@@ -93,7 +93,90 @@ jobs:
   # priority (chelis#2543). `queue: max` keeps the waiting jobs pending in
   # order; the default queue would cancel all but one of them. Off main each
   # job has its own group, so hosted candidate validation stays parallel.
+  module-oracles-plan:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
+    name: Plan module oracles
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      filterset: ${{ steps.derive.outputs.filterset }}
+      legs: ${{ steps.derive.outputs.legs }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      # The test exclusions that `.config/ci-test-targets.toml` assigns to the
+      # `module-oracles` job: `filterset` selects all of them, and the
+      # workspace suite negates it; `legs` gives each one its own matrix leg.
+      # `--legs` is the `module-oracles` matrix size; a different test count
+      # fails here.
+      - name: Derive the module oracle tests
+        id: derive
+        run: |
+          echo "filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles --format filterset --legs 7)" >> "$GITHUB_OUTPUT"
+          echo "legs=$(.venv/bin/python scripts/ci_change_owned.py module-oracles --format legs --legs 7)" >> "$GITHUB_OUTPUT"
+
+  # One module's heavy sweep or eval-and-C differential per runner. Each test
+  # runs alone under the `ci-full` profile, whose per-test backstop stops it
+  # at 3000 s (50 min); the longest measured on a Linux runner is the zone
+  # eval lane at 1588 s. 85 minutes covers the build and that backstop.
+  module-oracles:
+    needs: module-oracles-plan
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
+    name: Module Oracles (Linux, leg ${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [0, 1, 2, 3, 4, 5, 6]
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-module-oracles-{1}', github.run_id, matrix.leg) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 85
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Module oracle test
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: cargo nextest run -p ${{ fromJSON(needs.module-oracles-plan.outputs.legs)[matrix.leg].package }} --test ${{ fromJSON(needs.module-oracles-plan.outputs.legs)[matrix.leg].target }} --profile ci-full --ignore-default-filter --no-fail-fast --no-tests=fail -E '${{ fromJSON(needs.module-oracles-plan.outputs.legs)[matrix.leg].filter }}'
+
+      - name: Upload module oracle JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-module-oracle-${{ matrix.leg }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
   full-workspace:
+    needs: module-oracles-plan
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Full Workspace (Linux, shard ${{ matrix.shard }}/4)
     strategy:
@@ -137,7 +220,7 @@ jobs:
       - name: Full non-ignored workspace suite
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify nextest profile coverage
         if: matrix.shard == 1
@@ -776,7 +859,7 @@ jobs:
 
   report:
     name: Surface nightly status
-    needs: [dispatch-scope, script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
+    needs: [dispatch-scope, script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, module-oracles-plan, module-oracles, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all'))
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:

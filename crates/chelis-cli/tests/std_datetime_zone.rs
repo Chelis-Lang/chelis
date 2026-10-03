@@ -578,45 +578,48 @@ fn run_chelis(app_pkg: &Path, reef_home: &Path, args: &[&str]) -> (bool, String)
     )
 }
 
-/// Expressions per `chelis test` run. Every run has its own suite timeout,
-/// and each case reads its zone's TZif bytes again, so one run over a whole
-/// sweep can outgrow that timeout on a slow runner.
-const CASES_PER_SUITE: usize = 40;
+/// Seconds of Linux CI time one `chelis test` run may be planned to take.
+/// Each run has its own suite timeout, and each case reads its zone's TZif
+/// bytes again, so a run over a whole sweep can outgrow any one limit on a
+/// slow runner; a suite splits into runs of at most this much.
+const CI_RUN_BUDGET_SECS: f64 = 150.0;
 
-/// Seconds a quiet machine takes, with the debug build, to compile one
-/// generated suite file before its first test runs: the prelude, the imports
-/// and the bundled std. A one-case run under a fresh reef home measures 8 s
-/// (3 s once the reef cache is warm).
-const LOCAL_COMPILE_SECS: f64 = 8.0;
+/// Every `chelis test` limit is this many times its run's planned Linux CI
+/// time, which already uses the slowest per-case time CI has shown.
+const LIMIT_MARGIN: f64 = 3.0;
 
-/// Every `chelis test` limit below is this many times the run's local
-/// quiet-machine time. CI has run these suites up to 5.7 times slower than
-/// a quiet local machine (the extreme sweep: 791 s there, 139 s here), so 10
-/// keeps the limits clear of CI with room to spare.
-const LIMIT_MARGIN: f64 = 10.0;
+/// Cases per run for cases that take `ci_case_secs` each on Linux CI: as
+/// many as fit [`CI_RUN_BUDGET_SECS`], and at least one.
+fn cases_per_run(ci_case_secs: f64) -> usize {
+    ((CI_RUN_BUDGET_SECS / ci_case_secs).floor() as usize).max(1)
+}
 
 /// The `chelis test` limits for one run of `cases` cases that each take
-/// `case_secs` locally: `(--timeout, --suite-timeout)`, in seconds.
+/// `ci_case_secs` on Linux CI: `(--timeout, --suite-timeout)`, in seconds.
 ///
-/// The run takes `LOCAL_COMPILE_SECS + cases × case_secs` locally, and the
-/// suite timeout is `LIMIT_MARGIN` times that. Each test may use the whole
-/// suite budget, which is at least `LIMIT_MARGIN` times any one case's local
-/// time. `chelis test` kills a file worker after `timeout × (cases + 1) + 10`
-/// seconds, which therefore exceeds the suite timeout as well.
-fn run_limits(cases: usize, case_secs: f64) -> (u64, u64) {
-    let local = LOCAL_COMPILE_SECS + case_secs * cases as f64;
-    let suite = (LIMIT_MARGIN * local).ceil() as u64;
+/// The suite timeout is `LIMIT_MARGIN` times the run's planned CI time, and
+/// each test may use the whole suite budget. `chelis test` kills a file
+/// worker after `timeout × (cases + 1) + 10` seconds, which therefore
+/// exceeds the suite timeout as well.
+fn run_limits(cases: usize, ci_case_secs: f64) -> (u64, u64) {
+    let suite = (LIMIT_MARGIN * ci_case_secs * cases as f64).ceil() as u64;
     (suite, suite)
 }
 
-/// Runs `chelis test` over fixtures with one test per expression, at most
-/// [`CASES_PER_SUITE`] to a run, under [`run_limits`] for cases that take
-/// `case_secs` each locally, and returns each test's outcome: `None` for PASS,
-/// `Some(message)` for FAIL.
+/// The slowest that Linux CI runs a case relative to the pull-request
+/// change-owned lane: the nightly workspace suite, sharing its runner with
+/// every other test, ran the text-results suite at least 6.7 times and the
+/// suffix-tag suite 6.4 times slower than that lane did.
+const NIGHTLY_SLOWDOWN: f64 = 7.0;
+
+/// Runs `chelis test` over fixtures with one test per expression, in runs of
+/// [`cases_per_run`] cases under [`run_limits`] for cases that take
+/// `ci_case_secs` each on Linux CI, and returns each test's outcome: `None`
+/// for PASS, `Some(message)` for FAIL.
 fn run_expression_suite(
     dir_name: &str,
     expressions: &[(String, String)],
-    case_secs: f64,
+    ci_case_secs: f64,
 ) -> BTreeMap<String, Option<String>> {
     let (_dir, reef_home, app_pkg) = make_app(dir_name);
     let prelude = PRELUDE.replace("@TZIF@", &fixture_dir().to_string_lossy());
@@ -625,7 +628,7 @@ fn run_expression_suite(
         "module Demo.Main\nanchor = 0i64\n",
     );
     let mut outcomes = BTreeMap::new();
-    for (index, chunk) in expressions.chunks(CASES_PER_SUITE).enumerate() {
+    for (index, chunk) in expressions.chunks(cases_per_run(ci_case_secs)).enumerate() {
         let mut source = format!("module Demo.Tests.Zone\n{IMPORTS}\n{prelude}");
         for (name, expression) in chunk {
             source.push_str(&format!(
@@ -635,7 +638,7 @@ fn run_expression_suite(
         // One fixture file at a time, so no run sees another's module.
         let path = app_pkg.join(format!("tests/zone_cases_{index:03}.ch"));
         write_file(&path, &source);
-        let (timeout, suite_timeout) = run_limits(chunk.len(), case_secs);
+        let (timeout, suite_timeout) = run_limits(chunk.len(), ci_case_secs);
         let started = std::time::Instant::now();
         let (_, rendered) = run_chelis(
             &app_pkg,
@@ -697,10 +700,14 @@ fn std_datetime_zone_failures_report_their_exact_message() {
         .iter()
         .map(|(name, expression, _)| (name.to_string(), expression.to_string()))
         .collect();
-    // Locally the slowest run, 40 cases under a fresh reef home, takes 17.2 s:
-    // (17.2 - 8) / 40 = 0.23 s a case. The limit for 40 cases is
-    // 10 × (8 + 40 × 0.3) = 200 s.
-    let outcomes = run_expression_suite("datetime-zone-failures-2862", &expressions, 0.3);
+    // The pull-request lane ran the 66 cases in 38.9 s, 0.59 s a case, so
+    // Linux CI may take 0.59 × NIGHTLY_SLOWDOWN = 4.13 s a case: runs of 36
+    // cases, each limited to 3 × 36 × 4.13 = 447 s.
+    let outcomes = run_expression_suite(
+        "datetime-zone-failures-2862",
+        &expressions,
+        0.59 * NIGHTLY_SLOWDOWN,
+    );
     for (name, expression, expected) in EXACT_FAILURES {
         assert_eq!(
             outcomes.get(*name),
@@ -716,9 +723,10 @@ fn std_datetime_zone_text_results_are_exact() {
         .iter()
         .map(|(name, expression)| (name.to_string(), expression.to_string()))
         .collect();
-    // Locally the one run of 23 cases took 24.9 s: (24.9 - 8) / 23 = 0.73 s a
-    // case. With 37 cases the limit is 10 × (8 + 37 × 0.8) = 376 s.
-    let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions, 0.8);
+    // The nightly workspace suite on Linux reached its 376 s limit on the 37
+    // cases, at least 10.2 s a case: runs of 14 cases, each limited to
+    // 3 × 14 × 10.2 = 429 s.
+    let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions, 10.2);
     for (name, expression) in EXACT_RESULTS {
         assert_eq!(
             outcomes.get(*name),
@@ -836,9 +844,10 @@ fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
             )
         })
         .collect();
-    // Locally the one run, 9 cases of up to 30 texts, takes 24.2 s:
-    // (24.2 - 8) / 9 = 1.8 s a case. The limit is 10 × (8 + 9 × 1.9) = 251 s.
-    let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions, 1.9);
+    // The nightly workspace suite on Linux ran the 9 cases, each of up to 30
+    // texts, in 187.3 s, 20.8 s a case: runs of 7 cases, each limited to
+    // 3 × 7 × 20.8 = 437 s.
+    let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions, 20.8);
     let wrong: Vec<String> = expressions
         .iter()
         .filter_map(|(name, _)| match outcomes.get(name) {
@@ -978,10 +987,14 @@ fn std_datetime_zone_extreme_arguments_raise_no_primitive_trap() {
         .enumerate()
         .map(|(index, (_, expression))| (format!("case_{index:04}"), expression.clone()))
         .collect();
-    // Locally the slowest run, the first 40 cases (New York and Kiritimati,
-    // under a fresh reef home), takes 65.1 s: (65.1 - 8) / 40 = 1.43 s a case.
-    // The limit for 40 cases is 10 × (8 + 40 × 1.5) = 680 s.
-    let outcomes = run_expression_suite("datetime-zone-extremes-2862", &expressions, 1.5);
+    // The pull-request lane ran the 319 cases in 208.8 s, 0.65 s a case, so
+    // Linux CI may take 0.65 × NIGHTLY_SLOWDOWN = 4.55 s a case: runs of 32
+    // cases, each limited to 3 × 32 × 4.55 = 437 s.
+    let outcomes = run_expression_suite(
+        "datetime-zone-extremes-2862",
+        &expressions,
+        0.65 * NIGHTLY_SLOWDOWN,
+    );
     let mut failures = 0usize;
     for (index, (function, expression)) in cases.iter().enumerate() {
         let outcome = &outcomes[&format!("case_{index:04}")];
@@ -1064,8 +1077,9 @@ fn toolchain_json() -> String {
 /// (`ci-full`: 3 000 s). Together they took 1 948 s there before the
 /// `utc_texts` row, which made them about half as slow again. On a quiet
 /// local machine the eval lane takes 263 s and the C lane 189 s; at CI's
-/// observed 5.7 times that is about 1 500 s and 1 080 s. The two full lanes
-/// therefore run nightly, and the `canary` profile runs both lanes on every
+/// observed 5.7 times that is about 1 500 s and 1 080 s; a Linux nightly
+/// runner took 1 588 s and 1 447 s. The two full lanes therefore run in the
+/// nightly `module-oracles` job, and the `canary` profile runs both lanes on every
 /// pull request: a zone with both a gap and a fold, and `UTC`.
 fn run_zone_differential(profile: &str, lanes: &str, zones: &str) {
     let python =

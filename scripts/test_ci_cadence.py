@@ -205,7 +205,7 @@ def assert_extended(test, pr, nightly):
     # inside any budget, so it never reported a verdict at all. The selection
     # is unchanged and still unfiltered; it executes as four disjoint hash
     # partitions of itself.
-    workspace_suite = "cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4"
+    workspace_suite = "cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4"
     commands = [s.get("run") for s in full["steps"]]
     test.assertIn("cargo build --workspace --lib --bins", commands)
     test.assertIn(workspace_suite, commands)
@@ -292,6 +292,8 @@ def assert_extended(test, pr, nightly):
         | {
             "dispatch-scope",
             "full-workspace",
+            "module-oracles-plan",
+            "module-oracles",
             "script-nightly",
             "integration-support",
             "backend-sanitizers-full",
@@ -322,6 +324,8 @@ def assert_dispatch_scopes(test, nightly):
     jobs = nightly["jobs"]
     full_jobs = {
         "full-workspace",
+        "module-oracles-plan",
+        "module-oracles",
         "script-nightly",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
@@ -387,8 +391,8 @@ def assert_dispatch_scopes(test, nightly):
     def legs(names):
         return sum(len(matrix_legs(jobs[name])) for name in names)
 
-    test.assertEqual(legs(full_jobs - {"report"}), 19)
-    test.assertEqual(legs(full_jobs), 20)
+    test.assertEqual(legs(full_jobs - {"report"}), 27)
+    test.assertEqual(legs(full_jobs), 28)
     for name in (
         "runtime-representation-phase0-oracle",
         "dtype-phase3-oracle",
