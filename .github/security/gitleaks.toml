@@ -45,6 +45,20 @@ paths = ["^\\.github/workflows/ci\\-cache\\-warm\\.yml$"]
 regexes = ["^shared\\-key:\\ smt\\-glibc231$"]
 
 [[allowlists]]
+description = "Reviewed public Actions cache identity; exact path and match (chelis#3050)"
+condition = "AND"
+regexTarget = "match"
+paths = ["^\\.github/workflows/ci\\.yml$"]
+regexes = ["^shared\\-key:\\ smt\\-glibc231$"]
+
+[[allowlists]]
+description = "Reviewed public Actions cache identity; exact path and match (chelis#3050)"
+condition = "AND"
+regexTarget = "match"
+paths = ["^\\.github/workflows/ci\\-cache\\-warm\\.yml$"]
+regexes = ["^shared\\-key:\\ smt\\-glibc231$"]
+
+[[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
