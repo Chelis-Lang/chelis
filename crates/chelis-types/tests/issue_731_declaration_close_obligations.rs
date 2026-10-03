@@ -374,7 +374,25 @@ fn an_unresolved_axis_is_constrained_to_i32() {
                 report.errors
             );
         }
-        accepts(&program.replace("0i64)", &format!("{valid})")));
+        let correctly_typed = program.replace("0i64)", &format!("{valid})"));
+        if call.starts_with("gather(") {
+            // [05-AXIS-2]: the lambda parameter remains a variable even
+            // when its application supplies a literal. Its i32 constraint
+            // is necessary but does not establish gather's static geometry.
+            rejects_with(
+                &correctly_typed,
+                &["gather axis must be an i32 integer constant", "[05-AXIS-2]"],
+            );
+            accepts(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i32)",
+            );
+            rejects_with(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i64)",
+                &["gather expects i32 axis, got i64"],
+            );
+        } else {
+            accepts(&correctly_typed);
+        }
     }
 }
 
