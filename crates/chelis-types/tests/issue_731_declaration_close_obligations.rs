@@ -389,7 +389,7 @@ fn an_unresolved_axis_is_constrained_to_i32() {
             );
             rejects_with(
                 "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i64)",
-                &["gather expects i32 axis, got i64"],
+                &["gather argument 3 (axis)", "expected i32, got i64"],
             );
         } else {
             accepts(&correctly_typed);
