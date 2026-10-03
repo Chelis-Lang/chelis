@@ -125,6 +125,7 @@ pub fn check_layered(
     non_stdlib_decls: &[chelis_surf::ast::Decl],
     effect_rows: EffectRowReporting,
 ) -> Result<Option<LayeredCheck>, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5 (RT-1 F2 bypass): both `stdlib_decls` and `non_stdlib_decls`
     // are reef-linker output (internal-name-mangled), so the reserved
     // linker-name rejection must be off for this check.
@@ -256,6 +257,7 @@ pub fn stdlib_structural_stats(
     stdlib_decls: &[chelis_surf::ast::Decl],
     stdlib_source_digest: [u8; 32],
 ) -> Result<StructuralStats, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5: chelis-std decls are reef-linker output.
     let _linked = chelis_types::install_linked_program_guard();
     Ok(load_or_build_stdlib_context(stdlib_decls, stdlib_source_digest)?.structural_stats())
@@ -303,6 +305,7 @@ pub fn check_layered_for_build(
     dependency_decls: &[chelis_surf::ast::Decl],
     entry_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<crate::pipeline::CheckedCompilation>, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5 (RT-1 F2 bypass): linked decls; accept the linker name format.
     let _linked = chelis_types::install_linked_program_guard();
     let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls, stdlib_source_digest)?;

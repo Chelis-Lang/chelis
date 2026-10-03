@@ -147,22 +147,27 @@ struct StdLibContextWire {
 
 impl StdLibContext {
     pub fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.library
     }
 
     pub fn type_env(&self) -> &TypeEnv {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library.type_env()
     }
 
     pub fn library_checked(&self) -> &CheckedProgram {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library.program()
     }
 
     pub fn library_dag(&self) -> Option<&crate::pipeline::LoweredLibrary> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library_dag.as_ref()
     }
 
     pub fn structural_stats(&self) -> StructuralStats {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.structural_stats
     }
 }
@@ -260,6 +265,7 @@ pub fn stdlib_cache_key(
     stdlib_decls: &[chelis_surf::ast::Decl],
     stdlib_source_digest: [u8; 32],
 ) -> [u8; 32] {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     stdlib_cache_key_at_version(
         stdlib_decls,
         stdlib_source_digest,
@@ -276,6 +282,7 @@ pub fn stdlib_cache_key_input_bytes(
     stdlib_decls: &[chelis_surf::ast::Decl],
     stdlib_source_digest: [u8; 32],
 ) -> Vec<u8> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let mut bytes = Vec::new();
     visit_stdlib_cache_key_inputs(
         stdlib_decls,
@@ -377,6 +384,7 @@ pub(crate) fn hex_prefix(data: &[u8], n: usize) -> String {
 /// whole-package `CompiledContext` cache (`context.rs`) resolve through
 /// this one helper so the XDG fallback applies uniformly.
 pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     if let Some(reef_home) = non_empty_env("CHELIS_REEF_HOME") {
         return Some(PathBuf::from(reef_home).join(".cache").join(name));
     }
@@ -392,6 +400,7 @@ pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
 /// Resolve the directory the chelis-std typecheck cache lives in. See
 /// [`cache_dir_for`] for the resolution order.
 pub fn typecheck_cache_dir() -> Option<PathBuf> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     cache_dir_for("typecheck")
 }
 
@@ -430,6 +439,7 @@ pub(crate) fn running_build_stdlib_cache_prefix() -> String {
 
 /// Whether the disk cache is disabled for this process.
 pub fn cache_disabled() -> bool {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     std::env::var_os("CHELIS_STDLIB_CACHE_DISABLE")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -495,6 +505,7 @@ pub fn load_or_build_stdlib_context(
     build_decls: &[chelis_surf::ast::Decl],
     stdlib_source_digest: [u8; 32],
 ) -> Result<StdLibContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     if cache_disabled() {
         return build_stdlib_context(build_decls);
     }
@@ -551,6 +562,7 @@ pub fn load_or_build_stdlib_context(
 pub fn build_stdlib_context(
     stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<StdLibContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5: chelis-std decls are reef-linker output (internal-name
     // mangled); accept the linker name format while building the
     // context, including via direct callers and the cache-miss path.

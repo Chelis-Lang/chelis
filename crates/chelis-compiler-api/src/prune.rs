@@ -54,6 +54,7 @@ const MODULE_DECL_OFFSET: usize = 1;
 /// unknown entry surfaces downstream as the same "unbound"/unknown-output
 /// path it would without pruning, rather than silently emptying the program).
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     prune_entry(exprs, entry, ReferenceScope::Syntactic)
 }
 
@@ -111,6 +112,7 @@ fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<
 /// without pruning. This is the WI-3 single-entry contract; the build path
 /// uses [`prune_to_reachable_seeds`] directly with its multi-name seed set.
 pub fn prune_top_level_to_reachable_defs(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     prune_top_level_entry(exprs, entry, ReferenceScope::Syntactic)
 }
 
@@ -141,6 +143,7 @@ pub fn prune_to_reachable_seeds(
     exprs: Vec<DeepExpr>,
     seeds: impl IntoIterator<Item = String>,
 ) -> Vec<DeepExpr> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     prune_reachable(exprs, seeds, ReferenceScope::Syntactic)
 }
 
@@ -196,6 +199,7 @@ fn prune_reachable(
 /// reachability seed key: only a `def` provides a body to follow references
 /// through.
 pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match decl_head(expr)? {
         (DeepTag::Def, name) => Some(name),
         _ => None,
@@ -206,6 +210,7 @@ pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
 /// which elements the reachable filter applies to (both a function's `def`
 /// and its `defsig` are dropped together when unreachable).
 pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match decl_head(expr)? {
         (DeepTag::Def | DeepTag::Defsig, name) => Some(name),
         _ => None,
@@ -235,6 +240,7 @@ fn decl_head(expr: &DeepExpr) -> Option<(DeepTag, &str)> {
 /// Every `var` reference name in `expr`, in pre-order. A `var` node is the
 /// 3-tuple `(var {} name)`.
 pub fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let mut out = Vec::new();
     collect_deep_referenced_vars(expr, &mut out);
     out

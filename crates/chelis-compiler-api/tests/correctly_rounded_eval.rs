@@ -5,8 +5,10 @@
 //! tests 6-7). Also the `sin` adjoint through `cos` (chelis#2989), `gelu` at the
 //! largest finite inputs (chelis#2997), the `tanh` adjoint, and the IEEE default
 //! floating-point environment around evaluation (section 6).
-use chelis_compiler_api::compiler::{eval_selected, prepare_eval_in_context};
-use chelis_compiler_api::schema::{EvalRequest, EvalResult, SourceKind, TensorValue};
+use chelis_compiler_api::compiler::{compile, eval_selected, prepare_eval_in_context};
+use chelis_compiler_api::schema::{
+    CompileRequest, CompileResult, CompileTarget, EvalRequest, EvalResult, SourceKind, TensorValue,
+};
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
 use half::{bf16, f16};
 use serde_json::json;
@@ -605,6 +607,43 @@ fn eval_pins_the_ieee_default_and_restores_the_host_environment() {
     assert_eq!(
         hostile, default,
         "the host's FP environment changed eval's results"
+    );
+}
+
+/// Section 6 at compile time: literal finalization and constant folding run
+/// under the IEEE default too, so a host's flush-to-zero and rounding mode do
+/// not change the generated C (a rounded-up literal, a flushed folded `sub`),
+/// and the host's state is restored afterwards.
+#[test]
+fn compile_pins_the_ieee_default_and_restores_the_host_environment() {
+    let request = || CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: "y = exp(-100.0f32)\nz = sub(1.1754944e-38f32, 1.0e-38f32)\n".to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    };
+    let emitted = |result: CompileResult| {
+        result
+            .files
+            .into_iter()
+            .map(|file| (file.path, file.contents))
+            .collect::<Vec<_>>()
+    };
+    let default = emitted(compile(request()).expect("compile"));
+    let saved = control::read();
+    control::write(control::HOSTILE);
+    let hostile = compile(request());
+    let after = control::read();
+    control::write(saved);
+    assert_eq!(
+        after,
+        control::HOSTILE,
+        "compile must restore the host's control state"
+    );
+    assert_eq!(
+        emitted(hostile.expect("compile")),
+        default,
+        "the host's FP environment changed the generated C"
     );
 }
 
