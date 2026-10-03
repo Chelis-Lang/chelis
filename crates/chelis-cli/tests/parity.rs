@@ -674,6 +674,11 @@ fn parity_scalar_string_foundation() {
 }
 
 #[test]
+fn parity_scalar_special_values() {
+    drive_parity(&examples_root().join("scalar_special_values.ch"), true);
+}
+
+#[test]
 fn parity_unicode_string_foundation() {
     drive_parity(&examples_root().join("unicode_string_foundation.ch"), true);
 }

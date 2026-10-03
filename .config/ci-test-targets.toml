@@ -1628,6 +1628,11 @@ disposition = "packages"
 packages = ["chelis-e2e"]
 
 [[path_rule]]
+prefix = "examples/scalar_special_values.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
 prefix = "examples/tensor_structural_ops.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
