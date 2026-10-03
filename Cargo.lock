@@ -540,6 +540,7 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-conformance",
  "chelis-cove",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
