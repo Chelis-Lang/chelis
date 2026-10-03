@@ -1868,6 +1868,13 @@ impl SubexprLoweringContext {
             .collect()
     }
 
+    /// The dimension-binder roles of declaration `name`
+    /// ([`DimBinderRoles::of_declaration`]), from the same signature table
+    /// the named sites read.
+    pub fn dim_binder_roles(&self, name: &str) -> DimBinderRoles {
+        DimBinderRoles::of_declaration(&self.program_signatures, name)
+    }
+
     /// Restrict one synthetic region to the exact checker identities selected
     /// while planning it. Source offsets are local to an independently
     /// checked artifact and can collide after library composition.
@@ -4696,13 +4703,19 @@ impl DimBinderRoles {
         signatures: &BTreeMap<String, Expr>,
         ascription: &chelis_types::CheckedLocalTensorAscription,
     ) -> Self {
-        match ascription
-            .declaration_name()
-            .and_then(|name| signatures.get(name))
-        {
-            Some(signature) => Self::of_signature(signature),
+        match ascription.declaration_name() {
+            Some(name) => Self::of_declaration(signatures, name),
             // A top-level value's ascription has no signature, so it names
             // no dimension binder at all.
+            None => Self::default(),
+        }
+    }
+
+    /// The roles of declaration `name` by its checked signature in
+    /// `signatures`; empty when it has none.
+    pub fn of_declaration(signatures: &BTreeMap<String, Expr>, name: &str) -> Self {
+        match signatures.get(name) {
+            Some(signature) => Self::of_signature(signature),
             None => Self::default(),
         }
     }
@@ -7647,6 +7660,12 @@ struct LowerCtx<'program> {
     /// alone, which a `Where` cannot express, so lowering routes such a body
     /// to host control flow (see [`Self::selected_arm_depth`]).
     signature_witnesses: Vec<(String, NodeId)>,
+    /// The first-site witnesses of binders in their declaration's
+    /// [`DimBinderRoles::return_only`] set, so the declared result is a later
+    /// site of exactly those. A witness id is unique in the graph, so the set
+    /// needs no activation scoping: [`Self::signature_witnesses`] already
+    /// selects the witness the current activation sees.
+    return_only_first_sites: UnordSet<NodeId>,
     /// Every parameter witness minted by the CURRENT activation's
     /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
     ///
@@ -7890,6 +7909,7 @@ impl<'program> LowerCtx<'program> {
             next_pin: 0,
             bindings: ValueScope::default(),
             signature_witnesses: Vec::new(),
+            return_only_first_sites: UnordSet::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
@@ -9889,20 +9909,17 @@ impl<'program> LowerCtx<'program> {
                 Some((axis, label, required, matches!(dim, DimInfo::Lit(_))))
             })
             .collect::<Vec<_>>();
-        // A named result dimension no witness declares yet is output-inferred
-        // (spec/04-type-system.md section 4.4.1). If the body binds it at a
-        // first producing site, the result is a later site and is claimed
-        // against that site once the body has lowered.
+        // A named result dimension of a return-only binder
+        // (spec/04-type-system.md section 4.4.1) is a later site of the
+        // body's first site for it. Which binder that is, the first site
+        // recorded from the declaration's [`DimBinderRoles`] when it bound
+        // it, so the claim is resolved once the body has lowered.
         let first_site_claims = claim
             .into_iter()
             .filter(|_| !function && self.signature_is_authored)
             .flat_map(|ty| ty.dims.iter().enumerate())
             .filter_map(|(axis, dim)| match dim {
-                DimInfo::Named(name, _)
-                    if !name.is_empty()
-                        && name != "*"
-                        && self.signature_witness(name).is_none() =>
-                {
+                DimInfo::Named(name, _) if !name.is_empty() && name != "*" => {
                     Some((axis, extent_binder_label(name)))
                 }
                 _ => None,
@@ -10037,9 +10054,11 @@ impl<'program> LowerCtx<'program> {
             }
         }
         for (axis, label) in first_site_claims {
-            let (Some(first_site), Some(mut id)) =
-                (self.signature_witness(&label), result.as_single_node())
-            else {
+            let (Some(first_site), Some(mut id)) = (
+                self.signature_witness(&label)
+                    .filter(|witness| self.return_only_first_sites.contains(witness)),
+                result.as_single_node(),
+            ) else {
                 continue;
             };
             let required = self.capture_result_claim(first_site, label, axis);
@@ -11031,6 +11050,12 @@ impl<'program> LowerCtx<'program> {
                     },
                     span.map(str::to_owned),
                 );
+                if DimBinderRoles::of_ascription(&self.program_signatures, ascription)
+                    .return_only
+                    .contains(&extent_binder_label(&label))
+                {
+                    self.return_only_first_sites.insert(witness);
+                }
                 self.signature_witnesses.push((label, witness));
                 continue;
             }

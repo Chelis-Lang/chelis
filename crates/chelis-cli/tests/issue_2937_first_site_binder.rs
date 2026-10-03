@@ -874,3 +874,158 @@ fn a_lambda_site_never_binds_the_enclosing_parameter_binder() {
         );
     }
 }
+
+/// A first site inside a block, before a runtime `if` that returns the
+/// result, for a binder only a tuple, `Option` or `List` result names.
+fn block_first_site_then(result: &str, later: &str, tail: &str) -> String {
+    format!(
+        "def f[c, h](v: &tensor[c, f32], k: i64, flag: bool) -> {result} = {{\n\
+         \x20 s = {{\n\
+         \x20   a: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+         \x20   sum(sum(a, 1i32), 0i32)\n\
+         \x20 }}\n\
+         \x20 if flag then {{\n\
+         \x20   b: tensor[c, h, f32] = insert(v, 1i32, {later})\n\
+         {tail}\
+         }}\n\
+         {}",
+        out_call(&runtime_flag(2))
+    )
+}
+
+/// The return-only set counts a binder that only a tuple result names, so
+/// the block's ascription is `h`'s first site whatever the result's shape,
+/// and the arm's ascription, in another host region, is a claim against it.
+#[test]
+fn a_tuple_result_binder_is_bound_by_a_block_and_claimed_in_an_arm() {
+    assert_lanes_trap_identically(
+        "tuple_block_then_arm",
+        &block_first_site_then(
+            "(tensor[c, h, f32], i64)",
+            "add(k, 1i64)",
+            "\x20   (b, 1i64)\n\
+             \x20 } else (insert(v, 1i32, k), 0i64)\n",
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// The same with the two sites in two blocks and no runtime `if`.
+#[test]
+fn a_tuple_result_binder_is_claimed_across_two_blocks() {
+    assert_lanes_trap_identically(
+        "tuple_two_blocks",
+        &format!(
+            "def f[c, h](v: &tensor[c, f32], k: i64) -> (tensor[c, h, f32], i64) = {{\n\
+             \x20 s = {{\n\
+             \x20   a: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20   sum(sum(a, 1i32), 0i32)\n\
+             \x20 }}\n\
+             \x20 t = {{\n\
+             \x20   b: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20   sum(sum(b, 1i32), 0i32)\n\
+             \x20 }}\n\
+             \x20 (insert(v, 1i32, add(k, 1i64)), 0i64)\n\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// The same for a binder only an `Option` result names.
+#[test]
+fn an_option_result_binder_is_bound_by_a_block_and_claimed_in_an_arm() {
+    assert_lanes_trap_identically(
+        "option_block_then_arm",
+        &block_first_site_then(
+            "Option[tensor[c, h, f32]]",
+            "add(k, 1i64)",
+            "\x20   Some(b)\n\
+             \x20 } else None\n",
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// The same for a binder only a `List` result names.
+#[test]
+fn a_list_result_binder_is_bound_by_a_block_and_claimed_in_an_arm() {
+    assert_lanes_trap_identically(
+        "list_block_then_arm",
+        &block_first_site_then(
+            "List[tensor[c, h, f32]]",
+            "add(k, 1i64)",
+            "\x20   [b]\n\
+             \x20 } else []\n",
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// Control: an arm site that agrees with the block's first site runs, for a
+/// tuple and an `Option` result alike.
+#[test]
+fn an_agreeing_arm_site_of_a_non_tensor_result_binder_executes() {
+    assert_lanes_agree(
+        "tuple_block_then_arm_agree",
+        &block_first_site_then(
+            "(tensor[c, h, f32], i64)",
+            "k",
+            "\x20   (b, 1i64)\n\
+             \x20 } else (insert(v, 1i32, k), 0i64)\n",
+        ),
+        "out.0 = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])\nout.1 = 1",
+    );
+    assert_lanes_agree(
+        "option_block_then_arm_agree",
+        &block_first_site_then(
+            "Option[tensor[c, h, f32]]",
+            "k",
+            "\x20   Some(b)\n\
+             \x20 } else None\n",
+        ),
+        "out = Some(tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0]))",
+    );
+}
+
+/// Known gap, pinned rather than fixed: with a rank-polymorphic signature
+/// `chelis eval` runs the call through its named-axis path (chelis#338),
+/// which never claims a later site, so it prints the first site's value
+/// exactly as before first sites existed. Compiled C claims the later site
+/// and traps, which is the section 4.4.1 answer. When eval claims it, this
+/// row must become an identical-trap row.
+#[test]
+fn a_rank_polymorphic_later_site_is_claimed_only_by_compiled_c() {
+    let stem = "rankpoly_two_sites";
+    let dir = tempdir().expect("tempdir");
+    let path = write_fixture(
+        &dir,
+        stem,
+        &format!(
+            "def f[r, h](v: &tensor[..r, f32], k: i64) -> tensor[..r, h, f32] = {{\n\
+             \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 b: tensor[..r, h, f32] = insert(v, h, 4i64)\n\
+             \x20 _ = b\n\
+             \x20 a\n\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        ),
+    );
+    assert!(check(&path).status.success(), "{stem}: check accepts");
+    let evaluated = eval(&path);
+    let eval_out = combined(&evaluated);
+    assert!(
+        evaluated.status.success()
+            && eval_out.contains("out = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])"),
+        "{stem}: eval does not claim the later site yet: {eval_out}"
+    );
+    let compiled = build_and_run(&dir, stem, &path);
+    let c_out = combined(&compiled);
+    assert!(
+        !compiled.status.success()
+            && c_out.contains("extent `h`: claimed = 3, insert axis 1 = 4")
+            && c_out.contains(INSERT_TRAP),
+        "{stem}: C claims the later site: {c_out}"
+    );
+}

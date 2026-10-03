@@ -3278,28 +3278,26 @@ fn emit_function(
     // binders a site names is known once the body is emitted, so the frames
     // are placed here afterwards.
     let claims_at = emitter.lines.len();
-    emitter.first_site_frames = FirstSiteFrame::of(function);
+    emitter.first_site_frames = Some(FirstSiteFrames::of(function));
     // Entry guards and the frame still read parameters the body does not
     // use. Their verified entry drops run only after those reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
-    emitter.first_site_frames.retain(|frame| frame.named);
     // The declared result is a later site of every binder the body bound,
     // including one whose first site ran after the returned value's producer,
     // where that producer's check found the frame empty.
     emitter.emit_late_first_site_checks("__result");
+    let first_site_frames = emitter.first_site_frames.take().ok_or_else(|| {
+        invalid_abi_shape(
+            "a function body lost its first-site frames".to_string(),
+            "verified C host first-site emission",
+        )
+    })?;
     let indent = emitter.indent.clone();
-    let (mut claim_lines, claims_parent) = match &function.ret_ty {
-        HostAbiType::Tensor(ty) => FirstSiteFrame::declare(
-            &emitter.first_site_frames,
-            ty.dims.len(),
-            &indent,
-            "__chelis_caller_result_claims",
-        ),
-        _ => (Vec::new(), "__chelis_caller_result_claims".to_string()),
-    };
+    let (mut claim_lines, claims_parent) =
+        first_site_frames.declare(&indent, "__chelis_caller_result_claims");
     match HostResultClaim::of(function) {
         Some(claim) => claim_lines.extend(claim.frame_lines(
             &indent,
@@ -3915,82 +3913,125 @@ struct HostEmitter<'a> {
     result_claims: Option<String>,
     /// Taken at each expression entry and forwarded to its returned-value child.
     claim_on_spine: bool,
-    /// The function's output-inferred binders and their mutable claim frames
-    /// ([`FirstSiteFrame`]); empty outside a function body.
-    first_site_frames: Vec<FirstSiteFrame>,
+    /// The mutable claim frames of the output-inferred binders the function's
+    /// sites name ([`FirstSiteFrames`]); `None` outside a function body.
+    first_site_frames: Option<FirstSiteFrames>,
 }
 
 /// The claim frame of one output-inferred binder of the function being
-/// emitted (spec/04-type-system.md section 4.4.1): no parameter declares
-/// the binder, so the frame starts empty and the first site the body executes
-/// fills it ([`HostExprKind::ExtentSites`]). The declared result and every
-/// later site are then claims against that site. The frame lives for the
-/// whole invocation, so a site inside a block binds the binder after the
-/// block, and a site inside an `if` arm binds it on that arm's path only.
+/// emitted (spec/04-type-system.md section 4.4.1): a binder in the
+/// declaration's [`chelis_ir::lower::DimBinderRoles`] `return_only` set,
+/// which a site marks [`chelis_ir::lower::LocalAscriptionNamedSite::output_inferred`].
+/// The frame starts empty and the first site the body executes fills it
+/// ([`HostExprKind::ExtentSites`]). Every later site, and the declared result
+/// where the result is a tensor, is then a claim against that site. The frame
+/// lives for the whole invocation, so a site inside a block binds the binder
+/// after the block, and a site inside an `if` arm binds it on that arm's path
+/// only.
 struct FirstSiteFrame {
     binder: String,
     axes_name: String,
     frame_name: String,
-    /// The declared result axes the binder names.
+    /// The declared tensor result's axes that name the binder; empty when
+    /// the result is not a tensor (a tuple, `Option` or `List` result is
+    /// not claimed here, chelis#2644). The frame then only holds the bound
+    /// extent for later sites.
     result_axes: Vec<usize>,
-    /// Whether a site in the body names the binder. A frame no site can
-    /// fill is not declared.
-    named: bool,
 }
 
 impl FirstSiteFrame {
-    /// The output-inferred binders `function`'s declared result names, in
-    /// declared order: a named axis that neither a tensor parameter, a List
-    /// entry, nor a tensor helper's own claim resolves.
-    fn of(function: &HostFunction) -> Vec<Self> {
-        let HostAbiType::Tensor(ty) = &function.ret_ty else {
-            return Vec::new();
-        };
-        let named_lists = function.entry_contract.named_list_binders();
-        let mut frames: Vec<Self> = Vec::new();
-        for (axis, dim) in ty.dims.iter().enumerate() {
-            let DimInfo::Named(binder, _) = dim else {
-                continue;
-            };
-            let declared = binder == "*"
-                || named_lists.iter().any(|name| name == binder)
-                || function.params.iter().any(|param| {
-                    matches!(&param.ty, HostAbiType::Tensor(param_ty)
-                    if param_ty.dims.iter().any(
-                        |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
-                    ))
-                })
-                || function
-                    .helper_result_claim_axes
-                    .contains(&chelis_ir::dag::RtAxis::Lit(
-                        i32::try_from(axis).expect("rank fits i32"),
-                    ));
-            if declared {
-                continue;
-            }
-            let label = chelis_ir::lower::extent_binder_label(binder);
-            if let Some(frame) = frames.iter_mut().find(|frame| frame.binder == label) {
-                frame.result_axes.push(axis);
-                continue;
-            }
-            let index = frames.len();
-            frames.push(Self {
-                binder: label,
-                axes_name: format!("__chelis_first_site_axes_{index}"),
-                frame_name: format!("__chelis_first_site_frame_{index}"),
-                result_axes: vec![axis],
-                named: false,
-            });
+    /// The axes array always has a slot: the first one holds the bound
+    /// extent even when no result axis names the binder.
+    fn slots(&self) -> usize {
+        self.result_axes.len().max(1)
+    }
+}
+
+/// One function's first-site frames, one per output-inferred binder a body
+/// site names, created as the body's sites are emitted.
+struct FirstSiteFrames {
+    /// The declared result's dimensions when the result is a tensor.
+    result_dims: Option<Vec<DimInfo>>,
+    frames: Vec<FirstSiteFrame>,
+}
+
+impl FirstSiteFrames {
+    fn of(function: &HostFunction) -> Self {
+        Self {
+            result_dims: match &function.ret_ty {
+                HostAbiType::Tensor(ty) => Some(ty.dims.clone()),
+                _ => None,
+            },
+            frames: Vec::new(),
         }
+    }
+
+    /// The frame of output-inferred `binder`, created on its first site.
+    fn frame(&mut self, binder: &str) -> &mut FirstSiteFrame {
+        let index = match self.frames.iter().position(|frame| frame.binder == binder) {
+            Some(index) => index,
+            None => {
+                let index = self.frames.len();
+                let result_axes = self
+                    .result_dims
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .filter(|(_, dim)| {
+                        matches!(dim, DimInfo::Named(name, _)
+                            if chelis_ir::lower::extent_binder_label(name) == binder)
+                    })
+                    .map(|(axis, _)| axis)
+                    .collect();
+                self.frames.push(FirstSiteFrame {
+                    binder: binder.to_string(),
+                    axes_name: format!("__chelis_first_site_axes_{index}"),
+                    frame_name: format!("__chelis_first_site_frame_{index}"),
+                    result_axes,
+                });
+                index
+            }
+        };
+        &mut self.frames[index]
+    }
+
+    /// The frames a tensor result is claimed against, in declared order.
+    fn result_claims(&self) -> Vec<&FirstSiteFrame> {
+        let mut frames = self
+            .frames
+            .iter()
+            .filter(|frame| !frame.result_axes.is_empty())
+            .collect::<Vec<_>>();
+        frames.sort_by_key(|frame| frame.result_axes.first().copied());
         frames
     }
 
-    /// Declare every frame, chained in declared order in front of `parent`,
-    /// and return the chain's head.
-    fn declare(frames: &[Self], rank: usize, indent: &str, parent: &str) -> (Vec<String>, String) {
+    /// Declare every frame. The ones the result is claimed against are
+    /// chained in declared order in front of `parent`; return the chain's
+    /// head.
+    fn declare(&self, indent: &str, parent: &str) -> (Vec<String>, String) {
         let mut lines = Vec::new();
+        for frame in self
+            .frames
+            .iter()
+            .filter(|frame| frame.result_axes.is_empty())
+        {
+            lines.push(format!(
+                "{indent}__chelis_host_result_axis {}[] = {{ {{ 0, 0, {}, NULL, 0 }} }};",
+                frame.axes_name,
+                c_string_literal(&frame.binder)
+            ));
+            lines.push(format!(
+                "{indent}__chelis_host_result_claim {} = {{ NULL, 0, 0, {}, 0 }};",
+                frame.frame_name, frame.axes_name
+            ));
+        }
+        let rank = match &self.result_dims {
+            Some(dims) => dims.len(),
+            None => 0,
+        };
         let mut next = parent.to_string();
-        for frame in frames.iter().rev() {
+        for frame in self.result_claims().into_iter().rev() {
             lines.push(format!(
                 "{indent}__chelis_host_result_axis {}[] = {{",
                 frame.axes_name
@@ -4224,7 +4265,7 @@ impl<'a> HostEmitter<'a> {
             temp_counter: 0,
             result_claims: None,
             claim_on_spine: false,
-            first_site_frames: Vec::new(),
+            first_site_frames: None,
         }
     }
 
@@ -5521,9 +5562,7 @@ impl<'a> HostEmitter<'a> {
                 require_same_abi_type(ty, sites_ty, "local ascription extent sites")?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, value, ty)?;
-                if matches!(ty, HostType::Tensor(_)) {
-                    self.emit_extent_sites(target, sites);
-                }
+                self.emit_extent_sites(target, ty, sites)?;
                 self.emit_expression_site(site, target)?;
                 return Ok(());
             }
@@ -6176,23 +6215,35 @@ impl<'a> HostEmitter<'a> {
     fn emit_extent_sites(
         &mut self,
         target: &str,
+        ty: &HostType,
         sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
-    ) {
+    ) -> Result<(), Unsupported> {
         let origin = result_origin_name(target);
-        // Only an output-inferred binder's site binds or claims a frame; a
-        // frame no such site names is dropped, so the frames follow the
-        // signature's return-only set.
+        // Only an output-inferred binder's site binds or claims a frame, and
+        // each such binder gets its frame at its first site, whatever the
+        // declared result's shape.
         for site in sites.iter().filter(|site| site.output_inferred) {
-            let Some(frame) = self
-                .first_site_frames
-                .iter_mut()
-                .find(|frame| frame.binder == site.binder)
-            else {
-                continue;
+            if !matches!(ty, HostType::Tensor(_)) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "local ascription `{}` names output-inferred `{}` on a non-tensor value",
+                        site.binding, site.binder
+                    ),
+                    "verified C host first-site emission",
+                ));
+            }
+            let Some(frames) = self.first_site_frames.as_mut() else {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "local ascription `{}` names output-inferred `{}` outside a function body",
+                        site.binding, site.binder
+                    ),
+                    "verified C host first-site emission",
+                ));
             };
-            frame.named = true;
+            let frame = frames.frame(&site.binder);
             let (axes, frame_name) = (frame.axes_name.clone(), frame.frame_name.clone());
-            let count = frame.result_axes.len();
+            let count = frame.slots();
             let indent = self.indent.clone();
             let axis = site.axis;
             // The site's extent is read where it is used rather than held in
@@ -6225,12 +6276,21 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{indent}    }}"));
             self.lines.push(format!("{indent}}}"));
         }
+        Ok(())
     }
 
     /// Check each output-inferred binder's frame alone against the returned
-    /// `target`, at the return.
+    /// `target`, at the return, where the result is a tensor that names it.
     fn emit_late_first_site_checks(&mut self, target: &str) {
-        if self.first_site_frames.is_empty() {
+        let frame_names = match &self.first_site_frames {
+            Some(frames) => frames
+                .result_claims()
+                .into_iter()
+                .map(|frame| frame.frame_name.clone())
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        if frame_names.is_empty() {
             return;
         }
         let origin = result_origin_name(target);
@@ -6245,10 +6305,9 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{indent}    const char *__chelis_late_trap = __chelis_late_known ? {origin}->trap : \"numeric trap: domain in return at i64\";"
         ));
-        for frame in &self.first_site_frames {
+        for frame_name in frame_names {
             self.lines.push(format!(
-                "{indent}    {{ __chelis_host_result_claim __chelis_late = {}; __chelis_late.next = NULL; __chelis_check_host_result_claims(&__chelis_late, {target}, __chelis_late_op, __chelis_late_trap); }}",
-                frame.frame_name
+                "{indent}    {{ __chelis_host_result_claim __chelis_late = {frame_name}; __chelis_late.next = NULL; __chelis_check_host_result_claims(&__chelis_late, {target}, __chelis_late_op, __chelis_late_trap); }}"
             ));
         }
         self.lines.push(format!("{indent}}}"));

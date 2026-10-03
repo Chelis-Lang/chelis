@@ -2102,17 +2102,17 @@ impl<'a> EvalContext<'a> {
     ///
     /// A binder is resolved from its first witness among the tensor
     /// parameters, in signature order, which is the canonical side the entry
-    /// plan compares every later witness against. A binder no tensor
-    /// parameter declares is output-inferred: with `activation`, the body
-    /// executing in that activation binds it, and the claim keeps the axis
-    /// for [`EvalContext::resolve_first_sites`]; without one it adds
-    /// nothing. Axes stay in declared order, which the C lane's claim frame
-    /// also follows.
+    /// plan compares every later witness against. With `first_sites`, a
+    /// binder in the declaration's [`chelis_ir::lower::DimBinderRoles`]
+    /// `return_only` set is bound by the body executing in that activation,
+    /// and the claim keeps the axis for [`EvalContext::resolve_first_sites`];
+    /// any other binder no tensor parameter declares adds nothing. Axes stay
+    /// in declared order, which the C lane's claim frame also follows.
     fn with_named_result_axes(
         claim: Option<DeclaredResultClaim>,
         declared: Option<&Expr>,
         witnesses: &[(String, NamedResultSource, usize)],
-        activation: Option<u64>,
+        first_sites: Option<(u64, &chelis_ir::lower::DimBinderRoles)>,
     ) -> Result<Option<DeclaredResultClaim>, String> {
         let Some((_, dim_exprs)) = declared.and_then(tensor_type_dim_exprs) else {
             return Ok(claim);
@@ -2124,7 +2124,7 @@ impl<'a> EvalContext<'a> {
             return Ok(claim);
         }
         let mut named = Vec::new();
-        let mut first_sites = Vec::<FirstSiteAxis>::new();
+        let mut first_site_axes = Vec::<FirstSiteAxis>::new();
         for (axis, dim_expr) in dim_exprs.iter().enumerate() {
             let Some((DeepTag::DName | DeepTag::DVar, kids)) = tagged_expr_children(dim_expr)
             else {
@@ -2135,13 +2135,15 @@ impl<'a> EvalContext<'a> {
             };
             let Some((_, source, size)) = witnesses.iter().find(|(name, _, _)| name == binder)
             else {
-                if let Some(activation) = activation {
-                    let binder = chelis_ir::lower::extent_binder_label(binder);
-                    let at = first_sites
+                let binder = chelis_ir::lower::extent_binder_label(binder);
+                if let Some((activation, roles)) = first_sites
+                    && roles.return_only.contains(&binder)
+                {
+                    let at = first_site_axes
                         .iter()
                         .rposition(|site| site.binder == binder)
-                        .map_or(first_sites.len(), |last| last + 1);
-                    first_sites.insert(
+                        .map_or(first_site_axes.len(), |last| last + 1);
+                    first_site_axes.insert(
                         at,
                         FirstSiteAxis {
                             axis,
@@ -2160,7 +2162,7 @@ impl<'a> EvalContext<'a> {
                 source: Some(source.clone()),
             });
         }
-        if named.is_empty() && first_sites.is_empty() {
+        if named.is_empty() && first_site_axes.is_empty() {
             return Ok(claim);
         }
         let mut claim = claim.unwrap_or(DeclaredResultClaim {
@@ -2170,7 +2172,7 @@ impl<'a> EvalContext<'a> {
         });
         claim.axes.extend(named);
         claim.axes.sort_by_key(|axis| axis.axis);
-        claim.first_sites = first_sites;
+        claim.first_sites = first_site_axes;
         Ok(Some(claim))
     }
 
@@ -3082,11 +3084,19 @@ impl<'a> EvalContext<'a> {
                             size,
                         );
                     }
+                    // The body's first sites bind exactly the declaration's
+                    // return-only binders, the set its named sites read.
+                    let roles = match (active_declaration.as_deref(), self.session.as_ref()) {
+                        (Some(name), Some(session)) => session
+                            .checked_subexpr_lowering_context()
+                            .dim_binder_roles(name),
+                        _ => chelis_ir::lower::DimBinderRoles::default(),
+                    };
                     let declaration_claim = Self::with_named_result_axes(
                         declaration_claim,
                         declared_result,
                         &named_result_witnesses,
-                        Some(self.activation_extents.current),
+                        Some((self.activation_extents.current, &roles)),
                     )?;
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {
