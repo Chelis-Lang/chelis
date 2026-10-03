@@ -436,15 +436,39 @@ fn canary_args(
 /// row of the obligation table, and refuse the compiler unless it prints exactly
 /// the table's bits.
 fn run_canary(path: &Path, compile_flags: &[String], link_flags: &[String]) -> Result<(), String> {
-    let refuse = |what: String| {
-        format!(
-            "native compiler `{}` does not compile with the pinned floating-point profile \
-             ({}): {what}; a wrapper or configuration is adding flags, so name a compiler \
-             that applies the profile unchanged",
-            path.display(),
-            compile_flags.join(" ")
-        )
-    };
+    let mismatches = canary_mismatches(path, compile_flags, link_flags)?;
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    let reason = format!(
+        "the floating-point canary disagrees with the profile on {} of {} rows: {}",
+        mismatches.len(),
+        profile::canary_rows().count(),
+        profile::describe(&mismatches)
+    );
+    Err(refusal(path, compile_flags, &reason))
+}
+
+/// The refusal text for a compiler whose canary did not reproduce the profile.
+fn refusal(path: &Path, compile_flags: &[String], what: &str) -> String {
+    format!(
+        "native compiler `{}` does not compile with the pinned floating-point profile \
+         ({}): {what}; a wrapper or configuration is adding flags, so name a compiler \
+         that applies the profile unchanged",
+        path.display(),
+        compile_flags.join(" ")
+    )
+}
+
+/// The obligation-table rows the canary, built by `path` with these flags, computes
+/// differently from the table. An error when the canary does not build, run, or
+/// print one readable result per row.
+fn canary_mismatches(
+    path: &Path,
+    compile_flags: &[String],
+    link_flags: &[String],
+) -> Result<Vec<profile::Mismatch>, String> {
+    let refuse = |what: String| refusal(path, compile_flags, &what);
     let dir = CanaryDir::create()?;
     let source = dir.0.join("chelis-compiler-canary.c");
     let program = dir.0.join("chelis-compiler-canary");
@@ -488,17 +512,7 @@ fn run_canary(path: &Path, compile_flags: &[String], link_flags: &[String]) -> R
             ran.status
         )));
     }
-    let mismatches = profile::canary_mismatches(&printed).map_err(refuse)?;
-    if mismatches.is_empty() {
-        return Ok(());
-    }
-    let reason = format!(
-        "the floating-point canary disagrees with the profile on {} of {} rows: {}",
-        mismatches.len(),
-        profile::canary_rows().count(),
-        profile::describe(&mismatches)
-    );
-    Err(refuse(reason))
+    profile::canary_mismatches(&printed).map_err(refuse)
 }
 
 /// `PATH` lookup as the spawned tool will see it: [`tool_command`] passes
@@ -775,10 +789,11 @@ mod tests {
         let edited = wrapper(dir.path(), "edited-cc", "");
         verify_compiler(&edited, &flags, &links).unwrap_or_else(|error| panic!("{error}"));
         verify_compiler(&edited, &flags, &links).unwrap_or_else(|error| panic!("{error}"));
-        wrapper(dir.path(), "edited-cc", "-fno-honor-nans");
+        // Both clang and gcc accept the flag, and the macro check refuses it.
+        wrapper(dir.path(), "edited-cc", "-ffinite-math-only");
         let result = verify_compiler(&edited, &flags, &links);
         assert!(
-            matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("canonical-nan")),
+            matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("__FINITE_MATH_ONLY__")),
             "{result:?}"
         );
     }
@@ -789,9 +804,16 @@ mod tests {
     enum Verdict {
         /// Refused, with this text in the reason.
         Refused(&'static str),
-        /// Accepted because the flag changes no compiled instruction of the
-        /// canary: its assembly is byte-identical to the plain compiler's.
+        /// Accepted, and the flag changes no compiled instruction of the
+        /// canary on clang or gcc: its assembly is byte-identical to the plain
+        /// compiler's.
         Harmless,
+        /// Whether the flag changes a value depends on the compiler (gcc's
+        /// `-fno-trapping-math` reschedules code; gcc in ISO C mode treats
+        /// `-ffp-contract=on` as `off`). The product rule decides: accepted
+        /// exactly when the wrapper's canary reproduces every obligation row,
+        /// and otherwise refused naming each broken obligation.
+        RowsDecide,
     }
 
     /// Why the test compiler does not accept `extra` on top of `flags`, when
@@ -841,6 +863,20 @@ mod tests {
                 matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains(expected)),
                 "{name} ({extra}) should be refused with `{expected}`: {result:?}"
             ),
+            Verdict::RowsDecide => {
+                let mismatches = canary_mismatches(Path::new(&hostile), &flags, &links)
+                    .unwrap_or_else(|error| panic!("{name} ({extra}): {error}"));
+                if mismatches.is_empty() {
+                    result.unwrap_or_else(|error| panic!("{name} ({extra}): {error}"));
+                } else {
+                    let broken = profile::describe(&mismatches);
+                    assert!(
+                        matches!(&result, Err(CompilerCheckError::Refused(reason))
+                            if mismatches.iter().all(|m| reason.contains(m.row.obligation.name()))),
+                        "{name} ({extra}) breaks {broken}, so it must be refused naming it: {result:?}"
+                    );
+                }
+            }
             Verdict::Harmless => {
                 result.unwrap_or_else(|error| panic!("{name} ({extra}): {error}"));
                 let plain = wrapper(dir.path(), "plain-cc", "");
@@ -872,8 +908,8 @@ mod tests {
 
     /// One test per flag a wrapper might append (chelis#2957 round-1
     /// verification sweep). Each value-changing flag is refused by the check
-    /// that observes it; each accepted flag is shown not to change the
-    /// canary's compiled code.
+    /// that observes it; a flag is accepted exactly when the wrapper's canary
+    /// reproduces every obligation row.
     macro_rules! wrapper_verdicts {
         ($($test:ident: $extra:literal => $verdict:expr;)*) => {
             $(
@@ -894,7 +930,9 @@ mod tests {
         // Breaks only the kernels' infinity cases (5 rows on Apple clang 21).
         verify_compiler_wrapper_no_honor_infinities: "-fno-honor-infinities" => Verdict::Refused("correct-rounding");
         verify_compiler_wrapper_fp_contract_fast: "-ffp-contract=fast" => Verdict::Refused("no-contraction");
-        verify_compiler_wrapper_fp_contract_on: "-ffp-contract=on" => Verdict::Refused("no-contraction");
+        // clang contracts under `on`, which the contraction row refuses; gcc
+        // in ISO C mode treats `on` as `off`, so its canary is unchanged.
+        verify_compiler_wrapper_fp_contract_on: "-ffp-contract=on" => Verdict::RowsDecide;
         verify_compiler_wrapper_unsafe_math: "-funsafe-math-optimizations" => Verdict::Refused("floating-point canary");
         verify_compiler_wrapper_associative_trio: "-fassociative-math -fno-signed-zeros -fno-trapping-math"
             => Verdict::Refused("floating-point canary");
@@ -907,7 +945,7 @@ mod tests {
         verify_compiler_wrapper_associative_math: "-fassociative-math" => Verdict::Harmless;
         // Trapping is not observable: [05-OP-46] makes status flags
         // unobservable and the profile installs no trap.
-        verify_compiler_wrapper_no_trapping_math: "-fno-trapping-math" => Verdict::Harmless;
+        verify_compiler_wrapper_no_trapping_math: "-fno-trapping-math" => Verdict::RowsDecide;
     }
 
     // With SSE2 or AArch64 floating point, FLT_EVAL_METHOD is 0 and there is no

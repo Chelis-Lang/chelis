@@ -304,13 +304,16 @@ have no canary row because a compiler flag cannot reach their integer bit arithm
 their rows are checked in the runtime, the evaluator, and generated C's conversion
 helpers instead (§8, test 15).
 
-**Accepted flags.** A flag the check accepts must leave the canary's compiled code
-unchanged: each accepted wrapper test asserts the canary's assembly is byte-identical to
-the plain compiler's. `-fassociative-math` alone (clang and gcc reassociate only once
-signed zeros and trapping are also given up), `-fno-trapping-math` (status flags are
-unobservable and the profile installs no trap), and `-fexcess-precision=fast` on SSE2 and
-AArch64 (where `FLT_EVAL_METHOD` is 0) meet that rule. Every other flag in the wrapper
-tests is refused.
+**Accepted flags.** The check accepts a flag exactly when the compiler passes the macro
+checks and the canary built with the flag reproduces every obligation row; the wrapper
+tests assert that rule, and assert byte-identical canary assembly only for flags that
+change no instruction on either clang or gcc. `-fassociative-math` alone (clang and gcc
+reassociate only once signed zeros and trapping are also given up) and
+`-fexcess-precision=fast` on SSE2 and AArch64 (where `FLT_EVAL_METHOD` is 0) change no
+instruction. `-fno-trapping-math` (status flags are unobservable and the profile installs
+no trap) changes gcc's code but no row, and `-ffp-contract=on` is refused where it
+contracts (clang) and accepted where ISO C mode treats it as `off` (gcc).
+`-ffp-contract=fast` and every other flag in the wrapper tests are refused.
 
 **Cost and memo.** Compiling the canary with every kernel costs about half a second; the
 run is negligible. A process checks each compiler once: an accepted compiler is
@@ -418,10 +421,10 @@ has a negative partner.
    value-changing flag either fails with the profile diagnostic or produces bit-identical
    output; a clean build is the positive control. One compiler-check test per
    wrapper flag (`toolchain::tests::verify_compiler_wrapper_*`) covers fast math,
-   finite-only math, `-O0`, `-fno-honor-nans`, `-fno-honor-infinities`, both contraction
-   modes, unsafe math, reassociation, reciprocal math, `-fno-signed-zeros`,
+   finite-only math, `-O0`, `-fno-honor-nans`, `-fno-honor-infinities`, `-ffp-contract=fast`,
+   unsafe math, reassociation, reciprocal math, `-fno-signed-zeros`,
    `-ffp-model=fast`, and `-ffp-eval-method=double` (refused), and the accepted flags of
-   §5 (assembly unchanged). `crmath_profile.rs` checks the obligation table itself.
+   §5 (accepted exactly when every row passes). `crmath_profile.rs` checks the obligation table itself.
 10. FP environment: a host C driver that sets FTZ/DAZ and `FE_UPWARD`, then calls an
     exported function of a built static library on inputs with subnormal and inexact
     results, gets bits identical to eval and finds its own FTZ/DAZ/rounding state
