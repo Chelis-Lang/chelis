@@ -2636,7 +2636,24 @@ pub(super) fn tensor_sort_value(
         .product::<usize>()
         .max(1);
     let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
-    let wide = tensor.value.to_f64_lossy_vec();
+    // [05-OP-33]'s order on exact element values: integers by their stored
+    // value, floats by IEEE order with signed zeros equal and every NaN after
+    // every number. That is a total preorder, and the stable sort keeps equal
+    // elements, NaNs included, in source order.
+    let raw = tensor.value.storage().to_raw();
+    let order = |lhs: usize, rhs: usize| match &raw {
+        chelis_types::RawTensor::Int(values) => values[lhs].cmp(&values[rhs]),
+        chelis_types::RawTensor::Float(values) => {
+            match (values[lhs].is_nan(), values[rhs].is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => values[lhs]
+                    .partial_cmp(&values[rhs])
+                    .expect("numbers other than NaN are ordered"),
+            }
+        }
+    };
     let mut picks = vec![0usize; tensor.value.len()];
     let mut indices = vec![0i64; tensor.value.len()];
     for outer_idx in 0..outer {
@@ -2644,16 +2661,11 @@ pub(super) fn tensor_sort_value(
             let mut items = (0..axis_size)
                 .map(|axis_idx| {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    (axis_idx, linear, wide[linear])
+                    (axis_idx, linear)
                 })
                 .collect::<Vec<_>>();
-            items.sort_by(|(lhs_idx, _, lhs_val), (rhs_idx, _, rhs_val)| {
-                lhs_val
-                    .partial_cmp(rhs_val)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(lhs_idx.cmp(rhs_idx))
-            });
-            for (sorted_idx, (original_idx, original_linear, _)) in items.into_iter().enumerate() {
+            items.sort_by(|(_, lhs), (_, rhs)| order(*lhs, *rhs));
+            for (sorted_idx, (original_idx, original_linear)) in items.into_iter().enumerate() {
                 let linear = (outer_idx * axis_size + sorted_idx) * inner + inner_idx;
                 picks[linear] = original_linear;
                 indices[linear] = original_idx as i64;

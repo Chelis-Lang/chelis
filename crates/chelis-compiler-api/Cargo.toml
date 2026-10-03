@@ -182,6 +182,11 @@ path = "tests/issue_3000_host_computed_comparisons.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_3031_sort_matches_eval"
+path = "tests/issue_3031_sort_matches_eval.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2914_record_operand_routing"
 path = "tests/issue_2914_record_operand_routing.rs"
 required-features = ["ownership-ledger"]
