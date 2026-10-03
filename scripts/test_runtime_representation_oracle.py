@@ -1207,11 +1207,6 @@ class ManifestTests(unittest.TestCase):
                 "backend-element-spelling",
                 "validate_generated_include_set::ALLOWED_INCLUDES",
             ),
-            (
-                "crates/chelis-backend-c/src/toolchain.rs",
-                "load-store-template",
-                "CANARY_MAIN",
-            ),
         )
         self.assertEqual(oracle.CORRECTLY_ROUNDED_C_FINAL_FORMS, expected)
         forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]

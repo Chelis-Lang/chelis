@@ -1,6 +1,8 @@
 //! Cross-platform toolchain resolution for Chelis CPU codegen consumers.
 
+use crate::fp_env;
 use chelis_crmath::c_source::{Kernel, kernel_text};
+use chelis_crmath::profile;
 use std::{
     ffi::OsStr,
     fmt,
@@ -203,10 +205,13 @@ impl fmt::Display for CompilerCheckError {
 /// two steps. First it reads what the compiler predefines under those flags:
 /// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
 /// dropped optimisation level (`__OPTIMIZE__` missing although the profile
-/// passes `-O2`). No macro reveals contraction or reassociation, so it then
-/// compiles and runs [`CANARY_MAIN`] with the same flags and compares the bits
-/// it prints with [`CANARY_CASES`]. Any difference means something outside the
-/// profile changed the compile, and the build is refused.
+/// passes `-O2`). No macro reveals contraction, reassociation, or a NaN or
+/// infinity assumption, so it then compiles and runs the canary
+/// ([`canary_source`]) with the same flags and compares the bits it prints with
+/// the profile's obligation table (`chelis_crmath::profile`): every kernel row of
+/// the MPFR fixtures and every arithmetic, comparison, conversion, and
+/// expression-shape row. Any difference means something outside the profile
+/// changed the compile, and the build is refused.
 pub fn verify_compiler(
     compiler: &str,
     compile_flags: &[String],
@@ -240,6 +245,23 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
             )
         })?
         .to_string();
+
+    let accepted = AcceptedCompiler {
+        path: path.clone(),
+        version: version.clone(),
+        compile_flags: compile_flags.to_vec(),
+        executable: path
+            .metadata()
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok())),
+    };
+    if ACCEPTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&accepted)
+    {
+        return Ok(CompilerIdentity { path, version });
+    }
 
     let macros = tool_command(&path)
         .args(compile_flags)
@@ -283,98 +305,52 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
         ));
     }
     run_canary(&path, compile_flags)?;
+    ACCEPTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(accepted);
     Ok(CompilerIdentity { path, version })
 }
 
-/// The canary's inputs, as `f64` bit patterns it reads from its arguments, so
-/// the compiler cannot fold any check away.
-const CANARY_INPUTS: [u64; 10] = [
-    // A worst case for both kernels: `chelis_cr_exp` and `chelis_cr_tanh`
-    // round it wrongly once their polynomial evaluation is contracted.
-    0x3fd3_3333_3333_7111,
-    // a = b = 1 + 2^-27 and c = -(1 + 2^-26): a*b + c is 0 when the product
-    // is rounded and 2^-54 when it is fused.
-    0x3ff0_0000_0200_0000,
-    0x3ff0_0000_0200_0000,
-    0xbff0_0000_0400_0000,
-    // p = 2^53 and q = 1: (p + q) - p is 0, and q once reassociated.
-    0x4340_0000_0000_0000,
-    0x3ff0_0000_0000_0000,
-    // n = 5: n / 3 differs from n * (1/3) in the last bit.
-    0x4014_0000_0000_0000,
-    // z = -0: z + 0 is +0, and -0 once signed zeros are ignored.
-    0x8000_0000_0000_0000,
-    // s = 2^-1000 and t = 2^-60: s * t is the subnormal 2^-1060, and 0 under
-    // flush-to-zero (a `crtfastmath` startup, for example).
-    0x0170_0000_0000_0000,
-    0x3c30_0000_0000_0000,
-];
-
-/// What [`CANARY_MAIN`] prints for [`CANARY_INPUTS`] under the profile: the
-/// check, the operation it evaluates, and the result's bits. The kernel rows
-/// are the correctly rounded results (checked against 300-bit mpmath).
-const CANARY_CASES: [(&str, &str, u64); 7] = [
-    (
-        "exp",
-        "chelis_cr_exp(0x1.3333333337111p-2)",
-        0x3ff5_9905_8c8c_2f76,
-    ),
-    (
-        "tanh",
-        "chelis_cr_tanh(0x1.3333333337111p-2)",
-        0x3fd2_a4dd_a7d9_4d98,
-    ),
-    ("contraction", "(1+2^-27)*(1+2^-27) - (1+2^-26)", 0),
-    ("reassociation", "(2^53 + 1) - 2^53", 0),
-    ("reciprocal", "5 / 3", 0x3ffa_aaaa_aaaa_aaab),
-    ("signed-zero", "-0 + 0", 0),
-    ("subnormal", "2^-1000 * 2^-60", 0x4000),
-];
-
-/// The canary's driver. The kernels come from `chelis-crmath`, the same text
-/// every generated unit carries.
-const CANARY_MAIN: &str = r#"
-#include <stdio.h>
-#include <stdlib.h>
-
-static double chelis_canary_arg(const char *text) {
-    uint64_t bits = strtoull(text, NULL, 16);
-    double value;
-    memcpy(&value, &bits, sizeof value);
-    return value;
+/// A compiler this process has already accepted for these flags. Compiling the
+/// canary costs about half a second (it carries every kernel), so a process that
+/// builds repeatedly checks each compiler once. The key is the compiler's identity
+/// and argument vector plus the executable's size and modification time, so a wrapper
+/// edited in place is checked again. Nothing persists across processes.
+#[derive(PartialEq, Eq)]
+struct AcceptedCompiler {
+    path: PathBuf,
+    version: String,
+    compile_flags: Vec<String>,
+    executable: Option<(u64, Option<std::time::SystemTime>)>,
 }
 
-static void chelis_canary_print(const char *check, double value) {
-    uint64_t bits;
-    memcpy(&bits, &value, sizeof bits);
-    printf("%s %016llx\n", check, (unsigned long long)bits);
-}
+static ACCEPTED: std::sync::Mutex<Vec<AcceptedCompiler>> = std::sync::Mutex::new(Vec::new());
 
-int main(int argc, char **argv) {
-    if (argc != 11) {
-        return 2;
+/// The compiler canary: every kernel, generated code's NaN finalization, and the
+/// driver `chelis_crmath::profile` generates from the profile's obligation table.
+/// The kernel text and the NaN helpers are the bytes generated units carry, so the
+/// canary observes what the compiler does to them.
+fn canary_source() -> String {
+    let mut text = kernel_text(&Kernel::ALL);
+    text.push_str(profile::canary_prelude());
+    // The NaN helpers' bit casts, which generated units take from the runtime
+    // header.
+    text.push_str(
+        "#define chelis_f32_from_bits chelis_canary_f32\n\
+         #define chelis_f64_from_bits chelis_canary_f64\n",
+    );
+    for line in fp_env::helper_lines() {
+        text.push_str(line);
+        text.push('\n');
     }
-    double x = chelis_canary_arg(argv[1]);
-    double a = chelis_canary_arg(argv[2]);
-    double b = chelis_canary_arg(argv[3]);
-    double c = chelis_canary_arg(argv[4]);
-    double p = chelis_canary_arg(argv[5]);
-    double q = chelis_canary_arg(argv[6]);
-    double n = chelis_canary_arg(argv[7]);
-    double z = chelis_canary_arg(argv[8]);
-    double s = chelis_canary_arg(argv[9]);
-    double t = chelis_canary_arg(argv[10]);
-    chelis_canary_print("exp", chelis_cr_exp(x));
-    chelis_canary_print("tanh", chelis_cr_tanh(x));
-    chelis_canary_print("contraction", a * b + c);
-    double sum = p + q;
-    chelis_canary_print("reassociation", sum - p);
-    chelis_canary_print("reciprocal", n / 3.0);
-    chelis_canary_print("signed-zero", z + 0.0);
-    chelis_canary_print("subnormal", s * t);
-    return 0;
+    text.push_str(
+        "#define chelis_canary_finalize_f32 __chelis_nan_f32\n\
+         #define chelis_canary_finalize_f64 __chelis_nan_f64\n",
+    );
+    text.push_str(&profile::canary_driver());
+    text
 }
-"#;
 
 /// A scratch directory under the system temporary directory, removed on drop.
 struct CanaryDir(PathBuf);
@@ -415,8 +391,9 @@ impl Drop for CanaryDir {
     }
 }
 
-/// Compile [`CANARY_MAIN`] with `compile_flags`, run it, and refuse the
-/// compiler unless it prints exactly [`CANARY_CASES`].
+/// Compile [`canary_source`] with `compile_flags`, run it on every C row of the
+/// obligation table, and refuse the compiler unless it prints exactly the table's
+/// bits.
 fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
     let refuse = |what: String| {
         format!(
@@ -430,8 +407,7 @@ fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
     let dir = CanaryDir::create()?;
     let source = dir.0.join("chelis-compiler-canary.c");
     let program = dir.0.join("chelis-compiler-canary");
-    let text = kernel_text(&[Kernel::ExpF64, Kernel::TanhF64]) + CANARY_MAIN;
-    std::fs::write(&source, text)
+    std::fs::write(&source, canary_source())
         .map_err(|error| format!("cannot write the compiler canary: {error}"))?;
     let compiled = tool_command(path)
         .args(compile_flags)
@@ -448,52 +424,41 @@ fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
             String::from_utf8_lossy(&compiled.stderr).trim()
         )));
     }
-    let ran = Command::new(&program)
+    use std::io::Write as _;
+    let mut child = Command::new(&program)
         .env_clear()
-        .args(CANARY_INPUTS.map(|bits| format!("{bits:016x}")))
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|error| refuse(format!("its floating-point canary did not run: {error}")))?;
+    let input = profile::canary_input();
+    let mut stdin = child.stdin.take().expect("the canary's stdin is piped");
+    // Write from a thread so a canary that stops reading cannot deadlock against
+    // its full stdout pipe.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let ran = child
+        .wait_with_output()
+        .map_err(|error| refuse(format!("its floating-point canary did not run: {error}")))?;
+    let written = writer.join().expect("the canary input writer does not panic");
     let printed = String::from_utf8_lossy(&ran.stdout);
-    let mut lines = printed.lines();
-    let mut violations = Vec::new();
-    for (check, operation, expected) in CANARY_CASES {
-        let got = lines
-            .next()
-            .and_then(|line| line.strip_prefix(check)?.strip_prefix(' '))
-            .and_then(|bits| u64::from_str_radix(bits, 16).ok());
-        match got {
-            Some(got) if got == expected => {}
-            Some(got) => violations.push(format!(
-                "{check}: {operation} gave {:?} (0x{got:016x}) where the profile gives {:?} \
-                 (0x{expected:016x})",
-                f64::from_bits(got),
-                f64::from_bits(expected)
-            )),
-            None => {
-                return Err(refuse(format!(
-                    "its floating-point canary exited with {} and printed {:?}",
-                    ran.status,
-                    printed.trim()
-                )));
-            }
-        }
-    }
-    if !ran.status.success() || lines.next().is_some() {
+    if !ran.status.success() || written.is_err() {
         return Err(refuse(format!(
-            "its floating-point canary exited with {} and printed {:?}",
-            ran.status,
-            printed.trim()
+            "its floating-point canary exited with {}",
+            ran.status
         )));
     }
-    if violations.is_empty() {
-        Ok(())
-    } else {
-        Err(refuse(format!(
-            "the floating-point canary disagrees with the profile ({})",
-            violations.join("; ")
-        )))
+    let mismatches = profile::canary_mismatches(&printed).map_err(refuse)?;
+    if mismatches.is_empty() {
+        return Ok(());
     }
+    let reason = format!(
+        "the floating-point canary disagrees with the profile on {} of {} rows: {}",
+        mismatches.len(),
+        profile::canary_rows().count(),
+        profile::describe(&mismatches)
+    );
+    Err(refuse(reason))
 }
 
 /// `PATH` lookup as the spawned tool will see it: [`tool_command`] passes
@@ -742,45 +707,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn verify_compiler_refuses_a_wrapper_that_changes_the_profile() {
+    fn verify_compiler_accepts_the_plain_compiler_and_reports_a_missing_one() {
         let dir = tempfile::tempdir().unwrap();
         let flags =
             strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
         let plain = wrapper(dir.path(), "plain-cc", "");
         verify_compiler(&plain, &flags).unwrap_or_else(|error| panic!("{error}"));
-        // Contraction changes values only where the target has a fused
-        // multiply-add instruction, which the x86-64 baseline lacks; `-mfma`
-        // is what a `-march=native` wrapper would add there.
-        let contract = if cfg!(target_arch = "x86_64") {
-            "-mfma -ffp-contract=fast"
-        } else {
-            "-ffp-contract=fast"
-        };
-        for (name, extra, expected) in [
-            ("fast-cc", "-ffast-math", "__FAST_MATH__"),
-            ("finite-cc", "-ffinite-math-only", "__FINITE_MATH_ONLY__"),
-            ("unoptimised-cc", "-O0", "__OPTIMIZE__"),
-            ("contract-cc", contract, "contraction: "),
-            (
-                "unsafe-cc",
-                "-funsafe-math-optimizations",
-                "reassociation: ",
-            ),
-            ("reciprocal-cc", "-freciprocal-math", "reciprocal: "),
-            ("signed-zero-cc", "-fno-signed-zeros", "signed-zero: "),
-            (
-                "associative-cc",
-                "-fassociative-math -fno-signed-zeros -fno-trapping-math",
-                "reassociation: ",
-            ),
-        ] {
-            let hostile = wrapper(dir.path(), name, extra);
-            let error = verify_compiler(&hostile, &flags).expect_err(name);
-            assert!(
-                matches!(&error, CompilerCheckError::Refused(reason) if reason.contains(expected)),
-                "{name}: {error}"
-            );
-        }
         let missing = dir.path().join("missing-cc");
         assert_eq!(
             verify_compiler(missing.to_str().unwrap(), &flags),
@@ -788,6 +720,131 @@ mod tests {
                 missing.to_str().unwrap().to_string()
             ))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_rechecks_a_wrapper_edited_after_acceptance() {
+        let dir = tempfile::tempdir().unwrap();
+        let flags =
+            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let edited = wrapper(dir.path(), "edited-cc", "");
+        verify_compiler(&edited, &flags).unwrap_or_else(|error| panic!("{error}"));
+        verify_compiler(&edited, &flags).unwrap_or_else(|error| panic!("{error}"));
+        wrapper(dir.path(), "edited-cc", "-fno-honor-nans");
+        let result = verify_compiler(&edited, &flags);
+        assert!(
+            matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("canonical-nan")),
+            "{result:?}"
+        );
+    }
+
+    /// What the compiler check must conclude about a wrapper that appends
+    /// flags to the profile.
+    #[cfg(unix)]
+    enum Verdict {
+        /// Refused, with this text in the reason.
+        Refused(&'static str),
+        /// Accepted because the flag changes no compiled instruction of the
+        /// canary: its assembly is byte-identical to the plain compiler's.
+        Harmless,
+    }
+
+    /// Check one wrapper. Contraction changes values only where the target
+    /// has a fused multiply-add instruction, which the x86-64 baseline lacks;
+    /// `-mfma` is what a `-march=native` wrapper would add there.
+    #[cfg(unix)]
+    fn check_wrapper(name: &str, extra: &str, verdict: Verdict) {
+        let dir = tempfile::tempdir().unwrap();
+        let flags =
+            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let extra = if cfg!(target_arch = "x86_64") && extra.starts_with("-ffp-contract") {
+            format!("-mfma {extra}")
+        } else {
+            extra.to_string()
+        };
+        let hostile = wrapper(dir.path(), name, &extra);
+        let result = verify_compiler(&hostile, &flags);
+        match verdict {
+            Verdict::Refused(expected) => assert!(
+                matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains(expected)),
+                "{name} ({extra}) should be refused with `{expected}`: {result:?}"
+            ),
+            Verdict::Harmless => {
+                result.unwrap_or_else(|error| panic!("{name} ({extra}): {error}"));
+                let plain = wrapper(dir.path(), "plain-cc", "");
+                assert_eq!(
+                    canary_assembly(&hostile, &flags, dir.path()),
+                    canary_assembly(&plain, &flags, dir.path()),
+                    "{name} ({extra}) is accepted, so it must not change the canary's code"
+                );
+            }
+        }
+    }
+
+    /// The canary translation unit compiled to assembly by `compiler`.
+    #[cfg(unix)]
+    fn canary_assembly(compiler: &str, flags: &[String], dir: &Path) -> String {
+        let source = dir.join("canary-assembly.c");
+        let output = dir.join("canary-assembly.s");
+        std::fs::write(&source, canary_source()).unwrap();
+        let status = tool_command(compiler)
+            .args(flags)
+            .args(["-S", "-o"])
+            .arg(&output)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{compiler} did not compile the canary");
+        std::fs::read_to_string(&output).unwrap()
+    }
+
+    /// One test per flag a wrapper might append (chelis#2957 round-1
+    /// verification sweep). Each value-changing flag is refused by the check
+    /// that observes it; each accepted flag is shown not to change the
+    /// canary's compiled code.
+    macro_rules! wrapper_verdicts {
+        ($($test:ident: $extra:literal => $verdict:expr;)*) => {
+            $(
+                #[cfg(unix)]
+                #[test]
+                fn $test() {
+                    check_wrapper(stringify!($test), $extra, $verdict);
+                }
+            )*
+        };
+    }
+
+    wrapper_verdicts! {
+        verify_compiler_wrapper_fast_math: "-ffast-math" => Verdict::Refused("__FAST_MATH__");
+        verify_compiler_wrapper_finite_math_only: "-ffinite-math-only" => Verdict::Refused("__FINITE_MATH_ONLY__");
+        verify_compiler_wrapper_unoptimised: "-O0" => Verdict::Refused("__OPTIMIZE__");
+        verify_compiler_wrapper_no_honor_nans: "-fno-honor-nans" => Verdict::Refused("canonical-nan");
+        // Breaks only the kernels' infinity cases (5 rows on Apple clang 21).
+        verify_compiler_wrapper_no_honor_infinities: "-fno-honor-infinities" => Verdict::Refused("correct-rounding");
+        verify_compiler_wrapper_fp_contract_fast: "-ffp-contract=fast" => Verdict::Refused("no-contraction");
+        verify_compiler_wrapper_fp_contract_on: "-ffp-contract=on" => Verdict::Refused("no-contraction");
+        verify_compiler_wrapper_unsafe_math: "-funsafe-math-optimizations" => Verdict::Refused("floating-point canary");
+        verify_compiler_wrapper_associative_trio: "-fassociative-math -fno-signed-zeros -fno-trapping-math"
+            => Verdict::Refused("floating-point canary");
+        verify_compiler_wrapper_reciprocal_math: "-freciprocal-math" => Verdict::Refused("no-value-changing-optimization");
+        verify_compiler_wrapper_no_signed_zeros: "-fno-signed-zeros" => Verdict::Refused("signed-zero");
+        verify_compiler_wrapper_fp_model_fast: "-ffp-model=fast" => Verdict::Refused("floating-point canary");
+        verify_compiler_wrapper_fp_eval_method_double: "-ffp-eval-method=double" => Verdict::Refused("did not build");
+        // Inert alone: clang and gcc reassociate only when signed zeros and
+        // trapping are also given up.
+        verify_compiler_wrapper_associative_math: "-fassociative-math" => Verdict::Harmless;
+        // Trapping is not observable: [05-OP-46] makes status flags
+        // unobservable and the profile installs no trap.
+        verify_compiler_wrapper_no_trapping_math: "-fno-trapping-math" => Verdict::Harmless;
+    }
+
+    // With SSE2 or AArch64 floating point, FLT_EVAL_METHOD is 0 and there is no
+    // excess precision to keep or discard. On x87 the kernels' FLT_EVAL_METHOD
+    // guard refuses it instead.
+    #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    wrapper_verdicts! {
+        verify_compiler_wrapper_excess_precision_fast: "-fexcess-precision=fast" => Verdict::Harmless;
     }
 
     #[test]

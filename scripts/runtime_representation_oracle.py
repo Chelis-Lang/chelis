@@ -458,8 +458,7 @@ LIST_ENTRY_METADATA_FINAL_FORMS = (
 # chelis#2957: the C lane's correctly rounded math support. The NaN helpers
 # and their pruning spell the two IEEE widths [04-NUM-2]'s canonical quiet NaN
 # finalizes; the include allowlist names ISO C's <float.h>, a header, not an
-# element type; the compiler canary is a fixed scalar probe program that runs
-# outside every generated artifact and never touches tensor storage.
+# element type.
 CORRECTLY_ROUNDED_C_FINAL_FORMS = (
     (
         "crates/chelis-backend-c/src/fp_env.rs",
@@ -475,11 +474,6 @@ CORRECTLY_ROUNDED_C_FINAL_FORMS = (
         "crates/chelis-backend-c/src/generated_header.rs",
         "backend-element-spelling",
         "validate_generated_include_set::ALLOWED_INCLUDES",
-    ),
-    (
-        "crates/chelis-backend-c/src/toolchain.rs",
-        "load-store-template",
-        "CANARY_MAIN",
     ),
 )
 PHASE2_FINAL_FORMS = (

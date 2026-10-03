@@ -24,6 +24,7 @@
 use half::{bf16, f16};
 
 pub mod c_source;
+pub mod profile;
 
 mod ffi {
     // The shims in `csrc/crmath_ffi.c`. They are pure functions of their operand:
