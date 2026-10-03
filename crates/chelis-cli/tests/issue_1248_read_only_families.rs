@@ -142,3 +142,39 @@ fn host_comparisons_match_eval_and_reject_bad_operands() {
         }
     }
 }
+
+#[test]
+fn consuming_user_bindings_do_not_inherit_builtin_borrows() {
+    for name in COMPARISONS.iter().copied().chain([
+        "min_elem", "max_elem", "sigmoid", "tanh", "silu", "gelu", "ordinary",
+    ]) {
+        for consume_rhs in [false, true] {
+            let parameter = if consume_rhs { "rhs" } else { "lhs" };
+            let report = check(&format!(
+                "def bad(a: tensor[2, f32], b: tensor[2, f32]) = {{ {name} = fn (lhs: tensor[2, f32], rhs: tensor[2, f32]) -> realize({parameter})\n first = {name}(a, b)\n add(first, {}) }}\n",
+                if consume_rhs { "b" } else { "a" }
+            ));
+            assert!(
+                report["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["kind"] == "UseAfterConsume"),
+                "{name}/{parameter}: {report}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicitly_borrowed_user_bindings_leave_owner_live() {
+    for name in ["tanh", "min_elem", "ordinary"] {
+        let report = check(&format!(
+            "def good(x: tensor[2, f32]) = {{ {name} = fn (a: &tensor[2, f32]) -> add(a, a)\n first = {name}(x)\n add(first, x) }}\n"
+        ));
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "{name}: {report}"
+        );
+    }
+}

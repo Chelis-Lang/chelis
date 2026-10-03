@@ -1210,13 +1210,13 @@ impl Checker {
                 // A callee position that only borrows cannot take one.
                 if verdicts[index - 1] != KeyOperand::Refused
                     && !observational
-                    && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+                    && self.arg_is_borrowed(children.first(), builtin_callee, index - 1, scope)
                 {
                     self.reject_key_read(arg, "borrowed by this call");
                 } else {
                     self.consume_var_expr(arg, scope, app_site(expr, children));
                 }
-            } else if self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+            } else if self.arg_is_borrowed(children.first(), builtin_callee, index - 1, scope)
                 && is_var_expr(arg)
                 && self.expr_is_owned_linear(arg, scope)
             {
