@@ -907,10 +907,10 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
 #[test]
 fn s3_all_unary_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![
-        // The transcendentals are fenced on device lanes (chelis#2957);
-        // `issue_2957_device_transcendental_fence` covers their rejection.
+        // The transcendentals and sqrt are fenced on device lanes
+        // (chelis#2957); `issue_2957_device_transcendental_fence` covers
+        // their rejection.
         (RiscOp::Neg, "neg"),
-        (RiscOp::Sqrt, "sqrt"),
         (RiscOp::Abs, "abs"),
         (RiscOp::Floor, "floor"),
     ];

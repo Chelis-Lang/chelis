@@ -133,9 +133,9 @@ been compared across targets.
 - Metal `bf16` kernels require an Apple7 GPU family device.
 - HIP support for `bf16` and `f16` depends on the operation. A target limit
   produces a diagnostic rather than silently changing the calculation.
-- HIP and Metal reject the transcendentals and anything built from them, such
-  as `sigmoid` or `softmax`, at build time: the device lanes have no correctly
-  rounded kernels yet, and the build reports the operation rather than
+- HIP and Metal reject the transcendentals and `sqrt`, and anything built from
+  them, such as `sigmoid` or `softmax`, at build time: the device lanes have no
+  correctly rounded kernels for them yet, and the build reports the operation rather than
   computing it with a vendor library. Use `c` for such a program.
 - Every target computes the same bits for an admitted operation; there is no
   per-operation or per-target tolerance.

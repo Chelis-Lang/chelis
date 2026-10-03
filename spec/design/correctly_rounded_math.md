@@ -241,8 +241,10 @@ diagnostic, never computed with `ocml`, MSL built-ins, or `precise::` forms, and
 Metal is harder than a missing kernel. MSL permits a device to flush f32 subnormals
 and to round f32 arithmetic toward zero independently of the fast-math setting, and
 it has no f64. Turning fast math off therefore does not make Metal reach CPU bits, and
-this design makes no such claim: an f64 operation, and any f32 operation whose bits
-the device cannot guarantee, stays rejected on Metal. Whether a device-kernel route
+this design makes no such claim: codegen rejects every f64 operation on Metal under
+[04-TGT-1], and rejects `sqrt` on both device lanes alongside the transcendentals,
+because MSL compiles it under fast math and the HIP runtime compile does not pin a
+correctly rounded square root. Whether a device-kernel route
 exists for f32 on Metal is an open question for the deferred GPU work. The other GPU
 items in #2968 and #2969 (NaN-dropping reductions, the f16 max/min identity,
 `atomicAdd` scatter order) are outside this design and stay open.

@@ -592,30 +592,9 @@ fn m6_unary_neg_matches_evaluator() {
 
 #[test]
 #[ignore]
-fn m6_unary_sqrt_matches_evaluator() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(4),
-        None,
-    );
-    let s = dag.add_node(decl, RiscOp::Sqrt, vec![a], vec_f32(4), None);
-    dag.add_root(s);
-
-    let inputs = vec![TestInput::new("a", &[4], &[1.0, 4.0, 9.0, 16.0])];
-    let actual = compile_and_run_single_output(&dag, "sqrt_test", &inputs);
-    let expected = evaluator_single_output(&dag, &inputs);
-    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "unary sqrt");
-}
-
-#[test]
-#[ignore]
 fn m6_chained_elementwise_matches_evaluator() {
-    // sqrt(add(mul(a, b), c)) — three kernels, single output; the
-    // transcendentals are fenced on device lanes (chelis#2957).
+    // abs(add(mul(a, b), c)) — three kernels, single output; the
+    // transcendentals and sqrt are fenced on device lanes (chelis#2957).
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -641,7 +620,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     );
     let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(decl, RiscOp::Sqrt, vec![s], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Abs, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -651,7 +630,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     ];
     let actual = compile_and_run_single_output(&dag, "chain_test", &inputs);
     let expected = evaluator_single_output(&dag, &inputs);
-    assert_close(&actual, &expected, 1e-3, 1e-3, "chain sqrt(add(mul, c))");
+    assert_close(&actual, &expected, 1e-3, 1e-3, "chain abs(add(mul, c))");
 }
 
 #[test]

@@ -1303,27 +1303,6 @@ fn g2_copy_materializes_and_terminal_drop_matches_cpu() {
     );
 }
 
-#[test]
-#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
-fn g2_sqrt_gpu_matches_cpu() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let x = dag.add_node(
-        decl,
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        vec_f32(3),
-        None,
-    );
-    let out = dag.add_node(decl, RiscOp::Sqrt, vec![x], vec_f32(3), None);
-    dag.add_root(out);
-    assert_gpu_matches_eval(
-        &dag,
-        "g2_sqrt",
-        &[TestInput::new("x", &[3], &[1.0, 4.0, 9.0])],
-    );
-}
-
 // ===========================================================================
 // G3: All binary ops GPU == evaluator within tolerance
 // ===========================================================================

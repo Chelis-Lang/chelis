@@ -110,7 +110,7 @@ pub fn codegen_hip(
     // the specialized DAG the emitter actually consumes.
     dag.emission()
         .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
-    chelis_ir::dag::reject_device_transcendentals(dag.emission().nodes(), "hip")?;
+    chelis_ir::dag::reject_device_correctly_rounded_ops(dag.emission().nodes(), "hip")?;
     let h_header = format!(
         "#include \"chelis_device_owner.h\"\nextern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\nextern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out);"
     );

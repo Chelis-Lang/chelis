@@ -1,8 +1,8 @@
 //! chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): the
-//! hip lane has no correctly rounded transcendental kernels, so codegen
-//! rejects every [05-OP-46] transcendental through [05-UNS-1] instead of
-//! computing it with a vendor library. Correctly rounded IEEE operations
-//! stay admitted.
+//! hip lane has no correctly rounded transcendental kernels and does not
+//! establish a correctly rounded `sqrt`, so codegen rejects every [05-OP-46]
+//! transcendental and `sqrt` through [05-UNS-1] instead of computing them
+//! with a vendor library. Exact operations stay admitted.
 
 mod support;
 
@@ -54,7 +54,7 @@ fn codegen(dag: &Dag, name: &str) -> Result<(), Unsupported> {
 }
 
 #[test]
-fn every_transcendental_is_rejected_with_a_typed_diagnostic() {
+fn every_transcendental_and_sqrt_is_rejected_with_a_typed_diagnostic() {
     for (op, name) in [
         (RiscOp::Exp, "exp"),
         (RiscOp::Log, "log"),
@@ -63,6 +63,7 @@ fn every_transcendental_is_rejected_with_a_typed_diagnostic() {
         (RiscOp::Tan, "tan"),
         (RiscOp::Atan, "atan"),
         (RiscOp::Tanh, "tanh"),
+        (RiscOp::Sqrt, "sqrt"),
     ] {
         let error = codegen(&chain_dag(op), name).expect_err(name);
         let rendered = error.to_string();
@@ -76,9 +77,8 @@ fn every_transcendental_is_rejected_with_a_typed_diagnostic() {
 }
 
 #[test]
-fn correctly_rounded_ieee_operations_are_admitted() {
+fn exact_operations_are_admitted() {
     for (op, name) in [
-        (RiscOp::Sqrt, "sqrt"),
         (RiscOp::Neg, "neg"),
         (RiscOp::Abs, "abs"),
     ] {
@@ -102,4 +102,22 @@ fn a_transcendental_inside_a_fused_chain_is_rejected() {
     );
     let error = codegen(&fused, "fused_tanh").expect_err("fused tanh");
     assert!(error.to_string().contains("`tanh`"), "{error}");
+}
+
+#[test]
+fn sqrt_inside_a_fused_chain_is_rejected() {
+    let fused = chelis_ir::fuse::fuse(&chain_dag(RiscOp::Sqrt));
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .any(|node| matches!(&node.op, RiscOp::FusedElem { .. }))
+            && !fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Sqrt)),
+        "the witness must reach codegen as a fused chain, not a bare sqrt node"
+    );
+    let error = codegen(&fused, "fused_sqrt").expect_err("fused sqrt");
+    assert!(error.to_string().contains("`sqrt`"), "{error}");
 }

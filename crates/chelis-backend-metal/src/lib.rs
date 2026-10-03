@@ -265,7 +265,7 @@ pub fn codegen_metal(
     func_name: &str,
 ) -> Result<MetalCodegenResult, Unsupported> {
     let dag = plan.dag();
-    chelis_ir::dag::reject_device_transcendentals(dag.nodes(), "metal")?;
+    chelis_ir::dag::reject_device_correctly_rounded_ops(dag.nodes(), "metal")?;
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);
     let symbolic_dims = dag.symbolic_params();

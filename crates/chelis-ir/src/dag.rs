@@ -543,13 +543,25 @@ impl FusedStepOp {
             | Self::Round => None,
         }
     }
+
+    /// The [05-OP-46] operations a device lane may not compute: the
+    /// transcendentals, and `sqrt`, whose correct rounding neither device
+    /// lane establishes (Metal compiles with fast math, and the HIP runtime
+    /// compile does not pin a correctly rounded square root).
+    pub const fn device_fenced_name(self) -> Option<&'static str> {
+        match self {
+            Self::Sqrt => Some("sqrt"),
+            _ => self.transcendental_name(),
+        }
+    }
 }
 
 /// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
-/// device lane has no correctly rounded transcendental kernels, so a DAG
-/// that computes one, directly or inside a fused chain, is rejected through
-/// [05-UNS-1] rather than computed with a vendor library.
-pub fn reject_device_transcendentals(
+/// device lane has no correctly rounded kernels for [05-OP-46]'s
+/// transcendentals or `sqrt`, so a DAG that computes one, directly or inside
+/// a fused chain, is rejected through [05-UNS-1] rather than computed with a
+/// vendor library.
+pub fn reject_device_correctly_rounded_ops(
     nodes: &[DagNode],
     target: &'static str,
 ) -> Result<(), chelis_types::unsupported::Unsupported> {
@@ -562,7 +574,8 @@ pub fn reject_device_transcendentals(
             RiscOp::Tan => Some("tan"),
             RiscOp::Atan => Some("atan"),
             RiscOp::Tanh => Some("tanh"),
-            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.transcendental_name()),
+            RiscOp::Sqrt => Some("sqrt"),
+            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
             _ => None,
         };
         if let Some(name) = name {
@@ -574,7 +587,7 @@ pub fn reject_device_transcendentals(
                 chelis_types::unsupported::Stage::Codegen(target),
                 chelis_types::deliberate_rejection!(
                     "[05-OP-46]",
-                    "device transcendentals are fenced until the device lane has correctly rounded kernels"
+                    "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
                 ),
             ));
         }
