@@ -166,23 +166,35 @@ fn inputs_f32() -> Vec<f32> {
 }
 
 // The section 3.3 graphs, written here independently of the compiler's one
-// definition, each primitive rounded once at the operand dtype.
+// definition, each primitive rounded once at the operand dtype. Host
+// arithmetic leaves an ISA-chosen NaN (x86's default NaN is negative), so a
+// NaN result is finalized to [04-NUM-2]'s canonical quiet NaN as the spec
+// requires; a canonical NaN in stays NaN through the later primitives, so
+// finalizing each graph's result equals finalizing every primitive.
 macro_rules! reference_graphs {
-    ($module:ident, $t:ty, $exp:path, $tanh:path) => {
+    ($module:ident, $t:ty, $canonical_nan:expr, $exp:path, $tanh:path) => {
         mod $module {
+            fn canonical(x: $t) -> $t {
+                if x.is_nan() {
+                    <$t>::from_bits($canonical_nan)
+                } else {
+                    x
+                }
+            }
+
             pub fn sigmoid(x: $t) -> $t {
-                1.0 / (1.0 + $exp(-x))
+                canonical(1.0 / (1.0 + $exp(-x)))
             }
 
             pub fn silu(x: $t) -> $t {
-                x * sigmoid(x)
+                canonical(x * sigmoid(x))
             }
 
             pub fn gelu(x: $t) -> $t {
                 let cubic = 0.044715_f64 as $t;
                 let c = 0.797_884_560_802_865_4_f64 as $t;
                 let u = c * (x + cubic * ((x * x) * x));
-                x * sigmoid(2.0 * u)
+                canonical(x * sigmoid(2.0 * u))
             }
 
             pub fn tanh(x: $t) -> $t {
@@ -191,7 +203,7 @@ macro_rules! reference_graphs {
 
             pub fn tanh_adjoint(x: $t) -> $t {
                 let y = $tanh(x);
-                1.0 * (1.0 - y * y)
+                canonical(1.0 * (1.0 - y * y))
             }
 
             pub fn softmax(x: &[$t]) -> Vec<$t> {
@@ -212,7 +224,7 @@ macro_rules! reference_graphs {
                         .collect();
                 }
                 let sum = level[0];
-                exps.iter().map(|value| value / sum).collect()
+                exps.iter().map(|value| canonical(value / sum)).collect()
             }
 
             // Std.Contracts.normal_cdf and its erf_approx, primitive by primitive.
@@ -233,14 +245,20 @@ macro_rules! reference_graphs {
                     let y = 1.0 - poly * $exp(-(ax * ax));
                     if x < 0.0 { -y } else { y }
                 };
-                k(0.5) * (1.0 - erf(-(x * k(0.7071067811865475))))
+                canonical(k(0.5) * (1.0 - erf(-(x * k(0.7071067811865475)))))
             }
         }
     };
 }
 
-reference_graphs!(ref32, f32, chelis_crmath::exp_f32, chelis_crmath::tanh_f32);
-reference_graphs!(ref64, f64, chelis_crmath::exp_f64, chelis_crmath::tanh_f64);
+reference_graphs!(ref32, f32, 0x7fc0_0000, chelis_crmath::exp_f32, chelis_crmath::tanh_f32);
+reference_graphs!(
+    ref64,
+    f64,
+    0x7ff8_0000_0000_0000,
+    chelis_crmath::exp_f64,
+    chelis_crmath::tanh_f64
+);
 
 /// An activation's surface name and its reference.
 type Case<T> = (&'static str, fn(T) -> T);
@@ -564,12 +582,19 @@ mod control {
 mod control {
     // MXCSR: FTZ (bit 15), DAZ (bit 6), and rounding up (bits 13-14 = 0b10).
     pub const HOSTILE: u64 = 0x1f80 | 0x8000 | 0x0040 | 0x4000;
+    /// Bits 6-15: DAZ, the exception masks, rounding control, and FTZ. Bits
+    /// 0-5 are sticky status flags, not environment: IEEE status flags are
+    /// unobservable ([05-OP-46]), and any float operation the test's own code
+    /// runs outside a pinned call may raise one (inexact, typically). FPCR on
+    /// aarch64 holds no status, so that comparison stays whole-register.
+    const CONTROL_BITS: u32 = 0xffc0;
 
+    /// The control field of MXCSR.
     pub fn read() -> u64 {
         let mut mxcsr: u32 = 0;
         // SAFETY: `stmxcsr` stores four bytes to the given live local.
         unsafe { std::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack)) };
-        u64::from(mxcsr)
+        u64::from(mxcsr & CONTROL_BITS)
     }
 
     pub fn write(mxcsr: u64) {
