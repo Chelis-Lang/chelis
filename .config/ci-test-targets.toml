@@ -3868,6 +3868,15 @@ reason = "the Rust policy job's lint-and-unit gate stage runs chelis lint --chec
 tracking_issue = "chelis#2867"
 
 [[path_rule]]
+prefix = "scripts/test_pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the pipeline-core dependency guard's fixture-graph unit contracts with the other scripts/test_*.py suites"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/pipeline_core_dependency_guard.py"
 disposition = "owner"
 workflow = "ci.yml"

@@ -251,7 +251,13 @@ macro_rules! reference_graphs {
     };
 }
 
-reference_graphs!(ref32, f32, 0x7fc0_0000, chelis_crmath::exp_f32, chelis_crmath::tanh_f32);
+reference_graphs!(
+    ref32,
+    f32,
+    0x7fc0_0000,
+    chelis_crmath::exp_f32,
+    chelis_crmath::tanh_f32
+);
 reference_graphs!(
     ref64,
     f64,
