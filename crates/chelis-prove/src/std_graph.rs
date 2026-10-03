@@ -102,8 +102,12 @@ pub fn normal_cdf_graph_digest() -> Result<String, String> {
         .get_or_init(|| {
             let entry = chelis_surf::parser::parse_str("import Std.Contracts (normal_cdf)\n")
                 .map_err(|err| format!("normal_cdf digest probe did not parse: {err:?}"))?;
-            let program = chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)?
-                .ok_or("normal_cdf digest probe did not link chelis-std")?;
+            let program = chelis_reef::prepare_single_file_program(
+                "prove-normal-cdf",
+                &entry,
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            )?
+            .ok_or("normal_cdf digest probe did not link chelis-std")?;
             let text = chelis_surf::format::format_program(&program.stdlib_decls);
             let digest = Sha256::digest(text.as_bytes());
             Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -126,8 +130,12 @@ fn evaluate_normal_cdf(
     // program does, so the graph evaluated is the one Chelis ships.
     let entry = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("normal_cdf probe did not parse: {err:?}"))?;
-    let program = chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)?
-        .ok_or("normal_cdf probe did not link chelis-std")?;
+    let program = chelis_reef::prepare_single_file_program(
+        "prove-normal-cdf",
+        &entry,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )?
+    .ok_or("normal_cdf probe did not link chelis-std")?;
     let bindings = [(
         "prove_ncdf_inputs".to_string(),
         TensorValue {
@@ -196,9 +204,13 @@ mod tests {
                       b = normal_cdf(neg(2.5f32))\n\
                       c = normal_cdf(0.75f64)\n";
         let entry = chelis_surf::parser::parse_str(source).unwrap();
-        let program = chelis_reef::prepare_single_file_program("t", &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
-            .unwrap()
-            .unwrap();
+        let program = chelis_reef::prepare_single_file_program(
+            "t",
+            &entry,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap()
+        .unwrap();
         let _linked = chelis_types::install_linked_program_guard();
         let roots = compiler::eval_selected(
             EvalRequest {

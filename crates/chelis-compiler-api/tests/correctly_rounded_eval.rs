@@ -82,7 +82,8 @@ fn eval_package_on_this_thread(
     )
     .unwrap();
     std::fs::write(directory.path().join("src/values.ch"), library).unwrap();
-    let context = compile_reef_context(directory.path(), directory.path(), &EMBEDDED_RUNTIME).unwrap();
+    let context =
+        compile_reef_context(directory.path(), directory.path(), &EMBEDDED_RUNTIME).unwrap();
     let result = prepare_eval_in_context(&context, client)
         .unwrap_or_else(|error| panic!("compile {client}: {error:?}"))
         .eval_root(

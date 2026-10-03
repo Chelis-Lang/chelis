@@ -18,11 +18,11 @@
 //! Malformed scalar-carrier rows live in
 //! `format_shortest_invalid_width.rs`.
 
+use chelis_crmath::profile::{storage_reference, Output};
 use chelis_runtime::{
     chelis_scalar, chelis_scalar_from_bits, chelis_string_data, chelis_string_from_scalar,
     chelis_string_release,
 };
-use chelis_crmath::profile::{Output, storage_reference};
 use chelis_types::types::Prim;
 use chelis_types::{format_element, ElementRef};
 use chelis_vocab::RuntimeDType;
