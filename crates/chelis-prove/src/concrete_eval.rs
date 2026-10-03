@@ -8,7 +8,8 @@
 //! flattened invariant predicate: a generation method is only ever a
 //! proposal distribution, and every accepted sample is validated against
 //! the predicate via [`eval_bool`] here, so the two surfaces agree by
-//! construction.
+//! construction. `normal_cdf` is the shipped graph from the chelis-std
+//! runtime the caller passes (`crate::std_graph`).
 //!
 //! Semantics notes (kept identical to the pre-lift Tier C behavior so
 //! `tier_c` re-exports are byte-for-byte equivalent):
@@ -23,6 +24,7 @@
 //!   D-STARVE "exact float equality starves by design").
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
+use chelis_reef::EmbeddedRuntime;
 use chelis_types::{
     CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
     float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
@@ -39,8 +41,8 @@ pub type ConcreteEnv = UnordMap<String, ScalarValue>;
 /// comparison semantics: `==`/`!=` carry a `1e-10` tolerance. This is the
 /// user-property postcondition evaluator and must NOT be used for
 /// invariant-sample acceptance (use [`eval_bool_strict`] there).
-pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
-    eval_bool_with(expr, env, false)
+pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv, runtime: &'static EmbeddedRuntime) -> bool {
+    eval_bool_with(expr, env, false, runtime)
 }
 
 /// Evaluate a boolean-shaped [`SmtExpr`] with STRICT comparison semantics:
@@ -50,11 +52,20 @@ pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
 /// weaken exactly the soundness that validation provides). NaN operands
 /// compare false under both `==` and (per IEEE) yield `true` for `!=`, so
 /// a NaN representation never spuriously satisfies an equality invariant.
-pub fn eval_bool_strict(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
-    eval_bool_with(expr, env, true)
+pub fn eval_bool_strict(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    runtime: &'static EmbeddedRuntime,
+) -> bool {
+    eval_bool_with(expr, env, true, runtime)
 }
 
-fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
+fn eval_bool_with(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    strict: bool,
+    runtime: &'static EmbeddedRuntime,
+) -> bool {
     match expr {
         SmtExpr::BoolLit(v) => *v,
         SmtExpr::Cmp(op, left, right) => {
@@ -63,22 +74,23 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
             // operand keeps the exact-equality semantics under
             // `eval_bool_strict`, instead of silently reverting to the
             // 1e-10 fuzz tolerance via `eval_arith` (strict = false).
-            let Some(l) = eval_scalar_with(left, env, strict) else {
+            let Some(l) = eval_scalar_with(left, env, strict, runtime) else {
                 return false;
             };
-            let Some(r) = eval_scalar_with(right, env, strict) else {
+            let Some(r) = eval_scalar_with(right, env, strict, runtime) else {
                 return false;
             };
             eval_cmp(*op, l, r, strict)
         }
-        SmtExpr::Bool(BoolOp::And, children) => {
-            children.iter().all(|c| eval_bool_with(c, env, strict))
-        }
-        SmtExpr::Bool(BoolOp::Or, children) => {
-            children.iter().any(|c| eval_bool_with(c, env, strict))
-        }
+        SmtExpr::Bool(BoolOp::And, children) => children
+            .iter()
+            .all(|c| eval_bool_with(c, env, strict, runtime)),
+        SmtExpr::Bool(BoolOp::Or, children) => children
+            .iter()
+            .any(|c| eval_bool_with(c, env, strict, runtime)),
         SmtExpr::Bool(BoolOp::Implies, children) if children.len() == 2 => {
-            !eval_bool_with(&children[0], env, strict) || eval_bool_with(&children[1], env, strict)
+            !eval_bool_with(&children[0], env, strict, runtime)
+                || eval_bool_with(&children[1], env, strict, runtime)
         }
         // Non-binary `Implies` (or any other malformed boolean connective)
         // must NOT fall through to the arithmetic catch-all below: that path
@@ -94,20 +106,20 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
         SmtExpr::Bool(BoolOp::Implies, children) => {
             let antecedent = children
                 .split_last()
-                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict)))
+                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict, runtime)))
                 .unwrap_or(true);
             let consequent = children
                 .last()
-                .map(|c| eval_bool_with(c, env, strict))
+                .map(|c| eval_bool_with(c, env, strict, runtime))
                 .unwrap_or(true);
             !antecedent || consequent
         }
-        SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict),
+        SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict, runtime),
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool_with(cond, env, strict) {
-                eval_bool_with(then_e, env, strict)
+            if eval_bool_with(cond, env, strict, runtime) {
+                eval_bool_with(then_e, env, strict, runtime)
             } else {
-                eval_bool_with(else_e, env, strict)
+                eval_bool_with(else_e, env, strict, runtime)
             }
         }
         // Genuinely arithmetic-shaped expressions used in boolean context:
@@ -117,7 +129,7 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
         // its forms, `Not`, `Cmp`, `Ite`, `BoolLit`) is handled above, so
         // this arm only ever sees arithmetic variants and cannot re-enter
         // `eval_bool_with` for the same `expr` (no unbounded recursion).
-        _ => eval_scalar_with(expr, env, strict).is_some_and(|value| {
+        _ => eval_scalar_with(expr, env, strict, runtime).is_some_and(|value| {
             value
                 .as_bool_exact()
                 .unwrap_or_else(|| value.as_f64_lossy() != 0.0)
@@ -190,13 +202,18 @@ fn align_literal_widths(lhs: ScalarValue, rhs: ScalarValue) -> Option<(ScalarVal
 /// environment with the fuzz comparison semantics (`1e-10` tolerance for
 /// any nested `==`/`!=`). Unbound variables read as `0.0`; division by
 /// zero and out-of-domain transcendentals yield `NaN`.
-pub fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv) -> f64 {
-    eval_scalar_with(expr, env, false)
+pub fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv, runtime: &'static EmbeddedRuntime) -> f64 {
+    eval_scalar_with(expr, env, false, runtime)
         .map(|value| value.as_f64_lossy())
         .unwrap_or(f64::NAN)
 }
 
-fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<ScalarValue> {
+fn eval_scalar_with(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    strict: bool,
+    runtime: &'static EmbeddedRuntime,
+) -> Option<ScalarValue> {
     match expr {
         SmtExpr::Var(name) => env
             .get(name)
@@ -208,7 +225,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
             scalar_from_i64("prove-bool-literal", Prim::Bool, i64::from(*v)).ok()
         }
         SmtExpr::Arith(op, left, right) => {
-            let lhs = eval_scalar_with(left, env, strict)?;
+            let lhs = eval_scalar_with(left, env, strict, runtime)?;
             if matches!(op, ArithOp::Neg) {
                 return if lhs.prim().is_integer() {
                     int_unop(IntUnOp::Neg, lhs).ok()
@@ -218,7 +235,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
                     None
                 };
             }
-            let rhs = eval_scalar_with(right, env, strict)?;
+            let rhs = eval_scalar_with(right, env, strict, runtime)?;
             let (lhs, rhs) = align_literal_widths(lhs, rhs)?;
             if matches!(op, ArithOp::Div) && rhs.as_f64_lossy() == 0.0 {
                 return None;
@@ -262,7 +279,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
         SmtExpr::Apply(name, args) => {
             let values: Vec<ScalarValue> = args
                 .iter()
-                .map(|expr| eval_scalar_with(expr, env, strict))
+                .map(|expr| eval_scalar_with(expr, env, strict, runtime))
                 .collect::<Option<_>>()?;
             match (name.as_str(), values.as_slice()) {
                 ("abs", [value]) if value.prim().is_integer() => {
@@ -280,7 +297,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
                     float_unop(op, *value).ok()
                 }
                 ("normal_cdf", [value]) if value.prim().is_float() => {
-                    crate::std_graph::normal_cdf(*value).ok()
+                    crate::std_graph::normal_cdf(runtime, *value).ok()
                 }
                 ("min" | "max", [lhs, rhs]) => {
                     let (lhs, rhs) = align_literal_widths(*lhs, *rhs)?;
@@ -322,15 +339,15 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
             }
         }
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool_with(cond, env, strict) {
-                eval_scalar_with(then_e, env, strict)
+            if eval_bool_with(cond, env, strict, runtime) {
+                eval_scalar_with(then_e, env, strict, runtime)
             } else {
-                eval_scalar_with(else_e, env, strict)
+                eval_scalar_with(else_e, env, strict, runtime)
             }
         }
         SmtExpr::Cmp(op, left, right) => {
-            let lhs = eval_scalar_with(left, env, strict)?;
-            let rhs = eval_scalar_with(right, env, strict)?;
+            let lhs = eval_scalar_with(left, env, strict, runtime)?;
+            let rhs = eval_scalar_with(right, env, strict, runtime)?;
             scalar_from_i64(
                 "prove-comparison",
                 Prim::Bool,
@@ -341,7 +358,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
         SmtExpr::Bool(_, _) | SmtExpr::Not(_) => scalar_from_i64(
             "prove-bool",
             Prim::Bool,
-            i64::from(eval_bool_with(expr, env, strict)),
+            i64::from(eval_bool_with(expr, env, strict, runtime)),
         )
         .ok(),
         SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => None, // unreachable after fuzzability check
@@ -439,6 +456,24 @@ fn quantile_linear_impl(data: &[f64], q: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::solver::SmtExpr;
+    use chelis_std_bundle::EMBEDDED_RUNTIME;
+
+    // The evaluators at the runtime this test binary embeds.
+    fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
+        super::eval_bool(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_bool_strict(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
+        super::eval_bool_strict(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv) -> f64 {
+        super::eval_arith(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<ScalarValue> {
+        super::eval_scalar_with(expr, env, strict, &EMBEDDED_RUNTIME)
+    }
 
     fn env(pairs: &[(&str, f64)]) -> ConcreteEnv {
         pairs
@@ -889,7 +924,7 @@ mod tests {
         let x = f32_bits(0xbfab_01de); // a #2952 normal_cdf witness
         let got = eval_scalar_with(&apply_x("normal_cdf"), &scalar_env(&[("x", x)]), true).unwrap();
         assert_eq!(got.prim(), Prim::F32, "normal_cdf left f32");
-        let shipped = crate::std_graph::normal_cdf(x).unwrap();
+        let shipped = crate::std_graph::normal_cdf(&EMBEDDED_RUNTIME, x).unwrap();
         assert_eq!(
             got.as_f64_lossy().to_bits(),
             shipped.as_f64_lossy().to_bits()

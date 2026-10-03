@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use chelis_reef::EmbeddedRuntime;
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
@@ -223,8 +224,11 @@ const STANDARD_CONTRACTS: &[ContractSpec] = &[
 /// that width. A consumer passes the widths its operands can have; an empty
 /// slice means every admitted width. The per-width outcomes come from the
 /// committed discharge table, never from a fuzz run in this process.
-pub fn standard_contracts_at(widths: &[Prim]) -> Vec<StandardContract> {
-    standard_contracts_selected(widths, |_| true)
+pub fn standard_contracts_at(
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
+) -> Vec<StandardContract> {
+    standard_contracts_selected(widths, |_| true, runtime)
 }
 
 /// The standard contracts reduced to the invariants `select` accepts; a
@@ -232,6 +236,7 @@ pub fn standard_contracts_at(widths: &[Prim]) -> Vec<StandardContract> {
 fn standard_contracts_selected(
     widths: &[Prim],
     select: impl Fn(&str) -> bool,
+    runtime: &'static EmbeddedRuntime,
 ) -> Vec<StandardContract> {
     let widths = consumer_widths(widths);
     STANDARD_CONTRACTS
@@ -254,6 +259,7 @@ fn standard_contracts_selected(
                         samples,
                         seed,
                         &widths,
+                        runtime,
                     ),
                     DischargeSpec::Smt => smt_invariant(spec.id, spec.description, spec.assumption),
                 })
@@ -267,8 +273,11 @@ fn standard_contracts_selected(
         .collect()
 }
 
-pub fn standard_contract_registry(widths: &[Prim]) -> AssumptionRegistry {
-    standard_contract_registry_for(None, widths, None)
+pub fn standard_contract_registry(
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
+) -> AssumptionRegistry {
+    standard_contract_registry_for(None, widths, None, runtime)
 }
 
 /// Construct the standard contract registry, attempting to upgrade fuzz-discharged
@@ -277,8 +286,9 @@ pub fn standard_contract_registry(widths: &[Prim]) -> AssumptionRegistry {
 pub fn standard_contract_registry_with_prover(
     prover: &crate::beacon_contract_prover::BeaconContractProver,
     widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
 ) -> AssumptionRegistry {
-    standard_contract_registry_for(None, widths, Some(prover))
+    standard_contract_registry_for(None, widths, Some(prover), runtime)
 }
 
 /// The registry over the invariants in `contracts` (every invariant when
@@ -289,10 +299,11 @@ pub fn standard_contract_registry_for(
     contracts: Option<&BTreeSet<String>>,
     widths: &[Prim],
     prover: Option<&crate::beacon_contract_prover::BeaconContractProver>,
+    runtime: &'static EmbeddedRuntime,
 ) -> AssumptionRegistry {
     let mut registry = AssumptionRegistry::new();
     let selected = |id: &str| contracts.is_none_or(|contracts| contracts.contains(id));
-    for contract in standard_contracts_selected(widths, selected) {
+    for contract in standard_contracts_selected(widths, selected, runtime) {
         for invariant in contract.invariants {
             // Try to upgrade fuzz-validated contracts. A contract whose fuzz
             // discharge failed at a consumer width stays failed: a proof about
@@ -366,6 +377,7 @@ fn fuzz_invariant(
     samples: usize,
     seed: u64,
     widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
 ) -> ContractInvariant {
     ContractInvariant {
         id: id.to_string(),
@@ -375,7 +387,15 @@ fn fuzz_invariant(
             id,
             Some(AssumptionDischarge::new(
                 DischargeMethod::Fuzz,
-                fuzz_discharge_evidence(id, assumption, implementation, samples, seed, widths),
+                fuzz_discharge_evidence(
+                    id,
+                    assumption,
+                    implementation,
+                    samples,
+                    seed,
+                    widths,
+                    runtime,
+                ),
             )),
             Some(NonVacuityRecord::established(serde_json::json!({
                 "method": "fuzz",
@@ -437,14 +457,15 @@ fn fuzz_discharge_evidence(
     samples: usize,
     seed: u64,
     widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
 ) -> serde_json::Value {
     let outcomes = if is_float_contract(id) {
         widths
             .iter()
-            .map(|prim| run_fuzz_discharge(id, samples, seed, Some(*prim)))
+            .map(|prim| run_fuzz_discharge(id, samples, seed, Some(*prim), runtime))
             .collect::<Vec<_>>()
     } else {
-        vec![run_fuzz_discharge(id, samples, seed, None)]
+        vec![run_fuzz_discharge(id, samples, seed, None, runtime)]
     };
     // The reported outcome is the first failing width, else the first width.
     let reported = outcomes
@@ -608,10 +629,14 @@ pub fn committed_standard_contract_discharge_table() -> &'static str {
     DISCHARGE_TABLE_JSON
 }
 
-/// The table recomputed now, rendered as the committed file is. This runs
-/// every fuzz discharge; nothing on the prove path calls it.
-pub fn recompute_standard_contract_discharge_table() -> Result<String, String> {
-    generator::compute_discharge_table().map(|table| generator::render_discharge_table(&table))
+/// The table recomputed now against `runtime`'s chelis-std, rendered as the
+/// committed file is. This runs every fuzz discharge; nothing on the prove
+/// path calls it.
+pub fn recompute_standard_contract_discharge_table(
+    runtime: &'static EmbeddedRuntime,
+) -> Result<String, String> {
+    generator::compute_discharge_table(runtime)
+        .map(|table| generator::render_discharge_table(&table))
 }
 
 fn committed_discharge_table() -> Result<&'static DischargeTable, String> {
@@ -642,7 +667,15 @@ thread_local! {
 }
 
 /// One contract's fuzz discharge at one width, read from the committed table.
-fn run_fuzz_discharge(id: &str, samples: usize, seed: u64, prim: Option<Prim>) -> FuzzOutcome {
+/// A `normal_cdf` row is served only when the table's recorded graph digest is
+/// the digest of `runtime`'s chelis-std.
+fn run_fuzz_discharge(
+    id: &str,
+    samples: usize,
+    seed: u64,
+    prim: Option<Prim>,
+    runtime: &'static EmbeddedRuntime,
+) -> FuzzOutcome {
     #[cfg(test)]
     RESOLVED_ROWS.with(|rows| {
         rows.borrow_mut().push(format!(
@@ -652,7 +685,7 @@ fn run_fuzz_discharge(id: &str, samples: usize, seed: u64, prim: Option<Prim>) -
     });
     table_outcome(
         committed_discharge_table(),
-        crate::std_graph::normal_cdf_graph_digest,
+        || crate::std_graph::normal_cdf_graph_digest(runtime),
         id,
         samples,
         seed,
@@ -725,7 +758,7 @@ mod tests {
     use super::*;
 
     fn all_invariants() -> Vec<ContractInvariant> {
-        standard_contracts_at(&[Prim::F64])
+        standard_contracts_at(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME)
             .into_iter()
             .flat_map(|contract| contract.invariants)
             .collect()
@@ -733,7 +766,8 @@ mod tests {
 
     #[test]
     fn k1_put_call_parity_consumes_cdf_reflection_as_fuzz_qualified_contract() {
-        let registry = standard_contract_registry(&[Prim::F64]);
+        let registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         let probe = registry.probe_consumer(
             "put_call_parity",
             CompositeVerdict::Proven,
@@ -756,8 +790,30 @@ mod tests {
     }
 
     #[test]
+    fn chelis_2957_normal_cdf_rows_are_checked_against_the_callers_runtime() {
+        // A runtime whose archive is not the one the table was computed from.
+        // Its graph digest cannot match, so every normal_cdf row fails closed,
+        // while a row that does not read the graph is still served.
+        static OTHER: EmbeddedRuntime =
+            EmbeddedRuntime::new("0.0.0", b"not the shipped archive", b"");
+        let mut normal_cdf_rows = 0;
+        for contract in standard_contracts_at(&[Prim::F64], &OTHER) {
+            for invariant in contract.invariants {
+                let evidence = &invariant.record.discharge.as_ref().unwrap().evidence;
+                if is_normal_cdf_contract(&invariant.id) {
+                    normal_cdf_rows += 1;
+                    assert_eq!(evidence["status"], "failed", "{}", invariant.id);
+                } else {
+                    assert_ne!(evidence["status"], "failed", "{}", invariant.id);
+                }
+            }
+        }
+        assert_eq!(normal_cdf_rows, 3);
+    }
+
+    #[test]
     fn normal_cdf_contracts_bind_to_bundled_callable_implementation() {
-        let normal = standard_contracts_at(&[Prim::F64])
+        let normal = standard_contracts_at(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME)
             .into_iter()
             .find(|contract| contract.id == "std.normal_cdf")
             .expect("normal CDF contract exists");
@@ -816,7 +872,8 @@ mod tests {
 
     #[test]
     fn k3_corrupting_contract_discharge_degrades_dependent_consumer() {
-        let mut registry = standard_contract_registry(&[Prim::F64]);
+        let mut registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         let before = registry.probe_consumer(
             "put_call_parity",
             CompositeVerdict::Proven,
@@ -855,7 +912,8 @@ mod tests {
 
     #[test]
     fn k4_contract_assumption_non_vacuity_failure_is_invalid() {
-        let mut registry = standard_contract_registry(&[Prim::F64]);
+        let mut registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         registry.insert(AssumptionRecord::new(
             EXP_POSITIVITY,
             Some(AssumptionDischarge::new(
@@ -912,7 +970,7 @@ mod tests {
         // the f32 discharge of reflection fails on the shipped graph, so an f32
         // consumer composes to Failed while an f64 consumer stays validated.
         let at = |widths: &[Prim]| {
-            standard_contract_registry(widths).probe_consumer(
+            standard_contract_registry(widths, &chelis_std_bundle::EMBEDDED_RUNTIME).probe_consumer(
                 "put_call_parity",
                 CompositeVerdict::Proven,
                 [NORMAL_CDF_REFLECTION],
@@ -1012,10 +1070,11 @@ mod tests {
             (LOG_MONOTONICITY, ["validated"; 4]),
             (LOG_ONE, ["validated"; 4]),
         ];
-        let invariants = standard_contracts_at(&CONTRACT_FLOAT_WIDTHS)
-            .into_iter()
-            .flat_map(|contract| contract.invariants)
-            .collect::<Vec<_>>();
+        let invariants =
+            standard_contracts_at(&CONTRACT_FLOAT_WIDTHS, &chelis_std_bundle::EMBEDDED_RUNTIME)
+                .into_iter()
+                .flat_map(|contract| contract.invariants)
+                .collect::<Vec<_>>();
         for (id, statuses) in expected {
             let invariant = invariants
                 .iter()
@@ -1048,6 +1107,7 @@ mod tests {
             committed.samples,
             committed.seed,
             Some(Prim::F32),
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
         );
         assert_eq!(&recomputed, &committed.outcome);
         assert!(recomputed.counterexample.is_some());
@@ -1071,7 +1131,8 @@ mod tests {
         assert_eq!(rows, discharge_plan());
         assert_eq!(
             table.std_graph_digest,
-            crate::std_graph::normal_cdf_graph_digest().unwrap()
+            crate::std_graph::normal_cdf_graph_digest(&chelis_std_bundle::EMBEDDED_RUNTIME)
+                .unwrap()
         );
         assert_eq!(render_discharge_table(table), DISCHARGE_TABLE_JSON);
     }
@@ -1079,7 +1140,10 @@ mod tests {
     #[test]
     fn chelis_2957_registry_reads_the_table_and_never_fuzzes() {
         RECOMPUTED.with(|count| count.set(0));
-        let registry = standard_contract_registry(&CONTRACT_FLOAT_WIDTHS);
+        let registry = standard_contract_registry(
+            &CONTRACT_FLOAT_WIDTHS,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
         let probe = registry.probe_consumer(
             "consumer",
             CompositeVerdict::Proven,
@@ -1099,7 +1163,12 @@ mod tests {
         let resolved = |contracts: &[&str], widths: &[Prim]| {
             RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
             let reached = contracts.iter().map(|id| id.to_string()).collect();
-            let registry = standard_contract_registry_for(Some(&reached), widths, None);
+            let registry = standard_contract_registry_for(
+                Some(&reached),
+                widths,
+                None,
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            );
             let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, contracts);
             assert!(
                 probe
@@ -1122,7 +1191,10 @@ mod tests {
         );
         // The unfiltered registry resolves every row of the plan.
         RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
-        let _ = standard_contract_registry(&CONTRACT_FLOAT_WIDTHS);
+        let _ = standard_contract_registry(
+            &CONTRACT_FLOAT_WIDTHS,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
         assert_eq!(
             RESOLVED_ROWS.with(|rows| rows.borrow().len()),
             discharge_plan().len()

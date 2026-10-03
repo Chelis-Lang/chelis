@@ -16,7 +16,8 @@ use chelis_prove::{
 #[test]
 fn standard_contract_discharge_table_matches_recomputation() {
     crate::support::isolate();
-    let recomputed = recompute_standard_contract_discharge_table().unwrap();
+    let recomputed =
+        recompute_standard_contract_discharge_table(&chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(STANDARD_CONTRACT_DISCHARGE_TABLE_PATH);
     if std::env::var("CHELIS_PROVE_DISCHARGE_TABLE_WRITE").as_deref() == Ok("1") {
         std::fs::write(&path, &recomputed).unwrap();

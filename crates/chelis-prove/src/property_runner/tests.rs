@@ -40,7 +40,7 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
         samples: 32,
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(o) = run_surf_source_properties(source, &opts).expect("run");
     o
@@ -508,7 +508,7 @@ fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
     let options = PropertyRunOptions {
         tier: "smt-only".to_string(),
         only: Some("nested_grad_left".to_string()),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) =
         run_surf_source_properties(source, &options).expect("run filtered nested gradients");
@@ -589,7 +589,7 @@ inner = grad(square, wrt=xx)
         let options = PropertyRunOptions {
             tier: "smt-only".to_string(),
             only: only.map(str::to_string),
-            ..Default::default()
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
         };
         let result = if is_deep {
             run_deep_source_properties(source, &options)
@@ -700,7 +700,7 @@ def pair(x: f32) -> (f32, f32) = (x, x)
     let options = PropertyRunOptions {
         tier: "smt-only".to_string(),
         only: Some("reflexive".to_string()),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
 
     let PropertyRunResult::Ran(outcomes) =
@@ -1016,7 +1016,7 @@ fn run_deep(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
         samples: 16,
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(o) = run_deep_source_properties(source, &opts).expect("run");
     o
@@ -1187,7 +1187,7 @@ fn f6_deep_chelis_role_property_without_source_kind_is_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let result = run_deep_source_properties(source, &opts);
     assert!(
         result.is_err(),
@@ -1213,7 +1213,7 @@ fn f6_deep_invalid_source_kind_is_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let result = run_deep_source_properties(source, &opts);
     assert!(
         result.is_err(),
@@ -1237,7 +1237,7 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let PropertyRunResult::Ran(outcomes) =
         run_deep_source_properties(source, &opts).expect("bridge module is not an error");
     assert!(
@@ -1367,8 +1367,11 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
 #[test]
 fn producer_property_marker_has_no_discovery_authority() {
     let source = r#"(def {c_earchin_role: "property_witness", property_source_kind: "user"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#;
-    let PropertyRunResult::Ran(outcomes) =
-        run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
+    let PropertyRunResult::Ran(outcomes) = run_deep_source_properties(
+        source,
+        &PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME),
+    )
+    .unwrap();
     assert!(outcomes.is_empty(), "{outcomes:?}");
 }
 
@@ -1454,7 +1457,8 @@ fn resolved_rows_of(source: &str) -> Vec<String> {
     let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
     let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
     crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
-    contract_assumptions(&decls, &properties[0]).expect("contracts resolve");
+    contract_assumptions(&decls, &properties[0], &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("contracts resolve");
     crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow().clone())
 }
 

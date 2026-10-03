@@ -2243,8 +2243,8 @@ packages = [
 prefix = "packages/chelis-std/"
 disposition = "packages"
 packages = [
-  "chelis-cli", "chelis-compiler-api", "chelis-python", "chelis-reef",
-  "chelis-std-bundle",
+  "chelis-cli", "chelis-compiler-api", "chelis-prove", "chelis-python",
+  "chelis-reef", "chelis-std-bundle", "chelis-tide",
 ]
 
 # The configuration-closure implementation and its adversarial controls execute

@@ -9,18 +9,23 @@
 //!
 //! Inputs travel as an exact tagged tensor binding and results come back as
 //! exact scalars, so no value is rounded on the way in or out. One evaluation
-//! handles a whole batch, and each (dtype, input bits) pair is memoized per
-//! process, so repeated predicates do not recompile the program.
+//! handles a whole batch, and each (runtime, dtype, input bits) triple is
+//! memoized per process, so repeated predicates do not recompile the program.
+//!
+//! The chelis-std runtime is the caller's: every entry point takes the
+//! `&'static EmbeddedRuntime` the binary embeds, as chelis-reef's do, and the
+//! memos are keyed by its archive hash.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
+use chelis_reef::EmbeddedRuntime;
 use chelis_types::{ScalarValue, tensor_from_scalars, types::Prim};
 use sha2::{Digest, Sha256};
 
-type Memo = Mutex<BTreeMap<(&'static str, u64), ScalarValue>>;
+type Memo = Mutex<BTreeMap<(String, &'static str, u64), ScalarValue>>;
 
 fn memo() -> &'static Memo {
     static MEMO: OnceLock<Memo> = OnceLock::new();
@@ -28,19 +33,26 @@ fn memo() -> &'static Memo {
 }
 
 /// The bit pattern that identifies a float scalar inside its dtype.
-fn float_key(value: ScalarValue) -> Option<(&'static str, u64)> {
+fn float_key(runtime: &EmbeddedRuntime, value: ScalarValue) -> Option<(String, &'static str, u64)> {
     let prim = value.prim();
     if !prim.is_float() {
         return None;
     }
     // Every float dtype embeds exactly in f64, so the f64 bits identify the
     // value within its dtype, signed zero included.
-    Some((prim.name(), value.as_f64_lossy().to_bits()))
+    Some((
+        runtime.archive_sha256().to_string(),
+        prim.name(),
+        value.as_f64_lossy().to_bits(),
+    ))
 }
 
-/// `Std.Contracts.normal_cdf` at each input's own dtype. Every input must
-/// share one float dtype; the result has that dtype.
-pub fn normal_cdf_batch(inputs: &[ScalarValue]) -> Result<Vec<ScalarValue>, String> {
+/// `Std.Contracts.normal_cdf` from `runtime` at each input's own dtype. Every
+/// input must share one float dtype; the result has that dtype.
+pub fn normal_cdf_batch(
+    runtime: &'static EmbeddedRuntime,
+    inputs: &[ScalarValue],
+) -> Result<Vec<ScalarValue>, String> {
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
     };
@@ -66,29 +78,35 @@ pub fn normal_cdf_batch(inputs: &[ScalarValue]) -> Result<Vec<ScalarValue>, Stri
         let memo = memo().lock().map_err(|_| "normal_cdf memo poisoned")?;
         let mut queued = BTreeSet::new();
         for value in inputs {
-            let key = float_key(*value).expect("dtype checked above");
+            let key = float_key(runtime, *value).expect("dtype checked above");
             if !memo.contains_key(&key) && queued.insert(key) {
                 missing.push(*value);
             }
         }
     }
     if !missing.is_empty() {
-        let computed = evaluate_normal_cdf(type_name, prim, &missing)?;
+        let computed = evaluate_normal_cdf(runtime, type_name, prim, &missing)?;
         let mut memo = memo().lock().map_err(|_| "normal_cdf memo poisoned")?;
         for (input, output) in missing.iter().zip(computed) {
-            memo.insert(float_key(*input).expect("dtype checked above"), output);
+            memo.insert(
+                float_key(runtime, *input).expect("dtype checked above"),
+                output,
+            );
         }
     }
     let memo = memo().lock().map_err(|_| "normal_cdf memo poisoned")?;
     Ok(inputs
         .iter()
-        .map(|value| memo[&float_key(*value).expect("dtype checked above")])
+        .map(|value| memo[&float_key(runtime, *value).expect("dtype checked above")])
         .collect())
 }
 
-/// `Std.Contracts.normal_cdf` at the input's own dtype.
-pub fn normal_cdf(input: ScalarValue) -> Result<ScalarValue, String> {
-    normal_cdf_batch(std::slice::from_ref(&input)).map(|mut values| values.remove(0))
+/// `Std.Contracts.normal_cdf` from `runtime` at the input's own dtype.
+pub fn normal_cdf(
+    runtime: &'static EmbeddedRuntime,
+    input: ScalarValue,
+) -> Result<ScalarValue, String> {
+    normal_cdf_batch(runtime, std::slice::from_ref(&input)).map(|mut values| values.remove(0))
 }
 
 /// A digest of the chelis-std slice a `normal_cdf` program links, in canonical
@@ -96,18 +114,21 @@ pub fn normal_cdf(input: ScalarValue) -> Result<ScalarValue, String> {
 /// a `normal_cdf` verdict computed against one shipped graph is never served
 /// for another. It covers the std source the graph is built from, not the
 /// evaluator or the kernels; the table's recomputation check covers those.
-pub fn normal_cdf_graph_digest() -> Result<String, String> {
-    static DIGEST: OnceLock<Result<String, String>> = OnceLock::new();
-    DIGEST
-        .get_or_init(|| {
+pub fn normal_cdf_graph_digest(runtime: &'static EmbeddedRuntime) -> Result<String, String> {
+    type Digests = Mutex<BTreeMap<String, Result<String, String>>>;
+    static DIGESTS: OnceLock<Digests> = OnceLock::new();
+    let mut digests = DIGESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|_| "normal_cdf digest memo poisoned")?;
+    digests
+        .entry(runtime.archive_sha256().to_string())
+        .or_insert_with(|| {
             let entry = chelis_surf::parser::parse_str("import Std.Contracts (normal_cdf)\n")
                 .map_err(|err| format!("normal_cdf digest probe did not parse: {err:?}"))?;
-            let program = chelis_reef::prepare_single_file_program(
-                "prove-normal-cdf",
-                &entry,
-                &chelis_std_bundle::EMBEDDED_RUNTIME,
-            )?
-            .ok_or("normal_cdf digest probe did not link chelis-std")?;
+            let program =
+                chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, runtime)?
+                    .ok_or("normal_cdf digest probe did not link chelis-std")?;
             let text = chelis_surf::format::format_program(&program.stdlib_decls);
             let digest = Sha256::digest(text.as_bytes());
             Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -116,6 +137,7 @@ pub fn normal_cdf_graph_digest() -> Result<String, String> {
 }
 
 fn evaluate_normal_cdf(
+    runtime: &'static EmbeddedRuntime,
     type_name: &str,
     prim: Prim,
     inputs: &[ScalarValue],
@@ -130,12 +152,8 @@ fn evaluate_normal_cdf(
     // program does, so the graph evaluated is the one Chelis ships.
     let entry = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("normal_cdf probe did not parse: {err:?}"))?;
-    let program = chelis_reef::prepare_single_file_program(
-        "prove-normal-cdf",
-        &entry,
-        &chelis_std_bundle::EMBEDDED_RUNTIME,
-    )?
-    .ok_or("normal_cdf probe did not link chelis-std")?;
+    let program = chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry, runtime)?
+        .ok_or("normal_cdf probe did not link chelis-std")?;
     let bindings = [(
         "prove_ncdf_inputs".to_string(),
         TensorValue {
@@ -188,6 +206,7 @@ fn evaluate_normal_cdf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_std_bundle::EMBEDDED_RUNTIME;
     use chelis_types::scalar_from_f64;
 
     fn f32_scalar(value: f32) -> ScalarValue {
@@ -204,13 +223,9 @@ mod tests {
                       b = normal_cdf(neg(2.5f32))\n\
                       c = normal_cdf(0.75f64)\n";
         let entry = chelis_surf::parser::parse_str(source).unwrap();
-        let program = chelis_reef::prepare_single_file_program(
-            "t",
-            &entry,
-            &chelis_std_bundle::EMBEDDED_RUNTIME,
-        )
-        .unwrap()
-        .unwrap();
+        let program = chelis_reef::prepare_single_file_program("t", &entry, &EMBEDDED_RUNTIME)
+            .unwrap()
+            .unwrap();
         let _linked = chelis_types::install_linked_program_guard();
         let roots = compiler::eval_selected(
             EvalRequest {
@@ -232,7 +247,8 @@ mod tests {
                 other => panic!("{name}: {other:?}"),
             }
         };
-        let batch = normal_cdf_batch(&[f32_scalar(1.0), f32_scalar(-2.5)]).unwrap();
+        let batch =
+            normal_cdf_batch(&EMBEDDED_RUNTIME, &[f32_scalar(1.0), f32_scalar(-2.5)]).unwrap();
         for (got, name) in batch.iter().zip(["a", "b"]) {
             assert_eq!(got.prim(), Prim::F32);
             assert_eq!(
@@ -240,7 +256,11 @@ mod tests {
                 expected(name).as_f64_lossy().to_bits()
             );
         }
-        let c = normal_cdf(scalar_from_f64("test", Prim::F64, 0.75).unwrap()).unwrap();
+        let c = normal_cdf(
+            &EMBEDDED_RUNTIME,
+            scalar_from_f64("test", Prim::F64, 0.75).unwrap(),
+        )
+        .unwrap();
         assert_eq!(c.prim(), Prim::F64);
         assert_eq!(
             c.as_f64_lossy().to_bits(),
@@ -251,8 +271,8 @@ mod tests {
     #[test]
     fn normal_cdf_rejects_mixed_and_non_float_batches() {
         let f64_value = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
-        assert!(normal_cdf_batch(&[f32_scalar(0.5), f64_value]).is_err());
+        assert!(normal_cdf_batch(&EMBEDDED_RUNTIME, &[f32_scalar(0.5), f64_value]).is_err());
         let int = chelis_types::scalar_from_i64("test", Prim::Int32, 1).unwrap();
-        assert!(normal_cdf(int).is_err());
+        assert!(normal_cdf(&EMBEDDED_RUNTIME, int).is_err());
     }
 }

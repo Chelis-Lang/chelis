@@ -30,20 +30,22 @@ pub(super) fn discharge_plan() -> Vec<(&'static str, usize, u64, Option<Prim>)> 
     plan
 }
 
-/// Recompute the whole table.
-pub(super) fn compute_discharge_table() -> Result<DischargeTable, String> {
+/// Recompute the whole table against `runtime`'s chelis-std.
+pub(super) fn compute_discharge_table(
+    runtime: &'static EmbeddedRuntime,
+) -> Result<DischargeTable, String> {
     let rows = discharge_plan()
         .into_iter()
         .map(|(id, samples, seed, prim)| DischargeRow {
             contract: id.to_string(),
             samples,
             seed,
-            outcome: recompute_fuzz_discharge(id, samples, seed, prim),
+            outcome: recompute_fuzz_discharge(id, samples, seed, prim, runtime),
         })
         .collect();
     Ok(DischargeTable {
         schema: DISCHARGE_TABLE_SCHEMA.to_string(),
-        std_graph_digest: crate::std_graph::normal_cdf_graph_digest()?,
+        std_graph_digest: crate::std_graph::normal_cdf_graph_digest(runtime)?,
         rows,
     })
 }
@@ -60,11 +62,12 @@ pub(super) fn recompute_fuzz_discharge(
     samples: usize,
     seed: u64,
     prim: Option<Prim>,
+    runtime: &'static EmbeddedRuntime,
 ) -> FuzzOutcome {
     #[cfg(test)]
     RECOMPUTED.with(|count| count.set(count.get() + 1));
     match prim {
-        Some(prim) => run_float_fuzz_discharge(id, samples, seed, prim),
+        Some(prim) => run_float_fuzz_discharge(id, samples, seed, prim, runtime),
         None => run_untyped_fuzz_discharge(id, samples, seed),
     }
 }
@@ -87,11 +90,17 @@ fn run_untyped_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcom
 /// The float contracts at `prim`: the shipped `Std.Contracts.normal_cdf`
 /// graph and the correctly rounded `exp` and `log`, evaluated at that width
 /// exactly as a Chelis program evaluates them.
-fn run_float_fuzz_discharge(id: &str, samples: usize, seed: u64, prim: Prim) -> FuzzOutcome {
+fn run_float_fuzz_discharge(
+    id: &str,
+    samples: usize,
+    seed: u64,
+    prim: Prim,
+    runtime: &'static EmbeddedRuntime,
+) -> FuzzOutcome {
     match id {
-        NORMAL_CDF_RANGE => fuzz_normal_cdf_range(prim, samples, seed),
-        NORMAL_CDF_REFLECTION => fuzz_normal_cdf_reflection(prim, samples, seed),
-        NORMAL_CDF_MONOTONICITY => fuzz_normal_cdf_monotonicity(prim, samples, seed),
+        NORMAL_CDF_RANGE => fuzz_normal_cdf_range(prim, samples, seed, runtime),
+        NORMAL_CDF_REFLECTION => fuzz_normal_cdf_reflection(prim, samples, seed, runtime),
+        NORMAL_CDF_MONOTONICITY => fuzz_normal_cdf_monotonicity(prim, samples, seed, runtime),
         EXP_POSITIVITY => fuzz_unary(
             prim,
             samples,
@@ -163,8 +172,9 @@ fn normal_cdf_values(
     inputs: &[ScalarValue],
     domain: &'static str,
     prim: Prim,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Vec<ScalarValue>, FuzzOutcome> {
-    crate::std_graph::normal_cdf_batch(inputs).map_err(|message| {
+    crate::std_graph::normal_cdf_batch(runtime, inputs).map_err(|message| {
         FuzzOutcome::new(
             0,
             f64::INFINITY,
@@ -212,10 +222,15 @@ fn first_failure(
     FuzzOutcome::new(samples, max_error, None, domain, Some(prim))
 }
 
-fn fuzz_normal_cdf_range(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+fn fuzz_normal_cdf_range(
+    prim: Prim,
+    samples: usize,
+    seed: u64,
+    runtime: &'static EmbeddedRuntime,
+) -> FuzzOutcome {
     const DOMAIN: &str = "normal-cdf finite domain [-10, 10]";
     let xs = signed_samples(prim, samples, seed, 10.0);
-    let ys = match normal_cdf_values(&xs, DOMAIN, prim) {
+    let ys = match normal_cdf_values(&xs, DOMAIN, prim, runtime) {
         Ok(ys) => ys,
         Err(outcome) => return outcome,
     };
@@ -233,14 +248,19 @@ fn fuzz_normal_cdf_range(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
     first_failure(errors, samples, DOMAIN, prim)
 }
 
-fn fuzz_normal_cdf_reflection(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+fn fuzz_normal_cdf_reflection(
+    prim: Prim,
+    samples: usize,
+    seed: u64,
+    runtime: &'static EmbeddedRuntime,
+) -> FuzzOutcome {
     const DOMAIN: &str = "normal-cdf finite domain [-10, 10]";
     let xs = signed_samples(prim, samples, seed, 10.0);
     let mut inputs = xs.clone();
     inputs.extend(xs.iter().map(|x| {
         float_unop(FloatUnOp::Neg, *x).expect("negation is defined at every float dtype")
     }));
-    let ys = match normal_cdf_values(&inputs, DOMAIN, prim) {
+    let ys = match normal_cdf_values(&inputs, DOMAIN, prim, runtime) {
         Ok(ys) => ys,
         Err(outcome) => return outcome,
     };
@@ -257,14 +277,19 @@ fn fuzz_normal_cdf_reflection(prim: Prim, samples: usize, seed: u64) -> FuzzOutc
     first_failure(errors, samples, DOMAIN, prim)
 }
 
-fn fuzz_normal_cdf_monotonicity(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+fn fuzz_normal_cdf_monotonicity(
+    prim: Prim,
+    samples: usize,
+    seed: u64,
+    runtime: &'static EmbeddedRuntime,
+) -> FuzzOutcome {
     const DOMAIN: &str = "ordered normal-cdf finite pairs in [-10, 10]";
     let pairs = ordered_signed_pairs(prim, samples, seed);
     let inputs = pairs
         .iter()
         .flat_map(|(lo, hi)| [*lo, *hi])
         .collect::<Vec<_>>();
-    let ys = match normal_cdf_values(&inputs, DOMAIN, prim) {
+    let ys = match normal_cdf_values(&inputs, DOMAIN, prim, runtime) {
         Ok(ys) => ys,
         Err(outcome) => return outcome,
     };

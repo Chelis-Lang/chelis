@@ -77,6 +77,7 @@ pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u
 
 use crate::concrete_eval::{ConcreteEnv, eval_bool};
 use crate::tier_b::SmtProperty;
+use chelis_reef::EmbeddedRuntime;
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 use chelis_unord::UnordMap;
 
@@ -92,6 +93,7 @@ pub fn fuzz_smt_property(
     declared: &UnordMap<String, Prim>,
     samples: usize,
     seed: u64,
+    runtime: &'static EmbeddedRuntime,
 ) -> TierCResult {
     // Check fuzzability: quantifiers in postcondition → unsupported
     if let crate::inlineability::Fuzzability::NotFuzzable(reason) =
@@ -156,13 +158,13 @@ pub fn fuzz_smt_property(
         if !property
             .preconditions
             .iter()
-            .all(|pre| eval_bool(pre, &env))
+            .all(|pre| eval_bool(pre, &env, runtime))
         {
             continue;
         }
 
         accepted += 1;
-        if !eval_bool(&property.postcondition, &env) {
+        if !eval_bool(&property.postcondition, &env, runtime) {
             let cx: serde_json::Map<String, Value> = env
                 .to_sorted()
                 .into_iter()
@@ -225,6 +227,17 @@ impl Lcg {
 mod tests {
     use super::*;
     use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
+    use chelis_std_bundle::EMBEDDED_RUNTIME;
+
+    // The fuzzer at the runtime this test binary embeds.
+    fn fuzz_smt_property(
+        property: &SmtProperty,
+        declared: &UnordMap<String, Prim>,
+        samples: usize,
+        seed: u64,
+    ) -> TierCResult {
+        super::fuzz_smt_property(property, declared, samples, seed, &EMBEDDED_RUNTIME)
+    }
 
     fn declared(pairs: &[(&str, Prim)]) -> UnordMap<String, Prim> {
         pairs

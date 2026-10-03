@@ -15,6 +15,7 @@ smt = ["chelis-prove/smt"]
 axum = "0.7"
 chelis-compiler-api.workspace = true
 chelis-prove = { path = "../chelis-prove" }
+chelis-reef.workspace = true
 chelis-surf.workspace = true
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +25,9 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 [dev-dependencies]
 assert_cmd = "2"
 chelis-deep.workspace = true
+# The embedded chelis-std runtime the tests pass; the library takes it as a
+# parameter and never depends on the bundle.
+chelis-std-bundle.workspace = true
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

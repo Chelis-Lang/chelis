@@ -41,6 +41,7 @@ pub(super) fn run_obligations(
         tier: options.tier.to_string(),
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
+        runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
     };
     let outcomes = match run_surf_source_obligations(&source, &run_opts) {
         Ok(ObligationRunResult::Ran(o)) => o,

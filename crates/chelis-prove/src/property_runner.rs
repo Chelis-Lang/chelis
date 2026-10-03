@@ -460,10 +460,14 @@ pub struct PropertyRunOptions {
     pub invariant_min_rate: f64,
     /// Max sampling attempts; `None` derives it from `samples`.
     pub max_attempts: Option<usize>,
+    /// The chelis-std runtime the caller embeds: the standard-library graphs
+    /// properties evaluate and the discharge table is checked against.
+    pub runtime: &'static chelis_reef::EmbeddedRuntime,
 }
 
-impl Default for PropertyRunOptions {
-    fn default() -> Self {
+impl PropertyRunOptions {
+    /// The prove surface's defaults, over the caller's chelis-std `runtime`.
+    pub fn new(runtime: &'static chelis_reef::EmbeddedRuntime) -> Self {
         Self {
             seed: 0,
             samples: 100,
@@ -474,11 +478,10 @@ impl Default for PropertyRunOptions {
             only: None,
             invariant_min_rate: 0.01,
             max_attempts: None,
+            runtime,
         }
     }
-}
 
-impl PropertyRunOptions {
     fn effective_seed(&self, property_seed: Option<u64>) -> u64 {
         if self.seed != 0 {
             self.seed
@@ -745,7 +748,7 @@ fn prove_surf_property(
         return beacon::prove(decls, property, options);
     }
     let seed = options.effective_seed(property.seed);
-    let contract_assumptions = match contract_assumptions(decls, property) {
+    let contract_assumptions = match contract_assumptions(decls, property, options.runtime) {
         Ok(records) => records,
         Err(reason) => {
             return PropertyOutcome::new(
@@ -967,6 +970,7 @@ fn function_reaches_itself(
 fn contract_assumptions(
     decls: &[Decl],
     property: &Property,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<Vec<AssumptionRecord>, String> {
     let contracts = expanded_contracts(property);
     if contracts.is_empty() {
@@ -978,7 +982,8 @@ fn contract_assumptions(
     let widths = property_float_widths(decls, property);
     let reached = contracts.iter().cloned().collect::<BTreeSet<_>>();
     let prover = BeaconContractProver::from_env();
-    let registry = standard_contract_registry_for(Some(&reached), &widths, prover.as_ref());
+    let registry =
+        standard_contract_registry_for(Some(&reached), &widths, prover.as_ref(), runtime);
     let probe = registry.probe_consumer(
         &property.name,
         CompositeVerdict::Proven,

@@ -1819,6 +1819,7 @@ fn run_deep_obligations(
         tier: options.tier.to_string(),
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
+        runtime: &EMBEDDED_RUNTIME,
     };
     let outcomes = run_module_obligations(exprs, &sigs, &run_opts);
 

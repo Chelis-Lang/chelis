@@ -343,10 +343,14 @@ pub struct ObligationRunOptions {
     /// starvation classifier and restores the legacy exhaustion (`Error`)
     /// path.
     pub invariant_min_rate: f64,
+    /// The chelis-std runtime the caller embeds: the standard-library graphs
+    /// obligation predicates evaluate.
+    pub runtime: &'static chelis_reef::EmbeddedRuntime,
 }
 
-impl Default for ObligationRunOptions {
-    fn default() -> Self {
+impl ObligationRunOptions {
+    /// The prove surface's defaults, over the caller's chelis-std `runtime`.
+    pub fn new(runtime: &'static chelis_reef::EmbeddedRuntime) -> Self {
         Self {
             seed: 0,
             samples: 100,
@@ -354,6 +358,7 @@ impl Default for ObligationRunOptions {
             tier: "auto".to_string(),
             only: None,
             invariant_min_rate: 0.01,
+            runtime,
         }
     }
 }
@@ -708,7 +713,7 @@ fn run_tier_c(
 ) -> ObligationOutcome {
     let seed = options.seed;
     if ob.is_constant {
-        return match eval_constant_obligation(exprs, inv, ob, consts) {
+        return match eval_constant_obligation(exprs, inv, ob, consts, options.runtime) {
             Ok(true) => outcome(
                 ob,
                 ObligationStatus::Passed,
@@ -844,6 +849,7 @@ fn run_tier_c(
                         crate::opaque::GenModule {
                             exprs,
                             source: &module_source,
+                            runtime: options.runtime,
                         },
                         &producers,
                         &mut grng,
@@ -889,11 +895,18 @@ fn run_tier_c(
                 }
             }
         }
-        match eval_obligation_body_values(exprs, inv, ob, &arg_values, consts) {
+        match eval_obligation_body_values(exprs, inv, ob, &arg_values, consts, options.runtime) {
             Ok(true) => {}
             Ok(false) => {
-                let (shrunk, shrink_steps) =
-                    shrink_obligation_counterexample(exprs, inv, ob, &kinds, consts, arg_values);
+                let (shrunk, shrink_steps) = shrink_obligation_counterexample(
+                    exprs,
+                    inv,
+                    ob,
+                    &kinds,
+                    consts,
+                    arg_values,
+                    options.runtime,
+                );
                 let cx = obligation_counterexample(&shrunk);
                 return outcome(
                     ob,
@@ -962,6 +975,7 @@ fn shrink_obligation_counterexample(
     kinds: &[ArgKind],
     consts: &ConstEnv,
     mut args: Vec<ArgValue>,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> (Vec<ArgValue>, usize) {
     let mut steps = 0usize;
     while steps < MAX_OBLIGATION_SHRINK_STEPS {
@@ -977,7 +991,7 @@ fn shrink_obligation_counterexample(
                 let mut trial = args.clone();
                 trial[index] = candidate;
                 if matches!(
-                    eval_obligation_body_values(exprs, inv, ob, &trial, consts),
+                    eval_obligation_body_values(exprs, inv, ob, &trial, consts, runtime),
                     Ok(false)
                 ) {
                     args = trial;
@@ -1713,13 +1727,14 @@ fn eval_constant_obligation(
     inv: &OpaqueInvariant,
     ob: &ObligationProperty,
     consts: &ConstEnv,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<bool, String> {
     let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
         .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
     let module_source = chelis_deep::printer::print_canonical(exprs);
     let call = deep_var(&ob.producer);
     let value = eval_producer_value(&module_source, inv, call)?;
-    validate_value(&value, &ob.position, inv, &predicate)
+    validate_value(&value, &ob.position, inv, &predicate, runtime)
 }
 
 /// Insert `new_defs` into the `(module ...)` wrapper that contains the
@@ -1794,6 +1809,7 @@ fn eval_obligation_body_values(
     ob: &ObligationProperty,
     args: &[ArgValue],
     consts: &ConstEnv,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<bool, String> {
     let call = {
         let mut app = vec![deep_var(&ob.producer)];
@@ -1814,7 +1830,7 @@ fn eval_obligation_body_values(
     // recursively and None is a real discriminant -- no NaN sentinel and
     // no spurious record-read off a tuple.
     let value = eval_producer_value(&module_source, inv, call)?;
-    validate_value(&value, &ob.position, inv, &predicate)
+    validate_value(&value, &ob.position, inv, &predicate, runtime)
 }
 
 /// Evaluate the producer call inside the defining module (invariant
@@ -1861,9 +1877,10 @@ fn validate_value(
     position: &ProducedPosition,
     inv: &OpaqueInvariant,
     predicate: &crate::solver::SmtExpr,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<bool, String> {
     match position {
-        ProducedPosition::Direct => validate_produced_env(value, inv, predicate),
+        ProducedPosition::Direct => validate_produced_env(value, inv, predicate, runtime),
         ProducedPosition::InsideOption(inner) => match value {
             ExecutionValue::Adt { ctor, fields } if ctor == "None" => {
                 let _ = fields;
@@ -1873,7 +1890,7 @@ fn validate_value(
                 let payload = fields
                     .first()
                     .ok_or_else(|| "Some has no payload".to_string())?;
-                validate_value(payload, inner, inv, predicate)
+                validate_value(payload, inner, inv, predicate, runtime)
             }
             other => Err(format!(
                 "expected an Option value at an Option position, got {other:?}"
@@ -1889,7 +1906,7 @@ fn validate_value(
                 let comp = items
                     .get(*idx)
                     .ok_or_else(|| format!("tuple has no component {idx}"))?;
-                if !validate_value(comp, inner, inv, predicate)? {
+                if !validate_value(comp, inner, inv, predicate, runtime)? {
                     return Ok(false);
                 }
             }
@@ -2036,6 +2053,7 @@ fn validate_produced_env(
     value: &ExecutionValue,
     inv: &OpaqueInvariant,
     predicate: &crate::solver::SmtExpr,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<bool, String> {
     let env = opaque_record_env(value, inv)?;
     // CR2-2 / U1 (fail-CLOSED on non-finite): a NaN/Inf representation leaf
@@ -2052,7 +2070,9 @@ fn validate_produced_env(
     let hash = env.iter().map(|(k, v)| (k.clone(), *v)).collect();
     // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's
     // invariant is checked with exact `==`/`!=`, never the fuzz tolerance.
-    Ok(crate::concrete_eval::eval_bool_strict(predicate, &hash))
+    Ok(crate::concrete_eval::eval_bool_strict(
+        predicate, &hash, runtime,
+    ))
 }
 
 fn node_def(name: &str, body: Expr) -> Expr {

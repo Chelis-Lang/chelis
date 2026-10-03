@@ -981,6 +981,8 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-deep",
  "chelis-prove",
+ "chelis-reef",
+ "chelis-std-bundle",
  "chelis-surf",
  "http-body-util",
  "schemars",

@@ -37,6 +37,7 @@ fn run_opts(options: &ProveOptions<'_>) -> PropertyRunOptions {
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
         max_attempts: options.max_attempts,
+        runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
     }
 }
 

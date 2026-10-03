@@ -31,6 +31,7 @@ fn rejection_sampling_produces_a_valid_probability() {
         GenModule {
             exprs: &exprs,
             source: &source_of(PROB),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut rng,
@@ -56,6 +57,7 @@ fn rejection_sampling_is_deterministic_under_fixed_seed() {
         GenModule {
             exprs: &exprs,
             source: &src,
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut r1,
@@ -69,6 +71,7 @@ fn rejection_sampling_is_deterministic_under_fixed_seed() {
         GenModule {
             exprs: &exprs,
             source: &src,
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut r2,
@@ -99,6 +102,7 @@ fn exact_equality_invariant_starves_with_equality_atoms_shape() {
         GenModule {
             exprs: &exprs,
             source: &source_of(EQ_PROB),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut rng,
@@ -143,6 +147,7 @@ fn min_rate_zero_disables_floor_short_circuit() {
         GenModule {
             exprs: &exprs,
             source: &source_of(PROB),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut rng,
@@ -199,6 +204,7 @@ fn simplex_band_is_served_by_constructor_generation_not_starved() {
         GenModule {
             exprs: &exprs,
             source: &source_of(SIMPLEX),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &producers,
         &mut rng,
@@ -250,6 +256,7 @@ def make(x: i64) -> Option[LargeInt] =
         GenModule {
             exprs: &exprs,
             source: &source_of(surf),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
         },
         &[],
         &mut rng,
