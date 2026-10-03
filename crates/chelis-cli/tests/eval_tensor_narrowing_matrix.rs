@@ -127,12 +127,9 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     let tan_program = f64_unop_program("tan", "1.5", "3.0");
     let line = c_first_line(&tan_program, "c_f64_tan").expect("C lane should run");
     common::assert_elements_in_domain("f64", &line, "c_f64_tan");
-    // Property-based, not an exact string: the Phase 1 implementation
-    // control uses a 1e-12 separating margin because double tan is not required to
-    // be correctly rounded and may differ by a few ulp between platform
-    // libms (see the eval tan control above). f64 PRECISION is the claim:
-    // the #717 bug's f32-destroyed value is ~5e-7 away from true tan,
-    // while any reasonable libm is within ~1e-15.
+    // f64 PRECISION is the claim: the #717 bug's f32-destroyed value is
+    // ~5e-7 away from true tan. Both lanes compute the correctly rounded
+    // result ([05-OP-46]), so they also agree byte for byte.
     let v = parse_data(&line)[0];
     let truth = 14.10141994717172_f64;
     assert!(
@@ -140,20 +137,14 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
         "C f64 tan(1.5) must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
     let eval_line = eval_first_line(&tan_program).expect("eval tan should run");
-    let eval_v = parse_data(&eval_line)[0];
-    assert!(
-        (v - eval_v).abs() <= 1e-12,
-        "Phase 1 f64 tan lane delta exceeds the implementation control's 1e-12 margin: eval={eval_v}, C={v}"
-    );
+    assert_eq!(eval_line, line, "f64 tan: eval and C must agree byte for byte");
 
     let exp_program = f64_unop_program("exp", "2.0", "3.0");
     let c_exp_line = c_first_line(&exp_program, "c_f64_exp").expect("C exp should run");
-    let c_exp = parse_data(&c_exp_line)[0];
     let eval_exp_line = eval_first_line(&exp_program).expect("eval exp should run");
-    let eval_exp = parse_data(&eval_exp_line)[0];
-    assert!(
-        (c_exp - eval_exp).abs() <= 1e-12,
-        "Phase 1 f64 exp lane delta exceeds the implementation control's 1e-12 margin: eval={eval_exp}, C={c_exp}"
+    assert_eq!(
+        eval_exp_line, c_exp_line,
+        "f64 exp: eval and C must agree byte for byte"
     );
 
     let line = c_first_line(&f64_unop_program("sqrt", "2.0", "3.0"), "c_f64_sqrt")

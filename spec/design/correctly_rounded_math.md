@@ -357,10 +357,12 @@ has a negative partner.
 13. `OP_TOLERANCES` is empty, `AgreementOp` has only `Exact`, and the generated
     [05-OBS-3] table block has no rows; the existing byte-for-byte tripwire covers the
     mirror.
-14. A check (the #2967 oracle) fails if a numbered chapter or a design document under
-    `spec/design/` other than archived ones states a numeric agreement tolerance
-    (`ABS_TOL`, `REL_TOL`, an "ULP" bound, or a blanket epsilon) outside the generated
-    [05-OBS-3] block.
+14. A check (the #2967 oracle,
+    `agreement_tolerance::no_numbered_chapter_or_design_doc_states_an_agreement_tolerance`)
+    fails if a numbered chapter, a `spec/registry/` file, or a design document under
+    `spec/design/` other than archived ones states a numeric cross-lane agreement
+    tolerance (a named absolute or relative tolerance constant, a nonzero ULP bound, or
+    a blanket epsilon) outside the generated [05-OBS-3] block.
 
 ## 9. Implementation slices
 

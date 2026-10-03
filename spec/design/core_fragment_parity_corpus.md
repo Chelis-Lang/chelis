@@ -69,13 +69,10 @@ consistent with the conclusion here but is not its authority.
 
 Two qualifications belong with the claim rather than further down:
 
-- `[05-OBS-3]` **permits** a cross-lane value difference of 1 ULP for `atan`,
-  `cos`, `exp`, `log`, `sin` and `tan` — that is, permits different bytes. Byte
-  equality is the operative contract only because that atom's arithmetic-width
-  precondition is currently unmet; §3.2 states why. The corpus uses `exp`,
-  `log` and `sqrt` throughout, so when chelis#897 lands this section needs
-  revisiting in the same change set, and the receipt becomes over-strict for
-  those six until it is.
+- `[05-OBS-3]` grants no cross-lane value difference: the transcendentals and
+  `sqrt` are correctly rounded under `[05-OP-46]`, so the `exp`, `log` and
+  `sqrt` the corpus uses throughout must agree byte for byte, independent of
+  the arithmetic-width precondition §3.2 discusses.
 - A receipt that compared any other channel would be measuring something the
   spec does not bind across these two lanes (§2.2).
 

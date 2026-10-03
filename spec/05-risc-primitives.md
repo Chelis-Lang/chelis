@@ -4858,13 +4858,6 @@ tripwire-checked byte-for-byte against this block.
 <!-- BEGIN GENERATED OBSERVATION TOLERANCE TABLE -->
 | operation | maximum cross-lane value difference | authority |
 |---|---:|---|
-| `atan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `cos` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `exp` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `log` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `sin` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `sqrt` | 0 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `tan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
 <!-- END GENERATED OBSERVATION TOLERANCE TABLE -->
 
 Operations absent from the table have a zero-ULP bound. In particular,

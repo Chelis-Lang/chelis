@@ -354,11 +354,11 @@ fn reduced_float_scalar_activations_match_tier2_node_finalization() {
     }
 }
 
-/// [05-OBS-3] parity for an f64 transcendental whose libm result may differ
-/// by one ULP across supported platforms.  The shared closed-op comparator is
-/// the only authority for the tolerance; the emitted-source assertion keeps
-/// a mutually wrong f32 implementation from passing by byte agreement.
-fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) {
+/// [05-OBS-3] parity for an f64 transcendental, correctly rounded in both
+/// lanes under [05-OP-46], so the shared comparator demands exact agreement;
+/// the emitted-source assertion keeps a mutually wrong f32 implementation
+/// from passing by byte agreement.
+fn assert_f64_transcendental_parity(op_expr: &str, op_name: &str, name: &str) {
     let program = scalar_program(op_expr, "f64");
     let eval_got = eval_first_line(&program).unwrap_or_else(|e| panic!("{name}: eval failed: {e}"));
     common::assert_elements_in_domain("f64", &eval_got, name);
@@ -368,11 +368,11 @@ fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) 
     let (emitted, c_got) = c_lane(&program, name).expect("C lane should build and run");
     common::assert_elements_in_domain("f64", &c_got, name);
     assert!(
-        !emitted.contains(&format!("{}f(", op.name())),
+        !emitted.contains(&format!("{op_name}f(")),
         "{name}: an f64 operation must not route through the f32 libm entry"
     );
     compare_rendered_elements(
-        op,
+        AgreementOp::Exact,
         Prim::F64,
         ArithmeticWidthStatus::StoredAtArithmeticWidth,
         &eval_got,
@@ -587,8 +587,8 @@ fn float_only_scalar_families_reject_integer_and_bool_at_check_time() {
 /// Before Phase 3, C printed 0 for all seven rows while eval was correct.
 #[test]
 fn f64_scalar_stub_family_agrees_across_lanes() {
-    assert_f64_transcendental_parity("tan(cast(1.0, f64))", AgreementOp::Tan, "f64_tan");
-    assert_f64_transcendental_parity("atan(cast(1.0, f64))", AgreementOp::Atan, "f64_atan");
+    assert_f64_transcendental_parity("tan(cast(1.0, f64))", "tan", "f64_tan");
+    assert_f64_transcendental_parity("atan(cast(1.0, f64))", "atan", "f64_atan");
     for (expr, eval_expected, c_expected, name) in [
         ("ceil(cast(1.5, f64))", "2.0", "2.0", "f64_ceil"),
         ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),
