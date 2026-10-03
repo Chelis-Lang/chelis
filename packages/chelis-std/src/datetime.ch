@@ -55,15 +55,22 @@ type Dates[n] =
 @opaque
 type Instants[n] =
   | Instants { unix_seconds: tensor[n, i64], nanoseconds: tensor[n, i64] }
--- Range constants are written inline, because a compiled program prints every
--- reachable nullary definition of an imported module as a root (#2624):
--- - supported years -9999..9999, and epoch days -4371587..2932896;
--- - total months 12 * year + month - 1 in -119988..119999;
--- - unix seconds -377705030401..253402214400, the civil range shrunk by the
---   largest offset at each end, so every instant has a civil reading under
---   every offset;
--- - offsets within -86399..86399 seconds;
--- - 1000000000 nanoseconds per second and 86400 seconds per day.
+-- Range constants. Years run over -9999..9999 and epoch days over the days
+-- of those years. Total months are 12 * year + month - 1. Unix seconds cover
+-- the civil range shrunk by the largest offset at each end, so every instant
+-- has a civil reading under every offset; offsets lie strictly within one
+-- day.
+def min_year() -> i64 = -9999i64
+def max_year() -> i64 = 9999i64
+def min_epoch_day() -> i64 = -4371587i64
+def max_epoch_day() -> i64 = 2932896i64
+def min_total_month() -> i64 = -119988i64
+def max_total_month() -> i64 = 119999i64
+def min_unix_second() -> i64 = -377705030401i64
+def max_unix_second() -> i64 = 253402214400i64
+def max_offset_seconds() -> i64 = 86399i64
+def nanos_per_second() -> i64 = 1000000000i64
+def seconds_per_day() -> i64 = 86400i64
 -- Checked-arithmetic predicates: each answers whether the exact result fits in
 -- i64 without performing the operation that could trap.
 def euclid_rem(x: i64, y: i64) -> i64 = {
@@ -137,10 +144,10 @@ def epoch_day_text(epoch_day: i64) -> string = {
   joined([year_text(year), "-", zero_padded(month, 2i64), "-", zero_padded(day, 2i64)])
 }
 -- The first problem with a (year, month, day) triple, if any.
-def ymd_problem(year: i64, month: i64, day: i64) -> Option[string] = if year |> in_span(-9999i64, 9999i64) |> not then "year" |> outside_text(year, -9999i64, 9999i64) |> Some else if month |> in_span(1i64, 12i64) |> not then "month" |> outside_text(month, 1i64, 12i64) |> Some else if day |> in_span(1i64, month_length(year, month)) |> not then Some(joined([outside_text("day", day, 1i64, month_length(year, month)), " for ", year_month_text(year, month)])) else None
-def year_problem(year: i64) -> Option[string] = if in_span(year, -9999i64, 9999i64) then None else "year" |> outside_text(year, -9999i64, 9999i64) |> Some
-def year_month_problem(year: i64, month: i64) -> Option[string] = if year |> in_span(-9999i64, 9999i64) |> not then "year" |> outside_text(year, -9999i64, 9999i64) |> Some else if month |> in_span(1i64, 12i64) |> not then "month" |> outside_text(month, 1i64, 12i64) |> Some else None
-def epoch_day_problem(epoch_day: i64) -> Option[string] = if in_span(epoch_day, -4371587i64, 2932896i64) then None else Some(outside_text("epoch day", epoch_day, -4371587i64, 2932896i64))
+def ymd_problem(year: i64, month: i64, day: i64) -> Option[string] = if year |> in_span(min_year(), max_year()) |> not then "year" |> outside_text(year, min_year(), max_year()) |> Some else if month |> in_span(1i64, 12i64) |> not then "month" |> outside_text(month, 1i64, 12i64) |> Some else if day |> in_span(1i64, month_length(year, month)) |> not then Some(joined([outside_text("day", day, 1i64, month_length(year, month)), " for ", year_month_text(year, month)])) else None
+def year_problem(year: i64) -> Option[string] = if in_span(year, min_year(), max_year()) then None else "year" |> outside_text(year, min_year(), max_year()) |> Some
+def year_month_problem(year: i64, month: i64) -> Option[string] = if year |> in_span(min_year(), max_year()) |> not then "year" |> outside_text(year, min_year(), max_year()) |> Some else if month |> in_span(1i64, 12i64) |> not then "month" |> outside_text(month, 1i64, 12i64) |> Some else None
+def epoch_day_problem(epoch_day: i64) -> Option[string] = if in_span(epoch_day, min_epoch_day(), max_epoch_day()) then None else Some(outside_text("epoch day", epoch_day, min_epoch_day(), max_epoch_day()))
 -- Calendar queries, total over every i64 year.
 def is_leap_year(year: i64) -> bool = and(eq(mod(year, 4i64), 0i64), or(neq(mod(year, 100i64), 0i64), eq(mod(year, 400i64), 0i64)))
 def days_in_year(year: i64) -> i64 = if is_leap_year(year) then 366i64 else 365i64
@@ -190,7 +197,7 @@ def date_from_epoch_day(n: i64) -> Date =
     | Some(detail) => "date_from_epoch_day" |> domain_failure(detail) |> fail
     | None => Date { epoch_day: n }
   }
-def try_date_from_epoch_day(n: i64) -> Option[Date] = if in_span(n, -4371587i64, 2932896i64) then Some(Date { epoch_day: n }) else None
+def try_date_from_epoch_day(n: i64) -> Option[Date] = if in_span(n, min_epoch_day(), max_epoch_day()) then Some(Date { epoch_day: n }) else None
 def date_weekday(d: Date) -> Weekday = d.epoch_day |> epoch_weekday_index |> weekday_at_index
 def day_of_year_of(epoch_day: i64) -> i64 = add(sub(epoch_day, days_from_civil(civil_from_days(epoch_day).0, 1i64, 1i64)), 1i64)
 def date_day_of_year(d: Date) -> i64 = day_of_year_of(d.epoch_day)
@@ -206,7 +213,7 @@ def monday_of_week_one(iso_year: i64) -> i64 = {
 }
 def weeks_in_week_year(iso_year: i64) -> i64 = floor_div(sub(monday_of_week_one(add(iso_year, 1i64)), monday_of_week_one(iso_year)), 7i64)
 def ordinal_week_text(iso_year: i64, week: i64, w: Weekday) -> string = joined([year_text(iso_year), "-W", zero_padded(week, 2i64), "-", w |> weekday_iso_number |> to_string])
-def ordinal_week_problem(iso_year: i64, week: i64, w: Weekday) -> Option[string] = if not(in_span(iso_year, -9999i64, 9999i64)) then Some(outside_text("ISO week-year", iso_year, -9999i64, 9999i64)) else if not(in_span(week, 1i64, weeks_in_week_year(iso_year))) then Some(joined([outside_text("week", week, 1i64, weeks_in_week_year(iso_year)), " for ISO week-year ", year_text(iso_year)])) else if not(in_span(epoch_day_of_week_date(iso_year, week, w), -4371587i64, 2932896i64)) then Some(joined(["ISO week date ", ordinal_week_text(iso_year, week, w), " is outside the supported date range"])) else None
+def ordinal_week_problem(iso_year: i64, week: i64, w: Weekday) -> Option[string] = if not(in_span(iso_year, min_year(), max_year())) then Some(outside_text("ISO week-year", iso_year, min_year(), max_year())) else if not(in_span(week, 1i64, weeks_in_week_year(iso_year))) then Some(joined([outside_text("week", week, 1i64, weeks_in_week_year(iso_year)), " for ISO week-year ", year_text(iso_year)])) else if not(in_span(epoch_day_of_week_date(iso_year, week, w), min_epoch_day(), max_epoch_day())) then Some(joined(["ISO week date ", ordinal_week_text(iso_year, week, w), " is outside the supported date range"])) else None
 def epoch_day_of_week_date(iso_year: i64, week: i64, w: Weekday) -> i64 = add(add(monday_of_week_one(iso_year), mul(sub(week, 1i64), 7i64)), weekday_index(w))
 def date_from_iso_week(iso_year: i64, week: i64, weekday: Weekday) -> Date =
   match ordinal_week_problem(iso_year, week, weekday) with {
@@ -219,7 +226,7 @@ def try_date_from_iso_week(iso_year: i64, week: i64, weekday: Weekday) -> Option
     | None => Some(Date { epoch_day: epoch_day_of_week_date(iso_year, week, weekday) })
   }
 -- Date arithmetic. Each range check runs before the addition it protects.
-def shifted_epoch_day(function: string, epoch_day: i64, n: i64) -> i64 = if or(gt(n, sub(2932896i64, epoch_day)), lt(n, sub(-4371587i64, epoch_day))) then fail(overflow_failure(function, joined([epoch_day_text(epoch_day), " plus ", to_string(n), " days is outside the supported date range"]))) else add(epoch_day, n)
+def shifted_epoch_day(function: string, epoch_day: i64, n: i64) -> i64 = if or(gt(n, sub(max_epoch_day(), epoch_day)), lt(n, sub(min_epoch_day(), epoch_day))) then fail(overflow_failure(function, joined([epoch_day_text(epoch_day), " plus ", to_string(n), " days is outside the supported date range"]))) else add(epoch_day, n)
 def date_add_days(d: Date, n: i64) -> Date = Date { epoch_day: shifted_epoch_day("date_add_days", d.epoch_day, n) }
 def date_days_until(a: Date, b: Date) -> i64 = sub(b.epoch_day, a.epoch_day)
 def total_month_of(epoch_day: i64) -> i64 = {
@@ -237,7 +244,7 @@ def clamped_month_shift(epoch_day: i64, n: i64) -> i64 = {
 }
 def month_shift_fits(epoch_day: i64, n: i64) -> bool = {
   current = total_month_of(epoch_day)
-  and(lte(n, sub(119999i64, current)), gte(n, sub(-119988i64, current)))
+  and(lte(n, sub(max_total_month(), current)), gte(n, sub(min_total_month(), current)))
 }
 -- None when `RejectInvalidDay` fires; an out-of-range target fails `overflow`
 -- under `function`'s name.
@@ -377,7 +384,7 @@ def easter_sunday_orthodox(year: i64) -> Date =
   }
 -- Time of day.
 def clock_problem(hour: i64, minute: i64, second: i64, nanosecond: i64) -> Option[string] = if hour |> in_span(0i64, 23i64) |> not then "hour" |> outside_text(hour, 0i64, 23i64) |> Some else if minute |> in_span(0i64, 59i64) |> not then "minute" |> outside_text(minute, 0i64, 59i64) |> Some else if second |> in_span(0i64, 59i64) |> not then "second" |> outside_text(second, 0i64, 59i64) |> Some else if nanosecond |> in_span(0i64, 999999999i64) |> not then "nanosecond" |> outside_text(nanosecond, 0i64, 999999999i64) |> Some else None
-def clock_nanos(hour: i64, minute: i64, second: i64, nanosecond: i64) -> i64 = add(mul(add(mul(add(mul(hour, 60i64), minute), 60i64), second), 1000000000i64), nanosecond)
+def clock_nanos(hour: i64, minute: i64, second: i64, nanosecond: i64) -> i64 = add(mul(add(mul(add(mul(hour, 60i64), minute), 60i64), second), nanos_per_second()), nanosecond)
 def time(hour: i64, minute: i64, second: i64, nanosecond: i64) -> Time =
   match clock_problem(hour, minute, second, nanosecond) with {
     | Some(detail) => "time" |> domain_failure(detail) |> fail
@@ -390,8 +397,8 @@ def try_time(hour: i64, minute: i64, second: i64, nanosecond: i64) -> Option[Tim
   }
 def time_hour(t: Time) -> i64 = floor_div(t.nanosecond_of_day, 3600000000000i64)
 def time_minute(t: Time) -> i64 = t.nanosecond_of_day |> floor_div(60000000000i64) |> euclid_rem(60i64)
-def time_second(t: Time) -> i64 = t.nanosecond_of_day |> floor_div(1000000000i64) |> euclid_rem(60i64)
-def time_nanosecond(t: Time) -> i64 = euclid_rem(t.nanosecond_of_day, 1000000000i64)
+def time_second(t: Time) -> i64 = t.nanosecond_of_day |> floor_div(nanos_per_second()) |> euclid_rem(60i64)
+def time_nanosecond(t: Time) -> i64 = euclid_rem(t.nanosecond_of_day, nanos_per_second())
 def time_nanosecond_of_day(t: Time) -> i64 = t.nanosecond_of_day
 def time_from_nanosecond_of_day(n: i64) -> Time = if in_span(n, 0i64, sub(86400000000000i64, 1i64)) then Time { nanosecond_of_day: n } else fail(domain_failure("time_from_nanosecond_of_day", outside_text("nanosecond of day", n, 0i64, sub(86400000000000i64, 1i64))))
 def try_time_from_nanosecond_of_day(n: i64) -> Option[Time] = if in_span(n, 0i64, sub(86400000000000i64, 1i64)) then Some(Time { nanosecond_of_day: n }) else None
@@ -399,35 +406,38 @@ def try_time_from_nanosecond_of_day(n: i64) -> Option[Time] = if in_span(n, 0i64
 -- carried with the new second of day and nanosecond. Never overflows.
 def clock_shift(second_of_day: i64, nanosecond: i64, d: Duration) -> (i64, i64, i64) = {
   nanos = add(nanosecond, d.nanosecond)
-  carry = if gte(nanos, 1000000000i64) then 1i64 else 0i64
-  seconds = second_of_day |> add(euclid_rem(d.second, 86400i64)) |> add(carry)
-  (add(floor_div(d.second, 86400i64), floor_div(seconds, 86400i64)), euclid_rem(seconds, 86400i64), sub(nanos, mul(carry, 1000000000i64)))
+  carry = if gte(nanos, nanos_per_second()) then 1i64 else 0i64
+  seconds =
+    second_of_day
+    |> add(euclid_rem(d.second, seconds_per_day()))
+    |> add(carry)
+  (add(floor_div(d.second, seconds_per_day()), floor_div(seconds, seconds_per_day())), euclid_rem(seconds, seconds_per_day()), sub(nanos, mul(carry, nanos_per_second())))
 }
 def time_add_duration(t: Time, d: Duration) -> (i64, Time) = {
-  (days, second_of_day, nanosecond) = clock_shift(floor_div(t.nanosecond_of_day, 1000000000i64), euclid_rem(t.nanosecond_of_day, 1000000000i64), d)
-  (days, Time { nanosecond_of_day: second_of_day |> mul(1000000000i64) |> add(nanosecond) })
+  (days, second_of_day, nanosecond) = clock_shift(floor_div(t.nanosecond_of_day, nanos_per_second()), euclid_rem(t.nanosecond_of_day, nanos_per_second()), d)
+  (days, Time { nanosecond_of_day: second_of_day |> mul(nanos_per_second()) |> add(nanosecond) })
 }
 -- The normalized duration of a nanosecond count that is known to fit in i64.
-def nanos_duration(nanos: i64) -> Duration = Duration { second: floor_div(nanos, 1000000000i64), nanosecond: euclid_rem(nanos, 1000000000i64) }
+def nanos_duration(nanos: i64) -> Duration = Duration { second: floor_div(nanos, nanos_per_second()), nanosecond: euclid_rem(nanos, nanos_per_second()) }
 def time_until(a: Time, b: Time) -> Duration = b.nanosecond_of_day |> sub(a.nanosecond_of_day) |> nanos_duration
 def time_lt(a: Time, b: Time) -> bool = lt(a.nanosecond_of_day, b.nanosecond_of_day)
 def time_lte(a: Time, b: Time) -> bool = lte(a.nanosecond_of_day, b.nanosecond_of_day)
 def time_gt(a: Time, b: Time) -> bool = gt(a.nanosecond_of_day, b.nanosecond_of_day)
 def time_gte(a: Time, b: Time) -> bool = gte(a.nanosecond_of_day, b.nanosecond_of_day)
 def clock_text(nanosecond_of_day: i64) -> string = {
-  second_of_day = floor_div(nanosecond_of_day, 1000000000i64)
-  joined([second_of_day |> floor_div(3600i64) |> zero_padded(2i64), ":", zero_padded(euclid_rem(floor_div(second_of_day, 60i64), 60i64), 2i64), ":", second_of_day |> euclid_rem(60i64) |> zero_padded(2i64), nanosecond_of_day |> euclid_rem(1000000000i64) |> fraction_text])
+  second_of_day = floor_div(nanosecond_of_day, nanos_per_second())
+  joined([second_of_day |> floor_div(3600i64) |> zero_padded(2i64), ":", zero_padded(euclid_rem(floor_div(second_of_day, 60i64), 60i64), 2i64), ":", second_of_day |> euclid_rem(60i64) |> zero_padded(2i64), nanosecond_of_day |> euclid_rem(nanos_per_second()) |> fraction_text])
 }
 def time_to_string(t: Time) -> string = clock_text(t.nanosecond_of_day)
 -- Civil date and time.
 def datetime(d: Date, t: Time) -> DateTime = DateTime { epoch_day: d.epoch_day, nanosecond_of_day: t.nanosecond_of_day }
 def datetime_date(dt: DateTime) -> Date = Date { epoch_day: dt.epoch_day }
 def datetime_time(dt: DateTime) -> Time = Time { nanosecond_of_day: dt.nanosecond_of_day }
-def duration_text(d: Duration) -> string = if lt(d.second, 0i64) then if eq(d.nanosecond, 0i64) then joined(["-PT", magnitude_text(d.second), "S"]) else joined(["-PT", -1i64 |> sub(d.second) |> to_string, fraction_text(sub(1000000000i64, d.nanosecond)), "S"]) else joined(["PT", to_string(d.second), fraction_text(d.nanosecond), "S"])
+def duration_text(d: Duration) -> string = if lt(d.second, 0i64) then if eq(d.nanosecond, 0i64) then joined(["-PT", magnitude_text(d.second), "S"]) else joined(["-PT", -1i64 |> sub(d.second) |> to_string, fraction_text(sub(nanos_per_second(), d.nanosecond)), "S"]) else joined(["PT", to_string(d.second), fraction_text(d.nanosecond), "S"])
 def civil_text(epoch_day: i64, nanosecond_of_day: i64) -> string = joined([epoch_day_text(epoch_day), "T", clock_text(nanosecond_of_day)])
 def datetime_add_duration(dt: DateTime, d: Duration) -> DateTime = {
-  (days, second_of_day, nanosecond) = clock_shift(floor_div(dt.nanosecond_of_day, 1000000000i64), euclid_rem(dt.nanosecond_of_day, 1000000000i64), d)
-  if or(gt(days, sub(2932896i64, dt.epoch_day)), lt(days, sub(-4371587i64, dt.epoch_day))) then fail(overflow_failure("datetime_add_duration", joined([civil_text(dt.epoch_day, dt.nanosecond_of_day), " plus ", duration_text(d), " is outside the supported range"]))) else DateTime { epoch_day: add(dt.epoch_day, days), nanosecond_of_day: second_of_day |> mul(1000000000i64) |> add(nanosecond) }
+  (days, second_of_day, nanosecond) = clock_shift(floor_div(dt.nanosecond_of_day, nanos_per_second()), euclid_rem(dt.nanosecond_of_day, nanos_per_second()), d)
+  if or(gt(days, sub(max_epoch_day(), dt.epoch_day)), lt(days, sub(min_epoch_day(), dt.epoch_day))) then fail(overflow_failure("datetime_add_duration", joined([civil_text(dt.epoch_day, dt.nanosecond_of_day), " plus ", duration_text(d), " is outside the supported range"]))) else DateTime { epoch_day: add(dt.epoch_day, days), nanosecond_of_day: second_of_day |> mul(nanos_per_second()) |> add(nanosecond) }
 }
 def datetime_add_period(dt: DateTime, p: Period, overflow: DayOverflow) -> DateTime =
   match period_shift("datetime_add_period", dt.epoch_day, p, overflow) with {
@@ -443,10 +453,10 @@ def try_datetime_add_period(dt: DateTime, p: Period, overflow: DayOverflow) -> O
 -- difference is known to fit in i64.
 def elapsed_between(a_second: i64, a_nanosecond: i64, b_second: i64, b_nanosecond: i64) -> Duration = {
   nanos = sub(b_nanosecond, a_nanosecond)
-  Duration { second: b_second |> sub(a_second) |> add(floor_div(nanos, 1000000000i64)), nanosecond: euclid_rem(nanos, 1000000000i64) }
+  Duration { second: b_second |> sub(a_second) |> add(floor_div(nanos, nanos_per_second())), nanosecond: euclid_rem(nanos, nanos_per_second()) }
 }
-def civil_second(epoch_day: i64, nanosecond_of_day: i64) -> i64 = add(mul(epoch_day, 86400i64), floor_div(nanosecond_of_day, 1000000000i64))
-def datetime_until(a: DateTime, b: DateTime) -> Duration = elapsed_between(civil_second(a.epoch_day, a.nanosecond_of_day), euclid_rem(a.nanosecond_of_day, 1000000000i64), civil_second(b.epoch_day, b.nanosecond_of_day), euclid_rem(b.nanosecond_of_day, 1000000000i64))
+def civil_second(epoch_day: i64, nanosecond_of_day: i64) -> i64 = add(mul(epoch_day, seconds_per_day()), floor_div(nanosecond_of_day, nanos_per_second()))
+def datetime_until(a: DateTime, b: DateTime) -> Duration = elapsed_between(civil_second(a.epoch_day, a.nanosecond_of_day), euclid_rem(a.nanosecond_of_day, nanos_per_second()), civil_second(b.epoch_day, b.nanosecond_of_day), euclid_rem(b.nanosecond_of_day, nanos_per_second()))
 def reading_before(a_major: i64, a_minor: i64, b_major: i64, b_minor: i64) -> bool = a_major |> lt(b_major) |> or(and(eq(a_major, b_major), lt(a_minor, b_minor)))
 def datetime_lt(a: DateTime, b: DateTime) -> bool = reading_before(a.epoch_day, a.nanosecond_of_day, b.epoch_day, b.nanosecond_of_day)
 def datetime_lte(a: DateTime, b: DateTime) -> bool = not(reading_before(b.epoch_day, b.nanosecond_of_day, a.epoch_day, a.nanosecond_of_day))
@@ -454,7 +464,7 @@ def datetime_gt(a: DateTime, b: DateTime) -> bool = reading_before(b.epoch_day, 
 def datetime_gte(a: DateTime, b: DateTime) -> bool = not(reading_before(a.epoch_day, a.nanosecond_of_day, b.epoch_day, b.nanosecond_of_day))
 def datetime_to_string(dt: DateTime) -> string = civil_text(dt.epoch_day, dt.nanosecond_of_day)
 -- Fixed offsets.
-def offset_problem(seconds: i64) -> Option[string] = if in_span(seconds, -86399i64, 86399i64) then None else Some(joined(["offset ", to_string(seconds), " s is outside ", range_text(-86399i64, 86399i64)]))
+def offset_problem(seconds: i64) -> Option[string] = if in_span(seconds, neg(max_offset_seconds()), max_offset_seconds()) then None else Some(joined(["offset ", to_string(seconds), " s is outside ", range_text(neg(max_offset_seconds()), max_offset_seconds())]))
 def offset_from_seconds(s: i64) -> Offset =
   match offset_problem(s) with {
     | Some(detail) => "offset_from_seconds" |> domain_failure(detail) |> fail
@@ -473,7 +483,7 @@ def offset_text(seconds: i64) -> string =
   }
 def offset_to_string(o: Offset) -> string = offset_text(o.seconds)
 -- Instants on the POSIX timescale.
-def unix_second_problem(second: i64) -> Option[string] = if in_span(second, -377705030401i64, 253402214400i64) then None else Some(outside_text("unix second", second, -377705030401i64, 253402214400i64))
+def unix_second_problem(second: i64) -> Option[string] = if in_span(second, min_unix_second(), max_unix_second()) then None else Some(outside_text("unix second", second, min_unix_second(), max_unix_second()))
 def instant_problem(second: i64, nanosecond: i64) -> Option[string] = if nanosecond |> in_span(0i64, 999999999i64) |> not then "nanosecond" |> outside_text(nanosecond, 0i64, 999999999i64) |> Some else unix_second_problem(second)
 def instant_from_unix(second: i64, nanosecond: i64) -> Instant =
   match instant_problem(second, nanosecond) with {
@@ -508,7 +518,7 @@ def units_per_second(unit: TimeUnit) -> i64 =
   match unit with {
     | Milliseconds => 1000i64
     | Microseconds => 1000000i64
-    | Nanoseconds => 1000000000i64
+    | Nanoseconds => nanos_per_second()
     | _ => 1i64
   }
 -- The exact (second, nanosecond) of `count` units, or None when the second
@@ -517,7 +527,7 @@ def count_parts(count: i64, unit: TimeUnit) -> Option[(i64, i64)] = {
   multiple = seconds_per_unit(unit)
   if gt(multiple, 0i64) then if product_fits(count, multiple) then Some((mul(count, multiple), 0i64)) else None else {
     fraction = units_per_second(unit)
-    Some((floor_div(count, fraction), count |> euclid_rem(fraction) |> mul(floor_div(1000000000i64, fraction))))
+    Some((floor_div(count, fraction), count |> euclid_rem(fraction) |> mul(floor_div(nanos_per_second(), fraction))))
   }
 }
 -- 0 or 1: whether rounding moves a value up from its floor, given the
@@ -544,14 +554,14 @@ def parts_count(second: i64, nanosecond: i64, unit: TimeUnit, rounding: Rounding
   multiple = seconds_per_unit(unit)
   if gt(multiple, 0i64) then {
     whole = floor_div(second, multiple)
-    rem = add(mul(euclid_rem(second, multiple), 1000000000i64), nanosecond)
-    match rounding_step(rounding, rem, mul(multiple, 1000000000i64), is_even(whole), lt(second, 0i64)) with {
+    rem = add(mul(euclid_rem(second, multiple), nanos_per_second()), nanosecond)
+    match rounding_step(rounding, rem, mul(multiple, nanos_per_second()), is_even(whole), lt(second, 0i64)) with {
       | Some(step) => ("", add(whole, step))
       | None => ("inexact", 0i64)
     }
   } else {
     fraction = units_per_second(unit)
-    per = floor_div(1000000000i64, fraction)
+    per = floor_div(nanos_per_second(), fraction)
     base = floor_div(nanosecond, per)
     floor_even = if is_even(fraction) then is_even(base) else is_even(add(euclid_rem(second, 2i64), base))
     match rounding_step(rounding, euclid_rem(nanosecond, per), per, floor_even, lt(second, 0i64)) with {
@@ -587,7 +597,7 @@ def try_instant_from_unix_count(count: i64, unit: TimeUnit) -> Option[Instant] =
     | Some(_) => None
     | None => count |> instant_of_count(unit) |> Some
   }
-def instant_text(second: i64, nanosecond: i64) -> string = joined([civil_text(floor_div(second, 86400i64), add(mul(euclid_rem(second, 86400i64), 1000000000i64), nanosecond)), "Z"])
+def instant_text(second: i64, nanosecond: i64) -> string = joined([civil_text(floor_div(second, seconds_per_day()), add(mul(euclid_rem(second, seconds_per_day()), nanos_per_second()), nanosecond)), "Z"])
 def instant_to_unix_count(i: Instant, unit: TimeUnit, rounding: Rounding) -> i64 = {
   (status, count) = parts_count(i.unix_second, i.nanosecond, unit, rounding)
   if eq(status, "") then count else if eq(status, "inexact") then fail(domain_failure("instant_to_unix_count", joined([instant_text(i.unix_second, i.nanosecond), " is not a whole number of ", name_of_unit(unit)]))) else fail(overflow_failure("instant_to_unix_count", joined([instant_text(i.unix_second, i.nanosecond), " in ", name_of_unit(unit), " does not fit in i64"])))
@@ -598,12 +608,12 @@ def try_instant_to_unix_count(i: Instant, unit: TimeUnit, rounding: Rounding) ->
 }
 def instant_add_duration(i: Instant, d: Duration) -> Instant = {
   nanos = add(i.nanosecond, d.nanosecond)
-  carry = if gte(nanos, 1000000000i64) then 1i64 else 0i64
+  carry = if gte(nanos, nanos_per_second()) then 1i64 else 0i64
   base = add(i.unix_second, carry)
-  if or(gt(d.second, sub(253402214400i64, base)), lt(d.second, sub(-377705030401i64, base))) then fail(overflow_failure("instant_add_duration", joined([instant_text(i.unix_second, i.nanosecond), " plus ", duration_text(d), " is outside the supported instant range"]))) else Instant { unix_second: add(base, d.second), nanosecond: sub(nanos, mul(carry, 1000000000i64)) }
+  if or(gt(d.second, sub(max_unix_second(), base)), lt(d.second, sub(min_unix_second(), base))) then fail(overflow_failure("instant_add_duration", joined([instant_text(i.unix_second, i.nanosecond), " plus ", duration_text(d), " is outside the supported instant range"]))) else Instant { unix_second: add(base, d.second), nanosecond: sub(nanos, mul(carry, nanos_per_second())) }
 }
 def instant_until(a: Instant, b: Instant) -> Duration = elapsed_between(a.unix_second, a.nanosecond, b.unix_second, b.nanosecond)
-def increment_problem(increment: Duration) -> Option[string] = if or(lt(increment.second, 0i64), and(eq(increment.second, 0i64), eq(increment.nanosecond, 0i64))) then ["increment ", duration_text(increment), " is not positive"] |> joined |> Some else if gt(increment.second, 86400i64) then Some(joined(["increment ", duration_text(increment), " does not divide one day"])) else if neq(mod(86400000000000i64, increment.second |> mul(1000000000i64) |> add(increment.nanosecond)), 0i64) then Some(joined(["increment ", duration_text(increment), " does not divide one day"])) else None
+def increment_problem(increment: Duration) -> Option[string] = if or(lt(increment.second, 0i64), and(eq(increment.second, 0i64), eq(increment.nanosecond, 0i64))) then ["increment ", duration_text(increment), " is not positive"] |> joined |> Some else if gt(increment.second, seconds_per_day()) then Some(joined(["increment ", duration_text(increment), " does not divide one day"])) else if neq(mod(86400000000000i64, increment.second |> mul(nanos_per_second()) |> add(increment.nanosecond)), 0i64) then Some(joined(["increment ", duration_text(increment), " does not divide one day"])) else None
 -- Rounds to a multiple of `increment` counted from the unix epoch. The
 -- increment divides one day, so the multiples align with UTC days and the
 -- rounding runs within one day's nanoseconds.
@@ -611,17 +621,17 @@ def instant_round_to(i: Instant, increment: Duration, rounding: Rounding) -> Ins
   match increment_problem(increment) with {
     | Some(detail) => fail(domain_failure("instant_round_to", detail))
     | None => {
-    step = add(mul(increment.second, 1000000000i64), increment.nanosecond)
-    day = floor_div(i.unix_second, 86400i64)
-    within = add(mul(euclid_rem(i.unix_second, 86400i64), 1000000000i64), i.nanosecond)
+    step = add(mul(increment.second, nanos_per_second()), increment.nanosecond)
+    day = floor_div(i.unix_second, seconds_per_day())
+    within = add(mul(euclid_rem(i.unix_second, seconds_per_day()), nanos_per_second()), i.nanosecond)
     whole = floor_div(within, step)
     per_day = floor_div(86400000000000i64, step)
     floor_even = is_even(add(mul(euclid_rem(day, 2i64), euclid_rem(per_day, 2i64)), euclid_rem(whole, 2i64)))
     match rounding_step(rounding, sub(within, mul(whole, step)), step, floor_even, lt(i.unix_second, 0i64)) with {
       | Some(up) => {
       rounded = mul(add(whole, up), step)
-      second = add(mul(day, 86400i64), floor_div(rounded, 1000000000i64))
-      if in_span(second, -377705030401i64, 253402214400i64) then Instant { unix_second: second, nanosecond: euclid_rem(rounded, 1000000000i64) } else fail(overflow_failure("instant_round_to", joined(["rounding ", instant_text(i.unix_second, i.nanosecond), " to a multiple of ", duration_text(increment), " leaves the supported instant range"])))
+      second = add(mul(day, seconds_per_day()), floor_div(rounded, nanos_per_second()))
+      if in_span(second, min_unix_second(), max_unix_second()) then Instant { unix_second: second, nanosecond: euclid_rem(rounded, nanos_per_second()) } else fail(overflow_failure("instant_round_to", joined(["rounding ", instant_text(i.unix_second, i.nanosecond), " to a multiple of ", duration_text(increment), " leaves the supported instant range"])))
     }
       | None => fail(domain_failure("instant_round_to", joined([instant_text(i.unix_second, i.nanosecond), " is not a multiple of ", duration_text(increment)])))
     }
@@ -633,12 +643,12 @@ def instant_gt(a: Instant, b: Instant) -> bool = reading_before(b.unix_second, b
 def instant_gte(a: Instant, b: Instant) -> bool = not(reading_before(a.unix_second, a.nanosecond, b.unix_second, b.nanosecond))
 def civil_reading(second: i64, nanosecond: i64, offset: i64) -> DateTime = {
   local = add(second, offset)
-  DateTime { epoch_day: floor_div(local, 86400i64), nanosecond_of_day: add(mul(euclid_rem(local, 86400i64), 1000000000i64), nanosecond) }
+  DateTime { epoch_day: floor_div(local, seconds_per_day()), nanosecond_of_day: add(mul(euclid_rem(local, seconds_per_day()), nanos_per_second()), nanosecond) }
 }
 def instant_to_datetime_at(i: Instant, o: Offset) -> DateTime = civil_reading(i.unix_second, i.nanosecond, o.seconds)
 def datetime_to_instant_at(dt: DateTime, o: Offset) -> Instant = {
   second = dt.epoch_day |> civil_second(dt.nanosecond_of_day) |> sub(o.seconds)
-  if in_span(second, -377705030401i64, 253402214400i64) then Instant { unix_second: second, nanosecond: euclid_rem(dt.nanosecond_of_day, 1000000000i64) } else fail(overflow_failure("datetime_to_instant_at", joined([civil_text(dt.epoch_day, dt.nanosecond_of_day), " at offset ", offset_text(o.seconds), " is outside the supported instant range"])))
+  if in_span(second, min_unix_second(), max_unix_second()) then Instant { unix_second: second, nanosecond: euclid_rem(dt.nanosecond_of_day, nanos_per_second()) } else fail(overflow_failure("datetime_to_instant_at", joined([civil_text(dt.epoch_day, dt.nanosecond_of_day), " at offset ", offset_text(o.seconds), " is outside the supported instant range"])))
 }
 def instant_to_string(i: Instant) -> string = instant_text(i.unix_second, i.nanosecond)
 -- Instants with the offset they were written in.
@@ -652,8 +662,8 @@ def offset_datetime_to_string(odt: OffsetDateTime) -> string = {
 }
 -- Exact durations, Euclidean-normalized.
 def duration(second: i64, nanosecond: i64) -> Duration = {
-  carry = floor_div(nanosecond, 1000000000i64)
-  if sum_fits(second, carry) then Duration { second: add(second, carry), nanosecond: euclid_rem(nanosecond, 1000000000i64) } else fail(domain_failure("duration", joined(["second ", to_string(second), " with nanosecond ", to_string(nanosecond), " is outside the duration range"])))
+  carry = floor_div(nanosecond, nanos_per_second())
+  if sum_fits(second, carry) then Duration { second: add(second, carry), nanosecond: euclid_rem(nanosecond, nanos_per_second()) } else fail(domain_failure("duration", joined(["second ", to_string(second), " with nanosecond ", to_string(nanosecond), " is outside the duration range"])))
 }
 def duration_from_count(count: i64, unit: TimeUnit) -> Duration =
   match count_parts(count, unit) with {
@@ -675,7 +685,7 @@ def try_duration_to_count(d: Duration, unit: TimeUnit, rounding: Rounding) -> Op
 def duration_to_seconds_f64(d: Duration) -> f64 = {
   same_sign = or(gte(d.second, 0i64), eq(d.nanosecond, 0i64))
   whole = if same_sign then d.second else add(d.second, 1i64)
-  fraction = if same_sign then d.nanosecond else sub(d.nanosecond, 1000000000i64)
+  fraction = if same_sign then d.nanosecond else sub(d.nanosecond, nanos_per_second())
   add(cast(whole, f64), div(cast(fraction, f64), 1000000000.0f64))
 }
 -- `second_a + second_b + carry` for carry 0 or 1, or None when it does not fit.
@@ -684,9 +694,9 @@ def seconds_sum(second_a: i64, second_b: i64, carry: i64) -> Option[i64] = if eq
 def seconds_difference(second_a: i64, second_b: i64, debit: i64) -> Option[i64] = if eq(debit, 0i64) then if difference_fits(second_a, second_b) then second_a |> sub(second_b) |> Some else None else if gt(second_a, sub(-9223372036854775807i64, 1i64)) then if second_a |> sub(1i64) |> difference_fits(second_b) then Some(sub(sub(second_a, 1i64), second_b)) else None else if lt(second_b, 9223372036854775807i64) then if difference_fits(second_a, add(second_b, 1i64)) then second_a |> sub(add(second_b, 1i64)) |> Some else None else None
 def duration_add(a: Duration, b: Duration) -> Duration = {
   nanos = add(a.nanosecond, b.nanosecond)
-  carry = if gte(nanos, 1000000000i64) then 1i64 else 0i64
+  carry = if gte(nanos, nanos_per_second()) then 1i64 else 0i64
   match seconds_sum(a.second, b.second, carry) with {
-    | Some(second) => Duration { second, nanosecond: sub(nanos, mul(carry, 1000000000i64)) }
+    | Some(second) => Duration { second, nanosecond: sub(nanos, mul(carry, nanos_per_second())) }
     | None => fail(overflow_failure("duration_add", joined([duration_text(a), " plus ", duration_text(b), " does not fit in the duration range"])))
   }
 }
@@ -694,23 +704,26 @@ def duration_sub(a: Duration, b: Duration) -> Duration = {
   nanos = sub(a.nanosecond, b.nanosecond)
   debit = if lt(nanos, 0i64) then 1i64 else 0i64
   match seconds_difference(a.second, b.second, debit) with {
-    | Some(second) => Duration { second, nanosecond: add(nanos, mul(debit, 1000000000i64)) }
+    | Some(second) => Duration { second, nanosecond: add(nanos, mul(debit, nanos_per_second())) }
     | None => fail(overflow_failure("duration_sub", joined([duration_text(a), " minus ", duration_text(b), " does not fit in the duration range"])))
   }
 }
-def duration_negate(d: Duration) -> Duration = if eq(d.nanosecond, 0i64) then if eq(d.second, sub(-9223372036854775807i64, 1i64)) then fail(overflow_failure("duration_negate", joined(["the negation of ", duration_text(d), " does not fit in the duration range"]))) else Duration { second: neg(d.second), nanosecond: 0i64 } else Duration { second: sub(-1i64, d.second), nanosecond: sub(1000000000i64, d.nanosecond) }
+def duration_negate(d: Duration) -> Duration = if eq(d.nanosecond, 0i64) then if eq(d.second, sub(-9223372036854775807i64, 1i64)) then fail(overflow_failure("duration_negate", joined(["the negation of ", duration_text(d), " does not fit in the duration range"]))) else Duration { second: neg(d.second), nanosecond: 0i64 } else Duration { second: sub(-1i64, d.second), nanosecond: sub(nanos_per_second(), d.nanosecond) }
 -- Exact product. The value splits into a whole part `whole` rounded toward
 -- zero and a fraction `numer / 1e9` of the same sign, so `whole * k` is no
 -- larger in magnitude than the product; `numer * k` is split through
 -- `k = high * 1e9 + low` so no partial product leaves i64.
 def duration_mul(d: Duration, k: i64) -> Duration = {
   whole = if d.second |> lt(0i64) |> and(gt(d.nanosecond, 0i64)) then add(d.second, 1i64) else d.second
-  numer = if d.second |> lt(0i64) |> and(gt(d.nanosecond, 0i64)) then sub(d.nanosecond, 1000000000i64) else d.nanosecond
-  high = floor_div(k, 1000000000i64)
-  low = euclid_rem(k, 1000000000i64)
+  numer = if d.second |> lt(0i64) |> and(gt(d.nanosecond, 0i64)) then sub(d.nanosecond, nanos_per_second()) else d.nanosecond
+  high = floor_div(k, nanos_per_second())
+  low = euclid_rem(k, nanos_per_second())
   partial = mul(numer, low)
-  fraction_seconds = numer |> mul(high) |> add(floor_div(partial, 1000000000i64))
-  if product_fits(whole, k) then if whole |> mul(k) |> sum_fits(fraction_seconds) then Duration { second: whole |> mul(k) |> add(fraction_seconds), nanosecond: euclid_rem(partial, 1000000000i64) } else d |> duration_mul_failure(k) |> fail else d |> duration_mul_failure(k) |> fail
+  fraction_seconds =
+    numer
+    |> mul(high)
+    |> add(floor_div(partial, nanos_per_second()))
+  if product_fits(whole, k) then if whole |> mul(k) |> sum_fits(fraction_seconds) then Duration { second: whole |> mul(k) |> add(fraction_seconds), nanosecond: euclid_rem(partial, nanos_per_second()) } else d |> duration_mul_failure(k) |> fail else d |> duration_mul_failure(k) |> fail
 }
 def duration_mul_failure(d: Duration, k: i64) -> string = overflow_failure("duration_mul", joined([duration_text(d), " times ", to_string(k), " does not fit in the duration range"]))
 def duration_lt(a: Duration, b: Duration) -> bool = reading_before(a.second, a.nanosecond, b.second, b.nanosecond)
@@ -915,7 +928,7 @@ def instant_reading(text: string, form: string) -> (string, i64, i64, i64) = {
       unix_second = epoch_day |> civil_second(nanosecond_of_day) |> sub(seconds)
       match unix_second_problem(unix_second) with {
         | Some(detail) => (detail, 0i64, 0i64, 0i64)
-        | None => ("", unix_second, euclid_rem(nanosecond_of_day, 1000000000i64), seconds)
+        | None => ("", unix_second, euclid_rem(nanosecond_of_day, nanos_per_second()), seconds)
       }
     }
     }
@@ -999,7 +1012,7 @@ def duration_reading(text: string) -> (string, i64, i64) = {
       total = negated_combination(negated_combination(component_value(text, hours), 60i64, component_value(text, minutes)), 60i64, whole_seconds)
       fraction = if and(has_fraction, gt(fraction_count, 0i64)) then mul(fixed_digits(text, add(seconds_end, 1i64), fraction_count), fixed_digits("1000000000", 0i64, sub(10i64, fraction_count))) else 0i64
       match total with {
-        | Some(negated) => if negative then if eq(fraction, 0i64) then ("", negated, 0i64) else if gt(negated, sub(-9223372036854775807i64, 1i64)) then ("", sub(negated, 1i64), sub(1000000000i64, fraction)) else ("range", 0i64, 0i64) else if gt(negated, sub(-9223372036854775807i64, 1i64)) then ("", neg(negated), fraction) else ("range", 0i64, 0i64)
+        | Some(negated) => if negative then if eq(fraction, 0i64) then ("", negated, 0i64) else if gt(negated, sub(-9223372036854775807i64, 1i64)) then ("", sub(negated, 1i64), sub(nanos_per_second(), fraction)) else ("range", 0i64, 0i64) else if gt(negated, sub(-9223372036854775807i64, 1i64)) then ("", neg(negated), fraction) else ("range", 0i64, 0i64)
         | None => ("range", 0i64, 0i64)
       }
     }
@@ -1057,17 +1070,17 @@ def text_problem(text: string, status: string, form: string, type_name: string) 
 def filled[n](like: &tensor[n, i64], value: i64) -> tensor[n, i64] = value |> scalar_to_tensor |> insert(0i32, shape(like, 0i32))
 -- The index of the first false element, or -1.
 def first_false(flags: List[bool]) -> i64 = fold(fn (acc: (i64, i64), flag: bool) -> if gte(acc.1, 0i64) then acc else if flag then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), flags).1
-def epoch_day_mask[n](t: &tensor[n, i64]) -> tensor[n, bool] = and(gte(t, filled(t, -4371587i64)), lte(t, filled(t, 2932896i64)))
+def epoch_day_mask[n](t: &tensor[n, i64]) -> tensor[n, bool] = and(gte(t, filled(t, min_epoch_day())), lte(t, filled(t, max_epoch_day())))
 def dates_from_epoch_days[n](t: tensor[n, i64]) -> Dates[n] = {
   bad = first_false(to_list(epoch_day_mask(t)))
-  if gte(bad, 0i64) then fail(domain_failure("dates_from_epoch_days", joined(["element ", to_string(bad), ": ", outside_text("epoch day", t |> to_list |> index(bad), -4371587i64, 2932896i64)]))) else Dates { epoch_days: t }
+  if gte(bad, 0i64) then fail(domain_failure("dates_from_epoch_days", joined(["element ", to_string(bad), ": ", outside_text("epoch day", t |> to_list |> index(bad), min_epoch_day(), max_epoch_day())]))) else Dates { epoch_days: t }
 }
 def try_dates_from_epoch_days[n](t: tensor[n, i64]) -> (Dates[n], tensor[n, bool]) = {
   mask = epoch_day_mask(t)
   (Dates { epoch_days: where(mask, t, filled(t, 0i64)) }, mask)
 }
 def dates_epoch_days[n](ds: Dates[n]) -> tensor[n, i64] = ds.epoch_days
-def instant_mask[n](seconds: &tensor[n, i64], nanoseconds: &tensor[n, i64]) -> tensor[n, bool] = and(and(gte(seconds, filled(seconds, -377705030401i64)), lte(seconds, filled(seconds, 253402214400i64))), and(gte(nanoseconds, filled(nanoseconds, 0i64)), lte(nanoseconds, filled(nanoseconds, 999999999i64))))
+def instant_mask[n](seconds: &tensor[n, i64], nanoseconds: &tensor[n, i64]) -> tensor[n, bool] = and(and(gte(seconds, filled(seconds, min_unix_second())), lte(seconds, filled(seconds, max_unix_second()))), and(gte(nanoseconds, filled(nanoseconds, 0i64)), lte(nanoseconds, filled(nanoseconds, 999999999i64))))
 def instants_from_unix[n](seconds: tensor[n, i64], nanoseconds: tensor[n, i64]) -> Instants[n] = {
   bad = first_false(to_list(instant_mask(seconds, nanoseconds)))
   if gte(bad, 0i64) then fail(domain_failure("instants_from_unix", joined(["element ", to_string(bad), ": ", element_instant_problem(index(to_list(seconds), bad), index(to_list(nanoseconds), bad))]))) else Instants { unix_seconds: seconds, nanoseconds }

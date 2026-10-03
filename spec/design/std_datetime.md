@@ -687,16 +687,25 @@ Nothing proportional to the horizon's length is stored or built:
 The representation is O(h), construction is O(h log h) for the sort, and each scalar query
 reads O(log h) list elements.
 
-**Vectorized forms (decided in S2).** Each vectorized form applies the scalar algorithm to
-every element, at O(n log h) per call with nothing the horizon's length. That also keeps
-each element's failure identical to its scalar twin's by construction. The prefix-count
-gather planned above was built and measured, and ruled out, while `chelis eval` lacked
-`scatter_replace` (#2892), tensors could not be sized from a scalar (#469), so that every
-call built a horizon-length `List` first (7 304 485 elements for a full-range calendar),
-and compiled C refused or panicked on the table program (#2893, #2906, #2907).
+**Vectorized forms (decided in S2).** Each vectorized form is a tensor kernel over its
+column, built from the scalar algorithm's closed forms:
+- Weekmask ranks and selections gather from the per-week table.
+- Every holiday count is a prefix count over the merged sort of the queries and the
+  holidays. A query day `x` is keyed `2x − 1` and a holiday `y` is keyed `2y`. All the keys
+  are sorted together, and the running count of holidays along the sorted order, read at a
+  query, is the number of holidays before that query. No query key equals a holiday key,
+  so a holiday sorts ahead of a query exactly when it is earlier. Equal queries have the
+  same holidays ahead of them, so the counts do not depend on how the sort orders equal
+  keys.
+- Selecting the business day with a given ordinal uses the same count over the keys
+  `M_k − k`, where `M_k` is the weekmask rank of the k-th holiday. The holidays a
+  selection passes are those whose key is at most the target rank.
 
-A tensor kernel can replace the per-element loop, without changing the contract, once both
-lanes lower such programs.
+A call costs O((n + h) log(n + h)) for n elements and h holidays, independent of the
+horizon's length, and builds nothing the length of the horizon. Each kernel also reports,
+per element, whether it found an answer, and the elements without one are exactly those
+where the scalar twin fails. The call then fails with the twin's detail for the lowest
+such element.
 
 **Measured cost.** These costs were measured on one shared Apple-silicon workstation under
 other load, so they bound orders of magnitude rather than fix figures. Compiled C means
@@ -712,20 +721,29 @@ over the whole range (7 304 484 days) with no holidays.
 | `business_day_roll(…, ModifiedFollowing)` on A | 69 µs | 4.6 ms |
 | `business_day_offset(…, 250, RollStartForward)` on A | 101 µs | 6.2 ms |
 | `business_day_count` over 300 days on A | 44 µs | 3.1 ms |
-| `dates_business_day_offset` on A, per element of a 1 000-element column | 99 µs | 5.5 ms |
 | `business_day_offset(…, 10^6, RollStartForward)` on B | 51 µs | 3.0 ms |
 
 Calendar B's offsets cost no more than A's, because no cost scales with the horizon.
 
-Two costs outside this module show up in the measurements:
-- In a debug build of the runtime, compiled C rescans a `bool` tensor's whole storage on
-  every element read (#2903), so there building a column with `dates_from_epoch_days` and
-  reading a `bool` result grow quadratically in the column's length beyond about 10 000
-  elements. `dates_business_day_roll` and `dates_business_day_offset` pay it again building
-  their result columns; each form's per-element work stays linear. A release build
-  of the runtime does not rescan.
-- In `chelis eval`, each `index` into a `List` copies the list (#2335), so the binary
-  searches cost O(h) per probe there.
+The vectorized forms were measured separately, with release builds under a load average of
+about 6. Here compiled C is the executable `chelis build --target c` produces, and each
+figure is one call's wall time over the same program without the call. Calendar C is Monday
+to Friday from 1950-01-01 to 2100-12-31 with 3 020 holidays left after normalization.
+
+| Call | Compiled C | `chelis eval` |
+|---|---|---|
+| any vectorized form on a 1-element column, calendar B | at most 4 ms | under 0.4 s |
+| `dates_is_business_day` on C, 100 000 elements | 36 ms | 1.2 s |
+| `dates_business_day_roll(…, ModifiedFollowing)` on C, 100 000 elements | 0.11 s | 2.1 s |
+| `dates_business_day_offset(…, RollStartForward)` on C, 100 000 elements, offsets −5..5 | 0.12 s | 2.5 s |
+| `dates_business_day_count` on C, 100 000 ranges of 30 days | 59 ms | 2.8 s |
+
+A call on calendar B costs no more than one on C, because the kernel's cost grows with the
+column and the holidays, not the horizon.
+
+One cost outside this module shows up in the measurements: in `chelis eval`, each `index`
+into a `List` copies the list (#2335), so the scalar queries' binary searches cost O(h) per
+probe there. The vectorized forms index no list per element.
 
 ## 10. `Std.Datetime.Columns` (stage S3)
 

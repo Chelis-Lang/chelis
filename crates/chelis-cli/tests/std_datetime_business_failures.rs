@@ -194,6 +194,49 @@ fn exact_failures() -> Vec<(&'static str, &'static str, String)> {
                 "dates_business_day_count: domain: element 1: end 2027-01-02 is outside {HORIZON} and is not the day after it"
             ),
         ),
+        // A vectorized form names the lowest failing element with the detail
+        // its scalar twin gives there, in unsorted columns whose later
+        // elements fail for other reasons.
+        (
+            "column_is_business_day_unsorted",
+            "dates_is_business_day(cal(), dates_from_epoch_days(to_tensor([20500i64, 20460i64, 20453i64, 20900i64])))",
+            format!("dates_is_business_day: domain: element 2: 2025-12-31 is outside {HORIZON}"),
+        ),
+        (
+            "column_roll_no_following_day",
+            "dates_business_day_roll(december(), dates_from_epoch_days(to_tensor([20788i64, 20813i64, 20819i64])), ModifiedFollowing)",
+            "dates_business_day_roll: domain: element 1: no business day on or after 2026-12-26 lies inside the horizon 2026-12-01..2026-12-26".into(),
+        ),
+        (
+            "column_offset_before_the_horizon",
+            "dates_business_day_offset(cal(), dates_from_epoch_days(to_tensor([20458i64, 20455i64, 20456i64])), to_tensor([1i64, -1i64, 9223372036854775807i64]), RollStartForward)",
+            format!("dates_business_day_offset: domain: element 1: 2026-01-02 plus -1 business days is outside {HORIZON}"),
+        ),
+        (
+            "column_offset_from_a_rolled_start",
+            "dates_business_day_offset(cal(), dates_from_epoch_days(to_tensor([20813i64, 20458i64])), to_tensor([4i64, 1i64]), RollStartForward)",
+            format!("dates_business_day_offset: domain: element 0: 2026-12-28 plus 4 business days is outside {HORIZON}"),
+        ),
+        (
+            "column_offset_largest",
+            "dates_business_day_offset(cal(), dates_from_epoch_days(to_tensor([20455i64])), to_tensor([9223372036854775807i64]), RejectNonBusinessStart)",
+            format!("dates_business_day_offset: domain: element 0: 2026-01-02 plus 9223372036854775807 business days is outside {HORIZON}"),
+        ),
+        (
+            "column_offset_smallest",
+            "dates_business_day_offset(cal(), dates_from_epoch_days(to_tensor([20455i64])), to_tensor([i64_minimum()]), RejectNonBusinessStart)",
+            format!("dates_business_day_offset: domain: element 0: 2026-01-02 plus -9223372036854775808 business days is outside {HORIZON}"),
+        ),
+        (
+            "column_count_begin_before",
+            "dates_business_day_count(cal(), dates_from_epoch_days(to_tensor([20458i64, 20453i64])), dates_from_epoch_days(to_tensor([20460i64, 20819i64])))",
+            format!("dates_business_day_count: domain: element 1: begin 2025-12-31 is outside {HORIZON} and is not the day after it"),
+        ),
+        (
+            "column_count_lengths_differ_empty",
+            "dates_business_day_count(cal(), days_from(20458i64, 0i64), days_from(20458i64, 1i64))",
+            "dates_business_day_count: domain: arguments have 0 and 1 elements".into(),
+        ),
         // A column argument whose length differs from another argument's
         // fails before any element is read, rather than pairing the shorter
         // prefix.

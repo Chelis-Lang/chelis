@@ -294,50 +294,224 @@ def business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalenda
   if eq(problem, "") then any_calendar(a, b) else "business_in_any" |> domain_failure(problem) |> fail
 }
 def try_business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if a |> horizons_problem(b) |> eq("") then Some(any_calendar(a, b)) else None
--- Vectorized forms. Each applies its scalar twin's algorithm to every
--- element, so a call reads O(n log h) holiday-list elements and allocates
--- nothing the length of the horizon. Under chelis eval each list index copies
--- the list (#2335), which multiplies that by h. An element whose scalar twin fails makes the call fail with that
--- element's detail, naming the lowest such element.
--- The index of the first result carrying a problem, or -1.
-def first_problem(results: List[(string, i64)]) -> i64 = fold(fn (acc: (i64, i64), result: (string, i64)) -> if gte(acc.1, 0i64) then acc else if eq(result.0, "") then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), results).1
+-- Vectorized forms. Each is a tensor kernel over the column: weekmask days
+-- are ranked and selected in closed form through the week table, and every
+-- holiday count is a prefix count over the merged sort of the queries and
+-- the holidays, so a call costs O((n + h) log(n + h)) for n elements and h
+-- holidays and nothing the length of the horizon. A call fails with the
+-- detail its scalar twin gives for the lowest element where the kernel finds
+-- no answer, and each kernel finds no answer exactly where the twin fails.
+-- Every value a kernel passes to a trapping primitive is in range or
+-- replaced first, so no primitive numeric trap escapes a call.
+-- Constant columns and arithmetic with a scalar operand.
+def filled[n](like: &tensor[n, i64], value: i64) -> tensor[n, i64] = value |> scalar_to_tensor |> insert(0i32, shape(like, 0i32))
+def flags_filled[n](like: &tensor[n, i64], value: bool) -> tensor[n, bool] = value |> scalar_to_tensor |> insert(0i32, shape(like, 0i32))
+def plus[n](t: &tensor[n, i64], value: i64) -> tensor[n, i64] = add(t, filled(t, value))
+def times[n](t: &tensor[n, i64], value: i64) -> tensor[n, i64] = mul(t, filled(t, value))
+def floored[n](t: &tensor[n, i64], value: i64) -> tensor[n, i64] = floor_div(t, filled(t, value))
+-- The Euclidean remainder by a positive `value`.
+def euclid_rems[n](t: &tensor[n, i64], value: i64) -> tensor[n, i64] = {
+  r = sub(t, times(trunc_div(t, filled(t, value)), value))
+  where(lt(r, filled(r, 0i64)), plus(r, value), r)
+}
+def within[n](t: &tensor[n, i64], low: i64, high: i64) -> tensor[n, bool] = and(gte(t, filled(t, low)), lte(t, filled(t, high)))
+-- The positions 0, 1, ... of a column.
+def positions_of[n](like: &tensor[n, i64]) -> tensor[n, i64] =
+  like
+  |> filled(1i64)
+  |> cumsum(0i32)
+  |> plus(-1i64)
+-- For each query, the number of entries of `entries` below it. The queries
+-- and entries are sorted together, keyed `2q - 1` and `2e` so that an entry
+-- precedes a query exactly when it is smaller and no key of one kind equals
+-- a key of the other; the running count of entries along the sorted order,
+-- read at each query, is its answer. Equal queries see the same entries
+-- before them, so the counts do not depend on how the sort orders equal
+-- keys.
+def count_below[n, h](entries: &tensor[h, i64], queries: &tensor[n, i64]) -> tensor[n, i64] = {
+  size = shape(queries, 0i32)
+  slots = positions_of(queries)
+  others = plus(positions_of(entries), size)
+  empty =
+    0i64
+    |> scalar_to_tensor
+    |> insert(0i32, add(size, shape(entries, 0i32)))
+  keys =
+    empty
+    |> copy
+    |> scatter_replace(copy(slots), plus(times(queries, 2i64), -1i64), 0i32)
+    |> scatter_replace(copy(others), times(entries, 2i64), 0i32)
+  marks = empty |> copy |> scatter_replace(others, filled(entries, 1i64), 0i32)
+  (ordered, order) = sort(keys, 0i32)
+  counts = marks |> gather(copy(order), 0i32) |> cumsum(0i32)
+  empty |> scatter_replace(order, counts, 0i32) |> gather(slots, 0i32)
+}
+-- `mask_rank`, `mask_select` and `weekmask_has` over columns.
+def mask_ranks[n](week: (i64, List[i64], List[i64]), days: &tensor[n, i64]) -> tensor[n, i64] = {
+  shifted = plus(days, 3i64)
+  add(times(floored(shifted, 7i64), week.0), gather(to_tensor(week.1), euclid_rems(shifted, 7i64), 0i32))
+}
+def mask_selects[n](week: (i64, List[i64], List[i64]), indices: &tensor[n, i64]) -> tensor[n, i64] =
+  indices
+  |> floored(week.0)
+  |> times(7i64)
+  |> add(gather(to_tensor(week.2), euclid_rems(indices, week.0), 0i32))
+  |> plus(-3i64)
+def weekmask_hits[n](flags: List[bool], days: &tensor[n, i64]) -> tensor[n, bool] = gather(to_tensor(flags), euclid_rems(plus(days, 3i64), 7i64), 0i32)
+-- `business_before`, `is_business_at` and `business_select` over columns.
+def business_befores[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> tensor[n, i64] = {
+  week = week_table(cal.weekmask)
+  week
+  |> mask_ranks(days)
+  |> plus(neg(mask_rank(week, cal.valid_from)))
+  |> sub(count_below(to_tensor(cal.holidays), days))
+}
+def business_ats[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> tensor[n, bool] = {
+  holidays = to_tensor(cal.holidays)
+  and(weekmask_hits(weekmask_flags(cal.weekmask), days), eq(count_below(holidays, days), count_below(holidays, plus(days, 1i64))))
+}
+-- With M_k the weekmask rank of the k-th holiday, the holidays a selection
+-- skips are those with M_k - k at most the target rank: the target is the
+-- (target - base)-th weekmask day from the horizon start that is no holiday.
+def business_selects[n](cal: BusinessCalendar, ordinals: &tensor[n, i64]) -> tensor[n, i64] = {
+  week = week_table(cal.weekmask)
+  holidays = to_tensor(cal.holidays)
+  gaps = sub(mask_ranks(week, holidays), positions_of(holidays))
+  targets = plus(ordinals, mask_rank(week, cal.valid_from))
+  mask_selects(week, add(targets, count_below(gaps, plus(targets, 1i64))))
+}
+-- Each kernel below returns whether it found an answer, and the answer, for
+-- days inside the horizon.
+def followings[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> (tensor[n, bool], tensor[n, i64]) = {
+  ordinals = business_befores(cal, days)
+  found = lt(ordinals, filled(ordinals, business_total(cal)))
+  (copy(found), business_selects(cal, where(found, ordinals, filled(ordinals, 0i64))))
+}
+def precedings[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> (tensor[n, bool], tensor[n, i64]) = {
+  ordinals = cal |> business_befores(plus(days, 1i64)) |> plus(-1i64)
+  found = gte(ordinals, filled(ordinals, 0i64))
+  (copy(found), business_selects(cal, where(found, ordinals, filled(ordinals, 0i64))))
+}
+def month_keys[n](days: &tensor[n, i64]) -> tensor[n, i64] = {
+  shifted = plus(days, 719468i64)
+  era = floored(shifted, 146097i64)
+  doe = sub(shifted, times(era, 146097i64))
+  yoe = floored(sub(add(sub(doe, floored(doe, 1460i64)), floored(doe, 36524i64)), floored(doe, 146096i64)), 365i64)
+  doy = sub(doe, sub(add(times(yoe, 365i64), floored(yoe, 4i64)), floored(yoe, 100i64)))
+  yoe
+  |> add(times(era, 400i64))
+  |> times(12i64)
+  |> add(floored(plus(times(doy, 5i64), 2i64), 153i64))
+}
+-- As `modified_following_of`: the following day when it stays in the month,
+-- and otherwise the preceding day, including when no business day follows
+-- inside the horizon but the day after it already lies in a later month.
+def modified_followings[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> (tensor[n, bool], tensor[n, i64]) = {
+  (ahead_found, ahead) = followings(cal, days)
+  (behind_found, behind) = precedings(cal, days)
+  month = month_keys(days)
+  beyond = gt(filled(month, month_key(add(cal.valid_until, 1i64))), month)
+  keep = where(copy(ahead_found), eq(month_keys(ahead), month), not(beyond))
+  (where(copy(keep), ahead_found, behind_found), where(keep, ahead, behind))
+}
+def modified_precedings[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> (tensor[n, bool], tensor[n, i64]) = {
+  (ahead_found, ahead) = followings(cal, days)
+  (behind_found, behind) = precedings(cal, days)
+  month = month_keys(days)
+  before = lt(filled(month, month_key(sub(cal.valid_from, 1i64))), month)
+  keep = where(copy(behind_found), eq(month_keys(behind), month), not(before))
+  (where(copy(keep), behind_found, ahead_found), where(keep, behind, ahead))
+}
+def rolls[n](cal: BusinessCalendar, days: &tensor[n, i64], roll: BusinessDayRoll) -> (tensor[n, bool], tensor[n, i64]) =
+  match roll with {
+    | Unadjusted => (flags_filled(days, true), copy(days))
+    | Following => followings(cal, days)
+    | Preceding => precedings(cal, days)
+    | ModifiedFollowing => modified_followings(cal, days)
+    | ModifiedPreceding => modified_precedings(cal, days)
+  }
+-- As `offset_of` for starts inside the horizon. An offset that leaves the
+-- horizon is replaced by zero before any arithmetic reads it.
+def offsets_from[n](cal: BusinessCalendar, days: &tensor[n, i64], offsets: &tensor[n, i64], start: NonBusinessStart) -> (tensor[n, bool], tensor[n, i64]) = {
+  at = business_ats(cal, days)
+  (rolled_found, rolled) = match start with {
+    | RejectNonBusinessStart => (copy(at), copy(days))
+    | RollStartForward => followings(cal, days)
+    | RollStartBackward => precedings(cal, days)
+  }
+  started = where(copy(at), copy(days), rolled)
+  ordinals = business_befores(cal, started)
+  last = sub(business_total(cal), 1i64)
+  moved = and(lte(offsets, sub(filled(ordinals, last), ordinals)), gte(offsets, neg(ordinals)))
+  found = and(or(at, rolled_found), moved)
+  zeros = filled(ordinals, 0i64)
+  targets = add(where(copy(found), ordinals, copy(zeros)), where(copy(found), copy(offsets), zeros))
+  (found, business_selects(cal, targets))
+}
+-- Element access for failure details, and the index of the first false
+-- flag, or -1.
+def element_at[n](t: &tensor[n, i64], position: i64) -> i64 = t |> to_list |> index(position)
+def first_false(flags: List[bool]) -> i64 = fold(fn (acc: (i64, i64), flag: bool) -> if gte(acc.1, 0i64) then acc else if flag then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), flags).1
+def element_failure(function: string, position: i64, detail: string) -> string = function |> domain_failure(element_detail(position, detail))
 -- A column argument whose length differs from another argument's fails
 -- before any element is read ([05-OP-73]).
 def length_failure[n, m](function: string, first: &tensor[n, i64], second: &tensor[m, i64]) -> string =
   function
   |> domain_failure(joined(["arguments have ", to_string(shape(first, 0i32)), " and ", to_string(shape(second, 0i32)), " elements"]))
 def lengths_differ[n, m](first: &tensor[n, i64], second: &tensor[m, i64]) -> bool = neq(shape(first, 0i32), shape(second, 0i32))
-def column_values(function: string, results: List[(string, i64)]) -> List[i64] = {
-  bad = first_problem(results)
-  if gte(bad, 0i64) then function |> domain_failure(element_detail(bad, index(results, bad).0)) |> fail else map(fn (result: (string, i64)) -> result.1, results)
-}
-def business_flag_of(cal: BusinessCalendar, epoch_day: i64) -> (string, i64) = if in_horizon(cal, epoch_day) then ("", if is_business_at(cal, epoch_day) then 1i64 else 0i64) else (outside_horizon(cal, epoch_day), 0i64)
+-- Days outside the horizon are replaced by its first day before a kernel
+-- reads them; their elements fail.
+def clamped[n](cal: BusinessCalendar, days: &tensor[n, i64]) -> tensor[n, i64] = where(within(days, cal.valid_from, cal.valid_until), copy(days), filled(days, cal.valid_from))
 def dates_is_business_day[n](cal: BusinessCalendar, ds: Dates[n]) -> tensor[n, bool] = {
-  results = map(fn (day: i64) -> business_flag_of(cal, day), to_list(dates_epoch_days(ds)))
-  to_tensor(map(fn (flag: i64) -> eq(flag, 1i64), column_values("dates_is_business_day", results)))
+  days = dates_epoch_days(ds)
+  bad =
+    days
+    |> within(cal.valid_from, cal.valid_until)
+    |> to_list
+    |> first_false
+  if gte(bad, 0i64) then "dates_is_business_day"
+  |> element_failure(bad, outside_horizon(cal, element_at(days, bad)))
+  |> fail else business_ats(cal, days)
 }
 def dates_business_day_roll[n](cal: BusinessCalendar, ds: Dates[n], roll: BusinessDayRoll) -> Dates[n] = {
-  results = map(fn (day: i64) -> roll_of(cal, day, roll), to_list(dates_epoch_days(ds)))
-  "dates_business_day_roll"
-  |> column_values(results)
-  |> to_tensor
-  |> dates_from_epoch_days
+  days = dates_epoch_days(ds)
+  (found, rolled) = rolls(cal, clamped(cal, days), roll)
+  bad =
+    found
+    |> and(within(days, cal.valid_from, cal.valid_until))
+    |> to_list
+    |> first_false
+  if gte(bad, 0i64) then "dates_business_day_roll"
+  |> element_failure(bad, roll_of(cal, element_at(days, bad), roll).0)
+  |> fail else dates_from_epoch_days(rolled)
 }
 def dates_business_day_offset[n](cal: BusinessCalendar, ds: Dates[n], offsets: &tensor[n, i64], start: NonBusinessStart) -> Dates[n] = {
   days = dates_epoch_days(ds)
   if lengths_differ(days, offsets) then fail(length_failure("dates_business_day_offset", days, offsets)) else {
-    results = map(fn (pair: (i64, i64)) -> offset_of(cal, pair.0, pair.1, start), zip(to_list(days), to_list(offsets)))
-    "dates_business_day_offset"
-    |> column_values(results)
-    |> to_tensor
-    |> dates_from_epoch_days
+    (found, moved) = offsets_from(cal, clamped(cal, days), offsets, start)
+    bad =
+      found
+      |> and(within(days, cal.valid_from, cal.valid_until))
+      |> to_list
+      |> first_false
+    if gte(bad, 0i64) then "dates_business_day_offset"
+    |> element_failure(bad, offset_of(cal, element_at(days, bad), element_at(offsets, bad), start).0)
+    |> fail else dates_from_epoch_days(moved)
   }
 }
 def dates_business_day_count[n](cal: BusinessCalendar, begins: Dates[n], ends: Dates[n]) -> tensor[n, i64] = {
   firsts = dates_epoch_days(begins)
   lasts = dates_epoch_days(ends)
   if lengths_differ(firsts, lasts) then fail(length_failure("dates_business_day_count", firsts, lasts)) else {
-    results = map(fn (pair: (i64, i64)) -> count_of(cal, pair.0, pair.1), zip(to_list(firsts), to_list(lasts)))
-    "dates_business_day_count" |> column_values(results) |> to_tensor
+    beyond = add(cal.valid_until, 1i64)
+    bad =
+      firsts
+      |> within(cal.valid_from, beyond)
+      |> and(within(lasts, cal.valid_from, beyond))
+      |> to_list
+      |> first_false
+    if gte(bad, 0i64) then "dates_business_day_count"
+    |> element_failure(bad, count_of(cal, element_at(firsts, bad), element_at(lasts, bad)).0)
+    |> fail else sub(business_befores(cal, lasts), business_befores(cal, firsts))
   }
 }

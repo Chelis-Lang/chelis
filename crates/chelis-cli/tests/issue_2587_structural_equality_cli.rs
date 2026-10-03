@@ -229,12 +229,13 @@ fn inadmissible_equality_operands_are_rejected_by_check_eval_and_build() {
     }
 }
 
-/// chelis#1521: `chelis build` refuses an `eq` or `neq` operand pair the host
-/// lane has no comparison for, such as two tensors an `IO` operand moves to
-/// the host lane, rather than emitting a C address comparison. The evaluator
-/// answers element-wise.
+/// chelis#1521 and chelis#3000: two tensors an `IO` operand moves to the
+/// host lane compare element by element in compiled C, as the evaluator
+/// answers, and never by address. [05-OP-36]: "tensor comparisons are
+/// element-wise and return a bool tensor with the operand dimensions", and
+/// "two direct tensor operands retain the element-wise tensor result".
 #[test]
-fn host_lane_equality_without_a_comparison_is_refused_at_build() {
+fn host_lane_tensor_equality_compares_element_wise_in_both_lanes() {
     for (operation, expected) in [("eq", "[true, false]"), ("neq", "[false, true]")] {
         let (_dir, reef_home, app) = make_app(&format!("issue-2587-host-tensor-{operation}"));
         write_file(
@@ -245,6 +246,7 @@ fn host_lane_equality_without_a_comparison_is_refused_at_build() {
                  to_tensor([1.0f32, 3.0f32]))\n"
             ),
         );
+        let line = format!("r = tensor(shape=[2], data={expected})");
         let eval = eval_app(&reef_home, &app);
         let stdout = String::from_utf8_lossy(&eval.stdout);
         assert!(
@@ -252,26 +254,60 @@ fn host_lane_equality_without_a_comparison_is_refused_at_build() {
             "{operation}: {}",
             String::from_utf8_lossy(&eval.stderr)
         );
+        assert!(stdout.contains(&line), "{operation}: eval printed {stdout}");
+        let compiled = build_and_run_app(&reef_home, &app, "main");
         assert!(
-            stdout.contains(&format!("r = tensor(shape=[2], data={expected})")),
-            "{operation}: {stdout}"
+            compiled.contains(&line),
+            "{operation}: compiled C printed {compiled}"
         );
+    }
+}
+
+/// The negative twin: host-lane tensors of different lengths are refused by
+/// both lanes at the comparison, never compared by address or by prefix.
+#[test]
+fn host_lane_tensor_equality_of_different_lengths_fails_in_both_lanes() {
+    for operation in ["eq", "neq"] {
+        let (_dir, reef_home, app) =
+            make_app(&format!("issue-2587-host-tensor-lengths-{operation}"));
+        write_file(
+            &app.join("src/main.ch"),
+            &format!(
+                "module Demo.Main\n\ndef f(xs: List[f32], ys: List[f32]) -> List[bool] ! {{ IO \
+                 }} = to_list({operation}(debug(to_tensor(xs)), to_tensor(ys)))\nr = \
+                 f([1.0f32, 2.0f32], [1.0f32, 2.0f32, 3.0f32])\n"
+            ),
+        );
+        let eval = eval_app(&reef_home, &app);
+        let stderr = String::from_utf8_lossy(&eval.stderr);
+        assert!(!eval.status.success(), "{operation}: eval accepted");
+        assert!(
+            stderr.contains("tensor comparison expects matching tensor shape"),
+            "{operation}: eval said {stderr}"
+        );
+        let out_dir = app.join("out");
         let build = Command::cargo_bin("chelis")
             .expect("chelis binary")
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .current_dir(&app)
             .args(["build", "src/main.ch", "--target", "c", "--output"])
-            .arg(app.join("out"))
+            .arg(&out_dir)
             .output()
             .expect("run build");
-        let stderr = String::from_utf8_lossy(&build.stderr);
-        assert!(!build.status.success(), "{operation}: build accepted");
         assert!(
-            stderr.contains(&format!("builtin `{operation}`"))
-                && stderr.contains("[04-TOT-2]")
-                && stderr.contains("never compared by address"),
-            "{operation}: {stderr}"
+            build.status.success(),
+            "{operation}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = std::process::Command::new(out_dir.join("main"))
+            .output()
+            .expect("run the compiled program");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success(), "{operation}: compiled C accepted");
+        assert!(
+            stderr.contains("elementwise operand shape mismatch"),
+            "{operation}: compiled C said {stderr}"
         );
     }
 }

@@ -1,0 +1,1 @@
+`chelis build --target c` compiles `lt`, `lte`, `gt`, `gte`, `eq` and `neq` over tensor operands that are computed on the host, such as two calls that each return a tensor. It previously refused these programs, which `chelis eval` ran. See [#3000](https://github.com/Chelis-Lang/chelis/issues/3000).

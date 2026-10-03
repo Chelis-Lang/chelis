@@ -6498,35 +6498,34 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         let p = T::data_ptr_unchecked(values);
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
+                // Each lane sorts stably by `should_swap_for_stable_sort`'s
+                // order in O(n log n): an element after which another should
+                // move compares greater, and neither moving past the other
+                // keeps their source order (chelis#3031).
+                let mut lane = Vec::with_capacity(axis_size);
                 for i in 0..axis_size {
                     let linear = metadata_or_fail(
                         axis.linear_index(outer_idx, i, inner_idx),
                         "chelis_tensor_sort",
                     );
-                    *indices_data.add(linear) = i as i64;
+                    lane.push((*p.add(linear), i as i64));
                 }
-                for i in 1..axis_size {
-                    let mut j = i;
-                    while j > 0 {
-                        let left = metadata_or_fail(
-                            axis.linear_index(outer_idx, j - 1, inner_idx),
-                            "chelis_tensor_sort",
-                        );
-                        let right = metadata_or_fail(
-                            axis.linear_index(outer_idx, j, inner_idx),
-                            "chelis_tensor_sort",
-                        );
-                        if !(*p.add(left)).should_swap_for_stable_sort(*p.add(right)) {
-                            break;
-                        }
-                        let tmpv = *p.add(left);
-                        *p.add(left) = *p.add(right);
-                        *p.add(right) = tmpv;
-                        let tmpi = *indices_data.add(left);
-                        *indices_data.add(left) = *indices_data.add(right);
-                        *indices_data.add(right) = tmpi;
-                        j -= 1;
+                lane.sort_by(|left, right| {
+                    if left.0.should_swap_for_stable_sort(right.0) {
+                        std::cmp::Ordering::Greater
+                    } else if right.0.should_swap_for_stable_sort(left.0) {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Equal
                     }
+                });
+                for (i, (value, source)) in lane.into_iter().enumerate() {
+                    let linear = metadata_or_fail(
+                        axis.linear_index(outer_idx, i, inner_idx),
+                        "chelis_tensor_sort",
+                    );
+                    *p.add(linear) = value;
+                    *indices_data.add(linear) = source;
                 }
             }
         }

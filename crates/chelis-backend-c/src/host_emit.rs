@@ -6735,6 +6735,24 @@ impl<'a> HostEmitter<'a> {
                     );
                     return Ok(());
                 }
+                // A comparison whose operands are computed on the host, such as
+                // two calls that each return a tensor, compares element by
+                // element after the same operand agreement check, into a bool
+                // tensor ([05-OP-36]; chelis#3000).
+                "lt" | "lte" | "gt" | "gte" | "eq" | "neq"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_comparison_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        ElementwiseComparison::from_builtin(name),
+                    );
+                    return Ok(());
+                }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
                     return Ok(());
@@ -8295,6 +8313,100 @@ impl<'a> HostEmitter<'a> {
             self.emit_binary_elementwise_arm(target, lhs, rhs, op, *arm, &view);
         }
         self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "binary elementwise op");
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+    }
+
+    /// Compare two agreeing tensors element by element into a bool tensor.
+    /// The C operators give [05-OP-36]'s float rule directly: a NaN operand
+    /// makes every comparison but `neq` false, and signed zeros are equal.
+    /// The default arm is reached only by a dtype the checker refuses.
+    fn assign_tensor_comparison_elementwise(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        comparison: ElementwiseComparison,
+    ) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
+        self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
+        self.lines.push(format!(
+            "{}{target} = chelis_host_alloc_like({lhs}, {});",
+            self.indent,
+            DtypeArm::Bool.dtype_macro()
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}switch (chelis_host_tensor_dtype({lhs})) {{",
+            self.indent
+        ));
+        // Every dtype [05-OP-36] admits has an arm: the C integer and float
+        // types compare directly, and f16 and bf16 compare after the exact
+        // widening to binary32, which keeps their order, NaNs and signed
+        // zeros. Bool operands reach only equality.
+        let mut arms = vec![
+            (chelis_vocab::RuntimeDType::F32, Prim::F32, None),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64, None),
+            (
+                chelis_vocab::RuntimeDType::F16,
+                Prim::F16,
+                Some("chelis_f16_to_f32"),
+            ),
+            (
+                chelis_vocab::RuntimeDType::Bf16,
+                Prim::Bf16,
+                Some("chelis_bf16_to_f32"),
+            ),
+            (chelis_vocab::RuntimeDType::I8, Prim::Int8, None),
+            (chelis_vocab::RuntimeDType::I16, Prim::Int16, None),
+            (chelis_vocab::RuntimeDType::I32, Prim::Int32, None),
+            (chelis_vocab::RuntimeDType::I64, Prim::Int64, None),
+        ];
+        if comparison.admits_bool() {
+            arms.push((chelis_vocab::RuntimeDType::Bool, Prim::Bool, None));
+        }
+        // Element types come from the existing spelling authorities: the
+        // bool output from `DtypeArm`, each operand and the index from
+        // `cast_prim_c_type`.
+        let target_t = DtypeArm::Bool.elem_t();
+        // The loop index is an i64 element count.
+        let index_t = cast_prim_c_type(Prim::Int64);
+        let ind = self.indent.clone();
+        for (dtype, prim, widen) in arms {
+            let elem_t = cast_prim_c_type(prim);
+            let read = |side: &str| match widen {
+                Some(widen) => format!("{widen}(__{side}_data[i * {target}_{side}_step])"),
+                None => format!("__{side}_data[i * {target}_{side}_step]"),
+            };
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {target_t} *__target_data = ({target_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines.push(format!(
+                "{ind}            __target_data[i] = ({target_t})({} {} {});",
+                read("lhs"),
+                comparison.c_operator(),
+                read("rhs")
+            ));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+        self.emit_default_runtime_fail_arm_for(
+            &format!("chelis_host_tensor_dtype({lhs})"),
+            &format!("elementwise comparison ({})", comparison.c_operator()),
+        );
         self.lines.push(format!("{}}}", self.indent));
         self.end_tensor_write(&guard);
     }
@@ -11758,6 +11870,47 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
     prim.runtime_dtype()
         .unwrap_or_else(|error| panic!("C backend sparse summary: {error}"))
         .c_macro()
+}
+
+/// The element-wise tensor comparisons the host lane emits ([05-OP-36]).
+#[derive(Debug, Clone, Copy)]
+enum ElementwiseComparison {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+}
+
+impl ElementwiseComparison {
+    fn from_builtin(name: &str) -> Self {
+        match name {
+            "lt" => Self::Less,
+            "lte" => Self::LessEqual,
+            "gt" => Self::Greater,
+            "gte" => Self::GreaterEqual,
+            "eq" => Self::Equal,
+            "neq" => Self::NotEqual,
+            other => unreachable!("`{other}` is not an element-wise comparison"),
+        }
+    }
+
+    fn c_operator(self) -> &'static str {
+        match self {
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+        }
+    }
+
+    /// Only equality admits bool operands; ordering them is a type error.
+    fn admits_bool(self) -> bool {
+        matches!(self, Self::Equal | Self::NotEqual)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
