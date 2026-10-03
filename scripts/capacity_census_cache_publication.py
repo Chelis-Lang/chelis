@@ -16,6 +16,7 @@ import sys
 
 from capacity_census_graph import GraphError, RustdocGraph
 from capacity_census_wire_adapters import canonical, source_identity
+from capacity_census_wire_calls import matching_rlibs, rlib_identity
 from capacity_census_wire_runner import TestExecution, run_libtest
 
 
@@ -296,6 +297,67 @@ class VerifiedCachePublication:
         }
 
 
+REQUIRED_DEPENDENCIES = frozenset(
+    {
+        "chelis_compiler_api",
+        "chelis_ir",
+        "chelis_unord",
+        "serde",
+        "sha2",
+        "bincode",
+    }
+)
+
+
+def select_compiled_artifacts(stream: str, identify) -> tuple[dict[str, str], str]:
+    """Select the cache test binary and the rlibs it links from Cargo's messages.
+
+    `identify` reads an rlib's rustc identity. chelis-std-bundle's build script
+    links chelis-reef, so Cargo also compiles a copy of the compiler crates
+    below it for the build script, and both copies appear with one name. Each
+    required crate is the artifact whose crate hash equals the one the single
+    chelis_compiler_api rlib records for that dependency: the copy rustc links
+    into the cache test.
+    """
+    rows = [json.loads(line) for line in stream.splitlines()]
+    rows = [row for row in rows if row.get("reason") == "compiler-artifact"]
+    test_binary = None
+    for row in rows:
+        if row.get("target", {}).get("name") == "cache_wire_compatibility":
+            require(
+                test_binary is None and row.get("executable"),
+                "ambiguous cache runtime binary",
+            )
+            test_binary = row["executable"]
+    require(test_binary is not None, "missing cache runtime binary")
+    api_rows = [
+        row for row in rows if row.get("target", {}).get("name") == "chelis_compiler_api"
+    ]
+    require(len(api_rows) == 1, "missing or ambiguous cache dependency chelis_compiler_api")
+    api_files = [f for f in api_rows[0]["filenames"] if f.endswith(".rlib")]
+    require(len(api_files) == 1, "missing or ambiguous chelis_compiler_api rlib")
+    artifacts = {"chelis_compiler_api": api_files[0]}
+    try:
+        api = identify(Path(api_files[0]))
+        for name in sorted(REQUIRED_DEPENDENCIES - {"chelis_compiler_api"}):
+            matches = matching_rlibs(
+                name,
+                rows,
+                api.dependency_hash(name),
+                lambda path: identify(path).crate_hash,
+            )
+            require(
+                matches,
+                f"missing cache dependency {name}: no artifact carries the crate "
+                "hash chelis_compiler_api records",
+            )
+            require(len(matches) == 1, f"ambiguous cache dependency {name}")
+            artifacts[name] = str(matches[0][1])
+    except ValueError as error:
+        raise CachePublicationError(str(error)) from error
+    return artifacts, test_binary
+
+
 def verify_cache_publication(root: Path, target: Path) -> VerifiedCachePublication:
     """Build real API dependencies, compile all controls, and derive the seal.
 
@@ -349,37 +411,9 @@ def verify_cache_publication(root: Path, target: Path) -> VerifiedCachePublicati
         build.returncode == 0,
         f"cache publication dependency build failed: {build.stderr[-4000:]}",
     )
-    required = {
-        "chelis_compiler_api",
-        "chelis_ir",
-        "chelis_unord",
-        "serde",
-        "sha2",
-        "bincode",
-    }
-    artifacts = {}
-    test_binary = None
-    for line in build.stdout.splitlines():
-        row = json.loads(line)
-        name = row.get("target", {}).get("name")
-        if (
-            row.get("reason") == "compiler-artifact"
-            and name == "cache_wire_compatibility"
-        ):
-            require(
-                test_binary is None and row.get("executable"),
-                "ambiguous cache runtime binary",
-            )
-            test_binary = row["executable"]
-        if row.get("reason") == "compiler-artifact" and name in required:
-            files = [f for f in row["filenames"] if f.endswith(".rlib")]
-            require(
-                len(files) == 1 and name not in artifacts,
-                f"ambiguous cache dependency {name}",
-            )
-            artifacts[name] = files[0]
-    require(set(artifacts) == required, "missing compiled cache dependencies")
-    require(test_binary is not None, "missing cache runtime binary")
+    artifacts, test_binary = select_compiled_artifacts(
+        build.stdout, lambda path: rlib_identity(path, root)
+    )
     artifacts["runtime_test"] = test_binary
     artifacts = seal_compiled_artifacts(directory, artifacts)
     test_binary = artifacts["runtime_test"]

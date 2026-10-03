@@ -5,10 +5,10 @@ use crate::package_versioning::{
     RequestedPackage, TypedDependency, TypedManifest,
 };
 use crate::{
-    CANONICAL_REEF_ORG, LockSource, LockedDependency, PackageId, ReefLock, ReefManifest,
-    RegistryVersion, acquire_reef_home_lock, compiler_bundled_chelis_std_version, document_schema,
-    parse_remote_origin, read_lockfile, read_registry_index, registry_root, resolve_github_token,
-    sha256_file, validate_manifest_schema_with, verify_artifact_pair, write_lockfile_unlocked,
+    CANONICAL_REEF_ORG, EmbeddedRuntime, LockSource, LockedDependency, PackageId, ReefLock,
+    ReefManifest, RegistryVersion, acquire_reef_home_lock, document_schema, parse_remote_origin,
+    read_lockfile, read_registry_index, registry_root, resolve_github_token, sha256_file,
+    validate_manifest_schema_with, verify_artifact_pair, write_lockfile_unlocked,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -667,6 +667,7 @@ enum CandidateMaterial {
         dependencies: Vec<RequestedPackage>,
     },
     BundledRuntime {
+        runtime: &'static EmbeddedRuntime,
         typed: TypedManifest,
         dependencies: Vec<RequestedPackage>,
     },
@@ -712,11 +713,9 @@ impl CandidateMaterial {
             Self::Local { entry, .. } => {
                 format!("{}#{}", entry.archive_sha256, entry.shell_sha256)
             }
-            Self::BundledRuntime { .. } => format!(
-                "{}#{}",
-                chelis_std_bundle::archive_sha256(),
-                chelis_std_bundle::shell_sha256()
-            ),
+            Self::BundledRuntime { runtime, .. } => {
+                format!("{}#{}", runtime.archive_sha256(), runtime.shell_sha256())
+            }
             Self::Remote(material) => material.archive_sha256.clone(),
         }
     }
@@ -1218,6 +1217,7 @@ struct DiscoverySession {
     explored_states: u64,
     temp: tempfile::TempDir,
     provider: Option<GitHubReleaseProvider>,
+    runtime: &'static EmbeddedRuntime,
 }
 
 impl DiscoverySession {
@@ -1226,6 +1226,7 @@ impl DiscoverySession {
         mode: DiscoveryMode,
         target: Option<&str>,
         network_enabled: bool,
+        runtime: &'static EmbeddedRuntime,
     ) -> Result<Self, DiscoveryError> {
         if mode == DiscoveryMode::Locked {
             return Err(DiscoveryError::UnsupportedMode {
@@ -1305,6 +1306,7 @@ impl DiscoverySession {
             explored_states: 0,
             temp,
             provider: None,
+            runtime,
         };
         let root_name = session.root_manifest.typed.package.name.clone();
         let root_path = session.root.clone();
@@ -1486,20 +1488,21 @@ impl DiscoverySession {
         {
             self.loaded_local.insert(package.clone());
             if package.as_str() == crate::CHELIS_STD_PACKAGE_NAME {
-                let runtime = crate::bundled_runtime_package().map_err(|message| {
+                let runtime_package = self.runtime.package().map_err(|message| {
                     DiscoveryError::CandidateManifest {
                         package: package.to_string(),
                         message: format!("load compiler-bundled runtime: {message}"),
                     }
                 })?;
-                let typed = crate::typed_manifest_for_loaded(&runtime).map_err(|message| {
-                    DiscoveryError::CandidateManifest {
-                        package: package.to_string(),
-                        message,
-                    }
-                })?;
+                let typed =
+                    crate::typed_manifest_for_loaded(&runtime_package).map_err(|message| {
+                        DiscoveryError::CandidateManifest {
+                            package: package.to_string(),
+                            message,
+                        }
+                    })?;
                 if typed.package.name != package
-                    || typed.package.version.to_string() != compiler_bundled_chelis_std_version()
+                    || typed.package.version.to_string() != self.runtime.version()
                 {
                     return Err(DiscoveryError::CandidateManifest {
                         package: package.to_string(),
@@ -1507,7 +1510,7 @@ impl DiscoverySession {
                             "bundled runtime manifest names `{}` but the compiler advertises `{}@{}`",
                             typed.package,
                             crate::CHELIS_STD_PACKAGE_NAME,
-                            compiler_bundled_chelis_std_version()
+                            self.runtime.version()
                         ),
                     });
                 }
@@ -1517,6 +1520,7 @@ impl DiscoverySession {
                 self.insert_material(
                     package,
                     CandidateMaterial::BundledRuntime {
+                        runtime: self.runtime,
                         typed,
                         dependencies,
                     },
@@ -2193,13 +2197,13 @@ fn lock_for_resolution(
                 archive_sha256: entry.archive_sha256.clone(),
                 shell_sha256: entry.shell_sha256.clone(),
             },
-            CandidateMaterial::BundledRuntime { typed, .. } => LockedDependency {
+            CandidateMaterial::BundledRuntime { runtime, typed, .. } => LockedDependency {
                 name: candidate.id.name.to_string(),
                 version: candidate.id.version.to_string(),
                 source: LockSource::bundled_for_current_compiler(),
                 compiler: typed.compiler.to_string(),
-                archive_sha256: chelis_std_bundle::archive_sha256(),
-                shell_sha256: chelis_std_bundle::shell_sha256(),
+                archive_sha256: runtime.archive_sha256().to_string(),
+                shell_sha256: runtime.shell_sha256().to_string(),
             },
             CandidateMaterial::Remote(_) => {
                 let item = staged
@@ -2233,11 +2237,11 @@ fn lock_for_resolution(
     {
         dependencies.push(LockedDependency {
             name: crate::CHELIS_STD_PACKAGE_NAME.to_string(),
-            version: compiler_bundled_chelis_std_version().to_string(),
+            version: session.runtime.version().to_string(),
             source: LockSource::bundled_for_current_compiler(),
             compiler: session.root_manifest.typed.compiler.to_string(),
-            archive_sha256: chelis_std_bundle::archive_sha256(),
-            shell_sha256: chelis_std_bundle::shell_sha256(),
+            archive_sha256: session.runtime.archive_sha256().to_string(),
+            shell_sha256: session.runtime.shell_sha256().to_string(),
         });
     }
     for dependency in session.locked.values() {
@@ -2555,8 +2559,15 @@ pub fn update_project(
     root: &Path,
     target: Option<&str>,
     network_enabled: bool,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<UpdateReport, DiscoveryError> {
-    let mut session = DiscoverySession::new(root, DiscoveryMode::Refresh, target, network_enabled)?;
+    let mut session = DiscoverySession::new(
+        root,
+        DiscoveryMode::Refresh,
+        target,
+        network_enabled,
+        runtime,
+    )?;
     let resolution = session.resolve()?;
     let staged = stage_selected_remote(&mut session, &resolution)?;
     let lock = lock_for_resolution(&session, &resolution, &staged)?;
@@ -2581,8 +2592,10 @@ pub(crate) fn resolve_project(
     root: &Path,
     network_enabled: bool,
     publication: LockPublication,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<ReefLock, DiscoveryError> {
-    let mut session = DiscoverySession::new(root, DiscoveryMode::Resolve, None, network_enabled)?;
+    let mut session =
+        DiscoverySession::new(root, DiscoveryMode::Resolve, None, network_enabled, runtime)?;
     let resolution = session.resolve()?;
     let staged = stage_selected_remote(&mut session, &resolution)?;
     let lock = lock_for_resolution(&session, &resolution, &staged)?;
@@ -2605,8 +2618,15 @@ pub fn outdated_project(
     root: &Path,
     target: Option<&str>,
     network_enabled: bool,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<OutdatedReport, DiscoveryError> {
-    let mut session = DiscoverySession::new(root, DiscoveryMode::Inspect, target, network_enabled)?;
+    let mut session = DiscoverySession::new(
+        root,
+        DiscoveryMode::Inspect,
+        target,
+        network_enabled,
+        runtime,
+    )?;
     let resolution = session.resolve()?;
     let names = if let Some(target) = &session.target {
         vec![target.clone()]
@@ -2776,7 +2796,14 @@ mod tests {
             ),
         )
         .unwrap();
-        let session = DiscoverySession::new(&root, DiscoveryMode::Resolve, None, false).unwrap();
+        let session = DiscoverySession::new(
+            &root,
+            DiscoveryMode::Resolve,
+            None,
+            false,
+            crate::tests::test_runtime(),
+        )
+        .unwrap();
         let replacement = ReefLock {
             package: PackageId {
                 name: "state-recheck".to_string(),

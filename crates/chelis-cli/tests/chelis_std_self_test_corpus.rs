@@ -59,8 +59,8 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // checked-in package on disk and is isolated from any developer-local
     // reef state. `chelis test` resolves `Std.*` imports against the staged
     // package's own `src/`, so no separate `reef publish` step is required —
-    // chelis-std has no external dependencies (verified against
-    // `packages/chelis-std/reef.lock`).
+    // chelis-std declares no dependencies (`pack_runtime_package` refuses a
+    // runtime that does).
     let dir = tempdir().expect("tempdir");
     let pkg = dir.path().join("chelis-std");
     let reef_home = dir.path().join("reef-home");

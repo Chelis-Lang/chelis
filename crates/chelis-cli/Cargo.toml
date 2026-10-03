@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive"] }
 chelis-conformance.workspace = true
 chelis-deep.workspace = true
 chelis-reef.workspace = true
+# The chelis-std runtime this binary embeds, passed to every graph entry point.
+chelis-std-bundle.workspace = true
 # WS-C orchestration: reuse chelisup's toolchain-store path math (paths::Store)
 # and pin resolution (resolve) so `reef setup`/`doctor`/the unknown-subcommand
 # hint share one source of truth with the installer. chelisup has no `chelis-*`
@@ -76,7 +78,6 @@ flate2 = "1"
 # checker (tests/common/mod.rs) needs the same f16/bf16 nearest-value
 # rounding - one dev-dep serves both; same crate the backends already use.
 half.workspace = true
-chelis-std-bundle.workspace = true
 predicates = "3"
 sha2 = "0.10"
 syn.workspace = true

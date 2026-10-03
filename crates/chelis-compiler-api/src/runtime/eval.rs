@@ -6607,7 +6607,12 @@ mod legacy_capture_order_tests {
         for (module, value) in [("Left", 3), ("Right", 5)] {
             std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
         }
-        let compiled = crate::compile_reef_context(directory.path(), directory.path()).unwrap();
+        let compiled = crate::compile_reef_context(
+            directory.path(),
+            directory.path(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap();
         let library = compiled.checked_library();
         let tensors = UnordMap::new();
         let mut ctx = context(library, &tensors);

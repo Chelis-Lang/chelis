@@ -45,10 +45,9 @@ only rewrites Surf `Decl`s with internal names. There is no typecheck seam at
 
 ## Why a chelis-std sub-context cache is correct
 
-The chelis-std bundle ships inside the chelis binary via `include_bytes!`
-(`crates/chelis-std-bundle/src/lib.rs`): `CHELIS_STD_ARCHIVE`, `CHELIS_STD_SHELL`,
-and `BUNDLED_CHELIS_STD_VERSION` are compile-time constants, immutable for a
-given binary.
+The chelis-std runtime ships inside the chelis binary: `crates/chelis-std-bundle`
+packs `packages/chelis-std` while the binary builds and embeds the archive,
+shell, and version, so they are immutable for a given binary.
 
 Crucially, `link_graph` iterates `graph.packages` (a `BTreeMap`) and rewrites
 internal names with `internal_name(package_name, module_name, symbol)` — a pure
@@ -70,16 +69,14 @@ write path.
 
 ### Cache key
 
-The chelis-std sub-context is keyed, content-addressed, on:
-
-```
-chelis_std_typecheck_v{N} || BUNDLED_CHELIS_STD_VERSION || archive_sha256() || shell_sha256()
-```
-
-`archive_sha256()` / `shell_sha256()` (`chelis-std-bundle/src/lib.rs:75,84`) hash
-the `include_bytes!`'d bundle. The key self-invalidates on any stdlib
-regeneration; no manual bust. `v{N}` is an internal struct-format-version prefix
-so a shape change forces a clean miss rather than a bad decode.
+The chelis-std sub-context is keyed, content-addressed, on the struct-format
+version, the compiler build fingerprint, the prepared graph's exact chelis-std
+source digest, and the linked chelis-std declarations
+(`stdlib_cache::stdlib_cache_key` in `chelis-compiler-api`). The source digest
+carries the bundled runtime's version and its archive and shell hashes. The key
+self-invalidates on any stdlib change; no manual bust. The format version is an
+internal struct-format prefix so a shape change forces a clean miss rather than
+a bad decode.
 
 ### Cache location
 

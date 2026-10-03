@@ -821,6 +821,7 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-reef",
  "chelis-runtime-bundle",
+ "chelis-std-bundle",
  "chelis-vocab",
  "libc",
  "libloading",
@@ -932,11 +933,11 @@ dependencies = [
 name = "chelis-std-bundle"
 version = "0.18.12"
 dependencies = [
+ "chelis-reef",
  "chelis-shell",
+ "serde_json",
  "sha2",
- "tar",
  "tempfile",
- "zstd",
 ]
 
 [[package]]

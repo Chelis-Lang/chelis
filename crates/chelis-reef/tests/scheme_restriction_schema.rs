@@ -79,7 +79,8 @@ fn expected_set_domain() -> Value {
 #[test]
 fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let (_directory, root) = package_fixture();
-    let schema = package_schema(&root).expect("schema package must check");
+    let schema = package_schema(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("schema package must check");
     let schema_json = serde_json::to_value(schema).expect("schema must serialize");
 
     // chelis#2443 moved this to 4: the `domain` field widened from a string
@@ -305,8 +306,12 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         );
     }
 
-    let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("schema package must build");
+    let artifacts = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("schema package must build");
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 

@@ -699,7 +699,8 @@ fn manifest_boundary_rejects_invalid_identity_and_compiler_values() {
             ),
         )
         .unwrap();
-        let error = package_schema(directory.path()).unwrap_err();
+        let error =
+            package_schema(directory.path(), &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
 }
@@ -716,11 +717,15 @@ fn checked_path_dependencies_validate_name_version_and_publication() {
         "\n[dependencies]\ndependency = { path = \"../dependency\", version = \"0.1.0\" }\n",
     );
 
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("matching checked path dependency");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("matching checked path dependency");
     let prior_lock = std::fs::read(root.join("reef.lock")).unwrap();
     assert!(
-        publish_package(&root)
+        publish_package(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
             .unwrap_err()
             .contains("path dependencies")
     );
@@ -730,8 +735,12 @@ fn checked_path_dependencies_validate_name_version_and_publication() {
         "root",
         "\n[dependencies]\ndependency = { path = \"../dependency\", version = \"0.2.0\" }\n",
     );
-    let mismatch =
-        build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap_err();
+    let mismatch = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_err();
     assert!(mismatch.contains("0.2.0"), "{mismatch}");
     assert!(mismatch.contains("0.1.0"), "{mismatch}");
     assert_eq!(std::fs::read(root.join("reef.lock")).unwrap(), prior_lock);
@@ -741,8 +750,12 @@ fn checked_path_dependencies_validate_name_version_and_publication() {
         "root",
         "\n[dependencies]\nother-name = { path = \"../dependency\" }\n",
     );
-    let mismatch =
-        build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap_err();
+    let mismatch = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_err();
     assert!(mismatch.contains("other-name"), "{mismatch}");
     assert!(mismatch.contains("dependency"), "{mismatch}");
 
@@ -751,8 +764,12 @@ fn checked_path_dependencies_validate_name_version_and_publication() {
         "root",
         "\n[dependencies]\ndependency = { path = \"../dependency\" }\n",
     );
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("path-only dependency remains valid");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("path-only dependency remains valid");
 }
 
 #[test]
@@ -771,8 +788,12 @@ fn path_only_dependency_accepts_a_prerelease_package_version() {
         "\n[dependencies]\ndependency = { path = \"../dependency\" }\n",
     );
 
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("path-only dependency must not invent a stable-only requirement");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("path-only dependency must not invent a stable-only requirement");
 }
 
 #[test]
@@ -792,7 +813,12 @@ fn transitive_lock_requirements_and_reachability_are_revalidated() {
         "root",
         "\n[dependencies]\npackage-a = { path = \"../package-a\", version = \"0.1.0\" }\n",
     );
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap();
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let lock_path = root.join("reef.lock");
     let prior_lock = std::fs::read(&lock_path).unwrap();
 
@@ -801,13 +827,22 @@ fn transitive_lock_requirements_and_reachability_are_revalidated() {
         "package-a",
         "\n[dependencies]\npackage-b = { path = \"../package-b\", version = \"0.2.0\" }\n",
     );
-    let error = build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap_err();
+    let error = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_err();
     assert!(error.contains("0.2.0"), "{error}");
     assert_eq!(std::fs::read(&lock_path).unwrap(), prior_lock);
 
     write_manifest(&package_a, "package-a", "");
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("stale orphan is removed after complete local resolution");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("stale orphan is removed after complete local resolution");
     let replacement = std::fs::read_to_string(lock_path).unwrap();
     assert!(
         !replacement.contains("name = \"package-b\""),
@@ -827,7 +862,12 @@ fn changed_locked_path_and_unreachable_registry_entry_do_not_block_resolution() 
         "root",
         "\n[dependencies]\ndependency = { path = \"../old-dependency\" }\n",
     );
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap();
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     std::fs::rename(&old_dependency, &new_dependency).unwrap();
     write_manifest(
         &root,
@@ -835,8 +875,12 @@ fn changed_locked_path_and_unreachable_registry_entry_do_not_block_resolution() 
         "\n[dependencies]\ndependency = { path = \"../new-dependency\" }\n",
     );
 
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("a changed current path invalidates the unavailable locked path");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("a changed current path invalidates the unavailable locked path");
     let replaced = std::fs::read_to_string(root.join("reef.lock")).unwrap();
     assert!(
         replaced.contains("path = \"../new-dependency\""),
@@ -851,8 +895,12 @@ fn changed_locked_path_and_unreachable_registry_entry_do_not_block_resolution() 
         ),
     )
     .unwrap();
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("an unreachable lock entry must not require materialization");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("an unreachable lock entry must not require materialization");
     let replaced = std::fs::read_to_string(root.join("reef.lock")).unwrap();
     assert!(!replaced.contains("unused-registry"), "{replaced}");
 }
@@ -952,8 +1000,12 @@ fn external_format_locations_remain_exact_strings() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("format-demo");
     init_package(&root, "format-demo", "FormatDemo").unwrap();
-    let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("build format fixture");
+    let artifacts = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("build format fixture");
 
     let manifest: toml::Value =
         toml::from_str(&std::fs::read_to_string(root.join("reef.toml")).unwrap()).unwrap();
@@ -969,15 +1021,20 @@ fn external_format_locations_remain_exact_strings() {
         use std::os::unix::fs::MetadataExt;
         std::fs::metadata(&lock_path).unwrap().ino()
     };
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("valid lock is the exact preferred graph");
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("valid lock is the exact preferred graph");
     assert_eq!(std::fs::read(&lock_path).unwrap(), lock_bytes);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), lock_inode);
     }
-    package_schema(&root).expect("schema command reuses the exact lock");
+    package_schema(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("schema command reuses the exact lock");
     assert_eq!(std::fs::read(&lock_path).unwrap(), lock_bytes);
     #[cfg(unix)]
     {
@@ -1004,7 +1061,7 @@ fn external_format_locations_remain_exact_strings() {
 
 #[test]
 fn bundled_lock_compiler_version_normalization_is_strict() {
-    let bundled = chelis_reef::compiler_bundled_chelis_std_version();
+    let bundled = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
     let compiler = env!("CARGO_PKG_VERSION");
     for source_compiler in [compiler.to_string(), format!("={compiler}")] {
         let directory = tempdir().unwrap();
@@ -1013,13 +1070,17 @@ fn bundled_lock_compiler_version_normalization_is_strict() {
             directory.path().join("reef.lock"),
             format!(
                 "schema = \"1\"\n\n[package]\nname = \"root\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"{bundled}\"\ncompiler = \"{ACTIVE_COMPILER_PIN}\"\narchive_sha256 = \"{}\"\nshell_sha256 = \"{}\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"{source_compiler}\"\n",
-                chelis_std_bundle::archive_sha256(),
-                chelis_std_bundle::shell_sha256(),
+                chelis_std_bundle::EMBEDDED_RUNTIME.archive_sha256(),
+                chelis_std_bundle::EMBEDDED_RUNTIME.shell_sha256(),
             ),
         )
         .unwrap();
-        build_package_with_options(directory.path(), &BuildOptions { auto_fetch: false })
-            .expect("bare and single-equals bundled compiler versions are valid");
+        build_package_with_options(
+            directory.path(),
+            &BuildOptions { auto_fetch: false },
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("bare and single-equals bundled compiler versions are valid");
     }
 
     let directory = tempdir().unwrap();
@@ -1031,8 +1092,12 @@ fn bundled_lock_compiler_version_normalization_is_strict() {
         ),
     )
     .unwrap();
-    let error = build_package_with_options(directory.path(), &BuildOptions { auto_fetch: false })
-        .unwrap_err();
+    let error = build_package_with_options(
+        directory.path(),
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_err();
     assert!(
         error.contains("invalid bundled compiler version"),
         "{error}"
@@ -1047,8 +1112,12 @@ fn bundled_lock_compiler_version_normalization_is_strict() {
         ),
     )
     .unwrap();
-    build_package_with_options(directory.path(), &BuildOptions { auto_fetch: false })
-        .expect("a foreign bundled runtime lock is stale, not materialized");
+    build_package_with_options(
+        directory.path(),
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("a foreign bundled runtime lock is stale, not materialized");
     let repaired = std::fs::read_to_string(directory.path().join("reef.lock")).unwrap();
     assert!(
         repaired.contains(&format!("version = \"{bundled}\"")),
@@ -1067,17 +1136,27 @@ fn malformed_lock_identity_fails_at_the_lock_boundary() {
     )
     .unwrap();
 
-    let error = package_schema(directory.path()).unwrap_err();
+    let error = package_schema(directory.path(), &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap_err();
 
     assert!(error.contains("invalid package name"), "{error}");
 }
 
+/// A lock names the bundled runtime by the hashes of the binary that wrote
+/// it, so a runtime hash that differs from the embedded runtime's marks the
+/// lock stale, not corrupt: the build resolves the runtime again and writes
+/// the lock it would have written. A locked registry package's hash mismatch
+/// stays a hard failure (`crates/chelis-cli/tests/reef_remote_discovery.rs`).
 #[test]
-fn locked_hash_failure_is_hard_and_preserves_the_lock() {
+fn a_runtime_hash_mismatch_is_stale_and_the_build_rewrites_the_lock() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("hash-root");
     write_manifest(&root, "hash-root", "");
-    build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap();
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let lock_path = root.join("reef.lock");
     let lock = std::fs::read_to_string(&lock_path).unwrap();
     let archive_line = lock
@@ -1090,11 +1169,16 @@ fn locked_hash_failure_is_hard_and_preserves_the_lock() {
         1,
     );
     std::fs::write(&lock_path, &poisoned).unwrap();
+    assert_ne!(poisoned, lock);
 
-    let error = build_package_with_options(&root, &BuildOptions { auto_fetch: false }).unwrap_err();
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
 
-    assert!(error.contains("locked archive hash mismatch"), "{error}");
-    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), poisoned);
+    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), lock);
 }
 
 #[test]
@@ -1120,7 +1204,7 @@ fn unavailable_unrecorded_locked_origin_is_a_hard_failure() {
     let prior = std::env::var_os("CHELIS_REEF_HOME");
     unsafe { std::env::set_var("CHELIS_REEF_HOME", &registry) };
 
-    let result = package_schema(&root);
+    let result = package_schema(&root, &chelis_std_bundle::EMBEDDED_RUNTIME);
 
     match prior {
         Some(value) => unsafe { std::env::set_var("CHELIS_REEF_HOME", value) },

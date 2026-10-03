@@ -36,7 +36,12 @@ fn eval_root(client: &str, root: &str) -> EvalResult {
         format!("module Probe.Values\nexport (total)\n{LIBRARY}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let client = format!("module Probe.Client\nimport Probe.Values (total)\n{client}");
     let checked = check_in_context(&context, &client).unwrap();
     assert_eq!(checked.score.get(), 1.0, "{checked:?}");

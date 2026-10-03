@@ -5,17 +5,17 @@
 //! chelis#157 made the reef linker mangle, rewrite, and *export* ADT
 //! constructor names as module symbols, so a downstream program can
 //! `import Std.Io.Json (JsonInt)` and pattern-match on `JsonInt`. But
-//! the capability is only usable for std constructors once the prebuilt
-//! chelis-std bundle is regenerated to carry the exported, mangled
-//! constructor symbols in its shell (`.chb`). The bundle is served from
-//! the embedded bytes in `crates/chelis-std-bundle` whenever the
+//! the capability is only usable for std constructors once the
+//! chelis-std bundle carries the exported, mangled constructor symbols
+//! in its shell (`.chb`). The bundle is served from the embedded bytes
+//! `crates/chelis-std-bundle` packs at build time whenever the
 //! consumer depends on the bundled version, so this test exercises the
 //! shell that ships inside the chelis binary, not a publish-time copy.
 //!
 //! Fail-old / pass-new contract: against the pre-#311 bundle this test
 //! fails at `chelis check` because the std shell does not export the
 //! `JsonInt` constructor (`does not export 'JsonInt'`). Against the
-//! regenerated bundle it type-checks clean (score 1) and evaluates,
+//! embedded bundle it type-checks clean (score 1) and evaluates,
 //! proving the constructor symbol crosses the module boundary through
 //! the bundle.
 
@@ -75,7 +75,7 @@ chelis-std = {{ version = "0.4.0" }}
 /// constructor by name from `Std.Io.Json`, parses a JSON integer, and
 /// pattern-matches the result on `JsonInt(n)` to extract the value.
 /// The match arm naming `JsonInt` is the cross-module-constructor use
-/// that the regenerated bundle must support.
+/// that the embedded bundle must support.
 const CROSS_MODULE_CTOR_PROGRAM: &str = r#"module Demo.Main
 
 import Std.Io.Json (Json, JsonInt, parse_json)

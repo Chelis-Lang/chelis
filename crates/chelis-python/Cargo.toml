@@ -24,6 +24,8 @@ chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
 chelis-reef.workspace = true
 chelis-runtime-bundle.workspace = true
+# The extension module embeds the chelis-std runtime it compiles against.
+chelis-std-bundle.workspace = true
 chelis-vocab.workspace = true
 libc = "0.2"
 libloading = "0.8"

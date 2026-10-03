@@ -79,7 +79,12 @@ fn library_fixture() -> (TempDir, PathBuf) {
 #[test]
 fn issue1493_cached_context_keeps_aliases_callable_and_observes_results() {
     let (_dir, root) = library_fixture();
-    let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
+    let context = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let restored = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     let snippet = "module App.Eval\nimport Mylib.Math (square)\nalias: (i32) -> i32 = square\nsecond = alias\ndef user() -> i32 = second(3)\n";
     for ctx in [&context, &restored] {
@@ -116,11 +121,16 @@ fn flatten_module_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::as
 /// the canonical input shape for `prepare_eval` (mirrors what
 /// `chelis test`'s `cmd_internal_test_file` does today).
 fn format_library_plus_snippet(package_dir: &Path, snippet: &str) -> String {
-    let graph = chelis_reef::prepare_reef_graph(package_dir).expect("prepare_reef_graph");
+    let graph = chelis_reef::prepare_reef_graph(package_dir, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("prepare_reef_graph");
     let entry_decls = chelis_surf::parser::parse_str(snippet).expect("parse snippet");
     let flat_decls = flatten_module_decls(&entry_decls);
-    let prepared =
-        chelis_reef::compile_with_reef_graph(&graph, &flat_decls).expect("compile_with_reef_graph");
+    let prepared = chelis_reef::compile_with_reef_graph(
+        &graph,
+        &flat_decls,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile_with_reef_graph");
     chelis_surf::format::format_program(&prepared.decls)
 }
 
@@ -192,7 +202,12 @@ fn eval_in_context_matches_prepare_eval_for_int_snippets() {
         let baseline_named = collect_named_roots_json(&baseline.roots, &[root_name]);
 
         // In-context flow.
-        let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+        let ctx = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx");
         let result = eval_in_context(&ctx, snippet)
             .unwrap_or_else(|e| panic!("[{label}] eval_in_context failed: {e:?}"));
         let result_named = collect_named_roots_json(&result.roots, &[root_name]);
@@ -225,7 +240,12 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     .expect("baseline eval");
     let baseline_named = collect_named_roots_json(&baseline.roots, &["length_from_host"]);
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let result_named = collect_named_roots_json(&result.roots, &["length_from_host"]);
 
@@ -333,7 +353,12 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
         );
     }
 
-    let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+    let context = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("context");
     check_in_context(&context, snippet).expect("live checked/lowered context query");
     let live = eval_in_context(&context, snippet).expect("live context eval");
     assert_eq!(collect_named_roots_json(&live.roots, &names), raw_results);
@@ -402,7 +427,12 @@ fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     .expect("write lin.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    let _ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let _ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 }
 
 #[test]
@@ -420,7 +450,12 @@ fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
                    def isolated_a() -> i32 = square(3)\n\
                    def isolated_b() -> i32 = square(4)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     let names = vec!["isolated_a".to_string(), "isolated_b".to_string()];
     let many = eval_many_in_context(&ctx, snippet, &names);
@@ -519,7 +554,12 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     .expect("baseline eval");
     let baseline_named = collect_named_roots_json(&baseline.roots, &["greeting"]);
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let result_named = collect_named_roots_json(&result.roots, &["greeting"]);
 
@@ -564,7 +604,12 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     let snippet = "module App.Eval\nimport Mylib.Text (label)\n\n\
                    caption = label(\"n=\", cast(7, i64))\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     // Round-trip through bincode (mirrors the worker tempfile bridge).
     let bytes = bincode::serialize(&ctx).expect("serialize");
     let restored: CompiledContext = bincode::deserialize(&bytes).expect("deserialize");
@@ -589,7 +634,12 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
 #[test]
 fn check_in_context_accepts_well_typed_snippet() {
     let (_dir, root) = library_fixture();
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
                    def ok() -> i32 = add(1, 2)\n";
     let result = check_in_context(&ctx, snippet).expect("check ok");
@@ -627,7 +677,12 @@ fn stored_nonzero_vmap_spreads_survive_decoded_context() {
     .expect("write axes.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("compile context");
+    let context = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile context");
     let decoded = CompiledContext::decode(&context.encode().expect("encode context"))
         .expect("decode context");
     let values = (1..=18)
@@ -672,7 +727,12 @@ fn stored_nonzero_vmap_spreads_survive_decoded_context() {
 #[test]
 fn check_in_context_rejects_unbound_library_reference() {
     let (_dir, root) = library_fixture();
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     // Reference to a name that exists in NEITHER the library nor the new code.
     let snippet = "module App.Eval\n\n\
                    def bad() -> i32 = nonexistent_function(1, 2)\n";
@@ -689,7 +749,12 @@ fn compiled_context_round_trips_through_bincode() {
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
                    def eight() -> i32 = add(3, 5)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let pre = eval_in_context(&ctx, snippet).expect("pre-encode eval");
     let pre_named = collect_named_roots_json(&pre.roots, &["eight"]);
 
@@ -792,7 +857,12 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
     let baseline_elapsed = baseline_start.elapsed();
 
     // ---- with-context: build context once, eval 50 snippets ----
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let in_context_start = Instant::now();
     for snippet in &snippets {
         let _ = eval_in_context(&ctx, snippet).expect("in-context eval ok");
@@ -825,7 +895,12 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
 #[test]
 fn compile_in_context_hip_rejects_as_branded_unsupported_feature() {
     let (_dir, root) = library_fixture();
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let err = chelis_compiler_api::compiler::compile_for_execution_in_context(
         &ctx,
         "module App.Main\nimport Mylib.Math (add)\n\n\

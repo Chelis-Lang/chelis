@@ -5,8 +5,7 @@
 //! asserts the embedded bytes, both agent-surface symlinks, the `SHARED_SKILLS`
 //! list, and the live `agent-skills/` directory agree. A forgotten re-run (or a hand-edited
 //! embedded copy, or a skill added/removed upstream) fails here with a pointer
-//! back at the regenerate script — the same guarantee `chelis-std-bundle`'s
-//! `archive_self_consistency` gives for the runtime bytes.
+//! back at the regenerate script.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

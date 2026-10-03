@@ -16,6 +16,16 @@ node_modules/
 .reef-write.lock
 .*.reef-tmp-*
 .*.reef-backup-*
+# Every lock reef writes records the compiler-bundled chelis-std by the hashes of
+# the runtime the running binary embeds, which is built from the sources, not
+# committed. Such a lock is a build output; scripts/check_std_bundle_untracked.py
+# refuses one that is tracked.
+reef.lock
+# The chelis-std archive and shell are packed by crates/chelis-std-bundle/build.rs
+# while the compiler builds; `chelis reef build packages/chelis-std` writes the
+# same pair here.
+/packages/chelis-std/dist/
+/crates/chelis-std-bundle/dist/
 # Devenv and opt-in direnv keep worktree-local activation state here.
 /.devenv/
 /.devenv.flake.nix

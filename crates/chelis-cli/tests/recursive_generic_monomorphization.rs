@@ -366,8 +366,12 @@ fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
     // embedded bundle, so literals here go stale at every release bump.
     let ver = chelis_compiler_api::COMPILER_VERSION;
     let std_version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
-    let archive_sha256 = chelis_std_bundle::archive_sha256();
-    let shell_sha256 = chelis_std_bundle::shell_sha256();
+    let archive_sha256 = chelis_std_bundle::EMBEDDED_RUNTIME
+        .archive_sha256()
+        .to_string();
+    let shell_sha256 = chelis_std_bundle::EMBEDDED_RUNTIME
+        .shell_sha256()
+        .to_string();
     write_file(
         &root.join("reef.toml"),
         &format!(

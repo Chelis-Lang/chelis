@@ -28,7 +28,6 @@ NIGHTLY_CLASSES = frozenset({
     "test_capacity_census_native_calls.NativeCompilerCollectionControls",
     "test_capacity_census_native_execution.NativeExecutionIntegration",
     "test_capacity_census_native_owners.NativeOwnerIntegration",
-    "test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests",
 })
 NATIVE_EXECUTION_TARGET = ROOT / "target/agents/native-execution-integration"
 # Dedicated workflow/profile owners execute these outside the broad script lanes.

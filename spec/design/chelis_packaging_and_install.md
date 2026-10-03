@@ -63,6 +63,13 @@ Layer 2  ORCHESTRATION              `chelis reef setup` + unified `reef doctor`
 | Binary artifacts (translators, toolchain) | `reef install` | `reef.lock` (Binary) | #468 |
 | One-command reproduce + health | `reef setup` / `doctor` | composes all | this doc |
 
+The chelis-std runtime is packed from `packages/chelis-std` by
+`crates/chelis-std-bundle/build.rs` while the compiler builds, and each binary
+embeds it. A lock records it by the hashes of the running binary's runtime, so
+the compiler repository commits neither the runtime pair nor a lock recording
+it ([`reef_distribution.md`](reef_distribution.md), Item 7, "Bundling and
+lockfile synthesis").
+
 ## 3. The lockfile-ownership rule
 
 `reef.lock` records **exactly the artifacts reef itself fetches and
@@ -112,11 +119,11 @@ Reef verifies the root identity, direct requirements, source kinds, canonical pa
 
 A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
 
-A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+A changed requirement or source declaration invalidates the lock preference. For the graph-loading commands (`chelis check`, `build`, `eval`, `test`, and `reef build`), so does a locked `chelis-std` entry that does not name the compiler's embedded runtime by version, bundled source, and archive and shell hashes: a std rebuild or a compiler upgrade makes that entry stale, not corrupt. Reef then runs bounded local-first resolution. `reef export-bundle` and `reef install --from-lockfile` read the lock without that assessment (chelis#3025).
 
 If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
 
-A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+A locked hash failure of any other package, or an unavailable origin, is an integrity failure. Reef does not search for replacement bytes after that failure.
 
 Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
 

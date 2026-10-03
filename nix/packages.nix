@@ -7,11 +7,14 @@
 }:
 let
   source = import ./source.nix { inherit lib root; };
+  # `packages` carries packages/chelis-std, which the chelis-std-bundle build
+  # script packs into the runtime the compiler embeds.
   crateSource = import ./source.nix {
     inherit lib root;
     includeRoots = [
       "crates"
       "grammars"
+      "packages"
       "tree-sitter-chelis"
     ];
   };
@@ -40,6 +43,10 @@ let
         "chelis-cove" = attrs: {
           src = crateSource;
           sourceRoot = "chelis-source/crates/chelis-cove";
+        };
+        "chelis-std-bundle" = attrs: {
+          src = crateSource;
+          sourceRoot = "chelis-source/crates/chelis-std-bundle";
         };
         "cvc5-sys" = attrs: {
           nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [

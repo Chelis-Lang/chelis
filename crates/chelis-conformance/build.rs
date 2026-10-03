@@ -12,7 +12,7 @@
 //! Asset regeneration is `scripts/regenerate_conformance_assets.py` (repo root),
 //! which copies the live `agent-skills/` into `assets/`. The build.rs
 //! intentionally does not shell out — the assets live in the repo as committed
-//! files, exactly like `chelis-std-bundle`'s `dist/`.
+//! files.
 
 use std::path::PathBuf;
 

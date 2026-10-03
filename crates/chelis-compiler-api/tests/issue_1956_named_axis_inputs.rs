@@ -22,7 +22,12 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
         format!("module Probe.Values\nexport (total)\n{library}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     // Five discarded draws on their own keys; under explicit keys they do not
     // move the returned draw, which is keyed by `key_from_seed(42)` alone.
     let draws = (0..5)

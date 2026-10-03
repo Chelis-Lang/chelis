@@ -643,7 +643,7 @@ fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
         root.join("reef.toml"),
         format!(
             "schema = \"2\"\n\n[package]\nname = \"explicit-bundled-runtime\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\nchelis-std = \"={}\"\n",
-            chelis_reef::compiler_bundled_chelis_std_version()
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
         ),
     )
     .unwrap();
@@ -712,7 +712,7 @@ fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
         manifest.replace(
             &format!(
                 "chelis-std = \"={}\"",
-                chelis_reef::compiler_bundled_chelis_std_version()
+                chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
             ),
             "chelis-std = \"=999.0.0\"",
         ),

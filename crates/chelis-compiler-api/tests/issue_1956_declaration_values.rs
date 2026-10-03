@@ -133,7 +133,12 @@ fn linked_context(files: &[(&str, &str)]) -> chelis_compiler_api::CompiledContex
     for (name, source) in files {
         std::fs::write(directory.path().join("src").join(name), source).unwrap();
     }
-    chelis_compiler_api::compile_reef_context(directory.path(), directory.path()).unwrap()
+    chelis_compiler_api::compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap()
 }
 
 fn selected_context_out(

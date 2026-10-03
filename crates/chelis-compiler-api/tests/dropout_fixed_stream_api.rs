@@ -99,7 +99,12 @@ fn concrete_static_rate_exported_library_call_survives_context_decode() {
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static-rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n").unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let decoded =
         chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
     let source = format!(
@@ -132,7 +137,12 @@ fn compiled_static_rate_exported_library_call_survives_context_decode() {
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static-rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n").unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let decoded =
         chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
     let source = "module Probe.Client\nimport Probe.Draw (keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = keep(key_from_seed(7i64), x, 0.5f32)\n";
@@ -504,7 +514,12 @@ fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
                 format!("module Probe.Draw\nexport (loss)\n{definition}"),
             )
             .unwrap();
-            let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+            let context = compile_reef_context(
+                directory.path(),
+                directory.path(),
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            )
+            .unwrap();
             let bytes = context.encode().unwrap();
             let decoded = chelis_compiler_api::context::CompiledContext::decode(&bytes).unwrap();
             for count in [2, 3] {
@@ -638,7 +653,12 @@ fn host_only_random_source_does_not_cache_the_first_callers_key() {
         format!("module Probe.Draw\nexport (draw)\n{definition}\n"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let bytes = context.encode().unwrap();
     let decoded = chelis_compiler_api::context::CompiledContext::decode(&bytes).unwrap();
     assert_ne!(mask(keys(42).0)[..4], mask(keys(7).0)[..4]);
@@ -975,7 +995,12 @@ fn checked_extent_dropout_context_cache_keeps_claims_and_fresh_replay() {
     std::fs::write(directory.path().join("src/draw.ch"),
         "module Probe.Draw\nexport (draw, loss)\ndef checked[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef draw[n](k: key, x: tensor[n, f32]) -> tensor[16, 2, f32] = dropout(k, checked(x), 0.5f32)\ndef loss[n](k: key, x: tensor[n, f32]) -> tensor[f32] = sum(sum(draw(k, x), 0), 0)\n"
     ).unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let wire = context.encode().unwrap();
     let decoded = chelis_compiler_api::context::CompiledContext::decode(&wire).unwrap();
     let (_, k2) = two_keys();
@@ -1220,7 +1245,12 @@ fn checked_library_context_and_prepared_context_preserve_raw_key_binding() {
     std::fs::write(directory.path().join("src/draw.ch"),
         "module Probe.Draw\nexport (draw)\ndef draw(k: key, x: tensor[32, f32]) -> tensor[32, f32] = dropout(k, x, 0.5f32)\n"
     ).unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let cold_wire = context.encode().unwrap();
     let ones = std::iter::repeat_n("1.0f32", 32)
         .collect::<Vec<_>>()
@@ -1307,7 +1337,12 @@ fn assert_explicit_drop_context_parity(
         format!("module Probe.Draw\nexport (draw)\n{definition}\n"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let wire = context.encode().unwrap();
     let decoded = chelis_compiler_api::context::CompiledContext::decode(&wire).unwrap();
     let client = format!("module Probe.Eval\nimport Probe.Draw (draw)\n{main}");
@@ -1767,7 +1802,12 @@ fn function_library_contexts() -> [CompiledContext; 2] {
         format!("module Fnlib.Draw\nexport (f)\n{NAMES_SAMPLED}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     [context, decoded]
 }
@@ -2004,7 +2044,12 @@ fn draw_library_contexts() -> [CompiledContext; 2] {
         ),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     [context, decoded]
 }
@@ -2361,7 +2406,12 @@ fn issue_2405_library_exporting_a_draw_free_hessian_keeps_its_importers() {
         format!("module Probe.Calc\nexport (cube, hess)\n{CUBE_SLOPE_HESS}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let decoded =
         chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
     let cube_only = "module Probe.Client\nimport Probe.Calc (cube)\ndef main() = tensor_to_scalar(cube(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])))\n";

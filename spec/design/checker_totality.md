@@ -2630,8 +2630,8 @@ it is honest**, where a complete or authored-binder header is honest by
    binder-list declaration in `packages/chelis-std/` and `examples/`; the
    implementer's first Slice A step is to run the rigid check over the
    stdlib and confirm exactly that list reddens. A stdlib source change
-   regenerates the bundle and commits `reef.lock` and the tracked `dist/`
-   artifacts. No stdlib or example source declares a partial header (a
+   reaches the embedded bundle when the compiler builds; nothing generated
+   is committed. No stdlib or example source declares a partial header (a
    `def` with an annotated parameter and no result type): zero in both
    trees, so item 2 changes no shipped schedule, and no top-level value in
    either tree nests a lambda that names a top-level `def`, so item 3

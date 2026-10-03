@@ -71,6 +71,7 @@ use chelis_reef::{
     LockfileInstallError, ReefLock, RemoteOriginParseError, parse_remote_origin,
 };
 use chelis_shell::PackageId;
+use chelis_std_bundle::{BUNDLED_CHELIS_STD_VERSION, CHELIS_STD_ARCHIVE, CHELIS_STD_SHELL};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
@@ -83,12 +84,28 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const CURRENT_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CURRENT_COMPILER_PIN: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
-/// The chelis monorepo root (two levels up from `crates/chelis-cli`).
-fn monorepo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("monorepo root must exist")
+/// A monorepo layout under `dir` whose `packages/chelis-std` carries the real
+/// manifest and, in `dist/`, the archive and shell this binary embeds: the
+/// pair `chelis reef build` writes for the staged runtime inputs. The
+/// repository's own `packages/chelis-std` has no `dist/`.
+fn staged_monorepo(dir: &Path) -> PathBuf {
+    let monorepo = dir.join("monorepo");
+    let package = monorepo.join("packages/chelis-std");
+    fs::create_dir_all(package.join("dist")).expect("mkdir staged dist");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std/reef.toml"),
+        package.join("reef.toml"),
+    )
+    .expect("copy chelis-std manifest");
+    let stem = format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}");
+    fs::write(
+        package.join(format!("dist/{stem}.tar.zst")),
+        CHELIS_STD_ARCHIVE,
+    )
+    .expect("write staged archive");
+    fs::write(package.join(format!("dist/{stem}.chb")), CHELIS_STD_SHELL)
+        .expect("write staged shell");
+    monorepo
 }
 
 // ============================================================
@@ -516,6 +533,7 @@ fn oracle_install_from_github_populates_field() {
 fn oracle_install_from_monorepo_leaves_field_none() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
+    let monorepo = staged_monorepo(dir.path());
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -525,8 +543,8 @@ fn oracle_install_from_monorepo_leaves_field_none() {
             "reef",
             "install",
             "--from-monorepo",
-            monorepo_root().to_str().unwrap(),
-            "chelis-std=0.4.0",
+            monorepo.to_str().unwrap(),
+            &format!("chelis-std={BUNDLED_CHELIS_STD_VERSION}"),
         ])
         .assert()
         .success();

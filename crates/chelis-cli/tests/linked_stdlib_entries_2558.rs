@@ -53,7 +53,7 @@ fn package() -> (TempDir, PathBuf) {
         &format!(
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n\n[dependencies]\nchelis-std = {{ version = \"{}\" }}\n",
             env!("CARGO_PKG_VERSION"),
-            chelis_reef::compiler_bundled_chelis_std_version(),
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
         ),
     );
     write(&root.join("src/main.ch"), MAIN_MODULE);

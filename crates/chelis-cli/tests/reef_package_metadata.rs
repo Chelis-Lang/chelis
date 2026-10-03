@@ -419,9 +419,9 @@ fn source_archive_contains_only_declared_metadata_with_canonical_headers() {
     fs::write(root.join("LEGAL.txt"), b"license bytes").unwrap();
     fs::write(root.join("README-undiscovered.md"), b"must stay out").unwrap();
 
-    let first = build_package(root).unwrap();
+    let first = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let first_bytes = fs::read(&first.archive_path).unwrap();
-    let second = build_package(root).unwrap();
+    let second = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let second_bytes = fs::read(&second.archive_path).unwrap();
     assert_eq!(first_bytes, second_bytes);
 
@@ -446,7 +446,7 @@ fn source_archive_contains_only_declared_metadata_with_canonical_headers() {
         .unwrap()
         .replace("Archive metadata", "Changed archive metadata");
     fs::write(root.join("reef.toml"), changed_manifest).unwrap();
-    let changed = build_package(root).unwrap();
+    let changed = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     assert_eq!(changed.package, second.package);
     assert_ne!(fs::read(changed.archive_path).unwrap(), second_bytes);
 }
@@ -460,7 +460,7 @@ fn duplicate_declared_and_source_paths_produce_one_member_each() {
         "license-file = \"src/NOTICE.md\"\nreadme = \"src/NOTICE.md\"",
     );
     fs::write(root.join("src/NOTICE.md"), b"one snapshot").unwrap();
-    let build = build_package(root).unwrap();
+    let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let members = archive_members(&build.archive_path);
     assert_eq!(
         members
@@ -478,7 +478,7 @@ fn metadata_paths_do_not_widen_the_existing_source_root_grammar() {
     let root = directory.path();
     stage_buildable_package(root, "");
     fs::write(root.join("src/CON.txt"), b"existing source member").unwrap();
-    let build = build_package(root).unwrap();
+    let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let members = archive_members(&build.archive_path);
     assert_eq!(members["src/CON.txt"].0, b"existing source member");
 }
@@ -491,7 +491,7 @@ fn portable_spelling_collisions_fail_instead_of_creating_duplicate_members() {
     fs::write(root.join("src/README.md"), b"declared bytes").unwrap();
     fs::write(root.join("src/Readme.md"), b"case collision").unwrap();
     if cfg!(target_os = "macos") {
-        let build = build_package(root).unwrap();
+        let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
         let members = archive_members(&build.archive_path);
         assert_eq!(
             members
@@ -501,7 +501,7 @@ fn portable_spelling_collisions_fail_instead_of_creating_duplicate_members() {
             1
         );
     } else {
-        let error = build_package(root).unwrap_err();
+        let error = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap_err();
         assert!(error.contains("portable spelling collision"), "{error}");
     }
 }
@@ -514,7 +514,7 @@ fn distinct_declared_hard_link_paths_remain_distinct_members() {
     stage_buildable_package(root, "license-file = \"LICENSE\"\nreadme = \"README.md\"");
     fs::write(root.join("LICENSE"), b"shared inode bytes").unwrap();
     fs::hard_link(root.join("LICENSE"), root.join("README.md")).unwrap();
-    let build = build_package(root).unwrap();
+    let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let members = archive_members(&build.archive_path);
     assert_eq!(members["LICENSE"].0, b"shared inode bytes");
     assert_eq!(members["README.md"].0, b"shared inode bytes");
@@ -571,7 +571,7 @@ fn metadata_failure_preserves_the_previous_archive() {
     let root = directory.path();
     stage_buildable_package(root, "readme = \"README.md\"");
     fs::write(root.join("README.md"), b"valid readme").unwrap();
-    let build = build_package(root).unwrap();
+    let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let before = fs::read(&build.archive_path).unwrap();
     let unowned = root.join("dist/.metadata-oracle-0.1.0.tar.zst.reef-tmp-unowned");
     fs::write(&unowned, b"foreign sibling").unwrap();
@@ -581,7 +581,7 @@ fn metadata_failure_preserves_the_previous_archive() {
         vec![b'x'; METADATA_FILE_MAX_BYTES + 1],
     )
     .unwrap();
-    let error = build_package(root).unwrap_err();
+    let error = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap_err();
     assert!(
         error.contains("README.md") && error.contains("4194304"),
         "{error}"
@@ -712,7 +712,7 @@ fn metadata_does_not_enter_lock_or_source_selection() {
     let mut root_manifest = fs::read_to_string(root.join("reef.toml")).unwrap();
     root_manifest.push_str("\n[dependencies]\nmetadata-dep = { path = \"dep\" }\n");
     fs::write(root.join("reef.toml"), root_manifest).unwrap();
-    let build = build_package(root).unwrap();
+    let build = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     let lock = fs::read_to_string(root.join("reef.lock")).unwrap();
     assert!(lock.contains("kind = \"path\"") && lock.contains("path = \"dep\""));
     for field in [
@@ -743,7 +743,7 @@ fn metadata_does_not_enter_lock_or_source_selection() {
 
     let archive_before = fs::read(&build.archive_path).unwrap();
     fs::write(root.join("README.md"), b"changed metadata bytes").unwrap();
-    let rebuilt = build_package(root).unwrap();
+    let rebuilt = build_package(root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     assert!(
         fs::read(&rebuilt.archive_path).unwrap() != archive_before,
         "declared metadata must change the source archive"

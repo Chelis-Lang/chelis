@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, Metadata};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 #[cfg(not(feature = "chelis-prove"))]
 use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
 use chelis_surf::ast::{Decl, Expr, Literal, Param, TensorPrecision, TypeExpr};
@@ -232,7 +233,7 @@ fn compute_compiler_dependency_graph(
     path: &Path,
 ) -> Result<Option<chelis_reef::CompilerDependencyGraph>, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("ch") => chelis_reef::dependency_graph_for_file(path),
+        Some("ch") => chelis_reef::dependency_graph_for_file(path, &EMBEDDED_RUNTIME),
         Some("dp") => Ok(None),
         _ => Ok(None),
     }
@@ -561,8 +562,8 @@ fn prove_surf_file(
         let _ = (&flat, &parsed);
         let package_root = resolve_package_root(path, options.package);
         let linked_program = match &package_root {
-            Some(root) => chelis_reef::prepare_program_for_eval_file(path, root),
-            None => chelis_reef::prepare_program_for_file(path),
+            Some(root) => chelis_reef::prepare_program_for_eval_file(path, root, &EMBEDDED_RUNTIME),
+            None => chelis_reef::prepare_program_for_file(path, &EMBEDDED_RUNTIME),
         };
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {

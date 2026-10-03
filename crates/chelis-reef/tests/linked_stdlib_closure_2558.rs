@@ -5,8 +5,7 @@
 
 use chelis_reef::{
     DependencyGraphStatus, EntryImports, PreparedReefGraph, SourceDigest, compile_with_reef_graph,
-    compiler_bundled_chelis_std_version, dependency_graph_for_file, prepare_reef_graph,
-    rewrite_entry_decls_with_reef_graph,
+    dependency_graph_for_file, prepare_reef_graph, rewrite_entry_decls_with_reef_graph,
 };
 use chelis_surf::ast::Decl;
 use std::collections::BTreeSet;
@@ -59,7 +58,7 @@ fn manifest(name: &str, prefix: &str, extra_dependencies: &str) -> String {
     format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"{prefix}\"\n\n[dependencies]\nchelis-std = {{ version = \"{}\" }}\n{extra_dependencies}",
         env!("CARGO_PKG_VERSION"),
-        compiler_bundled_chelis_std_version(),
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
     )
 }
 
@@ -74,7 +73,7 @@ fn package(main: &str) -> (TempDir, PathBuf) {
 }
 
 fn prepared(root: &Path) -> PreparedReefGraph {
-    prepare_reef_graph(root).expect("prepare graph")
+    prepare_reef_graph(root, &chelis_std_bundle::EMBEDDED_RUNTIME).expect("prepare graph")
 }
 
 fn modules(names: &[&str]) -> BTreeSet<String> {
@@ -133,7 +132,11 @@ fn a_package_that_imports_nothing_links_no_stdlib_module() {
     let (_dir, root) = package(NO_IMPORT_MODULE);
     let graph = prepared(&root);
     // chelis-std is in the graph; it is only not linked.
-    closure_row(&graph.source_digests().expect("digests"));
+    closure_row(
+        &graph
+            .source_digests(&chelis_std_bundle::EMBEDDED_RUNTIME)
+            .expect("digests"),
+    );
     assert_eq!(graph.linked_stdlib_modules(), BTreeSet::new());
     assert!(
         graph.linked_stdlib_decls.is_empty(),
@@ -218,11 +221,16 @@ fn an_entry_extends_the_linked_modules_and_the_digests_name_the_set() {
     let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET).expect("parse snippet");
 
     // Entries the package already covers leave the graph as it is.
-    let unchanged = graph.covering(&EntryImports::none()).expect("cover none");
+    let unchanged = graph
+        .covering(&EntryImports::none(), &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("cover none");
     assert!(matches!(unchanged, std::borrow::Cow::Borrowed(_)));
 
     let covered = graph
-        .covering(&EntryImports::from_decls(&snippet))
+        .covering(
+            &EntryImports::from_decls(&snippet),
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
         .expect("cover the snippet")
         .into_owned();
     assert_eq!(
@@ -235,8 +243,12 @@ fn an_entry_extends_the_linked_modules_and_the_digests_name_the_set() {
     );
 
     // The same sources with a different linked set must key differently.
-    let before = graph.source_digests().expect("digests");
-    let after = covered.source_digests().expect("digests");
+    let before = graph
+        .source_digests(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("digests");
+    let after = covered
+        .source_digests(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("digests");
     assert_ne!(closure_row(&before).sha256, closure_row(&after).sha256);
     let without_row = |digests: &[SourceDigest]| {
         digests
@@ -254,7 +266,8 @@ fn compiling_an_entry_links_the_stdlib_modules_it_imports() {
     let (_dir, root) = package(NO_IMPORT_MODULE);
     let graph = prepared(&root);
     let snippet = chelis_surf::parser::parse_str(JSON_SNIPPET).expect("parse snippet");
-    let program = compile_with_reef_graph(&graph, &snippet).expect("compile snippet");
+    let program = compile_with_reef_graph(&graph, &snippet, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("compile snippet");
     assert_eq!(
         modules_named_by(&program.stdlib_decls, &["Std.Io.Json", "Std.Text"]),
         modules(&["Std.Io.Json", "Std.Text"])
@@ -282,9 +295,12 @@ fn rewriting_an_entry_against_a_graph_without_its_imports_is_refused() {
 #[test]
 fn the_dependency_graph_walks_only_linked_stdlib_modules() {
     let (_dir, root) = package(JSON_MODULE);
-    let graph = dependency_graph_for_file(&root.join("src/main.ch"))
-        .expect("dependency graph")
-        .expect("a package module has a dependency graph");
+    let graph = dependency_graph_for_file(
+        &root.join("src/main.ch"),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("dependency graph")
+    .expect("a package module has a dependency graph");
     assert_eq!(graph.status, DependencyGraphStatus::Complete);
     let reached = graph
         .declarations
@@ -301,9 +317,12 @@ fn the_dependency_graph_walks_only_linked_stdlib_modules() {
     );
 
     let (_dir, root) = package(NO_IMPORT_MODULE);
-    let graph = dependency_graph_for_file(&root.join("src/main.ch"))
-        .expect("dependency graph")
-        .expect("a package module has a dependency graph");
+    let graph = dependency_graph_for_file(
+        &root.join("src/main.ch"),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("dependency graph")
+    .expect("a package module has a dependency graph");
     assert_eq!(graph.status, DependencyGraphStatus::Complete);
     assert!(
         graph

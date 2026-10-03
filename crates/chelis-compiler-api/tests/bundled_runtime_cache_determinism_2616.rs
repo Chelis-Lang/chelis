@@ -16,6 +16,7 @@ use std::process::Command;
 
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
 use chelis_reef::{prepare_program_for_file, prepare_reef_graph_cached};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 use tempfile::TempDir;
 
 const WORKER_MODE: &str = "CHELIS_2616_WORKER_MODE";
@@ -37,7 +38,7 @@ fn make_locked_package(parent: &Path) -> PathBuf {
             "[package]\nname = \"bundled-runtime-2616\"\nversion = \"0.1.0\"\n\
              compiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"BundledRuntime\"\n\n\
              [dependencies]\nchelis-std = {{ version = \"{}\" }}\n",
-            chelis_reef::compiler_bundled_chelis_std_version()
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
         ),
     )
     .expect("write reef.toml");
@@ -141,12 +142,13 @@ fn bundled_runtime_worker() {
     let reef_home = PathBuf::from(std::env::var_os("CHELIS_REEF_HOME").expect("reef home"));
     fs::create_dir_all(&result_dir).expect("create result directory");
     if mode == "lock" {
-        prepare_program_for_file(&package_root.join("src/main.ch"))
+        prepare_program_for_file(&package_root.join("src/main.ch"), &EMBEDDED_RUNTIME)
             .expect("prepare the entry program")
             .expect("the entry file is inside a package");
         return;
     }
-    let prepared = prepare_reef_graph_cached(&package_root).expect("prepare package graph");
+    let prepared =
+        prepare_reef_graph_cached(&package_root, &EMBEDDED_RUNTIME).expect("prepare package graph");
     assert!(
         !prepared.linked_stdlib_decls.is_empty(),
         "the locked package graph must contain the bundled runtime"
@@ -161,7 +163,8 @@ fn bundled_runtime_worker() {
         prepared.encode().expect("encode prepared graph"),
     )
     .expect("write prepared-graph encoding");
-    let context = compile_reef_context(&reef_home, &package_root).expect("compile package context");
+    let context = compile_reef_context(&reef_home, &package_root, &EMBEDDED_RUNTIME)
+        .expect("compile package context");
     fs::write(
         result_dir.join(ARTIFACTS[2]),
         context.encode().expect("encode compiled context"),
