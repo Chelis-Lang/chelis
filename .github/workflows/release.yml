@@ -76,9 +76,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
       # `--features smt` links cvc5 so the shipped `chelis prove` uses
       # the SMT solver instead of degrading to the solver-free fuzz path
       # (chelis#422). WI-11: the cvc5-sys build forces GMP and disables
@@ -211,9 +208,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
@@ -330,7 +324,7 @@ jobs:
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
-    # cvc5 compile on a cache miss. Raised from 30 for chelis#1004: a
+    # cvc5 compile (release builds keep no Rust cache). Raised from 30 for chelis#1004: a
     # measured cold build is ~14m here, and a fetch failure aborts in ~3m,
     # so three attempts fit in ~21m -- but 30 left no margin for a slow
     # runner on top of that.
@@ -351,9 +345,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
 
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.

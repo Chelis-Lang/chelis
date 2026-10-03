@@ -56,6 +56,7 @@ concurrency:
 
 # Candidate code also runs on workflow_dispatch in the base branch context.
 # Limit the cache capability independently of GITHUB_TOKEN permissions.
+# The Hull build restores the family ci-cache-warm.yml writes from main.
 cache-mode: read
 
 permissions:
@@ -707,9 +708,12 @@ jobs:
         uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: conformance
+          save-if: false
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a

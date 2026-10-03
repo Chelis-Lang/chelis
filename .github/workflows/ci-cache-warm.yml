@@ -1,0 +1,425 @@
+name: CI Cache Warm
+
+# Writes the Rust build caches that pull-request and dispatch CI restore.
+#
+# CI and Hull run candidate code, including on workflow_dispatch in the base
+# branch's cache scope, so they hold `cache-mode: read` (chelis#2887) and save
+# nothing. The cache-mode key takes only a literal, so the main push that
+# merges a change cannot write from those workflows either. This workflow
+# writes each cache family instead, from main's own code only: it has no
+# pull_request trigger, every job requires refs/heads/main, and checkout takes
+# the pushed commit.
+#
+# Each job mirrors one consumer family: the same environment, setup and
+# Swatinem/rust-cache inputs, so the key it saves is the key the consumer
+# computes, and the consumer's own build commands. rust-cache keeps dependency
+# artifacts and drops the workspace crates, so a family's key changes only
+# with Cargo manifests, the lockfile, the toolchain or the job environment.
+# The push filter below names those inputs; the weekly run refreshes anything
+# a filter missed. A writer saves only after a successful build: rust-cache
+# never re-saves a key it restored exactly, so a failed run's partial entry
+# would otherwise stay live until a key input changed. scripts/test_ci_cache_policy.py locks the family census,
+# the single writer per family and the key parity.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - .github/workflows/ci-cache-warm.yml
+      - .github/actions/setup-project-ci/**
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+cache-mode: write
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cache-warm
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-rust:
+    name: Warm Rust Policy (Linux)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: lint-rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Gate (lint-and-unit subset)
+        run: chelis-gate lint-and-unit
+
+  linux-workspace:
+    name: Warm Fast Tests (Linux)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: linux-workspace
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Gate (units and reviewed integrations)
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: chelis-gate ci-fast
+
+  docs:
+    name: Warm Docs
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: docs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+
+      - name: Verify shared skill distribution
+        run: cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity
+
+      - name: Validate package SKILL and mdBook examples
+        run: cargo test -p chelis-e2e --test skill_suite
+
+  smt-build:
+    name: Warm SMT Feature Build (Linux)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+        with:
+          profile: ci-smt
+
+      # The same prebuilt-cvc5 path as ci.yml's smt-build job. Unlike that
+      # job, this one may save the Actions-cache fallback after a cold build.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
+
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
+        if: steps.cvc5fetch.outputs.warm != 'true'
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: smt-smt-build
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build smt feature
+        run: cargo build -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Run cvc5 engine smoke tests
+        run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
+
+      - name: Run SMT integration containment controls
+        run: cargo test -p chelis-prove --features smt --test integration_solver_isolation
+
+      - name: Run the Deep-surface obligation tier tests
+        run: cargo test -p chelis-cli --features smt --test prove_deep_obligations
+
+      - name: Clippy over the cvc5 feature configuration
+        run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+
+  smt-build-glibc231:
+    name: Warm SMT Feature Build (Linux, glibc 2.31)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: python:3.11.13-bullseye@sha256:df0bd610af061603b29d63eb82027b64d5a3f15506e39270422b10b2a55079fc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build prerequisites
+        run: python3 scripts/ci_apt_get.py --debian-bullseye-snapshot --no-sudo --no-install-recommends build-essential m4 cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
+
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-glibc231 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
+        if: steps.cvc5fetch.outputs.warm != 'true'
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: smt-glibc231
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build chelis-cli (release, smt)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+  backend-sanitizers:
+    name: Warm Backend Sanitizers
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: backend-sanitizers
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Backend tests under ASan/UBSan
+        run: cargo test -p chelis-backend-c --lib
+
+      - name: Backend doctests
+        run: cargo test -p chelis-backend-c --doc
+
+  conformance:
+    name: Warm Hull Conformance Gate (Linux)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: conformance
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build chelis (release)
+        run: cargo build --release -p chelis-cli --bin chelis
+
+  python-wheel-smoke:
+    name: Warm Python Distributions (Linux)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Cache the Python distribution build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: python-wheel-smoke
+          workspaces: . -> target/python-wheel-smoke/cargo
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and exercise Python distributions
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/python-wheel-smoke/cargo
+          CARGO_INCREMENTAL: 0
+        run: >-
+          python bindings/python/tests/python_wheel_smoke.py
+          --crossed-bundle
+          --receipt "$CARGO_TARGET_DIR/wheel-smoke.json"
+
+  diagnostic-kind-oracle:
+    name: Warm Diagnostic Kind Mutation Oracle
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: target/diagnostic-kind-oracle
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and mutation-oracle build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: diagnostic-kind-oracle
+          workspaces: . -> target/diagnostic-kind-oracle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run C2.2 controlled mutations
+        run: python scripts/diagnostic_kind_oracle.py

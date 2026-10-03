@@ -2288,6 +2288,15 @@ reason = "script-unit holds this workflow's reviewed registration as running no 
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
+prefix = ".github/workflows/ci-cache-warm.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit locks the cache writer's main-only triggers, its single writer per family and its key parity with every consumer (scripts/test_ci_cache_policy.py)"
+tracking_issue = "chelis#3034"
+
+[[path_rule]]
 prefix = ".github/workflows/conformance-nightly.yml"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3346,6 +3355,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "CI cadence and stable dependency assertions run in script-unit"
 tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_cache_policy.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Rust build cache policy across every workflow runs in script-unit"
+tracking_issue = "chelis#3034"
 
 [[path_rule]]
 prefix = "scripts/gate.py"

@@ -78,6 +78,10 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: drift-chelis
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build chelis-cli (release)
         run: cargo build --release -p chelis-cli --features sealed-runtime
@@ -540,8 +544,10 @@ jobs:
         if: matrix.type == 'cargo'
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           workspaces: shell
           shared-key: drift-${{ matrix.repo }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: false
 
       # Run the shell's cargo gate verbatim (from its ci.yml workspace-gate),
