@@ -440,7 +440,9 @@ fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
     let ran = child
         .wait_with_output()
         .map_err(|error| refuse(format!("its floating-point canary did not run: {error}")))?;
-    let written = writer.join().expect("the canary input writer does not panic");
+    let written = writer
+        .join()
+        .expect("the canary input writer does not panic");
     let printed = String::from_utf8_lossy(&ran.stdout);
     if !ran.status.success() || written.is_err() {
         return Err(refuse(format!(

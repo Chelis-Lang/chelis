@@ -510,7 +510,12 @@ macro_rules! impl_reduced_float_accumulation {
     };
 }
 
-impl_reduced_float_accumulation!(half::f16, finalize_f16, ieee_narrow::f64_to_f16_bits_rne, 0x7e00);
+impl_reduced_float_accumulation!(
+    half::f16,
+    finalize_f16,
+    ieee_narrow::f64_to_f16_bits_rne,
+    0x7e00
+);
 impl_reduced_float_accumulation!(
     half::bf16,
     finalize_bf16,

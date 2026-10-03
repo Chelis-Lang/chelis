@@ -1,10 +1,10 @@
 use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
 
-use chelis_crmath::profile::{Row, rows};
+use chelis_crmath::profile::{rows, Row};
 
 use super::{
-    RuntimeAccumulationOutput, chelis_tensor, finalize_bf16, finalize_f16, read_index_slot,
-    tensor_elem_size,
+    chelis_tensor, finalize_bf16, finalize_f16, read_index_slot, tensor_elem_size,
+    RuntimeAccumulationOutput,
 };
 
 #[test]
@@ -50,7 +50,7 @@ fn storage_bits(row: &Row) -> u64 {
             <half::bf16 as RuntimeAccumulationOutput<f64>>::from_accumulator(f64_operand())
                 .to_bits()
         }
-        other => unreachable!("{other:?} is not a storage conversion"),
+        _ => unreachable!("{} is not a storage conversion", row.primitive),
     };
     u64::from(bits)
 }
@@ -65,7 +65,12 @@ fn conversion_rows() -> Vec<&'static Row> {
 #[test]
 fn storage_finalization_matches_every_conversion_row() {
     let rows = conversion_rows();
-    for (name, width) in [("to_f16", 32), ("to_bf16", 32), ("to_f16", 64), ("to_bf16", 64)] {
+    for (name, width) in [
+        ("to_f16", 32),
+        ("to_bf16", 32),
+        ("to_f16", 64),
+        ("to_bf16", 64),
+    ] {
         assert!(
             rows.iter()
                 .any(|row| row.primitive.name == name && row.primitive.width == width),
@@ -75,9 +80,20 @@ fn storage_finalization_matches_every_conversion_row() {
     let bad: Vec<String> = rows
         .iter()
         .filter(|row| storage_bits(row) != row.expected)
-        .map(|row| format!("{row}: got 0x{:04x}, expected 0x{:04x}", storage_bits(row), row.expected))
+        .map(|row| {
+            format!(
+                "{row}: got 0x{:04x}, expected 0x{:04x}",
+                storage_bits(row),
+                row.expected
+            )
+        })
         .collect();
-    assert!(bad.is_empty(), "{} rows differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }
 
 /// chelis#3041: an f64 within 2^-30 of a bf16 midpoint, above it. A conversion that

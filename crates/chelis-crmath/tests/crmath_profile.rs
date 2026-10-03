@@ -23,20 +23,42 @@ fn f64_operand(row: &Row, index: usize) -> f64 {
 }
 
 fn finalize_f32(value: f32) -> u64 {
-    u64::from(if value.is_nan() { CANONICAL_F32 } else { value.to_bits() })
+    u64::from(if value.is_nan() {
+        CANONICAL_F32
+    } else {
+        value.to_bits()
+    })
 }
 
 fn finalize_f64(value: f64) -> u64 {
-    if value.is_nan() { CANONICAL_F64 } else { value.to_bits() }
+    if value.is_nan() {
+        CANONICAL_F64
+    } else {
+        value.to_bits()
+    }
 }
 
 /// The row's result in this crate's Rust lane, or `None` for a primitive whose
 /// production Rust lane is the runtime's (the f16 and bf16 storage conversions, which
 /// `chelis-runtime`'s tests check against these rows). `raw` skips NaN finalization.
+// `a - a` and `a == a` are the expression shapes the rows witness.
+#[allow(clippy::eq_op)]
 fn rust_lane(row: &Row, raw: bool) -> Option<u64> {
     let name = row.primitive.name;
-    let fin32 = |value: f32| if raw { u64::from(value.to_bits()) } else { finalize_f32(value) };
-    let fin64 = |value: f64| if raw { value.to_bits() } else { finalize_f64(value) };
+    let fin32 = |value: f32| {
+        if raw {
+            u64::from(value.to_bits())
+        } else {
+            finalize_f32(value)
+        }
+    };
+    let fin64 = |value: f64| {
+        if raw {
+            value.to_bits()
+        } else {
+            finalize_f64(value)
+        }
+    };
     if matches!(name, "to_f16" | "to_bf16") {
         return None;
     }
@@ -60,7 +82,6 @@ fn rust_lane(row: &Row, raw: bool) -> Option<u64> {
             "add_zero" => fin32(a + 0.0),
             "sub_self" => fin32(a - a),
             "mul_zero" => fin32(a * 0.0),
-            #[allow(clippy::eq_op)]
             "self_eq" => u64::from(a == a),
             "gt_max" => u64::from(a > f32::MAX),
             "widen" => fin64(f64::from(a)),
@@ -93,7 +114,6 @@ fn rust_lane(row: &Row, raw: bool) -> Option<u64> {
             "add_zero" => fin64(a + 0.0),
             "sub_self" => fin64(a - a),
             "mul_zero" => fin64(a * 0.0),
-            #[allow(clippy::eq_op)]
             "self_eq" => u64::from(a == a),
             "gt_max" => u64::from(a > f64::MAX),
             #[allow(clippy::cast_possible_truncation)]
@@ -118,10 +138,16 @@ fn rust_lane_matches_every_row_it_computes() {
         .filter_map(|row| {
             let got = rust_lane(row, false)?;
             checked += 1;
-            (got != row.expected).then(|| format!("{row}: Rust gives 0x{got:x}, table 0x{:x}", row.expected))
+            (got != row.expected)
+                .then(|| format!("{row}: Rust gives 0x{got:x}, table 0x{:x}", row.expected))
         })
         .collect();
-    assert!(bad.is_empty(), "{} rows differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
     assert!(checked > 2000, "only {checked} rows checked");
 }
 
@@ -165,9 +191,11 @@ fn rows_detect_the_rewrite_they_witness() {
             // A NaN passed through, payload and sign intact.
             (Obligation::CanonicalNan, _) => rust_lane(row, true),
             // Contraction: one rounding of a*b + c.
-            (Obligation::NoContraction, "mul_add") if row.primitive.width == 64 => {
-                Some(f64_operand(row, 0).mul_add(f64_operand(row, 1), f64_operand(row, 2)).to_bits())
-            }
+            (Obligation::NoContraction, "mul_add") if row.primitive.width == 64 => Some(
+                f64_operand(row, 0)
+                    .mul_add(f64_operand(row, 1), f64_operand(row, 2))
+                    .to_bits(),
+            ),
             (Obligation::NoContraction, "mul_add") => Some(u64::from(
                 f32_operand(row, 0)
                     .mul_add(f32_operand(row, 1), f32_operand(row, 2))
@@ -218,7 +246,9 @@ fn canary_driver_dispatches_every_c_primitive() {
 }
 
 fn expected_output() -> String {
-    canary_rows().map(|row| format!("{:x}\n", row.expected)).collect()
+    canary_rows()
+        .map(|row| format!("{:x}\n", row.expected))
+        .collect()
 }
 
 #[test]
@@ -229,7 +259,11 @@ fn canary_comparison_accepts_the_table_and_reports_each_planted_error() {
         let planted: String = canary_rows()
             .enumerate()
             .map(|(other, row)| {
-                let bits = if other == index { row.expected ^ 1 } else { row.expected };
+                let bits = if other == index {
+                    row.expected ^ 1
+                } else {
+                    row.expected
+                };
                 format!("{bits:x}\n")
             })
             .collect();
@@ -237,11 +271,21 @@ fn canary_comparison_accepts_the_table_and_reports_each_planted_error() {
         assert_eq!(reported.len(), 1, "{row}");
         assert!(std::ptr::eq(reported[0].row, row));
         let description = describe(&reported);
-        assert!(description.starts_with(row.obligation.name()), "{description}");
+        assert!(
+            description.starts_with(row.obligation.name()),
+            "{description}"
+        );
         assert!(description.contains(row.obligation.spec()), "{description}");
     }
-    let short: String = expected_output().lines().skip(1).map(|line| format!("{line}\n")).collect();
-    assert!(canary_mismatches(&short).is_err(), "a missing line is an error");
+    let short: String = expected_output()
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert!(
+        canary_mismatches(&short).is_err(),
+        "a missing line is an error"
+    );
     assert!(canary_mismatches(&format!("{}zz\n", expected_output())).is_err());
     assert!(count > 2000, "{count} canary rows");
 }

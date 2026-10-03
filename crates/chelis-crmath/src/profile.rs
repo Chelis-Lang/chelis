@@ -356,9 +356,17 @@ struct Bits {
 impl Bits {
     fn new(bits: u64, width: u32) -> Bits {
         if width == 32 {
-            Bits { bits, exponent: 8, fraction: 23 }
+            Bits {
+                bits,
+                exponent: 8,
+                fraction: 23,
+            }
         } else {
-            Bits { bits, exponent: 11, fraction: 52 }
+            Bits {
+                bits,
+                exponent: 11,
+                fraction: 52,
+            }
         }
     }
 
@@ -366,8 +374,16 @@ impl Bits {
         match result {
             Output::F64 => Some(Bits::new(bits, 64)),
             Output::F32 => Some(Bits::new(bits, 32)),
-            Output::F16 => Some(Bits { bits, exponent: 5, fraction: 10 }),
-            Output::Bf16 => Some(Bits { bits, exponent: 8, fraction: 7 }),
+            Output::F16 => Some(Bits {
+                bits,
+                exponent: 5,
+                fraction: 10,
+            }),
+            Output::Bf16 => Some(Bits {
+                bits,
+                exponent: 8,
+                fraction: 7,
+            }),
             Output::Bool => None,
         }
     }
@@ -457,14 +473,22 @@ fn parse_row(fixture: &str, line: &str) -> Result<Row, String> {
         };
         let (obligation, note) = note.split_once(": ").ok_or("no obligation")?;
         let obligation = Obligation::parse(obligation).ok_or("unknown obligation")?;
-        let operands = operands.iter().map(|text| hex(text)).collect::<Result<Vec<_>, _>>()?;
+        let operands = operands
+            .iter()
+            .map(|text| hex(text))
+            .collect::<Result<Vec<_>, _>>()?;
         (hex(expected)?, operands, obligation, note)
     } else {
         // Kernel fixtures: `function width input expected # note`.
         let [input, expected] = rest else {
             return Err("expected an input and a result".into());
         };
-        (hex(expected)?, vec![hex(input)?], Obligation::CorrectRounding, note)
+        (
+            hex(expected)?,
+            vec![hex(input)?],
+            Obligation::CorrectRounding,
+            note,
+        )
     };
     if operands.len() != primitive.arity {
         return Err(format!("{primitive} takes {} operands", primitive.arity));
