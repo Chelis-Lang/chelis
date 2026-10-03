@@ -177,6 +177,7 @@ fn nominal_function_field_rejects_at_abi_projection_before_boxing() {
     let identity = error.identity();
     assert!(matches!(identity.what, UnsupportedKind::HostAbi(_)));
     assert_eq!(identity.stage, Stage::Codegen("c"));
+    assert_eq!(identity.context, "C host ABI value selection");
     assert_eq!(identity.disposition, RejectionAuthorityKind::Unimplemented);
     assert_eq!(
         identity.tracking_issue.map(|issue| issue.number()),

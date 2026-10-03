@@ -71,7 +71,10 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
     );
 }
 
-fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug, CompilerError>) {
+fn assert_named_function_value_has_no_c_abi(
+    result: Result<impl std::fmt::Debug, CompilerError>,
+    expected_context: &str,
+) {
     let error = result.expect_err("a first-class named function must not acquire a C value ABI");
     assert_eq!(error.stage, "compile", "{error:?}");
     assert_eq!(error.errors.len(), 1, "{error:?}");
@@ -86,6 +89,13 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
         .expect("the C-private ABI rejection must retain its structured identity");
     assert!(matches!(identity.payload.what, UnsupportedKind::HostAbi(_)));
     assert_eq!(identity.payload.stage, Stage::Codegen("c"));
+    assert_eq!(identity.payload.context, expected_context);
+    if expected_context == "C host ABI callable-use projection" {
+        assert!(matches!(
+            &identity.payload.what,
+            UnsupportedKind::HostAbi(subject) if subject == "unresolved function value"
+        ));
+    }
     assert_eq!(
         identity.payload.disposition,
         RejectionAuthorityKind::Unimplemented
@@ -203,14 +213,20 @@ fn named_function_stored_in_adt_has_no_value_abi_across_public_compiler_apis() {
         "../../chelis-cli/tests/fixtures/compiled_value_ownership/reject_adt_function.ch"
     );
     for target in [CompileTarget::C, CompileTarget::Hip] {
-        assert_named_function_value_has_no_c_abi(compile(CompileRequest {
-            target,
-            ..c_request(source)
-        }));
-        assert_named_function_value_has_no_c_abi(compile_for_execution(CompileRequest {
-            target,
-            ..c_request(source)
-        }));
+        assert_named_function_value_has_no_c_abi(
+            compile(CompileRequest {
+                target,
+                ..c_request(source)
+            }),
+            "C host ABI value selection",
+        );
+        assert_named_function_value_has_no_c_abi(
+            compile_for_execution(CompileRequest {
+                target,
+                ..c_request(source)
+            }),
+            "C host ABI value selection",
+        );
     }
 }
 
@@ -220,8 +236,14 @@ fn returned_named_function_rejects_across_both_public_compiler_apis() {
                   def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
                   def choose() -> i8 -> i8 = increment\n\
                   out = print(\"ok\")\n";
-    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
-    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+    assert_named_function_value_has_no_c_abi(
+        compile(c_request(source)),
+        "C host ABI value selection",
+    );
+    assert_named_function_value_has_no_c_abi(
+        compile_for_execution(c_request(source)),
+        "C host ABI value selection",
+    );
 }
 
 #[test]
@@ -231,8 +253,14 @@ fn used_returned_named_function_rejects_before_an_unresolved_c_call_is_emitted()
                   def choose() -> i8 -> i8 = increment\n\
                   chosen = choose()\n\
                   out = print(chosen(cast(6, i8)))\n";
-    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
-    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+    assert_named_function_value_has_no_c_abi(
+        compile(c_request(source)),
+        "C host ABI value selection",
+    );
+    assert_named_function_value_has_no_c_abi(
+        compile_for_execution(c_request(source)),
+        "C host ABI value selection",
+    );
 }
 
 #[test]
@@ -294,8 +322,14 @@ fn dynamically_selected_named_callback_has_no_c_host_value_abi() {
                   def decrement(x: i8) -> i8 = sub(x, cast(1, i8))\n\
                   selected = if true then increment else decrement\n\
                   out = print(selected(cast(6, i8)))\n";
-    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
-    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+    assert_named_function_value_has_no_c_abi(
+        compile(c_request(source)),
+        "C host ABI callable-use projection",
+    );
+    assert_named_function_value_has_no_c_abi(
+        compile_for_execution(c_request(source)),
+        "C host ABI callable-use projection",
+    );
 }
 
 fn generic_access_source(dtype: &str, literal: &str) -> String {
