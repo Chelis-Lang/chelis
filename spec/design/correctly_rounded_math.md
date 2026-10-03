@@ -257,12 +257,63 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
 - The profile is `-O2 -ffp-contract=off -fno-fast-math` plus the target's required
   flags, the same strict profile `cross_lane_gate.md` PD2 defines, now the product
   default.
-- A selected compiler that does not honor the profile fails the build. The amalgamation's
-  `#error` guards catch fast-math and excess-precision injection at compile time. A
-  canary translation unit compiled with the exact argv detects contraction (a
-  non-inlinable `a*b+c` on operands where the fused and unfused results differ) and
-  flush-to-zero; it runs when the target can execute on the build host, and the build
-  fails if it reports a violation.
+- A selected compiler that does not honor the profile fails the build. A wrapper script
+  is opaque on the command line, so `toolchain::verify_compiler` observes the compiler
+  itself with the exact profile argv, in three steps. The predefined macros refuse fast
+  math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), and a dropped `-O2`
+  (`__OPTIMIZE__`). The amalgamation's `#error` guards refuse the same two modes and
+  excess-precision evaluation (`FLT_EVAL_METHOD` other than 0) when the canary compiles.
+  The canary then runs, and any bit it prints that differs from the profile refuses the
+  compiler, naming each broken obligation, its spec text, and its first broken row.
+
+**The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
+holds a closed list of the profile's obligations, each tied to the text it enforces:
+correct rounding ([05-OP-46]); IEEE exceptional values ([05-OP-46], [04-NUM-2]); the
+canonical NaN, signed zeros, and gradual underflow ([04-NUM-2]); one rounding at the
+arithmetic width ([04-NUM-8]); and no contraction and no value-changing optimization
+(spec/08 §7). It also holds a closed list of the float primitives generated code computes,
+each at its operand width with the C expression generated code uses for it: the four
+arithmetic operations, `sqrt`, the explicit `fma`, the comparisons, the f64-to-f32 and
+f32-to-f64 conversions, the f16 and bf16 storage conversions, the fourteen kernels, and
+the expression shapes value-changing optimizations rewrite (`a*b + c`, `(a + b) - a`,
+`a / 3`, `a + 0`, `a - a`, `a * 0`, `a == a`, `a > MAX`, with their literal operands as
+in generated code). Each primitive names the value classes its rows must cover: NaN
+operands with a payload or a sign, invalid operations, infinite operands, signed zeros,
+subnormal operands and results, and exact ties. A row's classes are read from its bits,
+except a tie, which the generator proves is an exact midpoint. The rows are three
+MPFR-derived fixtures: `canary.txt` and `binary64_worst_cases.txt` for the kernels, and
+`profile_obligations.txt` for every other primitive.
+
+**Generator and check mode.** `scripts/vendor_core_math.py obligations` writes
+`profile_obligations.txt` from MPFR at each result width's precision, exponent range, and
+subnormalization, each written operation rounded once; `obligations --check` fails when
+the checked-in fixture differs from what the generator produces. The C canary has no
+checked-in form to go stale: `profile::canary_driver` generates its `main` from the
+primitive list on every check, and `toolchain.rs` places it after the kernel text and
+generated code's own NaN-finalization helpers (`fp_env.rs`), so the canary compiles the
+bytes generated units carry. Every operand is read from standard input at run time, so
+nothing folds. The same rows drive the Rust lanes' tests, which check coverage by class
+and that every row detects the rewrite it witnesses (a fused `a*b + c`, a reassociated or
+reciprocal form, a NaN passed through unfinalized). The f16 and bf16 storage conversions
+have no canary row because a compiler flag cannot reach their integer bit arithmetic;
+their rows are checked in the runtime, the evaluator, and generated C's conversion
+helpers instead (§8, test 15).
+
+**Accepted flags.** A flag the check accepts must leave the canary's compiled code
+unchanged: each accepted wrapper test asserts the canary's assembly is byte-identical to
+the plain compiler's. `-fassociative-math` alone (clang and gcc reassociate only once
+signed zeros and trapping are also given up), `-fno-trapping-math` (status flags are
+unobservable and the profile installs no trap), and `-fexcess-precision=fast` on SSE2 and
+AArch64 (where `FLT_EVAL_METHOD` is 0) meet that rule. Every other flag in the wrapper
+tests is refused.
+
+**Cost and memo.** Compiling the canary with every kernel costs about half a second; the
+run is negligible. A process checks each compiler once: an accepted compiler is
+remembered in memory, keyed by its resolved path, `--version` line, profile argv, and the
+executable's size and modification time, so a wrapper edited in place is checked again.
+Nothing is cached across processes, because a persisted acceptance could not observe a
+change the key does not capture (a compiler configuration file, a file a wrapper reads),
+and spec/08 requires such a compiler to fail the build.
 
 ## 6. Floating-point environment and NaN canonicalization (#2964)
 
@@ -358,9 +409,14 @@ has a negative partner.
 **Profile and environment.**
 
 9. Environment injection: a build with `CFLAGS=-ffast-math`, `CCC_OVERRIDE_OPTIONS`
-   adding `-ffast-math`, `NIX_CFLAGS_COMPILE`, or a `CHELIS_CC` wrapper that appends
-   `-ffp-contract=fast` either fails with the profile diagnostic or produces bit-identical
-   output; a clean build is the positive control.
+   adding `-ffast-math`, `NIX_CFLAGS_COMPILE`, or a `CHELIS_CC` wrapper that appends a
+   value-changing flag either fails with the profile diagnostic or produces bit-identical
+   output; a clean build is the positive control. One compiler-check test per
+   wrapper flag (`toolchain::tests::verify_compiler_wrapper_*`) covers fast math,
+   finite-only math, `-O0`, `-fno-honor-nans`, `-fno-honor-infinities`, both contraction
+   modes, unsafe math, reassociation, reciprocal math, `-fno-signed-zeros`,
+   `-ffp-model=fast`, and `-ffp-eval-method=double` (refused), and the accepted flags of
+   §5 (assembly unchanged). `crmath_profile.rs` checks the obligation table itself.
 10. FP environment: a host C driver that sets FTZ/DAZ and `FE_UPWARD`, then calls an
     exported function of a built static library on inputs with subnormal and inexact
     results, gets bits identical to eval and finds its own FTZ/DAZ/rounding state
@@ -385,6 +441,18 @@ has a negative partner.
     `spec/design/` other than archived ones states a numeric cross-lane agreement
     tolerance (a named absolute or relative tolerance constant, a nonzero ULP bound, or
     a blanket epsilon) outside the generated [05-OBS-3] block.
+
+**Storage conversions.**
+
+15. Storage conversions: every f16 and bf16 conversion (the runtime header's
+    `chelis_f32_to_f16` and `chelis_f32_to_bf16`, the runtime's f32 and f64 accumulator
+    finalization, the evaluator's `{f16,bf16}_from_f64_rne`, and generated C's
+    `chelis_host_f64_to_{f16,bf16}`) is compared with an integer round-to-nearest-even
+    reference (`profile::storage_reference`, itself checked against the MPFR rows). Per
+    PR: every storage-conversion row, every f32 within two ulps of a rounding boundary,
+    and at every boundary the f64 midpoint, one ulp either side, and a relative 2^-30
+    either side. Manual gate: every f32 input, and its exact f64 widening, with zero
+    mismatches (`docs/manual_gates.md`).
 
 ## 9. Implementation slices
 
