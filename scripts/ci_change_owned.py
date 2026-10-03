@@ -3061,32 +3061,10 @@ def test_filterset(identity: TestIdentity) -> str:
     return f"(binary_id(/^{binary}$/) & test(/^{re.escape(identity.test)}$/))"
 
 
-def module_oracles_output(config: Config, output_format: str, legs: int) -> str:
-    """`filterset`: one filterset selecting every module oracle test, which the
-    workspace suite negates. `legs`: a JSON list with one entry per test, each
-    carrying its own filterset, which leg `i` of the job's static matrix
-    indexes. `legs` must equal the number of tests, so a row added or removed
-    without resizing the matrix fails here rather than skipping a test."""
-    tests = module_oracle_tests(config)
-    if len(tests) != legs:
-        raise ValueError(
-            f"{len(tests)} module oracle tests but {legs} matrix legs: resize the "
-            f"{MODULE_ORACLES_JOB} matrix in {MODULE_ORACLES_WORKFLOW}"
-        )
-    if output_format == "filterset":
-        return " | ".join(test_filterset(identity) for identity in tests)
-    if output_format == "legs":
-        entries = [
-            {
-                "test": identity.canonical,
-                "package": identity.package,
-                "target": identity.target,
-                "filter": test_filterset(identity),
-            }
-            for identity in tests
-        ]
-        return json.dumps(entries, sort_keys=True, separators=(",", ":"))
-    raise ValueError(f"unknown module-oracles format: {output_format!r}")
+def module_oracles_filterset(config: Config) -> str:
+    """One filterset selecting every module oracle test: the nightly
+    `module-oracles` job runs it, and the workspace suite negates it."""
+    return " | ".join(test_filterset(identity) for identity in module_oracle_tests(config))
 
 
 def execution_groups(
@@ -5121,11 +5099,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     module_oracles = subparsers.add_parser(
         "module-oracles",
-        help="print the nightly module-oracles selection derived from the test exclusions",
-    )
-    module_oracles.add_argument("--format", choices=("filterset", "legs"), required=True)
-    module_oracles.add_argument(
-        "--legs", type=int, required=True, help="the job's matrix size, which must equal the test count"
+        help="print the nightly module-oracles filterset derived from the test exclusions",
     )
     module_oracles.add_argument(
         "--config",
@@ -5157,7 +5131,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "module-oracles":
-        print(module_oracles_output(read_config(args.config), args.format, args.legs))
+        print(module_oracles_filterset(read_config(args.config)))
         return 0
     if args.command == "plan":
         targeted_packages = (

@@ -6349,44 +6349,27 @@ name = {json.dumps(name)}
             ("p", "oracle", "agrees", owned.MODULE_ORACLES_JOB),
         )
         self.assertEqual(
-            owned.module_oracles_output(config, "filterset", 2),
+            owned.module_oracles_filterset(config),
             "(binary_id(/^p::oracle$/) & test(/^agrees$/)) | "
             "(binary_id(/^q::zone$/) & test(/^on_eval$/))",
-        )
-        matrix = json.loads(owned.module_oracles_output(config, "legs", 2))
-        self.assertEqual(
-            matrix,
-            [
-                {"test": "p::oracle::agrees", "package": "p", "target": "oracle",
-                 "filter": "(binary_id(/^p::oracle$/) & test(/^agrees$/))"},
-                {"test": "q::zone::on_eval", "package": "q", "target": "zone",
-                 "filter": "(binary_id(/^q::zone$/) & test(/^on_eval$/))"},
-            ],
         )
 
     def test_full_workspace_rows_are_not_module_oracles(self) -> None:
         # The default fixture's only test exclusion belongs to full-workspace.
         with self.assertRaisesRegex(ValueError, "no test_exclusion is owned"):
-            owned.module_oracles_output(load_config(), "filterset", 0)
+            owned.module_oracles_filterset(load_config())
 
     def test_a_dotted_target_matches_literally(self) -> None:
         config = self.module_config(("p", "a.b", "case", owned.MODULE_ORACLES_JOB))
         self.assertEqual(
-            owned.module_oracles_output(config, "filterset", 1),
+            owned.module_oracles_filterset(config),
             r"(binary_id(/^p::a\.b$/) & test(/^case$/))",
         )
 
-    def test_workflow_matrix_has_one_leg_per_module_oracle_test(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        config = owned.read_config(root / ".config/ci-test-targets.toml")
-        count = len(owned.module_oracle_tests(config))
-        heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
-        legs = re.search(r"\n        leg: \[([0-9, ]+)\]\n", heavy)
-        self.assertIsNotNone(legs, "heavy-e2e.yml lost its module-oracles matrix")
-        self.assertEqual([int(leg) for leg in legs.group(1).split(",")], list(range(count)))
-        self.assertEqual(set(re.findall(r"module-oracles --format \w+ --legs (\d+)", heavy)), {str(count)})
-        with self.assertRaisesRegex(ValueError, f"{count} module oracle tests but {count + 1} matrix legs"):
-            owned.module_oracles_output(config, "legs", count + 1)
+    def test_workflow_runs_and_negates_the_derived_filterset(self) -> None:
+        heavy = (Path(__file__).resolve().parents[1] / ".github/workflows/heavy-e2e.yml").read_text()
+        self.assertIn("scripts/ci_change_owned.py module-oracles)", heavy)
+        self.assertEqual(heavy.count("${{ needs.module-oracles-plan.outputs.filterset }}"), 2)
 
     @staticmethod
     def missing_tests(root: Path, tests: list[owned.TestIdentity]) -> list[str]:

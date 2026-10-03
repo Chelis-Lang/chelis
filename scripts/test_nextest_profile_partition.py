@@ -716,7 +716,7 @@ class ProfilePartitionTests(unittest.TestCase):
         full = active(self.full)
         config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
         tests = ci_change_owned.module_oracle_tests(config)
-        filterset = ci_change_owned.module_oracles_output(config, "filterset", len(tests))
+        filterset = ci_change_owned.module_oracles_filterset(config)
         module = active(_list_filterset(filterset))
         self.assertEqual(module, {identity.canonical for identity in tests})
         self.assertLessEqual(module, full)

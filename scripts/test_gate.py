@@ -2416,10 +2416,9 @@ class CiParityTests(unittest.TestCase):
                 "junit-macos-workspace-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
             ),
-            # One runner per module oracle test, so one artifact per leg.
             "module-oracles": (
-                "junit-linux-module-oracle-${{ matrix.leg }}",
-                "target/nextest/ci-full/junit.xml",
+                "junit-linux-module-oracles-${{ matrix.shard }}",
+                "target/nextest/module-oracles/junit.xml",
             ),
         }
         for job, (artifact, path) in expectations.items():

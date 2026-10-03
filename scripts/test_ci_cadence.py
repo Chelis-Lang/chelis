@@ -210,6 +210,10 @@ def assert_extended(test, pr, nightly):
     test.assertIn("cargo build --workspace --lib --bins", commands)
     test.assertIn(workspace_suite, commands)
     assert_complete_hash_partition(test, full, workspace_suite)
+    module = jobs["module-oracles"]
+    module_suite = "cargo nextest run --workspace --profile module-oracles --ignore-default-filter --no-fail-fast --no-tests=warn -E '${{ needs.module-oracles-plan.outputs.filterset }}' --partition hash:${{ matrix.shard }}/2"
+    test.assertIn(module_suite, [s.get("run") for s in module["steps"]])
+    assert_complete_hash_partition(test, module, module_suite)
     test.assertIn("python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
     script_cache_steps = [
         step
@@ -391,8 +395,8 @@ def assert_dispatch_scopes(test, nightly):
     def legs(names):
         return sum(len(matrix_legs(jobs[name])) for name in names)
 
-    test.assertEqual(legs(full_jobs - {"report"}), 27)
-    test.assertEqual(legs(full_jobs), 28)
+    test.assertEqual(legs(full_jobs - {"report"}), 22)
+    test.assertEqual(legs(full_jobs), 23)
     for name in (
         "runtime-representation-phase0-oracle",
         "dtype-phase3-oracle",
