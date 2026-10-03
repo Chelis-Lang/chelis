@@ -306,6 +306,19 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/src/native_build.rs",
+        "archive-name",
+        lines=(
+            'runtime_archive: PathBuf::from("out/libchelis_runtime.a"),',
+            'let mut expected = vec![OsStr::new("out/libchelis_runtime.a")];',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "a unit test's fixture path for the staged archive; the test compares the printed "
+            "link requirements with it and nothing links or searches for an archive"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/tests/build_deep_ingestion.rs",
         "archive-name",
         lines=(
