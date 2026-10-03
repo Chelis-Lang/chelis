@@ -8345,29 +8345,36 @@ impl<'a> HostEmitter<'a> {
         // types compare directly, and f16 and bf16 compare after the exact
         // widening to binary32, which keeps their order, NaNs and signed
         // zeros. Bool operands reach only equality.
-        let mut arms: Vec<(chelis_vocab::RuntimeDType, &str, Option<&str>)> = vec![
-            (chelis_vocab::RuntimeDType::F32, "float", None),
-            (chelis_vocab::RuntimeDType::F64, "double", None),
+        let mut arms = vec![
+            (chelis_vocab::RuntimeDType::F32, Prim::F32, None),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64, None),
             (
                 chelis_vocab::RuntimeDType::F16,
-                "uint16_t",
+                Prim::F16,
                 Some("chelis_f16_to_f32"),
             ),
             (
                 chelis_vocab::RuntimeDType::Bf16,
-                "uint16_t",
+                Prim::Bf16,
                 Some("chelis_bf16_to_f32"),
             ),
-            (chelis_vocab::RuntimeDType::I8, "int8_t", None),
-            (chelis_vocab::RuntimeDType::I16, "int16_t", None),
-            (chelis_vocab::RuntimeDType::I32, "int32_t", None),
-            (chelis_vocab::RuntimeDType::I64, "int64_t", None),
+            (chelis_vocab::RuntimeDType::I8, Prim::Int8, None),
+            (chelis_vocab::RuntimeDType::I16, Prim::Int16, None),
+            (chelis_vocab::RuntimeDType::I32, Prim::Int32, None),
+            (chelis_vocab::RuntimeDType::I64, Prim::Int64, None),
         ];
         if comparison.admits_bool() {
-            arms.push((chelis_vocab::RuntimeDType::Bool, "uint8_t", None));
+            arms.push((chelis_vocab::RuntimeDType::Bool, Prim::Bool, None));
         }
+        // Element types come from the existing spelling authorities: the
+        // bool output from `DtypeArm`, each operand and the index from
+        // `cast_prim_c_type`.
+        let target_t = DtypeArm::Bool.elem_t();
+        // The loop index is an i64 element count.
+        let index_t = cast_prim_c_type(Prim::Int64);
         let ind = self.indent.clone();
-        for (dtype, elem_t, widen) in arms {
+        for (dtype, prim, widen) in arms {
+            let elem_t = cast_prim_c_type(prim);
             let read = |side: &str| match widen {
                 Some(widen) => format!("{widen}(__{side}_data[i * {target}_{side}_step])"),
                 None => format!("__{side}_data[i * {target}_{side}_step]"),
@@ -8375,7 +8382,7 @@ impl<'a> HostEmitter<'a> {
             self.lines
                 .push(format!("{ind}    case {}: {{", dtype.c_macro()));
             self.lines.push(format!(
-                "{ind}        uint8_t *__target_data = (uint8_t*){view}.data;"
+                "{ind}        {target_t} *__target_data = ({target_t}*){view}.data;"
             ));
             self.lines.push(format!(
                 "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
@@ -8384,10 +8391,10 @@ impl<'a> HostEmitter<'a> {
                 "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
             ));
             self.lines.push(format!(
-                "{ind}        for (int64_t i = 0; i < {view}.count; i++) {{"
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
             ));
             self.lines.push(format!(
-                "{ind}            __target_data[i] = (uint8_t)({} {} {});",
+                "{ind}            __target_data[i] = ({target_t})({} {} {});",
                 read("lhs"),
                 comparison.c_operator(),
                 read("rhs")
