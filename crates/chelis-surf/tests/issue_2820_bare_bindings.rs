@@ -49,3 +49,21 @@ fn standalone_tensor_signature_supplies_the_declared_literal_context() {
     assert!(output.contains("(t-prim {} f64)"), "{output}");
     assert!(!output.contains("(t-prim {} f32)"), "{output}");
 }
+
+#[test]
+fn lexical_tensor_constructor_capture_is_a_loud_refusal() {
+    for source in [
+        "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n xs\n}\nresult = sample()\n",
+        "def sample(to_tensor) = {\n xs = [1, 2]\n xs\n}\n",
+        "def sample() = {\n (to_tensor, other) = (fn (xs: List[i32]) -> xs, 1)\n xs = [1, 2]\n xs\n}\n",
+    ] {
+        let parsed = parse_str(source).unwrap();
+        let error = desugar_program(&parsed)
+            .expect_err("a lexical callable cannot own a synthesized tensor conversion");
+        assert!(error.to_string().contains("to_tensor"), "{error}");
+        assert!(error.span().is_some(), "{error}");
+    }
+    // An authored call and an explicit List do not synthesize that conversion.
+    let source = "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: List[i32] = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n";
+    assert!(desugar_program(&parse_str(source).unwrap()).is_ok());
+}

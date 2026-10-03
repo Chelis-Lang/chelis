@@ -2481,14 +2481,16 @@ pub(super) fn finish_unified_app(
                     .get(1)
                     .is_some_and(|arg| static_to_tensor_shape_status(arg).is_err())
                 {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            with_node_provenance(node, "to_tensor requires rectangular child shapes; statically inconsistent literal dimensions ([05-OP-57])".to_string()),
-                            vec![],
-                        ),
+                    let mut error = CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_node_provenance(node, "to_tensor requires rectangular child shapes; statically inconsistent literal dimensions ([05-OP-57])".to_string()),
+                        vec![],
                     );
+                    if let Some(id) = node_span_id(node) {
+                        error.span_offset = parse_span_offset(id);
+                        error.span_id = Some(id.to_string());
+                    }
+                    return report(errors, error);
                 }
                 if let Some(first_arg) = arg_tys.first() {
                     // Bucket 4b: support arbitrarily-nested numeric/bool

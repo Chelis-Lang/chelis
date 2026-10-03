@@ -49,6 +49,10 @@ pub enum DesugarError {
         "cannot resolve the parameter identity of `grad` target `{target}`; use a direct declaration, inline lambda, or immutable alias"
     )]
     UnresolvedGradTarget { target: String, span: Span },
+    #[error(
+        "unsupported tensor literal conversion: lexical `to_tensor` binding would capture the intrinsic constructor; rename that binding or use an explicit List annotation"
+    )]
+    CapturedTensorConstructor { span: Span },
     #[error("`grad` target `{target}` is not callable")]
     NonCallableGradTarget { target: String, span: Span },
 }
@@ -59,7 +63,8 @@ impl DesugarError {
             Self::InvalidDeclarationOwnership { .. } => None,
             Self::UnknownGradParameter { span, .. }
             | Self::UnresolvedGradTarget { span, .. }
-            | Self::NonCallableGradTarget { span, .. } => Some(*span),
+            | Self::NonCallableGradTarget { span, .. }
+            | Self::CapturedTensorConstructor { span } => Some(*span),
         }
     }
 }
@@ -740,6 +745,22 @@ impl GradSelectorResolver {
             Expr::Block(bindings, body, _) => {
                 let mut block_scope = scope.clone();
                 for binding in bindings {
+                    // A synthesized conversion must never resolve to authored
+                    // lexical code. This release boundary is established before
+                    // Deep construction and follows every lexical binder kind.
+                    let converts_literal = matches!(&binding.value, Expr::List(_, _))
+                        && (binding
+                            .ty
+                            .as_ref()
+                            .and_then(tensor_element_prim_name)
+                            .is_some()
+                            || (binding.ty.is_none()
+                                && is_bare_numeric_tensor_literal(&binding.value)));
+                    if converts_literal && block_scope.values.contains_key("to_tensor") {
+                        return Err(DesugarError::CapturedTensorConstructor {
+                            span: expr_span(&binding.value),
+                        });
+                    }
                     let value = self.visit_expr(&binding.value, &block_scope)?;
                     bind_let_pattern(&binding.pattern, &value, &mut block_scope);
                 }

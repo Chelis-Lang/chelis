@@ -84,3 +84,8 @@ extremum remain available for a later call, including when `<` or `>` is used.
 A prior consuming call such as `realize(x)` still makes a later read of `x` an
 error. Comparisons require matching dimensions and dtypes; borrowing does not
 permit implicit broadcasting or promotion.
+
+A local `to_tensor` binding that would capture a compiler-generated numeric
+literal conversion is currently refused with a source location. Rename the
+binding to use a tensor literal; an explicit `List[...]` annotation retains
+an authored List and ordinary calls to the local function.

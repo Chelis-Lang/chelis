@@ -105,3 +105,56 @@ fn explicit_list_roots_retain_list_kind_and_mixed_tensor_dtypes_reject() {
         );
     }
 }
+
+#[test]
+fn captured_constructor_refuses_and_ragged_rejection_has_a_source_location() {
+    let (_dir, reef, app) = common::make_app("issue-2820-capture");
+    let source = "module Demo.Main\ndef sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n xs\n}\nresult = sample()\n";
+    common::write_file(&app.join("src/main.ch"), source);
+    for command in [
+        ["check", "src/main.ch"].as_slice(),
+        ["eval", "--file", "src/main.ch"].as_slice(),
+    ] {
+        let output = cli(&reef, &app).args(command).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("to_tensor"),
+            "{output:?}"
+        );
+    }
+    cli(&reef, &app)
+        .args([
+            "build",
+            "src/main.ch",
+            "--target",
+            "c",
+            "--output",
+            "capture-output",
+        ])
+        .assert()
+        .failure();
+    assert!(!app.join("capture-output/main").exists());
+    common::write_file(
+        &app.join("src/main.ch"),
+        "module Demo.Main\nresult = [[1i32], [2i32, 3i32]]\n",
+    );
+    let output = cli(&reef, &app)
+        .args(["check", "src/main.ch"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("[05-OP-57]"))
+        })
+        .unwrap();
+    assert!(
+        error["span_id"].is_string() || error["span"].is_object(),
+        "{error}"
+    );
+}
