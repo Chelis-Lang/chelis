@@ -99,11 +99,19 @@ fn spec_deep_strict_validates_desugared() {
 fn checked_example_source(source: &str) -> chelis_types::FitnessReport {
     let declarations = chelis_surf::parser::parse_str(source).expect("parse executable example");
     let prepared = chelis_reef::prepare_single_file_program(
-        "example-oracle", &declarations, &chelis_std_bundle::EMBEDDED_RUNTIME,
-    ).expect("resolve every executable example import");
-    let _linked = prepared.as_ref().map(|_| chelis_types::install_linked_program_guard());
-    let declarations = prepared.as_ref().map_or(declarations.as_slice(), |program| program.decls.as_slice());
-    let deep = chelis_surf::desugar::desugar_program(declarations).expect("desugar executable example");
+        "example-oracle",
+        &declarations,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("resolve every executable example import");
+    let _linked = prepared
+        .as_ref()
+        .map(|_| chelis_types::install_linked_program_guard());
+    let declarations = prepared
+        .as_ref()
+        .map_or(declarations.as_slice(), |program| program.decls.as_slice());
+    let deep =
+        chelis_surf::desugar::desugar_program(declarations).expect("desugar executable example");
     assert!(!deep.is_empty(), "executable example desugared to empty");
     chelis_types::check_ir_fitness(&deep)
 }
