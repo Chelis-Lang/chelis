@@ -166,8 +166,9 @@ fn softmax_f64_adjoint_agrees_with_independent_finite_differences() {
         .unwrap();
     let bits = root["value"]["value"]["data"]["bits"].as_array().unwrap();
     assert_eq!(bits.len(), 4);
+    // Assemble the loss independently of AD, using the specified exp primitive.
     let loss = |x: [f64; 4]| {
-        let exponentials = x.map(f64::exp);
+        let exponentials = x.map(chelis_crmath::exp_f64);
         let denominator: f64 = exponentials.iter().sum();
         exponentials
             .iter()
