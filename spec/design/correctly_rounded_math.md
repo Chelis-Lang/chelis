@@ -86,16 +86,18 @@ Read from the upstream sources:
   is within the supported set. A Windows/MSVC target would need its own decision.
 - **Architecture paths.** binary64 `exp` and `tanh` use SSE intrinsics under
   `#if defined(__x86_64__)` with portable fallbacks; several files use inline
-  assembly for `roundeven` only when the builtin is unavailable. Both arms must be
-  covered by the oracle on their architectures (§8).
+  assembly for `roundeven` only when the builtin is unavailable. The amalgamation keeps
+  only the portable arm of each (§3.3), so every architecture compiles the same C; the
+  oracle still runs on each architecture (§8), because the compiler lowers that C
+  differently per target.
 - **FMA.** The kernels call `__builtin_fma`. Where the target has no hardware FMA in its
   baseline (x86-64 without `-mfma`, which the strict profile forbids adding from the
   host CPU), the compiler emits a call to the C library's `fma`, which C17 7.12.13.1
-  requires to round once, so values are unaffected; the cost is speed (open question 2).
+  requires to round once, so values are unaffected; the cost is speed (open question 1).
 - **Rounding mode.** The kernels read the dynamic rounding mode (`fegetround`) in a few
   binary64 paths and otherwise assume arithmetic rounds in the current mode. Chelis
-  pins round-to-nearest-even at every entry point (§6), so `-frounding-math` is not
-  needed.
+  pins round-to-nearest-even at every entry point (§6), so the amalgamation keeps only
+  the round-to-nearest case of each such switch and `-frounding-math` is not needed.
 - **Evaluation method.** The code assumes `FLT_EVAL_METHOD == 0` (no x87 extended
   precision). The vendored wrapper rejects any other value with `#error`.
 - **Internal precision.** Most binary32 kernels evaluate in binary64 internally and
@@ -128,7 +130,18 @@ not the oracle of §8.
      vendoring time, so kernels coexist in one translation unit;
   2. gives every definition `static` linkage;
   3. adds a `static` entry `chelis_cr_<name>` that calls the kernel and canonicalizes a
-     NaN result.
+     NaN result;
+  4. reduces the kernel text to the generated-C contract every built unit must
+     satisfy, since `chelis build` emits these bytes (§4.2). It drops what the contract
+     forbids and Chelis never observes: `<fenv.h>`, the `FENV_ACCESS` pragma,
+     floating-point exception raises, the `errno` blocks, the `noinline`/`cold`
+     attributes, the inline-assembly `roundeven` arms, and the x86-64 SSE intrinsic
+     arms, keeping the portable arm beside each. The `unsigned _BitInt(128)`
+     conditionals keep their `unsigned __int128` arm, the same arithmetic. Every
+     definition, the entries included, is written `static`. The script fails if a
+     forbidden token or an include outside the generated-C allowlist survives; that
+     allowlist admits the ISO C headers `<stdint.h>` and `<float.h>` for the kernels.
+     Values are unchanged: every dropped arm computes the bits of the arm that stays.
   The amalgamation begins with guards: `#error` when `__FAST_MATH__`,
   `__FINITE_MATH_ONLY__`, or `FLT_EVAL_METHOD != 0` is in effect. `--check` regenerates
   in memory and fails on any byte difference, so the vendored inputs and the
@@ -179,8 +192,8 @@ emitted kernels are byte-identical to the evaluator's. Because they are `static`
 static library built by `chelis build` exports no new symbol and no published header
 gains a bare `float` or `double` signature, which keeps the change inside the
 §C6 numeric-surface rule as #2979 binds it. `chelis_math.h` no longer selects a math
-library; it is reduced to what it still has to declare or removed from the published
-header roots, and the capacity census is rerun against the result.
+library and declares nothing; it stays a published header root so existing includes
+resolve, and the capacity census is rerun against the result.
 
 Prebuilt kernels in the runtime archive were considered: they would remove the host C
 compiler from transcendental values entirely, but they would export bare-float symbols
@@ -220,7 +233,7 @@ HIP and Metal are `scope:experimental`, and their implementation is deferred unt
 after the CPU lanes. Until a device lane has Chelis-owned kernels that pass the same
 oracle, a transcendental in device code is rejected under [05-UNS-1] with a typed
 diagnostic, never computed with `ocml`, MSL built-ins, or `precise::` forms, and the
-rejection is listed on the known-issues page (#1170).
+`docs/book` backends page lists the rejection.
 
 Metal is harder than a missing kernel. MSL permits a device to flush f32 subnormals
 and to round f32 arithmetic toward zero independently of the fast-math setting, and
@@ -281,9 +294,9 @@ follows:
   symmetric.
 - **Do not transfer.** Strict inequalities that depend on magnitude: `exp(x) > 0` is
   false at f32 for `x` below about -103.97, where the correctly rounded result is `+0`.
-  The standard contract `std.exp.positivity` is therefore restated either as a
-  real-model property, labelled as such, or as `exp(x) >= 0` for the float operation;
-  the implementation slice chooses and records which (open question 3).
+  The standard contract `std.exp.positivity` is therefore restated as the float
+  property `exp(x) >= 0`, which holds at every width; a real-model `exp(x) > 0` would
+  describe no value a lane computes.
 - **Error envelope.** Where a proof needs the real value, the float result lies within
   half an ULP of it at the arithmetic width, with the f16/bf16 composition adding the
   final storage rounding.
@@ -385,11 +398,11 @@ The kernel slices follow, in order:
 | S0 | Spec amendments and this document. | none alone; supplies #2967's text items 1, 2, and 4 and the manifest alignment of item 3 |
 | K1 | `chelis-crmath`: vendored CORE-MATH, the amalgamation script and its `--check`, the Rust API, NaN canonicalization, guards; tests 1-5 (with test 3 a manual gate); the `disallowed-methods` lint. | none alone |
 | K2 | Eval wiring: `dtype_semantics.rs`, IR constant folding, host ops through `chelis-crmath`; `Tanh` IR primitive and adjoint; `gelu` respelled; host activations derived from the §3.3 lowering. | none alone |
-| K3 | C wiring: static kernel emission, libm names replaced, host activations from one definition; vForce, Sleef, `MathLib`, and the `sleef` feature removed; `chelis_math.h` rewritten and census rerun. | #2952, #2958, #2959, #2961, #2963 (tests 6-8, 11); #2966's Sleef items only, so #2966 stays open |
-| K4 | Prove: fuzz evaluator and contracts at declared width; restated exp contract. | #2965 (test 12) |
-| S8 | `OP_TOLERANCES` emptied, `AgreementOp` reduced, [05-OBS-3] block regenerated; the tolerance-statement check. | #2967 (tests 13-14) |
-| G1 | GPU fence: device transcendentals and Metal f64 rejected under [05-UNS-1]; known-issues rows. Device kernels deferred. | none closed; Part of #2968 and #2969 |
-| S9 | `docs/book` backends page, `docs/manual_gates.md` rows, `changelog.d` fragment (`changed.breaking`: transcendental and compound results change bits wherever the old lanes were not correctly rounded, and `gelu` changes spelling). | none |
+| K3 | C wiring: static kernel emission from the contract-clean amalgamation, libm names rejected, host activations from one definition; vForce, Sleef, `MathLib`, the `sleef` feature, and `pow` removed; `chelis_math.h` declares nothing; census rerun. | #2952, #2958, #2959, #2961, #2963 (tests 6-8, 11); #2966's Sleef items only, so #2966 stays open |
+| K4 | Prove: fuzz evaluator and contracts at declared width; `std.exp.positivity` restated as `exp(x) >= 0`. | #2965 (test 12) |
+| S8 | `OP_TOLERANCES` emptied, `AgreementOp` reduced to `Exact`, [05-OBS-3] block regenerated; the tolerance-statement check (test 14) and the design passages it found corrected. | #2967 (tests 13-14) |
+| G1 | GPU fence: HIP and Metal codegen reject device transcendentals, directly or in a fused chain, under [05-UNS-1] with [05-OP-46] as authority; Metal f64 keeps its [04-TGT-1] rejection. The fence is documented on the `docs/book` backends page. Device kernels deferred. | none closed; Part of #2968 and #2969 |
+| S9 | `docs/book` backends page, `docs/manual_gates.md` rows, `changelog.d` fragment (`changed.breaking`: transcendental and compound results change bits wherever the old lanes were not correctly rounded, `tanh` becomes a primitive, `gelu` changes spelling, f32 contract verdicts can now fail, and the serialized graph schema moves from 23 to 24). | none |
 
 After K3, #1311's question (pin a reference graph for embedded transcendentals) is
 answered by correct rounding instead; whether to close it as superseded is a tracker
@@ -411,11 +424,6 @@ decision.
 
 ## 11. Open questions
 
-1. Whether `chelis_math.h` survives in reduced form or leaves the published header
-   roots entirely (K3 decides from what it still has to declare; the census rerun is
-   the check either way).
-2. Whether the x86-64 target's declared CPU baseline should include hardware FMA
+1. Whether the x86-64 target's declared CPU baseline should include hardware FMA
    (x86-64-v3), which would remove the software `fma` call from binary64 kernels at the
    cost of not running on older CPUs. Values do not depend on the answer.
-3. Whether `std.exp.positivity` becomes a labelled real-model property or the float
-   property `exp(x) >= 0` (§7).
