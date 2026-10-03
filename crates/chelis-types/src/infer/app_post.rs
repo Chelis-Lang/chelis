@@ -436,10 +436,14 @@ pub(super) fn finish_unified_app(
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
         checked_route_observed = true;
-        let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
-            Type::Tensor(dims, _) => Some(dims),
-            _ => None,
-        });
+        // chelis#3000: a borrowed operand `&x` carries `&tensor[D, p]`, and
+        // [05-OP-36] reads its shape exactly as it reads an owned one.
+        let tensor_dims = arg_tys
+            .iter()
+            .find_map(|t| match type_for_readonly_check(t, subst) {
+                Type::Tensor(dims, _) => Some(dims),
+                _ => None,
+            });
         if let Some(dims) = tensor_dims {
             // chelis#1265: route the result through unification rather than
             // constructing it out of band. A consumer that supplies a shape
