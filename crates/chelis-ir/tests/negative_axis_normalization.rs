@@ -34,6 +34,7 @@ use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::lower::{lower_program, try_lower_subexpr_program};
 use chelis_ir::verify;
 use chelis_types::check_ir_program;
+use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::types::Prim;
 
 /// Surf source -> desugar -> macro-expand -> typecheck -> effects ->
@@ -62,10 +63,10 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     Ok(lower_program(&checked))
 }
 
-/// Just the typecheck stage, surfacing the error messages. Used for the
+/// Just the typecheck stage, retaining the structured diagnostics. Used for the
 /// checker-side negative-axis assertions so checker and lowering can be
 /// pinned to agree.
-fn check_surf(src: &str) -> Result<(), Vec<String>> {
+fn check_surf(src: &str) -> Result<(), Vec<CheckError>> {
     let decls = chelis_surf::parser::parse_str(src).expect("parse failed");
     let exprs = chelis_macros::expand_program(
         &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
@@ -75,7 +76,7 @@ fn check_surf(src: &str) -> Result<(), Vec<String>> {
     .into_exprs();
     check_ir_program(&exprs)
         .map(|_| ())
-        .map_err(|r| r.errors.iter().map(|e| e.message.clone()).collect())
+        .map_err(|r| r.errors)
 }
 
 // ---------------------------------------------------------------------
@@ -211,7 +212,7 @@ def run(x) = softmax(x, -3)
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("softmax") && e.contains("out of bounds")),
+            .any(|e| e.message.contains("softmax") && e.message.contains("out of bounds")),
         "expected an out-of-bounds softmax axis diagnostic, got {errors:?}"
     );
 }
@@ -224,12 +225,15 @@ sig run: tensor[2, 3, f32] -> tensor[2, f32]
 def run(x) = sum(x, 5)
 "#;
     let errors = check_surf(src).expect_err("sum(x, 5) must be a type error");
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.contains("sum") && e.contains("out of bounds")),
-        "expected an out-of-bounds sum axis diagnostic, got {errors:?}"
-    );
+    let error = errors
+        .iter()
+        .find(|error| error.message.contains("sum argument 2, axis 5"))
+        .unwrap_or_else(|| panic!("expected the rejected sum axis diagnostic, got {errors:?}"));
+    assert!(matches!(error.kind, CheckErrorKind::DimensionMismatch));
+    assert_eq!(error.expected.as_deref(), Some("axis in -2..2"));
+    assert_eq!(error.got.as_deref(), Some("5"));
+    assert!(error.message.contains("for rank 2 tensor, got 5"));
+    assert_eq!(error.span_offset, src.find("sum(x, 5)"));
 }
 
 /// If a malformed axis reaches IR lowering directly -- the
