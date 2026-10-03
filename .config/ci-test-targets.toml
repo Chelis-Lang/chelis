@@ -1321,6 +1321,17 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
 tracking_issue = "chelis#1824"
 
+# chelis#3017: the complete scalar-gradient lane sweep builds and runs 26 C
+# executables. Its standing canary is `issue_1741_scalar_gradient_cli`.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "issue_3017_scalar_gradient_sweep"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "every exact gradient body over the 24-input sweep at f32 and f64 builds one C executable per body and dtype"
+tracking_issue = "chelis#3017"
+
 # These individual heavy rows remain in otherwise selectable targets. Each
 # exact test is removed from package expansion and retains the same unfiltered
 # Linux nightly owner.

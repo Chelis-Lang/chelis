@@ -72,68 +72,46 @@ fn check_and_eval_agree_for_scalar_gradients_and_reject_real_mixed_surfaces() {
     }
 }
 
-// chelis#2993 and chelis#3017: `chelis build` computes a top-level scalar
-// `grad` at the operand dtype ([04-NUM-8]) through the same reverse-mode DAG
-// `chelis eval` evaluates (spec/06 section 2.3), so the executable prints
-// what eval prints. `eval --json` reports the operand dtype, and the emitted
-// gradient code for an f32 program holds no `double` intermediate and no f64
-// dtype tag.
+// chelis#2993 and chelis#3017: `eval --json` reports the operand dtype, and
+// the emitted gradient code for an f32 program holds no `double` intermediate
+// and no f64 dtype tag. The standing lane-agreement canary below keeps
+// #3017's named witnesses at every float width; the complete 24-input sweep
+// and the narrow-width pass over every exact body are
+// `issue_3017_scalar_gradient_sweep`, run nightly.
+
+include!("support/scalar_gradient_lanes.rs");
 
 /// The #2993 oracle bodies, each `f: T -> T`; `{t}` is the dtype.
 const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
 
-/// Bodies built only from correctly rounded operations, so a lane mismatch
-/// can only come from the differentiation order (#3017's witnesses first).
-/// The transcendentals are correctly rounded in both lanes ([05-OP-46],
-/// chelis#2957), so bodies through them are bit-exact too.
-const EXACT_BODIES: [&str; 13] = [
-    "add(mul(x, x), x)",
-    "mul(x, sqrt(x))",
-    "sqrt(sqrt(x))",
-    "mul(x, x)",
-    "div(x, add(x, 1.0{t}))",
-    "div(sqrt(x), add(x, 1.0{t}))",
-    "sqrt(sqrt(sqrt(x)))",
-    "div(1.0{t}, x)",
-    "mul(exp(x), log(x))",
-    "div(sin(x), add(cos(x), 2.0{t}))",
-    "exp(neg(mul(x, x)))",
-    "tanh(mul(x, sin(x)))",
-    "log(add(x, 1.0{t}))",
+/// #3017's witnesses at their named inputs (summation order across paths,
+/// association along a chain, and the cancellation at `mul(x, sin(x))`),
+/// then one body through each correctly rounded transcendental. Each row is
+/// one `grad` call, and build cost grows with the number of calls.
+const CANARY_ROWS: [(&str, f64); 7] = [
+    ("add(mul(x, x), x)", 0.374),
+    ("mul(x, sqrt(x))", 0.648),
+    ("sqrt(sqrt(x))", 0.1),
+    ("mul(x, sin(x))", 2.018),
+    ("mul(exp(x), log(x))", 0.648),
+    ("div(sin(x), add(cos(x), 2.0{t}))", 2.018),
+    ("tanh(mul(x, sin(x)))", 1.333),
 ];
 
-fn width_program(dtype: &str, body: &str, root: &str) -> String {
-    let body = body.replace("{t}", dtype);
-    let root = root.replace("{t}", dtype);
-    format!("module Probe.Case\ndef f(x: {dtype}) -> {dtype} = {body}\nout = {root}\n")
-}
-
-/// One program printing `grad(f)` at the 24 inputs 0.1, 0.237, ..., 3.251.
-fn sweep_program(dtype: &str, body: &str) -> String {
-    let body = body.replace("{t}", dtype);
-    let mut source = format!("module Probe.Case\ndef f(x: {dtype}) -> {dtype} = {body}\n");
-    for index in 0..24 {
-        let input = 0.1 + 0.137 * f64::from(index);
-        source.push_str(&format!("r{index} = print(grad(f)({input:.3}{dtype}))\n"));
+/// One program defining `f0`, `f1`, ... from `rows` and printing each
+/// `grad(f<i>)` at its row's input, so one build covers every row.
+fn rows_program(dtype: &str, rows: &[(&str, f64)]) -> String {
+    let mut source = String::from("module Probe.Case\n");
+    for (index, (body, _)) in rows.iter().enumerate() {
+        let body = body.replace("{t}", dtype);
+        source.push_str(&format!("def f{index}(x: {dtype}) -> {dtype} = {body}\n"));
+    }
+    for (index, (_, input)) in rows.iter().enumerate() {
+        source.push_str(&format!(
+            "r{index} = print(grad(f{index})({input:.3}{dtype}))\n"
+        ));
     }
     source
-}
-
-fn chelis(args: &[&str]) -> std::process::Output {
-    Command::new(assert_cmd::cargo_bin!("chelis"))
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn eval_stdout(source: &str) -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("p.ch");
-    common::write_file(&path, source);
-    let output = chelis(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(output.status.success(), "{source}\n{output:?}");
-    String::from_utf8(output.stdout).unwrap()
 }
 
 fn eval_dtype(source: &str) -> String {
@@ -202,27 +180,17 @@ fn gradient_code(emitted: &str) -> Vec<&str> {
 }
 
 #[test]
-fn executable_prints_what_eval_prints_over_the_exact_sweep() {
-    for dtype in ["f32", "f64"] {
-        for body in EXACT_BODIES {
-            let source = sweep_program(dtype, body);
-            let eval = eval_stdout(&source);
-            assert_eq!(eval.lines().count(), 48, "{source}: 24 prints and roots");
-            let built = common::build_and_run(&source, "p");
-            assert_eq!(built, eval, "{source}");
-        }
-    }
-}
-
-#[test]
-fn executable_prints_what_eval_prints_at_the_narrow_widths() {
-    for dtype in ["f16", "bf16"] {
-        for body in EXACT_BODIES {
-            let source = width_program(dtype, body, "print(grad(f)(0.7{t}))");
-            let eval = eval_stdout(&source);
-            let built = common::build_and_run(&source, "p");
-            assert_eq!(built, eval, "{source}");
-        }
+fn executable_prints_what_eval_prints_on_the_witness_canary() {
+    for dtype in ["f32", "f64", "f16", "bf16"] {
+        let source = rows_program(dtype, &CANARY_ROWS);
+        let eval = eval_stdout(&source);
+        assert_eq!(
+            eval.lines().count(),
+            2 * CANARY_ROWS.len(),
+            "{source}: one print and one root per row"
+        );
+        let built = common::build_and_run(&source, "p");
+        assert_eq!(built, eval, "{source}");
     }
 }
 
