@@ -3748,7 +3748,11 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
 
     for prim in dtypes {
         let value = numeric_scalar(prim, 7, if prim == Prim::F64 { 1e100 } else { 1.5 });
-        let expected_float = if prim == Prim::F64 { 1e100 } else { 1.5 };
+        // Float elements move into the buffer as the stored scalar itself.
+        let expected_float = match &value {
+            RuntimeValue::Scalar(payload) => payload.value(),
+            other => panic!("numeric_scalar built {other:?}"),
+        };
         let (_, tensor_data) =
             nested_list_to_tensor_data(std::slice::from_ref(&value), prim, &[Some(1)])
                 .expect("to_tensor list ingress");
