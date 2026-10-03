@@ -147,7 +147,11 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
     // case refuses the probe too.
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
     let real =
-        chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
+        chelis_backend_c::toolchain::verify_compiler(
+            &toolchain.compiler,
+            &toolchain.compile_flags,
+            &toolchain.link_flags,
+        )
             .unwrap()
             .path;
     let probes = format!(
@@ -542,7 +546,11 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
 
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
     let real =
-        chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
+        chelis_backend_c::toolchain::verify_compiler(
+            &toolchain.compiler,
+            &toolchain.compile_flags,
+            &toolchain.link_flags,
+        )
             .unwrap()
             .path;
     // No predefined macro reveals contraction, so the floating-point canary

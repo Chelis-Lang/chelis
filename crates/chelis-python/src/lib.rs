@@ -1318,7 +1318,8 @@ fn compile_shared_library_inner(
     // hipcc keeps its environment, which ROCm uses to locate its installation.
     if artifact.compile_result.target == CompileTarget::C {
         let profile: Vec<String> = compile_flags.iter().map(|flag| flag.to_string()).collect();
-        chelis_backend_c::toolchain::verify_compiler(&compiler.to_string_lossy(), &profile)
+        let links: Vec<String> = link_flags.iter().map(|flag| flag.to_string()).collect();
+        chelis_backend_c::toolchain::verify_compiler(&compiler.to_string_lossy(), &profile, &links)
             .map_err(|error| format!("native compile: {error}"))?;
     }
     let mut command = match artifact.compile_result.target {
@@ -2561,6 +2562,7 @@ loss = (mean(x, 0) : tensor[f32])
             let real = chelis_backend_c::toolchain::verify_compiler(
                 &toolchain.compiler,
                 &toolchain.compile_flags,
+                &toolchain.link_flags,
             )
             .unwrap_or_else(|error| panic!("{error}"))
             .path;

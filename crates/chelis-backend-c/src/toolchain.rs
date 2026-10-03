@@ -199,15 +199,33 @@ impl fmt::Display for CompilerCheckError {
     }
 }
 
-/// Resolve `compiler`'s identity and check that, given `compile_flags`, it
-/// compiles with the profile's floating-point semantics. A wrapper script is
+/// The argument vector of a profile link: `compile_flags`, the `inputs`, the
+/// profile's `link_flags`, and the output. `chelis build` links executables
+/// with it and [`verify_compiler`] links the canary with it, so the canary is
+/// linked exactly as a real build is (the profile's `-lm` included).
+pub fn link_args(
+    compile_flags: &[String],
+    inputs: &[&OsStr],
+    link_flags: &[String],
+    output: &OsStr,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = compile_flags.iter().map(Into::into).collect();
+    args.extend(inputs.iter().map(|input| input.to_os_string()));
+    args.extend(link_flags.iter().map(Into::into));
+    args.push("-o".into());
+    args.push(output.to_os_string());
+    args
+}
+
+/// Resolve `compiler`'s identity and check that, given `compile_flags` and
+/// `link_flags`, it compiles with the profile's floating-point semantics. A wrapper script is
 /// opaque on the command line, so the check observes the compiler itself, in
 /// two steps. First it reads what the compiler predefines under those flags:
 /// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
 /// dropped optimisation level (`__OPTIMIZE__` missing although the profile
 /// passes `-O2`). No macro reveals contraction, reassociation, or a NaN or
 /// infinity assumption, so it then compiles and runs the canary
-/// ([`canary_source`]) with the same flags and compares the bits it prints with
+/// ([`canary_source`]) with the same flags, linked by [`link_args`], and compares the bits it prints with
 /// the profile's obligation table (`chelis_crmath::profile`): every kernel row of
 /// the MPFR fixtures and every arithmetic, comparison, conversion, and
 /// expression-shape row. Any difference means something outside the profile
@@ -215,13 +233,18 @@ impl fmt::Display for CompilerCheckError {
 pub fn verify_compiler(
     compiler: &str,
     compile_flags: &[String],
+    link_flags: &[String],
 ) -> Result<CompilerIdentity, CompilerCheckError> {
     let path = resolve_executable(compiler)
         .ok_or_else(|| CompilerCheckError::NotFound(compiler.to_string()))?;
-    check_compiler(path, compile_flags).map_err(CompilerCheckError::Refused)
+    check_compiler(path, compile_flags, link_flags).map_err(CompilerCheckError::Refused)
 }
 
-fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIdentity, String> {
+fn check_compiler(
+    path: PathBuf,
+    compile_flags: &[String],
+    link_flags: &[String],
+) -> Result<CompilerIdentity, String> {
     let version = tool_command(&path)
         .arg("--version")
         .stdin(Stdio::null())
@@ -250,6 +273,7 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
         path: path.clone(),
         version: version.clone(),
         compile_flags: compile_flags.to_vec(),
+        link_flags: link_flags.to_vec(),
         executable: path
             .metadata()
             .ok()
@@ -304,7 +328,7 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
             violations.join("; ")
         ));
     }
-    run_canary(&path, compile_flags)?;
+    run_canary(&path, compile_flags, link_flags)?;
     ACCEPTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -322,6 +346,7 @@ struct AcceptedCompiler {
     path: PathBuf,
     version: String,
     compile_flags: Vec<String>,
+    link_flags: Vec<String>,
     executable: Option<(u64, Option<std::time::SystemTime>)>,
 }
 
@@ -391,10 +416,26 @@ impl Drop for CanaryDir {
     }
 }
 
-/// Compile [`canary_source`] with `compile_flags`, run it on every C row of the
-/// obligation table, and refuse the compiler unless it prints exactly the table's
-/// bits.
-fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
+/// The canary's compile-and-link arguments: [`link_args`] with the canary source
+/// as the one input.
+fn canary_args(
+    compile_flags: &[String],
+    link_flags: &[String],
+    source: &Path,
+    program: &Path,
+) -> Vec<std::ffi::OsString> {
+    link_args(
+        compile_flags,
+        &[source.as_os_str()],
+        link_flags,
+        program.as_os_str(),
+    )
+}
+
+/// Compile and link [`canary_source`] with the profile's flags, run it on every C
+/// row of the obligation table, and refuse the compiler unless it prints exactly
+/// the table's bits.
+fn run_canary(path: &Path, compile_flags: &[String], link_flags: &[String]) -> Result<(), String> {
     let refuse = |what: String| {
         format!(
             "native compiler `{}` does not compile with the pinned floating-point profile \
@@ -410,10 +451,7 @@ fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
     std::fs::write(&source, canary_source())
         .map_err(|error| format!("cannot write the compiler canary: {error}"))?;
     let compiled = tool_command(path)
-        .args(compile_flags)
-        .arg(&source)
-        .arg("-o")
-        .arg(&program)
+        .args(canary_args(compile_flags, link_flags, &source, &program))
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
@@ -686,7 +724,11 @@ mod tests {
             return;
         }
         let toolchain = test_toolchain(CodegenRequirements::default());
-        let identity = verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
+        let identity = verify_compiler(
+            &toolchain.compiler,
+            &toolchain.compile_flags,
+            &toolchain.link_flags,
+        )
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(identity.path.is_absolute(), "{identity}");
         assert!(!identity.version.is_empty(), "{identity}");
@@ -711,13 +753,13 @@ mod tests {
     #[test]
     fn verify_compiler_accepts_the_plain_compiler_and_reports_a_missing_one() {
         let dir = tempfile::tempdir().unwrap();
-        let flags =
-            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
         let plain = wrapper(dir.path(), "plain-cc", "");
-        verify_compiler(&plain, &flags).unwrap_or_else(|error| panic!("{error}"));
+        verify_compiler(&plain, &flags, &links).unwrap_or_else(|error| panic!("{error}"));
         let missing = dir.path().join("missing-cc");
         assert_eq!(
-            verify_compiler(missing.to_str().unwrap(), &flags),
+            verify_compiler(missing.to_str().unwrap(), &flags, &links),
             Err(CompilerCheckError::NotFound(
                 missing.to_str().unwrap().to_string()
             ))
@@ -728,13 +770,13 @@ mod tests {
     #[test]
     fn verify_compiler_rechecks_a_wrapper_edited_after_acceptance() {
         let dir = tempfile::tempdir().unwrap();
-        let flags =
-            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
         let edited = wrapper(dir.path(), "edited-cc", "");
-        verify_compiler(&edited, &flags).unwrap_or_else(|error| panic!("{error}"));
-        verify_compiler(&edited, &flags).unwrap_or_else(|error| panic!("{error}"));
+        verify_compiler(&edited, &flags, &links).unwrap_or_else(|error| panic!("{error}"));
+        verify_compiler(&edited, &flags, &links).unwrap_or_else(|error| panic!("{error}"));
         wrapper(dir.path(), "edited-cc", "-fno-honor-nans");
-        let result = verify_compiler(&edited, &flags);
+        let result = verify_compiler(&edited, &flags, &links);
         assert!(
             matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("canonical-nan")),
             "{result:?}"
@@ -758,15 +800,15 @@ mod tests {
     #[cfg(unix)]
     fn check_wrapper(name: &str, extra: &str, verdict: Verdict) {
         let dir = tempfile::tempdir().unwrap();
-        let flags =
-            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
         let extra = if cfg!(target_arch = "x86_64") && extra.starts_with("-ffp-contract") {
             format!("-mfma {extra}")
         } else {
             extra.to_string()
         };
         let hostile = wrapper(dir.path(), name, &extra);
-        let result = verify_compiler(&hostile, &flags);
+        let result = verify_compiler(&hostile, &flags, &links);
         match verdict {
             Verdict::Refused(expected) => assert!(
                 matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains(expected)),
@@ -847,6 +889,38 @@ mod tests {
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     wrapper_verdicts! {
         verify_compiler_wrapper_excess_precision_fast: "-fexcess-precision=fast" => Verdict::Harmless;
+    }
+
+    /// The canary is linked as a real build is: the profile's compile flags,
+    /// then its link flags (`-lm` among them, which glibc needs for `fma`,
+    /// `roundeven`, and `sqrt`), for every requirement combination.
+    #[test]
+    fn canary_links_with_the_profile_link_flags() {
+        let (source, program) = (Path::new("canary.c"), Path::new("canary"));
+        for wants_openmp in [false, true] {
+            for needs_blas in [false, true] {
+                let requirements = CodegenRequirements {
+                    wants_openmp,
+                    needs_blas,
+                };
+                for profile in [
+                    pinned_toolchain("cc".into(), requirements, wants_openmp),
+                    strict_reference_toolchain("cc".into(), requirements),
+                ] {
+                    let mut expected: Vec<std::ffi::OsString> =
+                        profile.compile_flags.iter().map(Into::into).collect();
+                    expected.push(source.into());
+                    expected.extend(profile.link_flags.iter().map(Into::into));
+                    expected.extend(["-o".into(), program.into()]);
+                    assert!(profile.link_flags.contains(&"-lm".to_string()));
+                    assert_eq!(
+                        canary_args(&profile.compile_flags, &profile.link_flags, source, program),
+                        expected,
+                        "{profile:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

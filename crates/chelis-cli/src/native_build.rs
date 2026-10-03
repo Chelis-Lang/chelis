@@ -80,6 +80,7 @@ impl NativeBuild {
             let identity = chelis_backend_c::toolchain::verify_compiler(
                 &self.compiler.to_string_lossy(),
                 &self.compile_flags,
+                &self.link_flags,
             )
             .map_err(|error| match error {
                 CompilerCheckError::NotFound(tool) => tool_not_found("compile", self.target, &tool),
@@ -155,14 +156,15 @@ impl NativeBuild {
     }
 
     fn executable_command(&self, product: &Path) -> Command {
+        let mut inputs: Vec<&OsStr> = self.sources.iter().map(|source| source.as_os_str()).collect();
+        inputs.push(self.runtime_archive.as_os_str());
         let mut command = self.tool(&self.compiler);
-        command
-            .args(&self.compile_flags)
-            .args(&self.sources)
-            .arg(&self.runtime_archive)
-            .args(&self.link_flags)
-            .arg("-o")
-            .arg(product);
+        command.args(chelis_backend_c::toolchain::link_args(
+            &self.compile_flags,
+            &inputs,
+            &self.link_flags,
+            product.as_os_str(),
+        ));
         command
     }
 
