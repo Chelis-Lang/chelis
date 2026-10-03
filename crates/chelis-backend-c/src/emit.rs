@@ -10075,7 +10075,7 @@ mod tests {
             "cast must emit a checked element-wise loop; got:\n{c}"
         );
         assert!(
-            c.contains("((double*)t1_data)[i] = (double)(((float*)t0_data)[idx]);"),
+            c.contains("((double*)t1_data)[i] = __chelis_nan_f64((double)(((float*)t0_data)[idx]));"),
             "cast must read at the source width and convert into the target width; got:\n{c}"
         );
         assert!(
