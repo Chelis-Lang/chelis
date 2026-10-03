@@ -63,6 +63,7 @@ arb = ["dep:arb-sys"]
 
 [dependencies]
 chelis-reef.workspace = true
+chelis-std-bundle.workspace = true
 chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }
 # WI-14 oracle: FFI to FLINT/Arb. 0.3.6 vendors FLINT 2.8.5 + Arb c2b7e36 (it

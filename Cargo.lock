@@ -804,6 +804,7 @@ dependencies = [
  "chelis-deep",
  "chelis-pred",
  "chelis-reef",
+ "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
