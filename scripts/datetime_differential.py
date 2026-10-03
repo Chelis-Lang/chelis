@@ -60,18 +60,14 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import itertools
-import json
-import os
 import random
 from pathlib import Path
 import re
-import shutil
 import struct
-import subprocess
 import sys
 import tempfile
-import time
 
+from datetime_lanes import LaneResult, Runner, Toolchain
 import datetime_reference as ref
 from datetime_reference import DatetimeError, I64_MAX, I64_MIN
 
@@ -1549,29 +1545,12 @@ def build_exhaustive_corpus(chunk_days: int = 250_000) -> Corpus:
 
 
 @dataclass(frozen=True)
-class Toolchain:
-    compiler: str
-    compile_flags: tuple[str, ...]
-    link_flags: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class Program:
     name: str
     source: str
     bindings: tuple[Value, ...] = ()
     failure: Failure | None = None
     lanes: tuple[str, ...] = BOTH
-
-
-@dataclass
-class LaneResult:
-    lane: str
-    status: int | None
-    stdout: str
-    stderr: str
-    stage: str
-    seconds: float = 0.0
 
 
 def program_source(body: list[str]) -> str:
@@ -1639,51 +1618,6 @@ def canary_programs(programs: list[Program]) -> list[Program]:
     if missing:
         raise AssertionError(f"canary programs missing from the ci profile: {missing}")
     return [by_name[name] for name in CANARY_PROGRAMS]
-
-
-class Runner:
-    def __init__(self, chelis: Path, reef_home: Path, app_template: Path, work: Path, toolchain: Toolchain | None, timeout: int):
-        self.chelis = chelis
-        self.reef_home = reef_home
-        self.app_template = app_template
-        self.work = work
-        self.toolchain = toolchain
-        self.timeout = timeout
-
-    def env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update({"CHELIS_REEF_HOME": str(self.reef_home), "CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1"})
-        return env
-
-    def app(self, program: Program, lane: str) -> Path:
-        app = self.work / lane / program.name
-        if app.exists():
-            shutil.rmtree(app)
-        (app / "src").mkdir(parents=True)
-        shutil.copy(self.app_template / "reef.toml", app / "reef.toml")
-        (app / "src" / "main.ch").write_text(program.source, encoding="utf-8")
-        return app
-
-    def run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(argv, cwd=cwd, env=self.env(), capture_output=True, text=True, timeout=self.timeout, check=False)
-
-    def eval_lane(self, program: Program) -> LaneResult:
-        app = self.app(program, "eval")
-        done = self.run([str(self.chelis), "eval", "--file", "src/main.ch"], app)
-        return LaneResult("eval", done.returncode, done.stdout, done.stderr, "eval")
-
-    def c_lane(self, program: Program) -> LaneResult:
-        assert self.toolchain is not None
-        app = self.app(program, "c")
-        build = self.run([str(self.chelis), "build", "--emit-c", "src/main.ch", "--target", "c", "--output", "out"], app)
-        if build.returncode != 0:
-            return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
-        link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",
-                         "out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)
-        if link.returncode != 0:
-            return LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
-        done = self.run([str(app / "out" / "case")], app)
-        return LaneResult("c", done.returncode, done.stdout, done.stderr, "run")
 
 
 def parse_bindings(stdout: str) -> tuple[dict[str, str], list[str]]:
@@ -1810,13 +1744,7 @@ def run_all(runner: Runner, programs: list[Program], lanes: list[str], jobs: int
         for lane in lanes:
             if lane not in program.lanes:
                 continue
-            started = time.monotonic()
-            try:
-                result = runner.eval_lane(program) if lane == "eval" else runner.c_lane(program)
-            except subprocess.TimeoutExpired as error:
-                result = LaneResult(lane, None, "", f"timed out after {error.timeout} s", "timeout")
-            result.seconds = time.monotonic() - started
-            results.append(result)
+            results.append(runner.lane(program.name, program.source, lane))
         return program, results
 
     done = 0
@@ -1833,17 +1761,6 @@ def run_all(runner: Runner, programs: list[Program], lanes: list[str], jobs: int
     log("lane seconds: " + ", ".join(f"{lane} {total:.0f}" for lane, total in lane_total.items())
         + "; slowest: " + ", ".join(f"{name} {t:.0f}s" for t, name in timings[:8]))
     return report
-
-
-def write_app_template(chelis: Path, root: Path) -> Path:
-    version = subprocess.run([str(chelis), "--version"], capture_output=True, text=True, check=True).stdout.split()[1]
-    template = root / "template"
-    template.mkdir(parents=True, exist_ok=True)
-    (template / "reef.toml").write_text(
-        'schema = "1"\n\n[package]\nname = "datetime-oracle"\nversion = "0.1.0"\n'
-        f'compiler = "={version}"\nmodule_prefix = "Demo"\n\n[dependencies]\nchelis-std = {{ version = "0.4.0" }}\n',
-        encoding="utf-8")
-    return template
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1868,8 +1785,7 @@ def main(argv: list[str] | None = None) -> int:
     if "c" in lanes:
         if not args.toolchain_json:
             parser.error("the c lane needs --toolchain-json")
-        spec = json.loads(args.toolchain_json)
-        toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
+        toolchain = Toolchain.from_json(args.toolchain_json)
 
     ref.check_range_constants()
     corpus = build_exhaustive_corpus() if args.profile == "exhaustive" else build_ci_corpus()
@@ -1897,8 +1813,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="datetime-oracle-") as scratch:
         work = args.work or Path(scratch)
-        template = write_app_template(args.chelis, work)
-        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), template, work, toolchain, args.timeout)
+        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), work, toolchain, args.timeout, "datetime-oracle")
         report = run_all(runner, programs, lanes, args.jobs, log)
 
     for problem in report.problems[:200]:

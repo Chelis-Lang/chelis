@@ -1139,25 +1139,26 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "scripts/datetime_business_differential.py",
+        "scripts/datetime_lanes.py",
         "archive-name",
         lines=(
             '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)',
         ),
         disposition="not-lookup",
         reason=(
-            "links the archive `chelis build --output out` staged in the case's output directory, by its exact path"
+            "the Std.Datetime differentials' shared C lane links the archive `chelis build --emit-c --output out` staged in the case's output directory, by its exact path"
         ),
     ),
     Row(
-        "scripts/datetime_differential.py",
+        "scripts/test_datetime_lanes.py",
         "archive-name",
         lines=(
-            '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)',
+            '(out / "libchelis_runtime.a").write_text("")',
+            '["cc", "-O1", "-Werror", "-Iout", "out/main.c", "out/libchelis_runtime.a", "-lm", "-o", "out/case"],',
         ),
         disposition="not-lookup",
         reason=(
-            "links the archive `chelis build --output out` staged in the case's output directory, by its exact path"
+            "a stub `chelis build` writes an empty archive at the staged path, and the test asserts the C lane links that exact path"
         ),
     ),
     Row(
@@ -1165,17 +1166,6 @@ REVIEWED: tuple[Row, ...] = (
         "archive-name",
         lines=(
             '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"]',
-        ),
-        disposition="not-lookup",
-        reason=(
-            "links the archive `chelis build --output out` staged in the case's output directory, by its exact path"
-        ),
-    ),
-    Row(
-        "scripts/datetime_zone_differential.py",
-        "archive-name",
-        lines=(
-            '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)',
         ),
         disposition="not-lookup",
         reason=(
