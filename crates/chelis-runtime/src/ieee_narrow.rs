@@ -31,7 +31,9 @@ fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: 
         if source_mantissa == 0 {
             return sign | target_exponent_bits;
         }
-        return sign | target_exponent_bits | (1_u16 << (mantissa_bits - 1));
+        // [04-NUM-2]: the canonical quiet NaN, whatever the input's sign and
+        // payload.
+        return target_exponent_bits | (1_u16 << (mantissa_bits - 1));
     }
     if source_exponent == 0 {
         return sign;

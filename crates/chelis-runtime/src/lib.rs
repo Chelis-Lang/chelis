@@ -2368,10 +2368,15 @@ fn f32_to_f16_bits(v: f32) -> u16 {
         if exp < -10 {
             return sign;
         }
-        let m = (mant | 0x0080_0000) >> (1 - exp);
-        let lsb = (m >> 13) & 1;
-        let rounded = m + 0x0000_0FFF + lsb;
-        return sign | (rounded >> 13) as u16;
+        let full = mant | 0x0080_0000;
+        let shift = (14 - exp) as u32;
+        let mut kept = full >> shift;
+        let dropped = full & ((1 << shift) - 1);
+        let half = 1 << (shift - 1);
+        if dropped > half || (dropped == half && kept & 1 == 1) {
+            kept += 1;
+        }
+        return sign | kept as u16;
     }
     let lsb = (mant >> 13) & 1;
     let mut rounded = mant + 0x0000_0FFF + lsb;

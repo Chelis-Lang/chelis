@@ -310,6 +310,10 @@ to_f16 f32 0001 33800000 # gradual-underflow: the smallest f16 subnormal
 to_f16 f32 0000 33000000 # round-once: tie: half the smallest f16 subnormal is +0
 to_f16 f32 0002 33c00000 # round-once: tie: 1.5 smallest subnormals is 2
 to_f16 f32 0001 33000100 # round-once: just above the subnormal tie
+to_f16 f32 0001 33000001 # gradual-underflow: one f32 ulp above half the smallest subnormal: rounds up
+to_f16 f32 0003 34200001 # gradual-underflow: one f32 ulp above the tie between 2 and 3 subnormal quanta: rounds up to 3
+to_f16 f32 0201 38002001 # gradual-underflow: just above a tie in a larger subnormal: rounds up
+to_f16 f32 0200 38001fff # gradual-underflow: just below a tie in a larger subnormal: rounds down
 to_f16 f32 3c00 3f801000 # round-once: tie: 1 + 2^-11 is 1
 to_f16 f32 3c02 3f803000 # round-once: tie: rounds up to even
 to_f16 f32 3c01 3f801001 # round-once: just above a tie
@@ -325,6 +329,10 @@ to_f16 f64 0001 3e70000000000000 # gradual-underflow: the smallest f16 subnormal
 to_f16 f64 0000 3e60000000000000 # round-once: tie: half the smallest f16 subnormal is +0
 to_f16 f64 0002 3e78000000000000 # round-once: tie: 1.5 smallest subnormals is 2
 to_f16 f64 0001 3e60002000000000 # round-once: just above the subnormal tie
+to_f16 f64 0001 3e60000020000000 # gradual-underflow: one f32 ulp above half the smallest subnormal: rounds up
+to_f16 f64 0003 3e84000020000000 # gradual-underflow: one f32 ulp above the tie between 2 and 3 subnormal quanta: rounds up to 3
+to_f16 f64 0201 3f00040020000000 # gradual-underflow: just above a tie in a larger subnormal: rounds up
+to_f16 f64 0200 3f0003ffe0000000 # gradual-underflow: just below a tie in a larger subnormal: rounds down
 to_f16 f64 3c00 3ff0020000000000 # round-once: tie: 1 + 2^-11 is 1
 to_f16 f64 3c02 3ff0060000000000 # round-once: tie: rounds up to even
 to_f16 f64 3c01 3ff0020020000000 # round-once: just above a tie
@@ -338,6 +346,7 @@ to_bf16 f32 8000 80000000 # signed-zero: -0
 to_bf16 f32 0000 00000001 # gradual-underflow: far below the target's subnormals: +0
 to_bf16 f32 0001 00010000 # gradual-underflow: the smallest bf16 subnormal
 to_bf16 f32 0000 00008000 # round-once: tie: half the smallest bf16 subnormal is +0
+to_bf16 f32 0001 00008001 # gradual-underflow: one f32 ulp above half the smallest bf16 subnormal: rounds up
 to_bf16 f32 3f80 3f808000 # round-once: tie: 1 + 2^-8 is 1
 to_bf16 f32 3f82 3f818000 # round-once: tie: rounds up to even
 to_bf16 f32 3f81 3f808001 # round-once: just above a tie
@@ -349,6 +358,7 @@ to_bf16 f64 8000 8000000000000000 # signed-zero: -0
 to_bf16 f64 0000 0000000000000001 # gradual-underflow: far below the target's subnormals: +0
 to_bf16 f64 0001 37a0000000000000 # gradual-underflow: the smallest bf16 subnormal
 to_bf16 f64 0000 3790000000000000 # round-once: tie: half the smallest bf16 subnormal is +0
+to_bf16 f64 0001 3790002000000000 # gradual-underflow: one f32 ulp above half the smallest bf16 subnormal: rounds up
 to_bf16 f64 3f80 3ff0100000000000 # round-once: tie: 1 + 2^-8 is 1
 to_bf16 f64 3f82 3ff0300000000000 # round-once: tie: rounds up to even
 to_bf16 f64 3f81 3ff0100020000000 # round-once: just above a tie

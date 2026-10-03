@@ -686,3 +686,111 @@ pub fn describe(mismatches: &[Mismatch]) -> String {
         .collect::<Vec<_>>()
         .join("; ")
 }
+
+/// The f16 or bf16 storage bits of an f32 (`width` 32) or f64 (`width` 64) value,
+/// rounded once to nearest, ties to even, with [04-NUM-2]'s canonical NaN, computed
+/// with integer arithmetic alone. It is the reference the storage conversions are
+/// checked against, exhaustively over f32 and at every midpoint for f64 (the manual
+/// gates in `docs/manual_gates.md`); the crate's tests check it against the MPFR rows.
+pub fn storage_reference(bits: u64, width: u32, output: Output) -> u16 {
+    let (exponent_bits, fraction_bits) = if width == 32 { (8, 23) } else { (11, 52) };
+    let (target_exponent_bits, target_fraction_bits, canonical_nan) = match output {
+        Output::F16 => (5, 10, 0x7e00),
+        Output::Bf16 => (8, 7, 0x7fc0),
+        other => panic!("{other:?} is not a storage format"),
+    };
+    let exponent_mask = (1_u64 << exponent_bits) - 1;
+    let sign = (((bits >> (exponent_bits + fraction_bits)) & 1) as u16) << 15;
+    let exponent = (bits >> fraction_bits) & exponent_mask;
+    let fraction = bits & ((1_u64 << fraction_bits) - 1);
+    let target_exponent_max = (1_u16 << target_exponent_bits) - 1;
+    let infinity = sign | (target_exponent_max << target_fraction_bits);
+    if exponent == exponent_mask {
+        return if fraction == 0 { infinity } else { canonical_nan };
+    }
+    if exponent == 0 && fraction == 0 {
+        return sign;
+    }
+    // The value is `significand * 2^scale` exactly.
+    let source_bias = (1_i32 << (exponent_bits - 1)) - 1;
+    let (significand, scale) = if exponent == 0 {
+        (fraction, 1 - source_bias - fraction_bits as i32)
+    } else {
+        (
+            fraction | (1_u64 << fraction_bits),
+            exponent as i32 - source_bias - fraction_bits as i32,
+        )
+    };
+    let target_bias = (1_i32 << (target_exponent_bits - 1)) - 1;
+    // The exponent of the target's quantum: its ulp at the value's binade, never
+    // below the subnormal ulp.
+    let leading = 63 - significand.leading_zeros() as i32;
+    let quantum = (scale + leading - target_fraction_bits as i32)
+        .max(1 - target_bias - target_fraction_bits as i32);
+    let shift = quantum - scale;
+    let mut count = if shift <= 0 {
+        significand << -shift
+    } else if shift >= 64 {
+        0
+    } else {
+        let kept = significand >> shift;
+        let dropped = significand & ((1_u64 << shift) - 1);
+        let half = 1_u64 << (shift - 1);
+        kept + u64::from(dropped > half || (dropped == half && kept & 1 == 1))
+    };
+    if count < 1 << target_fraction_bits {
+        return sign | count as u16;
+    }
+    let mut biased = quantum + target_fraction_bits as i32 + target_bias;
+    if count >> (target_fraction_bits + 1) != 0 {
+        count >>= 1;
+        biased += 1;
+    }
+    if biased >= i32::from(target_exponent_max) {
+        return infinity;
+    }
+    sign | ((biased as u16) << target_fraction_bits)
+        | (count & ((1_u64 << target_fraction_bits) - 1)) as u16
+}
+
+/// f64 inputs at every f16 or bf16 rounding boundary: for each pair of adjacent
+/// finite storage values of either sign, their exact midpoint, the f64 values one ulp
+/// either side of it, and the values a relative 2^-30 either side (closer than an f32
+/// rounding step, so a conversion that rounds to f32 first lands on the midpoint).
+/// The f64 storage conversions are checked against [`storage_reference`] on all of
+/// them; there are too many f64 inputs to check exhaustively.
+pub fn storage_midpoint_inputs(output: Output) -> Vec<u64> {
+    let decode = |code: u16| match output {
+        Output::F16 => half::f16::from_bits(code).to_f64(),
+        Output::Bf16 => half::bf16::from_bits(code).to_f64(),
+        other => panic!("{other:?} is not a storage format"),
+    };
+    let infinity = match output {
+        Output::F16 => 0x7c00,
+        _ => 0x7f80,
+    };
+    let mut inputs = Vec::new();
+    for code in 0..infinity {
+        let low = decode(code);
+        // The largest finite value's upper neighbour is the overflow threshold.
+        let high = if code + 1 == infinity {
+            low + (low - decode(code - 1))
+        } else {
+            decode(code + 1)
+        };
+        let middle = low + (high - low) / 2.0;
+        let bits = middle.to_bits();
+        let nudge = middle * 2.0_f64.powi(-30);
+        for value in [
+            middle,
+            f64::from_bits(bits + 1),
+            f64::from_bits(bits - 1),
+            middle + nudge,
+            middle - nudge,
+        ] {
+            inputs.push(value.to_bits());
+            inputs.push((-value).to_bits());
+        }
+    }
+    inputs
+}

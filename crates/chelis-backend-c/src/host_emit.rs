@@ -1357,7 +1357,7 @@ pub(crate) fn append_checked_cast_conversion_helpers(out: &mut Vec<String>) {
             "    if (source_exponent == UINT32_C(0x7ff)) {",
             "        uint16_t target_exponent = (uint16_t)(target_exponent_max << mantissa_bits);",
             "        if (source_mantissa == 0) return (uint16_t)(sign | target_exponent);",
-            "        return (uint16_t)(sign | target_exponent | (UINT16_C(1) << (mantissa_bits - 1)));",
+            "        return (uint16_t)(target_exponent | (UINT16_C(1) << (mantissa_bits - 1)));",
             "    }",
             "    if (source_exponent == 0 && source_mantissa == 0) return sign;",
             "    int exponent;",
@@ -12811,5 +12811,129 @@ mod expression_dispatch_tests {
                 "}",
             ]
         );
+    }
+}
+
+/// Generated C's f64 storage conversions against the integer reference
+/// (`chelis_crmath::profile::storage_reference`, [04-NUM-2], [04-NUM-14]): at every
+/// f16 and bf16 rounding boundary per pull request, and over every f32's exact f64
+/// widening as a manual gate (`docs/manual_gates.md`).
+#[cfg(test)]
+mod storage_narrowing_tests {
+    use super::append_checked_cast_conversion_helpers;
+    use crate::toolchain::{CodegenRequirements, strict_reference_toolchain, test_toolchain};
+    use chelis_crmath::profile::{Output, rows, storage_midpoint_inputs, storage_reference};
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The driver, compiled with the product profile.
+    fn driver(dir: &Path) -> PathBuf {
+        let mut helpers = Vec::new();
+        append_checked_cast_conversion_helpers(&mut helpers);
+        let mut source = String::from("#include <stdint.h>\n#include <string.h>\n");
+        for line in helpers {
+            source.push_str(&line);
+            source.push('\n');
+        }
+        source.push_str(include_str!("../tests/fixtures/f64_storage_narrowing.c"));
+        let path = dir.join("f64_storage_narrowing.c");
+        let program = dir.join("f64_storage_narrowing");
+        std::fs::write(&path, source).unwrap();
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let flags =
+            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let output = Command::new(compiler)
+            .args(flags)
+            .arg(&path)
+            .arg("-o")
+            .arg(&program)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        program
+    }
+
+    #[test]
+    fn f64_storage_conversion_matches_the_reference_at_every_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = driver(dir.path());
+        let mut inputs: Vec<u64> = rows()
+            .iter()
+            .filter(|row| {
+                row.primitive.width == 64
+                    && matches!(row.primitive.result, Output::F16 | Output::Bf16)
+            })
+            .map(|row| row.operands[0])
+            .collect();
+        inputs.extend(storage_midpoint_inputs(Output::F16));
+        inputs.extend(storage_midpoint_inputs(Output::Bf16));
+        let mut child = Command::new(&program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let text: String = inputs.iter().map(|bits| format!("{bits:x}\n")).collect();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+        let output = child.wait_with_output().unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(output.status.success());
+        let printed = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(printed.lines().count(), inputs.len());
+        let mut bad = Vec::new();
+        for (bits, line) in inputs.iter().zip(printed.lines()) {
+            let (f16, bf16) = line.split_once(' ').unwrap();
+            for (output, got) in [(Output::F16, f16), (Output::Bf16, bf16)] {
+                let got = u16::from_str_radix(got, 16).unwrap();
+                let expected = storage_reference(*bits, 64, output);
+                if got != expected {
+                    bad.push(format!("{output:?} {bits:x}: {got:04x}, reference {expected:04x}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} mismatches: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    }
+
+    #[test]
+    #[ignore = "manual gate: 2^32 inputs (docs/manual_gates.md)"]
+    fn every_f32_widening_narrows_once_to_f16_and_bf16_storage() {
+        const CHUNK: u64 = 1 << 24;
+        let dir = tempfile::tempdir().unwrap();
+        let program = driver(dir.path());
+        let threads = std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
+        let next = AtomicU64::new(0);
+        let total: u64 = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut count = 0_u64;
+                        loop {
+                            let low = next.fetch_add(CHUNK, Ordering::Relaxed);
+                            if low >= 1 << 32 {
+                                break count;
+                            }
+                            let output = Command::new(&program)
+                                .args([format!("{low:x}"), format!("{:x}", low + CHUNK)])
+                                .output()
+                                .unwrap();
+                            assert!(output.status.success());
+                            for (offset, pair) in output.stdout.chunks_exact(4).enumerate() {
+                                let bits = low + offset as u64;
+                                let value = f32::from_bits(u32::try_from(bits).unwrap());
+                                let wide = f64::from(value).to_bits();
+                                let f16 = u16::from_ne_bytes([pair[0], pair[1]]);
+                                let bf16 = u16::from_ne_bytes([pair[2], pair[3]]);
+                                count += u64::from(f16 != storage_reference(wide, 64, Output::F16));
+                                count += u64::from(bf16 != storage_reference(wide, 64, Output::Bf16));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|worker| worker.join().unwrap()).sum()
+        });
+        assert_eq!(total, 0, "{total} misrounded conversions over 2^32 inputs");
     }
 }

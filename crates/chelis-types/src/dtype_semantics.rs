@@ -1625,9 +1625,9 @@ fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: 
         if source_mantissa == 0 {
             return sign | target_exponent_bits;
         }
-        // Every NaN remains a NaN. A canonical quiet payload also avoids
-        // architecture-dependent signaling-NaN behavior at this boundary.
-        return sign | target_exponent_bits | (1_u16 << (mantissa_bits - 1));
+        // [04-NUM-2]: every NaN becomes the canonical quiet NaN, whatever its
+        // sign and payload.
+        return target_exponent_bits | (1_u16 << (mantissa_bits - 1));
     }
     if source_exponent == 0 {
         // Every finite binary64 subnormal is below half of the least f16 or

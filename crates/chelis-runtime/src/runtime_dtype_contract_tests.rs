@@ -1,6 +1,6 @@
 use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
 
-use chelis_crmath::profile::{rows, Row};
+use chelis_crmath::profile::{rows, storage_midpoint_inputs, storage_reference, Output, Row};
 
 use super::{
     chelis_tensor, finalize_bf16, finalize_f16, read_index_slot, tensor_elem_size,
@@ -115,4 +115,62 @@ fn f64_accumulator_rounds_to_bf16_once() {
         <half::f16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits(),
         0x3c01
     );
+}
+
+fn accumulator_bits(bits: u64, output: Output) -> u16 {
+    let value = f64::from_bits(bits);
+    match output {
+        Output::F16 => <half::f16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits(),
+        Output::Bf16 => <half::bf16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits(),
+        _ => unreachable!("not a storage format"),
+    }
+}
+
+/// The f64 accumulator's finalization at every f16 and bf16 rounding boundary, against
+/// the integer reference.
+#[test]
+fn f64_accumulator_matches_the_reference_at_every_boundary() {
+    for output in [Output::F16, Output::Bf16] {
+        for bits in storage_midpoint_inputs(output) {
+            assert_eq!(
+                accumulator_bits(bits, output),
+                storage_reference(bits, 64, output),
+                "input {bits:x}"
+            );
+        }
+    }
+}
+
+/// Manual gate (`docs/manual_gates.md`): every f32 bit pattern through the f32 and
+/// the f64 accumulators' finalization, against the integer reference.
+#[test]
+#[ignore = "manual gate: 2^32 inputs (docs/manual_gates.md)"]
+fn every_f32_finalizes_once_to_f16_and_bf16_storage() {
+    let threads = std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
+    let span = (1_u64 << 32) / threads as u64 + 1;
+    let total: u64 = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads as u64)
+            .map(|worker| {
+                scope.spawn(move || {
+                    let mut count = 0_u64;
+                    for bits in worker * span..((worker + 1) * span).min(1 << 32) {
+                        let value = f32::from_bits(u32::try_from(bits).unwrap());
+                        let wide = f64::from(value).to_bits();
+                        for output in [Output::F16, Output::Bf16] {
+                            let expected = storage_reference(bits, 32, output);
+                            let narrow = match output {
+                                Output::F16 => finalize_f16(value).to_bits(),
+                                _ => finalize_bf16(value).to_bits(),
+                            };
+                            count += u64::from(narrow != expected);
+                            count += u64::from(accumulator_bits(wide, output) != expected);
+                        }
+                    }
+                    count
+                })
+            })
+            .collect();
+        workers.into_iter().map(|worker| worker.join().unwrap()).sum()
+    });
+    assert_eq!(total, 0, "{total} misrounded finalizations over 2^32 inputs");
 }

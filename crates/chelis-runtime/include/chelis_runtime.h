@@ -683,10 +683,18 @@ static inline uint16_t chelis_f32_to_f16(float v) {
         if (exp < -10) {
             return (uint16_t)sign;
         }
-        mant = (mant | 0x00800000u) >> (1 - exp);
-        uint32_t lsb = (mant >> 13) & 1u;
-        uint32_t rounded = mant + 0x00000FFFu + lsb;
-        return (uint16_t)(sign | (rounded >> 13));
+        /* Round the full significand once at the subnormal quantum: every
+         * discarded bit, not only the ones a pre-shift keeps, decides a
+         * near-tie. A carry into bit 10 is the smallest normal. */
+        uint32_t full = mant | 0x00800000u;
+        uint32_t shift = (uint32_t)(14 - exp);
+        uint32_t kept = full >> shift;
+        uint32_t dropped = full & ((1u << shift) - 1u);
+        uint32_t half = 1u << (shift - 1u);
+        if (dropped > half || (dropped == half && (kept & 1u) != 0u)) {
+            kept += 1u;
+        }
+        return (uint16_t)(sign | kept);
     }
     /* Normal: round-to-nearest-even on the discarded 13 mantissa bits. */
     uint32_t lsb = (mant >> 13) & 1u;
