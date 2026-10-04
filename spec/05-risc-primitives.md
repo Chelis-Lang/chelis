@@ -2951,9 +2951,9 @@ exact ADT identity by [05-OP-34].
 > graph finalized once to `p_float`. Its `erfc` and `exp` leaves are [05-OP-46]'s correctly rounded
 > primitives at `p_float`'s arithmetic width, so the complete callable denotes
 > one result bit pattern per input and has [05-OBS-3]'s zero-ULP cross-lane
-> bound. `normal_cdf(+inf)` is exact `1p`, `normal_cdf(-inf)` is exact `0p`,
-> and a NaN input returns [04-NUM-2]'s canonical NaN at `p_float`, each as the
-> graph's own result.
+> bound. `normal_cdf(+inf)` is exact `1p`, `normal_cdf(-inf)` is exact `0p`, and a NaN
+> input returns [04-NUM-2]'s canonical NaN at `p_float`, each as the graph's own
+> result.
 > Its adjoint is the derivative of that exact graph, not a substituted
 > library CDF or density. The infinities have zero cotangent and NaN propagates the
 > canonical NaN cotangent; no non-finite input traps `Domain`.
