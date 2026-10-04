@@ -2169,7 +2169,11 @@ impl RiscOp {
             // [05-OP-43] identity and its AD-only selector stay explicit so
             // the zero-at-zero convention cannot collapse to MaxElem's tie
             // rule. Beacon has not yet registered dedicated transformers.
-            RiscOp::Relu | RiscOp::ReluAdjoint | RiscOp::Softmax { .. } => false,
+            RiscOp::Relu | RiscOp::ReluAdjoint => false,
+
+            // [05-OP-48] remains a retained composition identity. Beacon
+            // has no dedicated transformer for an undecomposed Softmax.
+            RiscOp::Softmax { .. } => false,
 
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
@@ -5176,8 +5180,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            68,
-            "one_of_every_risc_op must list all 68 classified samples"
+            69,
+            "one_of_every_risc_op must list all 69 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5204,13 +5208,15 @@ mod tests {
         // baked draws with the two key-operand draws and adds their two
         // AD replays (+2 = 27). The four explicit key derivations produce
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
-        // branch's key join (+1 = 32).
+        // branch's key join (+1 = 32). The internal extrema adjoint
+        // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
+        // composition has no dedicated transformer (+1 = 34).
         assert_eq!(
             targetable, 35,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 33,
+            excluded, 34,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -5218,6 +5224,10 @@ mod tests {
         // reclassification (not just a count drift) is caught.
         assert!(RiscOp::Add.is_verifier_targetable());
         assert!(RiscOp::Exp.is_verifier_targetable());
+        assert!(
+            !RiscOp::Softmax { axis: 0 }.is_verifier_targetable(),
+            "retained Softmax requires its own transformer before verifier admission"
+        );
         assert!(
             RiscOp::Compare(ComparisonKind::CmpLt).is_verifier_targetable(),
             "Compare(CmpLt) drives erf64 branch-and-bound; must be targetable"
