@@ -61,7 +61,10 @@ const LAWS: &[(&str, &str)] = &[
 ];
 
 /// The properties whose false variant the canary refutes.
-const CANARY_FALSE_VARIANTS: &[&str] = &["decimal_round_is_idempotent", "decimal_from_i64_round_trips"];
+const CANARY_FALSE_VARIANTS: &[&str] = &[
+    "decimal_round_is_idempotent",
+    "decimal_from_i64_round_trips",
+];
 
 /// A copy of `packages/chelis-std`, so a run reads this checkout's sources and
 /// writes nothing into it, with its own reef home.
