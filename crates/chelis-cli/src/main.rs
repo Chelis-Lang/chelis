@@ -402,6 +402,11 @@ enum Command {
         /// Run only the comma-separated set of rules.
         #[arg(long)]
         rules: Option<String>,
+        /// After the run, print one JSON line per file to stderr with the
+        /// typed rewrite gate's work: candidates, pipeline runs, and whether
+        /// the pipeline accepted the original source.
+        #[arg(long)]
+        stats: bool,
     },
     /// Internal: run the tests in a single file and emit NDJSON on stdout.
     /// Invoked by `chelis test` as a subprocess per file so a crash in one
@@ -1114,7 +1119,16 @@ fn main() {
             list,
             rule,
             rules,
-        }) => match cmd_lint(paths, check, fix, list, rule.as_deref(), rules.as_deref()) {
+            stats,
+        }) => match cmd_lint(
+            paths,
+            check,
+            fix,
+            list,
+            rule.as_deref(),
+            rules.as_deref(),
+            stats,
+        ) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -12741,43 +12755,83 @@ fn typed_pipeline_accepts_surf(source: &str) -> bool {
     )
 }
 
-/// The typed-pipeline proof that a lint rewrite preserves semantics.
+/// The typed-pipeline guard on lint rewrites.
 ///
-/// `spec/01-nomenclature.md` §12 admits an autofix only when the fixer can
-/// prove the rewrite preserves semantics. Preservation relates two programs,
-/// so the proof needs the pipeline to accept both the original source and the
-/// rewritten one: a source the pipeline rejects has no typed meaning for a
-/// rewrite to preserve, and every rewrite of it is declined.
+/// `spec/01-nomenclature.md` §12 admits an autofix only when the rewrite
+/// preserves semantics. Each opted-in rule is intended to propose only
+/// meaning-preserving rewrites; whether that holds is open in chelis#3119.
+/// The pipeline check is a necessary guard, not a proof: it declines a
+/// candidate unless the pipeline accepts both the original source and the
+/// rewritten one. A source the pipeline rejects has no typed meaning to
+/// preserve, so every rewrite of it is declined.
 ///
 /// The original's verdict depends only on the original text, so the gate
 /// computes it once per distinct source and checks it before any rewrite. A
 /// file the pipeline rejects then costs one pipeline run however many
 /// candidates its rules propose, instead of one full-file run per candidate
-/// (chelis#3108). `pipeline_runs` counts every run so tests can bound the work
-/// without timing it.
+/// (chelis#3108). The gate counts candidates and runs per file so tests can
+/// bound the work without timing it and `chelis lint --stats` can report it.
 #[derive(Default)]
 struct TypedRewriteGate {
     original_accepted: BTreeMap<String, bool>,
+    files: BTreeMap<PathBuf, TypedRewriteFileStats>,
+}
+
+/// One file's work through the typed rewrite gate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TypedRewriteFileStats {
+    /// Rewrites submitted to the gate.
+    candidates: usize,
+    /// Full typed-pipeline runs spent on them, the original's included.
     pipeline_runs: usize,
+    /// The pipeline's verdict on the unedited source, once computed.
+    original_accepted: Option<bool>,
 }
 
 impl TypedRewriteGate {
-    fn accepts_rewrite(&mut self, original: &str, rewritten: &str) -> bool {
+    fn accepts_rewrite(&mut self, path: &Path, original: &str, rewritten: &str) -> bool {
+        let mut runs = 0;
         let original_accepted = match self.original_accepted.get(original) {
             Some(accepted) => *accepted,
             None => {
-                let accepted = self.run_pipeline(original);
+                runs += 1;
+                let accepted = typed_pipeline_accepts_surf(original);
                 self.original_accepted
                     .insert(original.to_string(), accepted);
                 accepted
             }
         };
-        original_accepted && self.run_pipeline(rewritten)
+        let accepted = original_accepted && {
+            runs += 1;
+            typed_pipeline_accepts_surf(rewritten)
+        };
+        let stats = self.files.entry(path.to_path_buf()).or_default();
+        stats.candidates += 1;
+        stats.pipeline_runs += runs;
+        stats.original_accepted = Some(original_accepted);
+        accepted
     }
 
-    fn run_pipeline(&mut self, source: &str) -> bool {
-        self.pipeline_runs += 1;
-        typed_pipeline_accepts_surf(source)
+    fn pipeline_runs(&self) -> usize {
+        self.files.values().map(|stats| stats.pipeline_runs).sum()
+    }
+
+    /// One JSON object per file the gate saw, in path order: the
+    /// `chelis lint --stats` stderr lines.
+    fn stats_lines(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|(path, stats)| {
+                serde_json::json!({
+                    "lint_stats": "typed_rewrite_gate",
+                    "path": path.display().to_string(),
+                    "candidates": stats.candidates,
+                    "pipeline_runs": stats.pipeline_runs,
+                    "original_accepted": stats.original_accepted,
+                })
+                .to_string()
+            })
+            .collect()
     }
 }
 
@@ -12794,6 +12848,7 @@ fn cmd_lint(
     list: bool,
     rule_filter: Option<&str>,
     rules_filter: Option<&str>,
+    stats: bool,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     if rule_filter.is_some() && rules_filter.is_some() {
         return Err("use either --rule or --rules, not both".into());
@@ -13031,6 +13086,11 @@ fn cmd_lint(
              (advisory/warning lines, if any, are non-blocking)"
         );
     }
+    if stats {
+        for line in gate.stats_lines() {
+            eprintln!("{line}");
+        }
+    }
     if check && blocking_total > 0 {
         Ok(1)
     } else {
@@ -13151,7 +13211,7 @@ fn apply_lint_fixes(
                 if needs_check && surface_eligible_for_typed_check {
                     let mut candidate = source.clone();
                     candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-                    if !gate.accepts_rewrite(&source, &candidate) {
+                    if !gate.accepts_rewrite(&path, &source, &candidate) {
                         // Drop this replacement silently; the lint warning
                         // remains so the user sees the still-flagged copy().
                         continue;
@@ -13259,7 +13319,7 @@ fn fix_would_apply_for_violation(
             return false;
         }
         candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-        return gate.accepts_rewrite(source, &candidate);
+        return gate.accepts_rewrite(&violation.path, source, &candidate);
     }
     true
 }
@@ -13315,7 +13375,7 @@ mod typed_rewrite_gate_tests {
                 (status.suppress, status.fix_available)
             })
             .collect();
-        (statuses, gate.pipeline_runs)
+        (statuses, gate.pipeline_runs())
     }
 
     fn defs(body: &str) -> String {

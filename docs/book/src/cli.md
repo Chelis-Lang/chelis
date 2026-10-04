@@ -73,6 +73,20 @@ Each of those commands accepts `--allow-style-violations` for an exceptional loc
 prints a warning and skips the style check for that command. Parse, type, evaluation, and build
 errors still fail.
 
+Two lint rules, `prefer-pipe-operator` and `redundant-linearity-call`, print a warning only when
+their rewrite would apply. A rewrite applies only when the typed pipeline accepts both the
+unedited file and the rewritten one. That check runs the whole pipeline, once for the unedited
+file and once per rewrite. `chelis lint --stats` reports that work after the run as one JSON
+line per file on stderr:
+
+```json
+{"candidates":3,"lint_stats":"typed_rewrite_gate","original_accepted":false,"path":"app.ch","pipeline_runs":1}
+```
+
+`candidates` counts the rewrites checked, `pipeline_runs` counts the full pipeline runs spent
+on them, and `original_accepted` is the pipeline's verdict on the unedited file. When the
+unedited file is rejected, none of its rewrites is offered, and the file costs one run.
+
 ## Build for a target
 
 ```sh

@@ -7853,6 +7853,75 @@ fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
     assert!(!rewritten.contains("|>"));
 }
 
+/// chelis#3108: `chelis lint --stats` reports the typed rewrite gate's
+/// per-file work on stderr as JSON lines.
+fn lint_stats_lines(args: &[&str]) -> Vec<serde_json::Value> {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(args)
+        .output()
+        .expect("run chelis lint");
+    assert!(output.status.success(), "lint failed: {output:?}");
+    String::from_utf8(output.stderr)
+        .expect("utf-8 stderr")
+        .lines()
+        .filter(|line| line.contains("\"lint_stats\""))
+        .map(|line| serde_json::from_str(line).expect("stats line is JSON"))
+        .collect()
+}
+
+#[test]
+fn lint_stats_reports_one_run_for_a_rejected_original() {
+    // `outer`, `inner`, and `scale` are undefined, so the pipeline rejects
+    // the original once and declines all three candidates without
+    // checking them.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_stats_rejected.ch");
+    let body = "(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
+    write_file(&path, &format!("def f{body}\ndef g{body}\ndef h{body}"));
+
+    let stats = lint_stats_lines(&["lint", "--stats", path.to_str().unwrap()]);
+    assert_eq!(stats.len(), 1, "one stats line per gated file: {stats:?}");
+    assert_eq!(stats[0]["lint_stats"], "typed_rewrite_gate");
+    assert!(
+        stats[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("pipe_stats_rejected.ch")
+    );
+    assert_eq!(stats[0]["candidates"], 3);
+    assert_eq!(stats[0]["pipeline_runs"], 1);
+    assert_eq!(stats[0]["original_accepted"], false);
+}
+
+#[test]
+fn lint_stats_reports_a_run_per_candidate_for_an_accepted_original() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_stats_accepted.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
+    );
+
+    let stats = lint_stats_lines(&["lint", "--stats", path.to_str().unwrap()]);
+    assert_eq!(stats.len(), 1, "one stats line per gated file: {stats:?}");
+    assert_eq!(stats[0]["candidates"], 1);
+    assert_eq!(stats[0]["pipeline_runs"], 2);
+    assert_eq!(stats[0]["original_accepted"], true);
+}
+
+#[test]
+fn lint_without_stats_prints_no_stats_lines() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_no_stats.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
+    );
+
+    assert!(lint_stats_lines(&["lint", path.to_str().unwrap()]).is_empty());
+}
+
 #[test]
 fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
     // Positive case: a nested first-argument call chain over stdlib
