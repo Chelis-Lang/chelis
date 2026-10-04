@@ -137,20 +137,38 @@ fn assert_lanes(source: &str, entry: &str, root: &str, prim: Prim, expected: &[S
 
 /// Run `source` in both lanes and require both to fail with `line`.
 fn assert_lanes_trap(source: &str, entry: &str, line: &str) {
+    assert_lanes_trap_lines(source, entry, &[line]);
+}
+
+/// Run `source` in both lanes and require each to fail with every line of
+/// `lines` as a whole line of its failure, in order.
+fn assert_lanes_trap_lines(source: &str, entry: &str, lines: &[&str]) {
+    let expected = lines.join("\n");
     let err = match eval_source(source) {
-        Ok(roots) => panic!("{entry}: eval returned {roots:?} instead of failing with {line}"),
+        Ok(roots) => panic!("{entry}: eval returned {roots:?} instead of failing with {expected}"),
         Err(err) => err,
     };
+    // `eval_source` renders the failure with `{:?}`, which escapes newlines.
+    let escaped = lines.join("\\n");
     assert!(
-        err.contains(line),
-        "{entry}: eval failure {err} lacks `{line}`"
+        err.contains(&escaped),
+        "{entry}: eval failure {err} lacks `{expected}`"
     );
     let program = ownership_support::emit(source, entry);
     let stderr = ownership_support::run_failure_stderr(&program, "");
     assert!(
-        stderr.lines().any(|candidate| candidate == line),
-        "{entry}: compiled C failure {stderr} lacks `{line}`"
+        stderr
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(lines.len())
+            .any(|window| window == lines),
+        "{entry}: compiled C failure {stderr} lacks `{expected}`"
     );
+}
+
+/// The [04-NUM-9] clamp domain trap at `dtype`, then its position detail.
+fn clamp_trap(dtype: &str) -> String {
+    format!("numeric trap: domain in clamp at {dtype}")
 }
 
 fn ints(values: &[i64]) -> Vec<Stored> {
@@ -333,10 +351,12 @@ fn float_clamp_with_valid_bounds_selects_in_both_lanes() {
 }
 
 /// Evidentiary status: REGRESSION TEST. At 08939bc0e eval panics in Rust
-/// `f64::clamp` (exit 101) on every row below.
+/// `f64::clamp` (exit 101) on every row below. chelis#3010: both lanes print
+/// the [04-NUM-9] line at the operand dtype, then the position on its own
+/// line; neither used to print the canonical line.
 #[test]
 fn clamp_lower_above_upper_traps_domain_at_its_position_in_both_lanes() {
-    let line = "Domain: clamp lower bound exceeds upper bound at row-major position 2";
+    let detail = "clamp lower bound exceeds upper bound at row-major position 2";
     for prim in [Prim::F32, Prim::F64, Prim::F16, Prim::Bf16] {
         let source = format!(
             "out = clamp({}, {}, {})\n",
@@ -344,16 +364,16 @@ fn clamp_lower_above_upper_traps_domain_at_its_position_in_both_lanes() {
             float_tensor(prim, &[0.0, 0.0, 5.0, 6.0]),
             float_tensor(prim, &[1.0, 1.0, 1.0, 1.0]),
         );
-        assert_lanes_trap(&source, prim.name(), line);
+        assert_lanes_trap_lines(&source, prim.name(), &[&clamp_trap(prim.name()), detail]);
     }
-    for (prim, suffix) in [("i64", "i64"), ("i32", "i32")] {
+    for suffix in ["i64", "i32"] {
         let source = format!(
             "out = clamp({}, {}, {})\n",
             int_tensor(suffix, &[1, 2, 3, 4]),
             int_tensor(suffix, &[0, 0, 5, 6]),
             int_tensor(suffix, &[1, 1, 1, 1]),
         );
-        assert_lanes_trap(&source, prim, line);
+        assert_lanes_trap_lines(&source, suffix, &[&clamp_trap(suffix), detail]);
     }
 }
 
@@ -365,10 +385,13 @@ fn clamp_rank_zero_bounds_trap_at_the_first_position_in_both_lanes() {
         int_tensor("i64", &[3]),
         int_tensor("i64", &[0]),
     );
-    assert_lanes_trap(
+    assert_lanes_trap_lines(
         &source,
         "clamp-rank-zero",
-        "Domain: clamp lower bound exceeds upper bound at row-major position 0",
+        &[
+            &clamp_trap("i64"),
+            "clamp lower bound exceeds upper bound at row-major position 0",
+        ],
     );
 }
 
@@ -382,10 +405,13 @@ fn clamp_nan_bound_traps_domain_at_its_position_in_both_lanes() {
             float_tensor(prim, &[1.0, 2.0, 3.0]),
             float_tensor(prim, &[5.0, 5.0, 5.0]),
         );
-        assert_lanes_trap(
+        assert_lanes_trap_lines(
             &source,
             prim.name(),
-            "Domain: clamp bound is NaN at row-major position 1",
+            &[
+                &clamp_trap(prim.name()),
+                "clamp bound is NaN at row-major position 1",
+            ],
         );
     }
 }

@@ -317,6 +317,33 @@ macro_rules! runtime_fail {
     }};
 }
 
+/// Fail with an [04-NUM-9] trap line rendered by the formatter every lane
+/// shares, then optionally one detail line. The trap line itself never
+/// carries a prefix or suffix.
+macro_rules! numeric_trap {
+    ($kind:ident, $op:expr, $dtype:expr) => {
+        runtime_fail!(
+            "{}",
+            chelis_vocab::NumericTrapLine {
+                kind: chelis_vocab::NumericTrapKind::$kind,
+                op: $op,
+                dtype: $dtype,
+            }
+        )
+    };
+    ($kind:ident, $op:expr, $dtype:expr, $($detail:tt)+) => {
+        runtime_fail!(
+            "{}\n{}",
+            chelis_vocab::NumericTrapLine {
+                kind: chelis_vocab::NumericTrapKind::$kind,
+                op: $op,
+                dtype: $dtype,
+            },
+            format_args!($($detail)+)
+        )
+    };
+}
+
 // Declared after `runtime_fail!` so the module can use it.
 mod fp_env;
 pub use fp_env::FpEnvGuard;
@@ -360,13 +387,13 @@ macro_rules! impl_runtime_integer_arithmetic {
             #[inline]
             fn runtime_add(self, rhs: Self, op: &'static str) -> Self {
                 self.checked_add(rhs)
-                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+                    .unwrap_or_else(|| numeric_trap!(Overflow, op, $name))
             }
 
             #[inline]
             fn runtime_mul(self, rhs: Self, op: &'static str) -> Self {
                 self.checked_mul(rhs)
-                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+                    .unwrap_or_else(|| numeric_trap!(Overflow, op, $name))
             }
 
             #[inline]
@@ -2729,12 +2756,11 @@ pub unsafe extern "C" fn chelis_tensor_check_expand(
 
 fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
     result.unwrap_or_else(|error| {
-        let class = match &error {
-            MetadataError::Domain(_) => "domain",
-            MetadataError::Overflow(_) => "overflow",
-        };
         eprintln!("{error}");
-        runtime_fail!("numeric trap: {class} in {op} at i64")
+        match &error {
+            MetadataError::Domain(_) => numeric_trap!(Domain, op, "i64"),
+            MetadataError::Overflow(_) => numeric_trap!(Overflow, op, "i64"),
+        }
     })
 }
 
@@ -5968,7 +5994,12 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         }
         for axis2 in 0..(*tensor).rank() as usize {
             if axis2 != axis_i && (*tensor).shape()[axis2] != (*first).shape()[axis2] {
-                runtime_fail!("numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes");
+                numeric_trap!(
+                    Domain,
+                    "concat",
+                    "i64",
+                    "concat expects matching non-concatenated axes"
+                );
             }
         }
         // [05-OP-33]: output extents use checked arithmetic. Unchecked, this
@@ -5976,14 +6007,14 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         // from the allocator, where the atom mandates `Overflow`.
         out_shape[axis_i] = out_shape[axis_i]
             .checked_add((*tensor).shape()[axis_i])
-            .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in concat at i64"));
+            .unwrap_or_else(|| numeric_trap!(Overflow, "concat", "i64"));
     }
     // Validate the complete output metadata under concat's attribution before
     // the allocator can report the same overflow as a different operation.
     if let Err(error) = ShapeMetadata::contiguous(&out_shape, dtype) {
         match error {
-            MetadataError::Overflow(_) => runtime_fail!("numeric trap: overflow in concat at i64"),
-            MetadataError::Domain(_) => runtime_fail!("numeric trap: domain in concat at i64"),
+            MetadataError::Overflow(_) => numeric_trap!(Overflow, "concat", "i64"),
+            MetadataError::Domain(_) => numeric_trap!(Domain, "concat", "i64"),
         }
     }
     let out = chelis_alloc(
@@ -6831,7 +6862,8 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         size: usize,
         lo_scalar: bool,
         hi_scalar: bool,
-    ) where
+    ) -> Result<(), (&'static str, usize)>
+    where
         T: RuntimeOrdered,
     {
         let tp = T::data_ptr_unchecked(tensor as *mut chelis_tensor);
@@ -6843,12 +6875,10 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
             let high = if hi_scalar { *hp } else { *hp.add(i) };
             let mut value = *tp.add(i);
             if low.is_nan() || high.is_nan() {
-                runtime_fail!("Domain: clamp bound is NaN at row-major position {i}");
+                return Err(("clamp bound is NaN", i));
             }
             if low.greater_than(high) {
-                runtime_fail!(
-                    "Domain: clamp lower bound exceeds upper bound at row-major position {i}"
-                );
+                return Err(("clamp lower bound exceeds upper bound", i));
             }
             if value.less_than(low) {
                 value = low;
@@ -6858,8 +6888,9 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
             }
             *op.add(i) = value;
         }
+        Ok(())
     }
-    match dtype {
+    let clamped = match dtype {
         RuntimeDType::F32 => clamp_loop::<f32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::F64 => clamp_loop::<f64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::I64 => clamp_loop::<i64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
@@ -6874,6 +6905,14 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         }
         RuntimeDType::Bool => runtime_fail!("clamp is undefined for bool tensors"),
         RuntimeDType::Key => runtime_fail!("clamp is undefined for key tensors"),
+    };
+    if let Err((reason, position)) = clamped {
+        numeric_trap!(
+            Domain,
+            "clamp",
+            diagnostic_dtype_name(dtype),
+            "{reason} at row-major position {position}"
+        );
     }
     out
 }
