@@ -4561,3 +4561,8 @@ tracking_issue = "chelis#2815"
 prefix = "examples/linspace.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/literal_ascriptions.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
