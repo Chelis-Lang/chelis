@@ -213,7 +213,7 @@ const GATED_SHAPES: [(&str, &str, &str); 11] = [
     (
         "negative pad",
         NEGATIVE_PAD,
-        "must be a non-negative integer",
+        "numeric trap: domain in pad at i64",
     ),
     (
         "call's named extent claim",
@@ -354,7 +354,7 @@ out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 }
 out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 ",
-        "must be a non-negative integer",
+        "numeric trap: domain in pad at i64",
     ),
     (
         "call's named extent claim",

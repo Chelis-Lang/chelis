@@ -3371,11 +3371,11 @@ y = insert(b, cast(0, i32), negative_count)
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("insert with negative count must fail");
-    // chelis#469: the trap renders as the C runtime renders it, the metadata
-    // `Domain` line and then [04-NUM-9]'s trap line.
+    // chelis#1802: the trap renders as every lane renders it, the context
+    // line and then [04-NUM-9]'s trap line.
     assert!(
         err.contains(
-            "Domain: expansion axis or extent outside domain\nnumeric trap: domain in insert at i64"
+            "insert target extent at axis 0 is negative: -1\nnumeric trap: domain in insert at i64"
         ),
         "expected the Domain trap for a negative extent, got: {err}"
     );
@@ -3436,7 +3436,10 @@ y = to_tensor([row(false), row(true)])
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("ragged nested list must fail to_tensor");
     assert!(
-        err.contains("uniform inner shape"),
+        err.contains(
+            "to_tensor children disagree in shape: child 0 has [2], child 1 has [1]\n\
+             numeric trap: domain in to_tensor at i64"
+        ),
         "expected ragged-shape diagnostic, got: {err}"
     );
 }

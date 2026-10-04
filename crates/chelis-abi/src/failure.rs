@@ -7,7 +7,9 @@
 //! (spec/04-type-system.md section 4.7); the context line before it names
 //! the disagreeing sources and the values observed.
 
-fn domain_trap_line_at_i64(op: &str) -> String {
+/// The [04-NUM-9] line of a `Domain` trap in `op` that finalizes an extent,
+/// an index or a count, so its `<prim>` slot is `i64`.
+pub fn domain_trap_line_at_i64(op: &str) -> String {
     format!("numeric trap: domain in {op} at i64")
 }
 
@@ -99,7 +101,117 @@ pub fn matmul_product_disagreement(expanded_lhs: &[i64], expanded_rhs: &[i64]) -
 /// `Domain` in `op`, after a context line naming the axis and the value.
 pub fn negative_target_extent(op: &str, axis: usize, extent: i64) -> String {
     format!(
-        "{op} target extent at axis {axis} is negative: {extent}\n{}",
+        "{}{extent}\n{}",
+        negative_target_extent_prefix(op, axis),
+        domain_trap_line_at_i64(op)
+    )
+}
+
+/// The context line of [`negative_target_extent`] before the value. A lane
+/// that assembles the message at run time prints this prefix, the value and
+/// then [`domain_trap_line_at_i64`], so it cannot drift from the renderer.
+pub fn negative_target_extent_prefix(op: &str, axis: usize) -> String {
+    format!("{op} target extent at axis {axis} is negative: ")
+}
+
+/// A runtime `pad` or `shrink` bound is negative: the non-negativity guard
+/// of spec/04-type-system.md section 4.7 traps `Domain` in the movement
+/// operation, after a context line naming the axis and the value.
+pub fn negative_movement_bound(op: &str, axis: usize, bound: i64) -> String {
+    format!(
+        "{}{bound}\n{}",
+        negative_movement_bound_prefix(op, axis),
+        domain_trap_line_at_i64(op)
+    )
+}
+
+/// The context line of [`negative_movement_bound`] before the value.
+pub fn negative_movement_bound_prefix(op: &str, axis: usize) -> String {
+    format!("{op} bound at axis {axis} is negative: ")
+}
+
+/// A runtime length or count argument of `op` is negative (`tensor_scan`'s
+/// length): the non-negativity guard of spec/04-type-system.md section 4.7
+/// traps `Domain` in `op`, after a context line naming the value.
+pub fn negative_length(op: &str, length: i64) -> String {
+    format!(
+        "{}{length}\n{}",
+        negative_length_prefix(op),
+        domain_trap_line_at_i64(op)
+    )
+}
+
+/// The context line of [`negative_length`] before the value.
+pub fn negative_length_prefix(op: &str) -> String {
+    format!("{op} length is negative: ")
+}
+
+/// The parts of `concat` disagree on an axis other than the concatenated
+/// one at run time: an extent disagreement under spec/04-type-system.md
+/// section 4.7, so a `Domain` trap in `concat` after a context line naming
+/// the axis and both parts' extents.
+pub fn concat_extent_disagreement(axis: usize, first: i64, part: usize, extent: i64) -> String {
+    format!(
+        "concat parts disagree at axis {axis}: part 0 has {first}, part {part} has {extent}\n{}",
+        domain_trap_line_at_i64("concat")
+    )
+}
+
+/// `concat` received an empty List of parts, which [05-OP-62] excludes from
+/// its domain and which no element type can complete.
+pub fn concat_without_parts() -> String {
+    format!(
+        "concat received no tensor parts\n{}",
+        domain_trap_line_at_i64("concat")
+    )
+}
+
+/// An entry of a runtime size list of `op` (`split`'s sizes, a
+/// `reduce_window_*` window or stride) is negative: the non-negativity
+/// guard of spec/04-type-system.md section 4.7 traps `Domain` in `op`, after
+/// a context line naming the entry and the value.
+pub fn negative_list_entry(op: &str, index: usize, value: i64) -> String {
+    format!(
+        "{op} list entry {index} is negative: {value}\n{}",
+        domain_trap_line_at_i64(op)
+    )
+}
+
+/// The `split` sizes do not partition the selected axis ([05-OP-53]): an
+/// extent disagreement under spec/04-type-system.md section 4.7.
+pub fn split_sizes_disagreement(total: i64, axis: usize, extent: i64) -> String {
+    format!(
+        "split sizes sum to {total} but axis {axis} has extent {extent}\n{}",
+        domain_trap_line_at_i64("split")
+    )
+}
+
+/// Two children of a nested List given to `to_tensor` disagree in shape at
+/// run time ([05-OP-57]): an extent disagreement under
+/// spec/04-type-system.md section 4.7, after a context line naming the
+/// first child's shape and the disagreeing child's.
+pub fn to_tensor_ragged(first: &[i64], child: usize, shape: &[i64]) -> String {
+    format!(
+        "to_tensor children disagree in shape: child 0 has {}, child {child} has {}\n{}",
+        render_shape(first),
+        render_shape(shape),
+        domain_trap_line_at_i64("to_tensor")
+    )
+}
+
+/// A runtime extent or count guard of `op` failed for a reason no more
+/// specific rendering here names: `context`, then the `Domain` trap line.
+/// Every lane that can reach the same guard renders it through the same
+/// call.
+pub fn domain_guard(op: &str, context: &str) -> String {
+    format!("{context}\n{}", domain_trap_line_at_i64(op))
+}
+
+/// A runtime window of `op` (a `reduce_window_*` builtin) is wider than the
+/// input axis it slides over ([05-RWIN-1..2]): a `Domain` trap in `op`.
+pub fn window_exceeds_extent(op: &str, axis: usize, window: i64, extent: i64) -> String {
+    format!(
+        "{op} window {window} at axis {axis} exceeds the input extent {extent}\n{}",
         domain_trap_line_at_i64(op)
     )
 }
@@ -204,6 +316,85 @@ mod tests {
         // Agreement, including a broadcast batch extent of 1, is no failure.
         assert_eq!(matmul_operand_disagreement(&[1, 2, 3], &[5, 3, 2]), None);
         assert_eq!(matmul_operand_disagreement(&[2, 3], &[3, 2]), None);
+    }
+
+    #[test]
+    fn extent_guards_put_the_context_before_the_trap_line() {
+        use super::{
+            concat_extent_disagreement, concat_without_parts, domain_guard, negative_length,
+            negative_list_entry, negative_movement_bound, split_sizes_disagreement,
+            to_tensor_ragged, window_exceeds_extent,
+        };
+        for (rendered, context, op) in [
+            (
+                negative_movement_bound("pad", 1, -3),
+                "pad bound at axis 1 is negative: -3",
+                "pad",
+            ),
+            (
+                negative_length("tensor_scan", -2),
+                "tensor_scan length is negative: -2",
+                "tensor_scan",
+            ),
+            (
+                negative_list_entry("split", 0, -1),
+                "split list entry 0 is negative: -1",
+                "split",
+            ),
+            (
+                split_sizes_disagreement(2, 0, 3),
+                "split sizes sum to 2 but axis 0 has extent 3",
+                "split",
+            ),
+            (
+                concat_extent_disagreement(1, 2, 1, 1),
+                "concat parts disagree at axis 1: part 0 has 2, part 1 has 1",
+                "concat",
+            ),
+            (
+                concat_without_parts(),
+                "concat received no tensor parts",
+                "concat",
+            ),
+            (
+                to_tensor_ragged(&[2], 1, &[1]),
+                "to_tensor children disagree in shape: child 0 has [2], child 1 has [1]",
+                "to_tensor",
+            ),
+            (
+                window_exceeds_extent("reduce_window_max", 0, 4, 3),
+                "reduce_window_max window 4 at axis 0 exceeds the input extent 3",
+                "reduce_window_max",
+            ),
+            (
+                domain_guard(
+                    "reduce_window_sum",
+                    "reduce_window_sum strides[0] must be >= 1",
+                ),
+                "reduce_window_sum strides[0] must be >= 1",
+                "reduce_window_sum",
+            ),
+        ] {
+            assert_eq!(
+                rendered,
+                format!("{context}\nnumeric trap: domain in {op} at i64")
+            );
+        }
+        // A lane that prints the prefix and the value renders the same text.
+        assert_eq!(
+            format!("{}-3", super::negative_movement_bound_prefix("shrink", 0)),
+            negative_movement_bound("shrink", 0, -3)
+                .lines()
+                .next()
+                .unwrap()
+        );
+        assert_eq!(
+            format!("{}-1", super::negative_target_extent_prefix("insert", 2)),
+            negative_target_extent("insert", 2, -1)
+                .lines()
+                .next()
+                .unwrap()
+        );
     }
 
     #[test]

@@ -114,8 +114,8 @@ class OracleMutationTests(unittest.TestCase):
     def test_reordered_tensor_scan_bounds_check_fails(self):
         self.assert_mutation_fails(
             "crates/chelis-ir/src/host.rs",
-            "tensor_scan requires a non-negative length, got ",
-            "tensor_scan length ",
+            'chelis_abi::failure::negative_length_prefix("tensor_scan")',
+            '"tensor_scan length "',
         )
 
     def test_dtype_named_assertion_alias_fails(self):

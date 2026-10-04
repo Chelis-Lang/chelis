@@ -122,7 +122,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-ir/src/host.rs",
             (
                 'active_compiler_name == Some("tensor_scan")',
-                "tensor_scan requires a non-negative length, got ",
+                'chelis_abi::failure::negative_length_prefix("tensor_scan")',
                 'name: "to_tensor".to_string(),',
                 "name: TENSOR_SCAN_STACK.to_string(),",
             ),

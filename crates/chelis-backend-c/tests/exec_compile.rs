@@ -11238,7 +11238,7 @@ fn a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_ev
         (
             "pad",
             -1,
-            "must be a non-negative integer",
+            "numeric trap: domain in pad at i64",
             "numeric trap: domain in pad at i64",
         ),
         (
@@ -11656,7 +11656,7 @@ const DEAD_LET_KINDS: [DeadLetKind; 10] = [
         traps: "5i64",
         total: "3i64",
         n: 4,
-        eval_trap: "must be a non-negative integer",
+        eval_trap: "numeric trap: domain in pad at i64",
         c_trap: "numeric trap: domain in pad at i64",
     },
     DeadLetKind {

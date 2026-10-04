@@ -142,6 +142,7 @@ dependencies = [
 name = "chelis-backend-c"
 version = "0.18.12"
 dependencies = [
+ "chelis-abi",
  "chelis-crmath",
  "chelis-ir",
  "chelis-types",

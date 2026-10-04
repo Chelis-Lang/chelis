@@ -982,10 +982,20 @@ pub(super) fn nested_list_to_tensor_data(
         nested_list_to_tensor_data(inner, precision, inner_extents)
     });
     let (inner_shape, mut data) = rows.next().expect("nonempty List checked above")?;
-    for row in rows {
+    for (child, row) in rows.enumerate() {
         let (shape, row_data) = row?;
         if shape != inner_shape {
-            return Err("to_tensor requires uniform inner shape".into());
+            let exact = |shape: &[usize]| {
+                shape
+                    .iter()
+                    .map(|extent| i64::try_from(*extent).unwrap_or(i64::MAX))
+                    .collect::<Vec<_>>()
+            };
+            return Err(chelis_abi::failure::to_tensor_ragged(
+                &exact(&inner_shape),
+                child + 1,
+                &exact(&shape),
+            ));
         }
         data.extend(row_data)?;
     }
@@ -1303,13 +1313,14 @@ pub(super) fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, 
 pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, String> {
     values
         .iter()
-        .map(|value| match value {
+        .enumerate()
+        .map(|(index, value)| match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
                 let v = payload.as_i64();
                 if v >= 0 {
                     Ok(v as usize)
                 } else {
-                    Err(format!("{op} expects non-negative sizes, got {v}"))
+                    Err(chelis_abi::failure::negative_list_entry(op, index, v))
                 }
             }
             other => Err(format!("{op} expects i64 sizes, got {other:?}")),
@@ -1567,8 +1578,8 @@ pub(super) fn tensor_insert_host(
 /// fires at the operation because the host interpreter has no entry at which
 /// to hoist it.
 ///
-/// The trap renders through [`NumericTrap`], so the line is
-/// `numeric trap: domain in expand at i64` verbatim: the guarded result is
+/// The trap renders through `chelis_abi::failure`, context line first, so
+/// the trap line is `numeric trap: domain in expand at i64`: the guarded result is
 /// an extent under [05-DIM-1] and not a tensor element, which is why the
 /// dtype slot is `i64` rather than the tensor's precision
 /// (`spec/04-type-system.md` section 4.7).
@@ -1587,14 +1598,12 @@ pub(super) fn tensor_expand_host(
         ));
     }
     if in_shape[axis] != 1 {
-        let trap = NumericTrap::Domain {
-            op: "expand",
-            prim: Prim::Int64,
-        };
         let observed = in_shape[axis];
-        return Err(format!(
-            "{trap}\n  {builtin} claims the operand's extent at axis {axis} is 1, observed \
-             {observed}"
+        return Err(chelis_abi::failure::domain_guard(
+            "expand",
+            &format!(
+                "{builtin} claims the operand's extent at axis {axis} is 1, observed {observed}"
+            ),
         ));
     }
 
@@ -1629,23 +1638,30 @@ pub(super) fn tensor_reduce_window_host(
     op_name: &str,
 ) -> Result<RuntimeTensorValue, String> {
     if window_shape.len() != strides.len() {
-        return Err(format!(
-            "{op_name} window_shape (len {}) and strides (len {}) must agree",
-            window_shape.len(),
-            strides.len()
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!(
+                "{op_name} window_shape (len {}) and strides (len {}) must agree",
+                window_shape.len(),
+                strides.len()
+            ),
         ));
     }
     let in_shape = &tensor.value.shape;
     let n = window_shape.len();
     if n == 0 {
-        return Err(format!(
-            "{op_name} requires a non-empty window_shape and strides"
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!("{op_name} requires a non-empty window_shape and strides"),
         ));
     }
     if in_shape.len() < n {
-        return Err(format!(
-            "{op_name} window arity {n} exceeds tensor rank {}",
-            in_shape.len()
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!(
+                "{op_name} window arity {n} exceeds tensor rank {}",
+                in_shape.len()
+            ),
         ));
     }
     let leading = in_shape.len() - n;
@@ -1654,16 +1670,25 @@ pub(super) fn tensor_reduce_window_host(
         let w = window_shape[i];
         let s = strides[i];
         if w == 0 {
-            return Err(format!("{op_name} window_shape[{i}] must be >= 1"));
+            return Err(chelis_abi::failure::domain_guard(
+                op_name,
+                &format!("{op_name} window_shape[{i}] must be >= 1"),
+            ));
         }
         if s == 0 {
-            return Err(format!("{op_name} strides[{i}] must be >= 1"));
+            return Err(chelis_abi::failure::domain_guard(
+                op_name,
+                &format!("{op_name} strides[{i}] must be >= 1"),
+            ));
         }
         let in_dim = in_shape[leading + i];
         if in_dim < w {
-            return Err(format!(
-                "{op_name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
-                leading + i
+            let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+            return Err(chelis_abi::failure::window_exceeds_extent(
+                op_name,
+                leading + i,
+                exact(w),
+                exact(in_dim),
             ));
         }
         out_shape.push((in_dim - w) / s + 1);
@@ -1899,9 +1924,9 @@ pub(super) fn extract_bounds_pair_list(
                         return Err(format!("{op} axis {axis} expects int end, got {other:?}"));
                     }
                 };
-                if start < 0 || end < 0 {
-                    return Err(format!(
-                        "{op} axis {axis} bound [{start}, {end}] has negative endpoint"
+                if let Some(negative) = [start, end].into_iter().find(|bound| *bound < 0) {
+                    return Err(chelis_abi::failure::negative_movement_bound(
+                        op, axis, negative,
                     ));
                 }
                 Ok((start as usize, end as usize))
@@ -2169,7 +2194,7 @@ pub(super) fn tensor_concat_value(
         .collect::<Result<Vec<_>, _>>()?;
     let first = tensors
         .first()
-        .ok_or_else(|| "concat expects at least one tensor part".to_string())?;
+        .ok_or_else(chelis_abi::failure::concat_without_parts)?;
     // chelis#368/#522: accept a negative concat axis (`-1` = last axis),
     // matching the negative-axis convention every other axis-taking op follows
     // (reductions, softmax) AND the IR `concat` lowering (`lower_tensor_concat`
@@ -2182,7 +2207,7 @@ pub(super) fn tensor_concat_value(
     // `-1` -> `2`). One offset, then the shared bounds check.
     let rank = first.value.shape.len();
     let axis = normalize_axis(rank, axis, "concat")?;
-    for tensor in &tensors[1..] {
+    for (part, tensor) in tensors.iter().enumerate().skip(1) {
         if tensor.precision != first.precision {
             return Err("concat expects matching tensor precision".to_string());
         }
@@ -2191,8 +2216,12 @@ pub(super) fn tensor_concat_value(
         }
         for dim in 0..tensor.value.shape.len() {
             if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
-                return Err(format!(
-                    "numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes; axis {dim} differed"
+                let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+                return Err(chelis_abi::failure::concat_extent_disagreement(
+                    dim,
+                    exact(first.value.shape[dim]),
+                    part,
+                    exact(tensor.value.shape[dim]),
                 ));
             }
         }
@@ -2323,9 +2352,11 @@ pub(super) fn tensor_split_value(
     let sizes = expect_int_list(sizes, "split")?;
     let total: usize = sizes.iter().sum();
     if total != tensor.value.shape[axis] {
-        return Err(format!(
-            "split sizes sum to {total}, expected {}",
-            tensor.value.shape[axis]
+        let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+        return Err(chelis_abi::failure::split_sizes_disagreement(
+            exact(total),
+            axis,
+            exact(tensor.value.shape[axis]),
         ));
     }
     let mut parts = Vec::with_capacity(sizes.len());

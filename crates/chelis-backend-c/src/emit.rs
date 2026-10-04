@@ -8198,6 +8198,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         let a = inputs[0].0;
         let extent = Self::bound_c_expr(size, inputs, a, axis);
+        let kind = dag.expansion_kind(NodeId(id));
+        let op = kind.primitive_name();
+        self.emit_negative_bound_guard(
+            op,
+            size,
+            &extent,
+            &chelis_abi::failure::negative_target_extent_prefix(op, axis),
+        );
         if self.runtime_dim_sites.contains_key(&(id, axis))
             || self.local_dim_guard_sites.contains_key(&id)
             || self
@@ -8218,7 +8226,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 emitter.emit_runtime_dim_sites(id, &extents)
             });
         }
-        let operation = match dag.expansion_kind(NodeId(id)) {
+        let operation = match kind {
             chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
             chelis_ir::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
         };
@@ -8265,6 +8273,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // `emit_dim_info` renders a runtime-bound named dimension.
             RtDim::Sym(name) => extent_read(name),
         }
+    }
+
+    /// spec/04-type-system.md section 4.7: a negative runtime bound of a
+    /// movement operation fails the non-negativity guard, a `Domain` trap in
+    /// `op`, before the operation builds its plan. `context_prefix` is the
+    /// shared rendering's text before the value
+    /// (`chelis_abi::failure::negative_target_extent_prefix` or
+    /// `negative_movement_bound_prefix`), so the line matches eval's. Only a
+    /// node-valued bound can be negative; a literal one is checked
+    /// statically and a metadata read never is.
+    fn emit_negative_bound_guard(
+        &mut self,
+        op: &str,
+        bound: &RtDim,
+        expr: &str,
+        context_prefix: &str,
+    ) {
+        if !matches!(bound, RtDim::Node(_)) {
+            return;
+        }
+        let negative = self.gated_check(&format!("({expr}) < 0"));
+        let trap = chelis_abi::failure::domain_trap_line_at_i64(op);
+        self.line(&format!(
+            "if ({negative}) {{ fprintf(stderr, \"{context_prefix}%lld\\n\", (long long)({expr})); \
+             chelis_numeric_trap(\"{trap}\"); }}"
+        ));
     }
 
     /// Declare every name whose extent this operation's axis produces.
@@ -8774,6 +8808,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .enumerate()
             .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
+        for (axis, (low, high)) in padding.iter().enumerate() {
+            let prefix = chelis_abi::failure::negative_movement_bound_prefix("pad", axis);
+            self.emit_negative_bound_guard("pad", low, &before[axis], &prefix);
+            self.emit_negative_bound_guard("pad", high, &after[axis], &prefix);
+        }
         self.emit_affine_bounds(&format!("t{id}_before"), &before);
         self.emit_affine_bounds(&format!("t{id}_after"), &after);
         self.emit_affine_plan(id, a, ty, "pad", &format!("t{id}_before, t{id}_after"));
@@ -8862,6 +8901,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .enumerate()
             .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
+        for (axis, (low, high)) in bounds.iter().enumerate() {
+            let prefix = chelis_abi::failure::negative_movement_bound_prefix("shrink", axis);
+            self.emit_negative_bound_guard("shrink", low, &start[axis], &prefix);
+            self.emit_negative_bound_guard("shrink", high, &end[axis], &prefix);
+        }
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
         self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));

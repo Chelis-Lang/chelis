@@ -6261,26 +6261,16 @@ fn a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval() {
 }
 
 /// A computed size that goes NEGATIVE traps before allocation on BOTH lanes,
-/// which is what `spec/04-type-system.md` section 4.7.2 requires of a runtime
-/// negative size. What the two lanes do NOT share is the rendering, and this
-/// row and its C twin below exist as a pair so that divergence is visible
-/// rather than implied by one lane's text.
+/// which is what `spec/04-type-system.md` section 4.7 requires of a runtime
+/// negative size: the non-negativity guard of the owning `insert`, a
+/// `Domain` trap rendered by `chelis_abi::failure::negative_target_extent`
+/// with a context line naming the axis and the value (chelis#1802). The
+/// operation's own guard precedes the result claim on its extent, because a
+/// negative number is not an extent the claim could compare.
 ///
-/// Eval reports through the `RtDim::Node` carrier it shares with `stride` and
-/// `slice` bounds, so it says "movement bound" about an `insert` size and never
-/// renders [04-NUM-9]'s form. C renders [04-NUM-9]'s form with section 4.7's
-/// context line and never renders the movement-bound message. Under a free
-/// result dim C says "Domain: expansion axis or extent outside domain" instead
-/// of the claim line, while eval's text does not change at all. Newly reachable
-/// through chelis#1379's admission, because the only node-valued sizes before
-/// it came from extent witnesses, which carry real axis extents and are never
-/// negative. Tracked by chelis#1802; repairing it would change text shared with
-/// rows this change does not own, so both lanes are locked here and that issue
-/// has to update both locks.
-///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
-/// reached a negative extent at all.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering. On
+/// `fc5b6aa99` the program was refused at lowering, so no lane reached a
+/// negative extent at all.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -6292,7 +6282,10 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let (ok, out) = eval_result(&dir, "arith_negative.ch", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains("must be a non-negative integer, got -3"),
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
         "the negative extent is reported with the value it computed: {out}"
     );
     assert!(
@@ -6301,13 +6294,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     );
 }
 
-/// The C twin of the negative-extent row, and the half that makes chelis#1802 a
-/// LANE DIVERGENCE rather than a wording problem: this lane renders
-/// [04-NUM-9]'s form with section 4.7's context, and the words "movement bound"
-/// appear nowhere in it.
+/// The C twin of the negative-extent row: the same context line and trap line
+/// as eval (chelis#1802), never the claim line, since the guard precedes the
+/// claim.
 ///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. Measured on this head; on `6dbbbf2bc` the program did not build.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering.
+/// Measured on this head; on `6dbbbf2bc` the program did not build.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     if !gcc_available() {
@@ -6322,14 +6314,15 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     let (ok, out) = c_run_result(&dir, "arith_negative_c", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains(&domain_trap_line("insert"))
-            && out.contains("extent `n`: claimed = 2, insert axis 0 = -3"),
-        "C renders [04-NUM-9]'s form with section 4.7's context: {out}"
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
+        "C renders eval's context line and [04-NUM-9]'s form: {out}"
     );
     assert!(
-        !out.contains("movement bound"),
-        "and never the movement-bound message eval uses for the same program \
-         (chelis#1802 is a lane divergence, not one wording): {out}"
+        !out.contains("movement bound") && !out.contains("claimed = 2"),
+        "and neither evaluator plumbing nor the claim line: {out}"
     );
     assert!(
         !out.contains("shape=["),
@@ -6337,14 +6330,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     );
 }
 
-/// The same negative extent under a FREE result dim, where C loses the claim
-/// line and falls back to the operation's own domain message while eval's text
-/// is unchanged. Without this row the divergence above could be read as "C
-/// always names the claim", which is not what either lane does.
+/// The same negative extent under a FREE result dim renders identically on
+/// both lanes: the guard does not depend on the claim shape (chelis#1802).
 ///
-/// EVIDENTIARY STATUS: disposition lock, both lanes. Measured on this head.
+/// EVIDENTIARY STATUS: regression test, both lanes. Measured on this head.
 #[test]
-fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
+fn a_negative_computed_size_under_a_free_result_dim_agrees_by_lane() {
     if !gcc_available() {
         return;
     }
@@ -6360,14 +6351,17 @@ fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
         !c_ok && !eval_ok,
         "neither lane produces a value: {c_out} {eval_out}"
     );
-    assert!(
-        c_out.contains("Domain: expansion axis or extent outside domain")
-            && c_out.contains(&domain_trap_line("insert")),
-        "with no claim to name, C reports the operation's own domain: {c_out}"
+    let expected = format!(
+        "insert target extent at axis 0 is negative: -3\n{}",
+        domain_trap_line("insert")
     );
     assert!(
-        eval_out.contains("must be a non-negative integer, got -3"),
-        "eval's rendering does not change with the claim shape: {eval_out}"
+        c_out.contains(&expected) && eval_out.contains(&expected),
+        "both lanes render the shared guard: {c_out} {eval_out}"
+    );
+    assert!(
+        !c_out.contains("Domain: expansion axis or extent outside domain"),
+        "and C no longer falls back to the runtime metadata message: {c_out}"
     );
 }
 

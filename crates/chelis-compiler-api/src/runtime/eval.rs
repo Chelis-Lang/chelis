@@ -1858,7 +1858,11 @@ impl<'a> EvalContext<'a> {
                             )
                         }))
             }) || (name == "concat"
-                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
+                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))))
+                // These run no callback and render every failure from their
+                // numeric arguments alone, never from an authored string, so
+                // a trap line in their failure is the runtime's own.
+                || matches!(name, "to_tensor" | "split");
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
             } else {
@@ -3951,8 +3955,10 @@ impl<'a> EvalContext<'a> {
                 let callback = args[1].clone();
                 let n = expect_int_arg(args, 2)?;
                 if n < 0 {
-                    return Err(format!(
-                        "tensor_scan requires a non-negative length, got {n}"
+                    // The guard runs before any callback, so the trap line is
+                    // the runtime's own and not an authored `fail`.
+                    return self.mark_numeric_trap_from_trusted_result(Err(
+                        chelis_abi::failure::negative_length("tensor_scan", n),
                     ));
                 }
                 let precision = match &initial {
@@ -5090,18 +5096,14 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("{name} requires non-negative axis, got {axis}"));
                 }
                 if count < 0 {
-                    // A runtime negative size traps `Domain` before allocation
-                    // (spec/04-type-system.md section 4.7.2), rendered as the C
-                    // runtime renders it: the metadata line, then [04-NUM-9]'s
-                    // trap line with the extent dtype.
-                    let trap = chelis_types::NumericTrap::Domain {
-                        op: if name == "insert" { "insert" } else { "expand" },
-                        prim: Prim::Int64,
-                    };
-                    let error = chelis_abi::metadata::MetadataError::Domain(
-                        chelis_abi::metadata::EXPANSION_DOMAIN.into(),
-                    );
-                    return Err(format!("{error}\n{trap}"));
+                    // A runtime negative size fails the non-negativity guard
+                    // before allocation (spec/04-type-system.md section 4.7),
+                    // rendered as every lane renders it.
+                    return Err(chelis_abi::failure::negative_target_extent(
+                        if name == "insert" { "insert" } else { "expand" },
+                        axis as usize,
+                        count,
+                    ));
                 }
                 // One shape per operation (spec/04-type-system.md section
                 // 4.7.2), so the name selects the evaluator rather than a

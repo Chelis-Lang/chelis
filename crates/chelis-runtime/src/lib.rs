@@ -5745,12 +5745,19 @@ unsafe fn nested_list_shape(list: *const chelis_list) -> Vec<i64> {
     validate_value(items[0], "chelis_tensor_from_values element");
     if items[0].tag == CHELIS_VALUE_LIST {
         let child_shape = nested_list_shape(items[0].payload.list);
-        for item in &items[1..] {
+        for (child, item) in items.iter().enumerate().skip(1) {
             validate_value(*item, "chelis_tensor_from_values element");
-            if item.tag != CHELIS_VALUE_LIST || nested_list_shape(item.payload.list) != child_shape
-            {
+            if item.tag != CHELIS_VALUE_LIST {
+                runtime_fail!("Domain: chelis_tensor_from_values mixes scalar and list leaves");
+            }
+            // [05-OP-57]: children of one List that disagree in shape are a
+            // runtime extent disagreement in `to_tensor`, reported as eval
+            // reports it.
+            let shape = nested_list_shape(item.payload.list);
+            if shape != child_shape {
                 runtime_fail!(
-                    "Domain: chelis_tensor_from_values requires a rectangular nested list"
+                    "{}",
+                    chelis_abi::failure::to_tensor_ragged(&child_shape, child, &shape)
                 );
             }
         }
@@ -6014,8 +6021,11 @@ pub unsafe extern "C" fn chelis_tensor_concat(
     parts: *const chelis_list,
     axis: i32,
 ) -> *mut chelis_tensor {
-    if parts.is_null() || (*parts).live().is_empty() {
-        runtime_fail!("Domain: concat expects at least one tensor part");
+    if parts.is_null() {
+        runtime_fail!("Domain: chelis_tensor_concat received a null list");
+    }
+    if (*parts).live().is_empty() {
+        runtime_fail!("{}", chelis_abi::failure::concat_without_parts());
     }
     let tensors = (*parts)
         .live()
@@ -6034,17 +6044,20 @@ pub unsafe extern "C" fn chelis_tensor_concat(
     let mut out_shape =
         std::slice::from_raw_parts((*first).shape().as_ptr(), (*first).rank() as usize).to_vec();
     out_shape[axis_i] = 0;
-    for (&tensor, &part_dtype) in tensors.iter().zip(&dtypes) {
+    for (part, (&tensor, &part_dtype)) in tensors.iter().zip(&dtypes).enumerate() {
         if (*tensor).rank() != (*first).rank() || part_dtype != dtype {
             runtime_fail!("Domain: concat expects matching tensor rank and dtype");
         }
         for axis2 in 0..(*tensor).rank() as usize {
             if axis2 != axis_i && (*tensor).shape()[axis2] != (*first).shape()[axis2] {
-                numeric_trap!(
-                    Domain,
-                    "concat",
-                    "i64",
-                    "concat expects matching non-concatenated axes"
+                runtime_fail!(
+                    "{}",
+                    chelis_abi::failure::concat_extent_disagreement(
+                        axis2,
+                        (*first).shape()[axis2],
+                        part,
+                        (*tensor).shape()[axis2],
+                    )
                 );
             }
         }
@@ -6111,14 +6124,20 @@ pub unsafe extern "C" fn chelis_tensor_split(
     for i in 0..chelis_list_len(sizes) {
         let size = int_list_value(sizes, i, "split");
         if size < 0 {
-            runtime_fail!("Domain: split expects nonnegative i64 sizes, got {size}");
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::negative_list_entry("split", i as usize, size)
+            );
         }
         total = total
             .checked_add(size)
             .unwrap_or_else(|| runtime_fail!("Overflow: split size sum exceeds i64"));
     }
     if total != (*tensor).shape()[axis_i] {
-        runtime_fail!("split sizes must sum to the selected axis extent");
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::split_sizes_disagreement(total, axis_i, (*tensor).shape()[axis_i])
+        );
     }
     let mut items = Vec::new();
     let mut axis_offset = 0;

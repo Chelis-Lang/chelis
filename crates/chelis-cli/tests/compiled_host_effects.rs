@@ -363,8 +363,9 @@ fn tensor_scan_failures_match_eval() {
         "negative",
     );
     assert_eq!(run.status, Some(1), "{run:?}");
+    assert_eq!(run.context, "tensor_scan length is negative: -1", "{run:?}");
     assert_eq!(
-        run.failure, "tensor_scan requires a non-negative length, got -1",
+        run.failure, "numeric trap: domain in tensor_scan at i64",
         "{run:?}"
     );
     let run = parity::assert_lanes_agree(

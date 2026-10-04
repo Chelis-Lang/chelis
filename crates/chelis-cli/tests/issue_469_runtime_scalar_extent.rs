@@ -330,7 +330,7 @@ fn a_runtime_negative_size_traps_domain_on_both_lanes() {
             &format!("{op}_negative"),
             &format!("def f(k: i64) = {op}({operand}, 0, k)\nout = f(sub({RUNTIME_FOUR}, 5i64))\n"),
             &[
-                "Domain: expansion axis or extent outside domain",
+                &format!("{op} target extent at axis 0 is negative: -1"),
                 &domain_trap_line(op),
             ],
         );

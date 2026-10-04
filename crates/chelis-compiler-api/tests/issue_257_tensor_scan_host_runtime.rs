@@ -171,7 +171,8 @@ out = tensor_scan(
     });
     let message = result.err().map(|e| format!("{e:?}")).unwrap_or_default();
     assert!(
-        message.contains("non-negative length"),
+        message.contains("tensor_scan length is negative: -1")
+            && message.contains("numeric trap: domain in tensor_scan at i64"),
         "expected negative-length error, got: {message}"
     );
 }

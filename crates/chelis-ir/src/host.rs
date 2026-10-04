@@ -12089,19 +12089,33 @@ fn lower_app_host_expr(
         let length_name = names.fresh("__chelis_tensor_scan_length");
         let length = || HostExpr::new(HostExprKind::Var(length_name.clone(), HostTypeTerm::Int64));
         let index_list_ty = HostTypeTerm::List(Box::new(HostTypeTerm::Int64));
+        // The shared rendering's prefix, the value, then its trap line:
+        // every lane reports the same text (spec/04-type-system.md section
+        // 4.7's non-negativity guard).
+        let context = HostExpr::new(HostExprKind::Builtin {
+            name: "string_concat".to_string(),
+            args: vec![
+                HostExpr::new(HostExprKind::String(
+                    chelis_abi::failure::negative_length_prefix("tensor_scan"),
+                )),
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "to_string".to_string(),
+                    args: vec![length()],
+                    ty: HostTypeTerm::String,
+                }),
+            ],
+            ty: HostTypeTerm::String,
+        });
         let negative_length = HostExpr::new(HostExprKind::Builtin {
             name: "fail".to_string(),
             args: vec![HostExpr::new(HostExprKind::Builtin {
                 name: "string_concat".to_string(),
                 args: vec![
-                    HostExpr::new(HostExprKind::String(
-                        "tensor_scan requires a non-negative length, got ".to_string(),
-                    )),
-                    HostExpr::new(HostExprKind::Builtin {
-                        name: "to_string".to_string(),
-                        args: vec![length()],
-                        ty: HostTypeTerm::String,
-                    }),
+                    context,
+                    HostExpr::new(HostExprKind::String(format!(
+                        "\n{}",
+                        chelis_abi::failure::domain_trap_line_at_i64("tensor_scan")
+                    ))),
                 ],
                 ty: HostTypeTerm::String,
             })],

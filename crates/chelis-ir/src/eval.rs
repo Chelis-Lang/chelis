@@ -2221,6 +2221,7 @@ fn resolve_eval_bound(
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
     input_extent: usize,
+    axis: usize,
 ) -> Result<usize, String> {
     match bound {
         RtDim::Lit(n) => Ok(*n),
@@ -2245,11 +2246,15 @@ fn resolve_eval_bound(
                 )
             })?;
             if raw < 0 {
-                return Err(format!(
-                    "movement bound at node {}: bound-source (slot {i}) must be a non-negative \
-                     integer, got {raw}",
-                    node.id.0
-                ));
+                return Err(
+                    negative_bound_failure(node, values, axis, raw).unwrap_or_else(|| {
+                        format!(
+                            "movement bound at node {}: bound-source (slot {i}) must be a \
+                         non-negative integer, got {raw}",
+                            node.id.0
+                        )
+                    }),
+                );
             }
             usize::try_from(raw).map_err(|_| {
                 format!(
@@ -2298,6 +2303,46 @@ fn resolve_eval_bound(
     }
 }
 
+/// The non-negativity guard of spec/04-type-system.md section 4.7 for a
+/// negative runtime bound at `axis` of `node`, rendered as every lane renders
+/// it: a target extent of `expand`, `insert` or `reshape`, or a bound of
+/// `pad` or `shrink`. `None` for an operation whose bounds carry their own
+/// guard before they are resolved here.
+fn negative_bound_failure(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    axis: usize,
+    raw: i64,
+) -> Option<String> {
+    match &node.op {
+        RiscOp::Expand { .. } => {
+            // One more output axis than the operand has is an `insert`, as
+            // the expansion below decides.
+            let input_rank = values.get(node.inputs.first()?)?.shape.len();
+            let op = if node.output_type.dims.len() == input_rank + 1 {
+                crate::axis_sources::ExpansionKind::Insert
+            } else {
+                crate::axis_sources::ExpansionKind::Expand
+            };
+            Some(chelis_abi::failure::negative_target_extent(
+                op.primitive_name(),
+                axis,
+                raw,
+            ))
+        }
+        RiscOp::Reshape { .. } => Some(chelis_abi::failure::negative_target_extent(
+            "reshape", axis, raw,
+        )),
+        RiscOp::Pad { .. } => Some(chelis_abi::failure::negative_movement_bound(
+            "pad", axis, raw,
+        )),
+        RiscOp::Shrink { .. } => Some(chelis_abi::failure::negative_movement_bound(
+            "shrink", axis, raw,
+        )),
+        _ => None,
+    }
+}
+
 /// chelis#616: resolve a `(start, end)` bound-pair list against the input shape
 /// (used for `Pad` / `Shrink`).
 fn resolve_eval_pairs(
@@ -2312,8 +2357,8 @@ fn resolve_eval_pairs(
         .map(|(axis, (s, e))| {
             let extent = input_shape.get(axis).copied().unwrap_or(0);
             Ok((
-                resolve_eval_bound(s, node, values, extent)?,
-                resolve_eval_bound(e, node, values, extent)?,
+                resolve_eval_bound(s, node, values, extent, axis)?,
+                resolve_eval_bound(e, node, values, extent, axis)?,
             ))
         })
         .collect()
@@ -2363,7 +2408,7 @@ fn resolve_eval_stride_step(
             })?
         }
         RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => {
-            resolve_eval_bound(step, node, values, input_extent)?
+            resolve_eval_bound(step, node, values, input_extent, 0)?
         }
     };
     std::num::NonZeroUsize::new(resolved).ok_or_else(|| STRIDE_DOMAIN_TRAP.to_string())
@@ -3825,7 +3870,7 @@ where
                 // lane while the C lane keeps emitting it.
                 let observed = match &claim.observed {
                     crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
-                        resolve_eval_bound(carrier, node, &values, 0)?
+                        resolve_eval_bound(carrier, node, &values, 0, *axis)?
                     }
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(
@@ -4428,7 +4473,7 @@ where
                         }
                         .to_string());
                     }
-                    resolve_eval_bound(count, node, &values, 0)?
+                    resolve_eval_bound(count, node, &values, 0, 0)?
                 } else {
                     inactive_split_count(&node.output_type, &runtime_dims)?
                 };
@@ -4636,9 +4681,9 @@ where
                                     "reshape", axis, raw,
                                 ));
                             }
-                            resolve_eval_bound(dim, node, &values, 0)
+                            resolve_eval_bound(dim, node, &values, 0, axis)
                         }
-                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0),
+                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0, axis),
                         // chelis#616: an op-declared symbol resolves from the
                         // mid-evaluation bindings.
                         RtDim::Sym(name) => runtime_dims.get(name).copied().ok_or_else(|| {
@@ -4669,7 +4714,7 @@ where
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes)?,
             RiscOp::Expand { axis, size } => {
                 let input = &values[&node.inputs[0]];
-                let size_value = resolve_eval_bound(size, node, &values, 0)?;
+                let size_value = resolve_eval_bound(size, node, &values, 0, *axis)?;
                 let mut out_shape = input.shape.clone();
                 let kind = if node.output_type.dims.len() == input.shape.len() + 1 {
                     if *axis > out_shape.len() {
@@ -5612,8 +5657,8 @@ fn computed_axis_extent_value(
             else {
                 return Ok(None);
             };
-            let start = resolve_eval_bound(start, node, values, extent)?;
-            let end = resolve_eval_bound(end, node, values, extent)?;
+            let start = resolve_eval_bound(start, node, values, extent, *operand_axis)?;
+            let end = resolve_eval_bound(end, node, values, extent, *operand_axis)?;
             if end > extent {
                 return Ok(None);
             }
@@ -5641,8 +5686,8 @@ fn computed_axis_extent_value(
             // which a padding bound never is; passing the operand's extent
             // keeps one resolver for both owners rather than a second that
             // differs only in what it refuses.
-            let before = resolve_eval_bound(before, node, values, extent)?;
-            let after = resolve_eval_bound(after, node, values, extent)?;
+            let before = resolve_eval_bound(before, node, values, extent, *operand_axis)?;
+            let after = resolve_eval_bound(after, node, values, extent, *operand_axis)?;
             // A sum past the host's extent capacity computes no extent. The
             // pad's own allocation owns that failure, so the guard yields
             // instead of comparing a wrapped number.
