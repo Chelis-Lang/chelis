@@ -219,8 +219,8 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
         let decl = dag.declare("test");
         let template = load(&mut dag, decl, "t", tensor(prim, len));
         let weights = load(&mut dag, decl, "w", tensor(prim, len));
-        let low = load(&mut dag, decl, "low", scalar(Prim::F32));
-        let high = load(&mut dag, decl, "high", scalar(Prim::F32));
+        let low = load(&mut dag, decl, "low", scalar(prim));
+        let high = load(&mut dag, decl, "high", scalar(prim));
         let sample = uniform(&mut dag, decl, template, low, high, 9);
         let weighted = dag.add_node(
             decl,
@@ -238,15 +238,15 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
         let inputs = UnordMap::from([
             ("t", value(prim, vec![len], vec![0.0; len])),
             ("w", value(prim, vec![len], weights_data.clone())),
-            ("low", value(Prim::F32, vec![], vec![-0.5])),
-            ("high", value(Prim::F32, vec![], vec![1.75])),
+            ("low", value(prim, vec![], vec![-0.5])),
+            ("high", value(prim, vec![], vec![1.75])),
         ]);
         let roots = [grad.grad_nodes[&low], grad.grad_nodes[&high]];
         let values =
             eval_tensor_roots_exact(&grad.dag, &roots, |name| inputs.get(name).cloned()).unwrap();
         // [05-OP-8]: g_i * (1-u_i) to low and g_i * u_i to high, at the
-        // arithmetic width, combined by the adjacent-pair tree; the f32
-        // bound then takes the checked cast of the template-dtype sum.
+        // arithmetic width, combined by the adjacent-pair tree and stored at
+        // the template's dtype, which is the bounds' dtype.
         let tree = |mut level: Vec<f64>| {
             while level.len() > 1 {
                 level = level
@@ -279,7 +279,7 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
                     }
                 })
                 .collect::<Vec<_>>();
-            let expected = stored(Prim::F32, tree(leaves));
+            let expected = stored(prim, tree(leaves));
             assert_eq!(
                 values[&root].to_f64_lossy_vec()[0].to_bits(),
                 expected.to_bits(),

@@ -53,18 +53,19 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
         dims: vec![],
         precision,
     };
+    // [05-OP-8]: the bounds have the template's dtype.
     let low = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, low),
+        RiscOp::synth_const(precision, low),
         vec![],
-        rank0(Prim::F32),
+        rank0(precision),
         None,
     );
     let high = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, high),
+        RiscOp::synth_const(precision, high),
         vec![],
-        rank0(Prim::F32),
+        rank0(precision),
         None,
     );
     let seed = dag.add_node(

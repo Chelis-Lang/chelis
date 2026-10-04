@@ -860,3 +860,67 @@ fn pad_sequences_to_traps_a_negative_width_like_eval() {
         "{run:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [05-OP-8] uniform_like bounds at the template dtype
+// ---------------------------------------------------------------------------
+
+/// `low` and `high` have the template's dtype `p` at every active float dtype,
+/// and both lanes draw the same stored values from a folded template (the DAG
+/// lane) and from a runtime-derived one (the host lane), with folded and
+/// computed bounds alike.
+#[test]
+fn uniform_like_takes_bounds_at_the_template_dtype_like_eval() {
+    let source = "def bc16(c: f16) -> tensor[3, f16] = to_tensor([c, c, c])\n\
+                  def bcb(c: bf16) -> tensor[2, bf16] = to_tensor([c, c])\n\
+                  def bc64(c: f64) -> tensor[2, f64] = to_tensor([c, c])\n\
+                  a = uniform_like(key_from_seed(7i64), cast(to_tensor([0.0f32, 0.0f32, 0.0f32]), f16), cast(2.0f32, f16), cast(5.0f32, f16))\n\
+                  b = uniform_like(key_from_seed(7i64), bc16(cast(0.0f32, f16)), cast(2.0f32, f16), cast(5.0f32, f16))\n\
+                  c = uniform_like(key_from_seed(7i64), cast(to_tensor([0.0f32, 0.0f32]), bf16), cast(-1.0f32, bf16), cast(1.0f32, bf16))\n\
+                  d = uniform_like(key_from_seed(7i64), bcb(cast(0.0f32, bf16)), cast(-1.0f32, bf16), cast(1.0f32, bf16))\n\
+                  e = uniform_like(key_from_seed(7i64), to_tensor([0.0f64, 0.0f64]), 0.1f64, 0.9f64)\n\
+                  f = uniform_like(key_from_seed(7i64), bc64(0.0f64), 0.1f64, 0.9f64)\n\
+                  g = uniform_like(key_from_seed(7i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)\n\
+                  def at16(x: f16) -> f16 = x\n\
+                  def at64(x: f64) -> f64 = x\n\
+                  h = uniform_like(key_from_seed(7i64), bc16(cast(0.0f32, f16)), at16(cast(2.0f32, f16)), at16(cast(5.0f32, f16)))\n\
+                  i = uniform_like(key_from_seed(7i64), bc64(0.0f64), at64(0.1f64), at64(0.9f64))\n";
+    let run = parity::assert_lanes_agree(source, "uniformwide");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    let line = |name: &str| {
+        run.stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} = ")))
+            .unwrap_or_else(|| panic!("no `{name}` line: {run:?}"))
+            .split_once(" = ")
+            .unwrap()
+            .1
+            .to_string()
+    };
+    // The folded and runtime templates draw the same stream.
+    assert_eq!(line("a"), line("b"), "{run:?}");
+    assert_eq!(line("c"), line("d"), "{run:?}");
+    assert_eq!(line("e"), line("f"), "{run:?}");
+    // A bound the emitter cannot fold reaches the draw at the template dtype.
+    assert_eq!(line("b"), line("h"), "{run:?}");
+    assert_eq!(line("f"), line("i"), "{run:?}");
+}
+
+/// A bound at another dtype than the template's is a type error at every
+/// float template dtype, including the f32 bounds the old signature fixed.
+#[test]
+fn uniform_like_rejects_a_bound_of_another_dtype_by_type() {
+    for source in [
+        "a = uniform_like(key_from_seed(7i64), to_tensor([0.0f64]), 0.0f32, 1.0f32)\n",
+        "a = uniform_like(key_from_seed(7i64), cast(to_tensor([0.0f32]), f16), 0.0f32, 1.0f32)\n",
+        "a = uniform_like(key_from_seed(7i64), to_tensor([0.0f32]), 0.0f64, 1.0f64)\n",
+        "a = uniform_like(key_from_seed(7i64), to_tensor([0.0f32]), 0.0f32, 1.0f64)\n",
+    ] {
+        let stderr = build_rejection(source);
+        assert!(
+            stderr.contains("PrecisionMismatch: `uniform_like` argument")
+                || stderr.contains("uniform_like bounds must have the template's"),
+            "{source}: {stderr}"
+        );
+    }
+}

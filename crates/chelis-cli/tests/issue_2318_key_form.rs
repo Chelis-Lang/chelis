@@ -204,7 +204,7 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
             DAG_DRAW,
             "__tensor_0__private: input `k` at slot",
         ),
-        ("host_draw", HOST_DRAW, "__uniform_dtype_"),
+        ("host_draw", HOST_DRAW, "__uniform_low_"),
     ] {
         let out_dir = build(dir.path(), stem, source);
         let header = std::fs::read_to_string(out_dir.join(format!("{stem}.h"))).unwrap();

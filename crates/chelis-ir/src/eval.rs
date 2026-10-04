@@ -7809,7 +7809,7 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// The `[05-OP-8]` kernel over a shape, f32 bounds and one draw key.
+    /// The `[05-OP-8]` kernel over a shape, bounds at `prim` and one draw key.
     fn uniform_like(
         shape: &[usize],
         low: f64,
@@ -7817,7 +7817,7 @@ mod tests {
         key: RandomKey,
         prim: Prim,
     ) -> Result<TensorValue, String> {
-        let bound = |value| chelis_types::scalar_from_f64("uniform_like", Prim::F32, value);
+        let bound = |value| chelis_types::scalar_from_f64("uniform_like", prim, value);
         let prepared = PreparedUniformLike::new(
             prim,
             numel(shape),

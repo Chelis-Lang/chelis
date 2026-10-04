@@ -4,7 +4,7 @@
 //! Every expected value is a bit pattern computed by
 //! `briefs/keys-b-slice2-probes/slice2_ref.py`, which extends `key_ref.py`'s
 //! independent transcription of [05-RNG-2] with the [05-OP-8] and [05-OP-37]
-//! text (f32 bounds; one fused multiply-add at f32 for f32, f16 and bf16 and
+//! text (bounds at the draw's dtype; one fused multiply-add at f32 for f32, f16 and bf16 and
 //! at f64 for f64; one narrowing for f16 and bf16). No expected value is
 //! computed by compiler code; the formatter only spells the reference bits.
 //! Each program runs in eval and in C, and both must print the reference.
@@ -201,14 +201,14 @@ fn every_key_source_draws_the_reference_bits_in_eval_and_c() {
         let p = prim.name();
         let zeros = format!("[cast(0.0, {p}), cast(0.0, {p}), cast(0.0, {p}), cast(0.0, {p})]");
         let source = format!(
-            "def row(k: key, t: tensor[4, {p}]) -> tensor[4, {p}] = uniform_like(k, t, 0.0f32, 1.0f32)\n\
+            "def row(k: key, t: tensor[4, {p}]) -> tensor[4, {p}] = uniform_like(k, t, cast(0.0, {p}), cast(1.0, {p}))\n\
              def main() = {{\n\
              \x20 t = to_tensor({zeros})\n\
              \x20 x = to_tensor([cast(1.0, {p}), cast(2.0, {p}), cast(3.0, {p}), cast(4.0, {p})])\n\
              \x20 ts = to_tensor([{zeros}, {zeros}, {zeros}])\n\
              \x20 (a, b) = split_key(key_from_seed(-3i64))\n\
              \x20 (c, d) = split_key(b)\n\
-             \x20 (uniform_like(key_from_seed(7i64), t, 0.0f32, 1.0f32), uniform_like(a, t, -2.0f32, 3.0f32), \
+             \x20 (uniform_like(key_from_seed(7i64), t, cast(0.0, {p}), cast(1.0, {p})), uniform_like(a, t, cast(-2.0, {p}), cast(3.0, {p})), \
              dropout(fold_in(c, -5i64), x, cast(0.5, {p})), vmap(row)(split_keys(d, 3i64), ts))\n\
              }}\n"
         );

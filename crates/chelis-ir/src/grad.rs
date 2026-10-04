@@ -2003,9 +2003,8 @@ fn compute_adjoints(
             Some(vec![(data, replay)])
         }
         // [05-OP-8]: zero to the template and the reparameterisation adjoint
-        // to each bound, read from the forward key. A bound stored at f32
-        // under a narrower or wider template (chelis#1295) takes the checked
-        // cast of the template-dtype adjoint.
+        // to each bound, read from the forward key. Each bound has the
+        // template's dtype ([05-OP-8]), as the verifier requires.
         RiscOp::UniformLike => {
             let template = node.inputs[0];
             let template_ty = forward.get(template).unwrap().output_type.clone();
@@ -2036,19 +2035,6 @@ fn compute_adjoints(
                     },
                     None,
                 );
-                let adjoint = if bound_ty.precision == node.output_type.precision {
-                    adjoint
-                } else {
-                    dag.add_node(
-                        node.owner,
-                        RiscOp::Cast {
-                            new_precision: bound_ty.precision,
-                        },
-                        vec![adjoint],
-                        bound_ty,
-                        None,
-                    )
-                };
                 contributions.push((node.inputs[slot], adjoint));
             }
             Some(contributions)

@@ -1755,16 +1755,16 @@ fn logical_random_activation_is_control_only_during_grad() {
     };
     let low = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, -1.0),
+        RiscOp::synth_const(Prim::F64, -1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let high = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, 1.0),
+        RiscOp::synth_const(Prim::F64, 1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let seed = dag.add_node(

@@ -331,7 +331,7 @@ use chelis_ir::ownership::{
 use chelis_types::manifest::{RootManifest, RootPathStep};
 use chelis_types::types::{Lane, Prim};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
+use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
 pub(crate) fn emit_host_abi_program(
@@ -4630,113 +4630,71 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         };
-        // [05-OP-8]: each bound is an f32 scalar operand. A bound the emitter
-        // can fold is stamped as its exact f32 image, as the DAG lane folds
-        // it; any other bound is the host scalar the arguments computed.
-        let low_f32_expr = uniform_bound_f32_expr(args.get(1), arg_vars.get(1), "low")?;
-        let high_f32_expr = uniform_bound_f32_expr(args.get(2), arg_vars.get(2), "high")?;
-        let low_f64_expr = format!("((double)({low_f32_expr}))");
-        let high_f64_expr = format!("((double)({high_f32_expr}))");
+        // [05-OP-8]: `low` and `high` have the template's dtype `p`. A bound
+        // the emitter can fold is stamped as its exact image at `p`, as the
+        // DAG lane folds it; any other bound is the host scalar the arguments
+        // computed. Both reach the draw at its arithmetic width: f64 for an
+        // f64 draw, f32 (exactly widened from f16 or bf16) otherwise.
+        let Some((_, HostType::Tensor(template_ty))) = arg_vars.first() else {
+            unreachable!("the template operand was matched as a tensor above");
+        };
+        let prim = template_ty.precision;
+        let arithmetic = match prim {
+            Prim::F64 => "double",
+            Prim::F32 | Prim::F16 | Prim::Bf16 => "float",
+            _ => return Err(uniform_bound_desync("template")),
+        };
+        let low_expr = uniform_bound_expr(args.get(1), arg_vars.get(1), prim, "low")?;
+        let high_expr = uniform_bound_expr(args.get(2), arg_vars.get(2), prim, "high")?;
 
         let key = format!("{key_var}.bits");
         // [05-OP-8] validates finite bounds, `low <= high` and a finite
         // difference at the draw's arithmetic width before any element is
-        // drawn: f64 subtracts the widened bounds, every other float dtype
-        // subtracts in f32.
+        // drawn.
         let low = self.next_temp("uniform_low");
         let high = self.next_temp("uniform_high");
-        let dtype = self.next_temp("uniform_dtype");
         let ind = self.indent.clone();
-        self.lines.push(format!(
-            "{ind}float {low} = {low_f32_expr}, {high} = {high_f32_expr};"
-        ));
-        self.lines.push(format!(
-            "{ind}int {dtype} = (int)chelis_host_tensor_dtype({template});"
-        ));
-        self.lines.push(format!(
-            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && ({dtype} == {f64} ? isfinite((double){high} - (double){low}) : isfinite({high} - {low})))) {{",
-            f64 = chelis_vocab::RuntimeDType::F64.c_macro(),
-        ));
-        self.lines.push(format!("{ind}    switch ({dtype}) {{"));
-        for (runtime, prim) in [
-            (chelis_vocab::RuntimeDType::F32, Prim::F32),
-            (chelis_vocab::RuntimeDType::F64, Prim::F64),
-            (chelis_vocab::RuntimeDType::F16, Prim::F16),
-            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
-        ] {
-            let trap = chelis_types::NumericTrap::Domain {
-                op: "uniform_like",
-                prim,
-            }
-            .to_string();
-            self.lines.push(format!(
-                "{ind}    case {}: chelis_numeric_trap({trap:?}); break;",
-                runtime.c_macro()
-            ));
+        let trap = chelis_types::NumericTrap::Domain {
+            op: "uniform_like",
+            prim,
         }
+        .to_string();
         self.lines.push(format!(
-            "{ind}    default: fprintf(stderr, \"uniform_like unsupported dtype %d\\n\", {dtype}); abort();"
+            "{ind}{arithmetic} {low} = {low_expr}, {high} = {high_expr};"
         ));
-        self.lines.push(format!("{ind}    }}"));
-        self.lines.push(format!("{ind}}}"));
         self.lines.push(format!(
-            "{}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));",
-            self.indent
+            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && isfinite({high} - {low}))) chelis_numeric_trap({trap:?});"
+        ));
+        self.lines.push(format!(
+            "{ind}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));"
         ));
         let (guard, view) = self.begin_tensor_write(target);
+        // f32 and f64 sample at their own width. f16 and bf16 execute the one
+        // fused multiply-add in f32 and narrow exactly once at the store, the
+        // same shape `emit::emit_uniform_like` gives the DAG lane, so a
+        // template that folds and one that does not agree element for element.
+        let sample = match prim {
+            Prim::F64 => format!("chelis_uniform_sample_f64({key}, (uint64_t)i, {low}, {high})"),
+            _ => format!("chelis_uniform_sample_f32({key}, (uint64_t)i, {low}, {high})"),
+        };
+        let (elem_t, stored) = match prim {
+            Prim::F64 => ("double", sample),
+            Prim::F32 => ("float", sample),
+            Prim::F16 => ("uint16_t", format!("chelis_f32_to_f16({sample})")),
+            _ => ("uint16_t", format!("chelis_f32_to_bf16({sample})")),
+        };
+        let ind = self.indent.clone();
+        self.lines.push(format!("{ind}{{"));
+        self.lines.push(format!(
+            "{ind}    {elem_t} *__target_data = ({elem_t}*){view}.data;"
+        ));
+        self.lines.push(format!(
+            "{ind}    for (int64_t i = 0; i < {view}.count; i++) {{"
+        ));
         self.lines
-            .push(format!("{}switch ({view}.dtype) {{", self.indent));
-        // One arm per active float dtype in [05-OP-8], which "admits every
-        // active float template dtype `p`". f32 and f64 sample at their own
-        // width. f16 and bf16 widen the stored bounds to f32, execute the one
-        // fused multiply-add in f32, and narrow exactly once at the store —
-        // the same shape `emit::emit_uniform_like` gives the DAG lane, so a
-        // template that folds and one that does not agree element for
-        // element. `chelis_f32_to_f16`/`_bf16` are `static inline` in
-        // `chelis_runtime.h`, which every emitted translation unit includes.
-        let sample_f32 = format!(
-            "chelis_uniform_sample_f32({key}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
-        );
-        for (macro_name, elem_t, sampled) in [
-            (
-                chelis_vocab::RuntimeDType::F32.c_macro(),
-                "float",
-                sample_f32.clone(),
-            ),
-            (
-                chelis_vocab::RuntimeDType::F64.c_macro(),
-                "double",
-                format!(
-                    "chelis_uniform_sample_f64({key}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
-                ),
-            ),
-            (
-                chelis_vocab::RuntimeDType::F16.c_macro(),
-                "uint16_t",
-                format!("chelis_f32_to_f16({sample_f32})"),
-            ),
-            (
-                chelis_vocab::RuntimeDType::Bf16.c_macro(),
-                "uint16_t",
-                format!("chelis_f32_to_bf16({sample_f32})"),
-            ),
-        ] {
-            let ind = &self.indent;
-            self.lines.push(format!("{ind}    case {macro_name}: {{"));
-            self.lines.push(format!(
-                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
-            ));
-            self.lines.push(format!(
-                "{ind}        for (int64_t i = 0; i < {view}.count; i++) {{"
-            ));
-            self.lines
-                .push(format!("{ind}            __target_data[i] = {sampled};"));
-            self.lines.push(format!("{ind}        }}"));
-            self.lines.push(format!("{ind}        break;"));
-            self.lines.push(format!("{ind}    }}"));
-        }
-        self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "uniform_like");
-        self.lines.push(format!("{}}}", self.indent));
+            .push(format!("{ind}        __target_data[i] = {stored};"));
+        self.lines.push(format!("{ind}    }}"));
+        self.lines.push(format!("{ind}}}"));
         self.end_tensor_write(&guard);
         Ok(())
     }
@@ -13060,45 +13018,65 @@ fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     }
 }
 
-fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
-    // f32 is the emitted bound width; see the matching note at the
-    // `uniform_like` site in `chelis-ir`'s lowering.
-    staged_bound(expr)
-        .and_then(|staged| staged.finalize(Prim::F32))
-        .map(|value| value.as_f64_lossy())
-}
-
-/// The C `float` expression of one `[05-OP-8]` bound: the exact f32 image of
-/// a bound the emitter folds, else the f32 host scalar the arguments computed.
-fn uniform_bound_f32_expr(
+/// The C expression of one `[05-OP-8]` bound at the draw's arithmetic width:
+/// `double` for an f64 draw, `float` for every other float dtype `p`. The
+/// bound has dtype `p`. A bound the emitter can fold is stamped as its exact
+/// image at `p`, as the DAG lane folds it; any other bound is the host scalar
+/// of dtype `p` the arguments computed. An f16 or bf16 bound widens exactly to
+/// f32.
+fn uniform_bound_expr(
     expr: Option<&HostExpr>,
     var: Option<&(String, HostType)>,
+    prim: Prim,
     which: &str,
 ) -> Result<String, Unsupported> {
-    if let Some(bound) = static_float_bound(expr) {
-        let bits = (bound as f32).to_bits();
-        return Ok(format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"));
+    if let Some(bound) = staged_bound(expr).and_then(|staged| staged.finalize(prim)) {
+        return Ok(match bound.element_ref() {
+            ElementRef::F64(value) => {
+                format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", value.to_bits())
+            }
+            ElementRef::F32(value) => {
+                format!("chelis_f32_from_bits(UINT32_C(0x{:08x}))", value.to_bits())
+            }
+            ElementRef::F16(value) => {
+                format!("chelis_f16_to_f32(UINT16_C(0x{:04x}))", value.to_bits())
+            }
+            ElementRef::Bf16(value) => {
+                format!("chelis_bf16_to_f32(UINT16_C(0x{:04x}))", value.to_bits())
+            }
+            _ => return Err(uniform_bound_desync(which)),
+        });
     }
-    match var {
-        Some((name, HostType::Float32)) => {
-            Ok(format!("(({})({name}))", cast_prim_c_type(Prim::F32)))
+    match (var, prim) {
+        (Some((name, HostType::Float64)), Prim::F64)
+        | (Some((name, HostType::Float32)), Prim::F32) => {
+            Ok(format!("(({})({name}))", cast_prim_c_type(prim)))
         }
-        _ => Err(Unsupported::new(
-            UnsupportedKind::Builtin("uniform_like".to_string()),
-            "`chelis build` host emission",
-            Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
-                "[04-TOT-2]",
-                "uniform_like's bounds are f32 scalars; the checker types them so, so a \
-                 bound that is neither a foldable literal nor an f32 host scalar here is \
-                 an internal desync"
-            ),
-        )
-        .with_supported_alternative(match which {
-            "low" => "give `uniform_like` an f32 low bound",
-            _ => "give `uniform_like` an f32 high bound",
-        })),
+        (Some((name, HostType::Float16)), Prim::F16) => Ok(format!("chelis_f16_to_f32({name})")),
+        (Some((name, HostType::BFloat16)), Prim::Bf16) => Ok(format!("chelis_bf16_to_f32({name})")),
+        _ => Err(uniform_bound_desync(which)),
     }
+}
+
+/// A `uniform_like` operand the checker types otherwise than [05-OP-8] says
+/// reached host emission: an internal desync, never a user-facing gate.
+fn uniform_bound_desync(which: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Builtin("uniform_like".to_string()),
+        "`chelis build` host emission",
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "uniform_like's template is a tensor of an admitted dtype `p` and its bounds \
+             have dtype `p`; the checker types them so, so any other operand here is an \
+             internal desync"
+        ),
+    )
+    .with_supported_alternative(match which {
+        "low" => "give `uniform_like` a low bound of the template's dtype",
+        "high" => "give `uniform_like` a high bound of the template's dtype",
+        _ => "give `uniform_like` a tensor template",
+    })
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise

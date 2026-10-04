@@ -3553,7 +3553,7 @@ impl HipEmitter {
         Ok(())
     }
 
-    /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
+    /// The literal bounds and emission-time key of a keyed `UniformLike`
     /// whose key [`Self::record_derived_key`] computed.
     fn keyed_uniform_like_parameters(
         &self,
@@ -3620,9 +3620,9 @@ impl HipEmitter {
         let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
-        // [05-OP-8]: bounds have f32 dtype. The f32 kernel consumes those
-        // exact images; the f64 kernel widens the same images exactly and
-        // executes the affine at f64 width.
+        // [05-OP-8]: the bounds have the draw's dtype, so `low` and `high`
+        // are the exact images of f32 or f64 constants. Each kernel consumes
+        // them at its own width and executes the affine there.
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
         match elem {
@@ -3635,8 +3635,8 @@ impl HipEmitter {
                 ));
             }
             kernels::ElemKind::F64 => {
-                let low_wide_bits = (low as f32 as f64).to_bits();
-                let high_wide_bits = (high as f32 as f64).to_bits();
+                let low_wide_bits = low.to_bits();
+                let high_wide_bits = high.to_bits();
                 self.line(&format!(
                     "double t{id}_low = chelis_f64_from_bits(0x{low_wide_bits:016x}uLL);"
                 ));
@@ -6618,18 +6618,19 @@ mod tests {
             dims: vec![],
             precision,
         };
+        // [05-OP-8]: the bounds have the template's dtype.
         let low = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, low),
+            RiscOp::synth_const(ty.precision, low),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let high = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, high),
+            RiscOp::synth_const(ty.precision, high),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let seed = dag.add_node(
@@ -6906,18 +6907,19 @@ mod tests {
             rank0(Prim::Key),
             None,
         );
+        // [05-OP-8]: the bounds have the template's dtype.
         let low = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, 0.0),
+            RiscOp::synth_const(ty.precision, 0.0),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let high = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, 1.0),
+            RiscOp::synth_const(ty.precision, 1.0),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let draw = dag.add_node(
@@ -7156,8 +7158,17 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains(&format!("double t{}_low = chelis_f64_from_bits(", u.0)));
-        assert!(hip.contains(&format!("double t{}_high = chelis_f64_from_bits(", u.0)));
+        // [05-OP-8]: f64 bounds reach the draw exactly, not through f32.
+        assert!(hip.contains(&format!(
+            "double t{}_low = chelis_f64_from_bits(0x{:016x}uLL);",
+            u.0,
+            low.to_bits()
+        )));
+        assert!(hip.contains(&format!(
+            "double t{}_high = chelis_f64_from_bits(0x{:016x}uLL);",
+            u.0,
+            high.to_bits()
+        )));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

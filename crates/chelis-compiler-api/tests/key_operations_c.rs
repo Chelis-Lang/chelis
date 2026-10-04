@@ -2412,8 +2412,8 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
         vec![8]
     };
     let like = load(&mut dag, decl, "like", &rows, prim);
-    let low = float_const(&mut dag, decl, Prim::F32, 0.0);
-    let high = float_const(&mut dag, decl, Prim::F32, 1.0);
+    let low = float_const(&mut dag, decl, prim, 0.0);
+    let high = float_const(&mut dag, decl, prim, 1.0);
     let (key, active) = match how {
         HipKey::FromSeed => {
             let seed = i64_const(&mut dag, decl, 7);

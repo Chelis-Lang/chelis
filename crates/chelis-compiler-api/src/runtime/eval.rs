@@ -6765,8 +6765,7 @@ mod legacy_capture_order_tests {
                 matches!(
                     error.kind,
                     chelis_types::errors::CheckErrorKind::TypeMismatch
-                ) && error.message
-                    == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
+                ) && error.message.contains("() -> tensor[2, f32]")
             }),
             "{}",
             messages(&report.errors)

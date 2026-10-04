@@ -3496,7 +3496,7 @@ mod uniform_like_affine_tests {
     const KEY_BITS: u64 = 42;
 
     fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
-        let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
+        let bound = |value| scalar_from_f64("test", template.precision, value).unwrap();
         let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
         let key = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 42).unwrap()).unwrap();
         uniform_like_value(template, &prepared, key).unwrap()

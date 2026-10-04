@@ -114,7 +114,6 @@ pub(super) fn finish_unified_app(
         node,
         func_name.as_deref(),
         &arg_tys,
-        env,
         subst,
         errors,
         &mut checked_route_observed,
