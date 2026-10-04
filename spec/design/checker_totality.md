@@ -2380,7 +2380,7 @@ is part of the design.
   `TypeUseSite::Defsig` the resolver mints a fresh variable for `_`
   (`crates/chelis-types/src/deep_type.rs`, `resolve_type_var`: `if name ==
   "_" { ... self.vg.fresh_tvar() }`), and `collect_declarations`
-  (`crates/chelis-types/src/infer/common.rs`, the `DeepTag::Defsig` arm)
+  (`crates/chelis-types/src/infer/declaration_collect.rs`, the `DeepTag::Defsig` arm)
   resolves the signature inside `subst.enter_level`, leaves the level, and
   calls `env.generalize(&ty, subst)`, which quantifies every variable minted
   above the current level, the hole included: the header becomes
@@ -2428,7 +2428,7 @@ is part of the design.
   The issue's candidate fix (eager only in argument position of an eager
   application) is not adopted, for the reason given under the decision.
 - [#1485], an over-rejection and an ingress split. `primary_inference_
-  schedule` (`crates/chelis-types/src/infer/program.rs`) builds a mirror
+  schedule` (`crates/chelis-types/src/infer/program_schedule.rs`) builds a mirror
   edge from a module function to every item at or after the floor that
   references it and a read edge from a value to every later item that reads
   it. `carried = wrap(f)` with `f` reading `carried` closes a two-cycle;

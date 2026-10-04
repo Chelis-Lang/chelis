@@ -295,7 +295,7 @@ fn diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased() {
         );
     }
     assert!(
-        !INFER_PROGRAM.contains("prebind_recursive_function_schemes"),
+        !infer().contains("prebind_recursive_function_schemes"),
         "the source contract must not preserve the removed recursive-only prebind seam"
     );
 }
