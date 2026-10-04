@@ -43,7 +43,7 @@ fn operands(dtype: &str) -> (String, String) {
         format!("7.0{dtype}"),
         inf.clone(),
         format!("3.0{dtype}"),
-        format!("neg(0.0{dtype})"),
+        format!("-0.0{dtype}"),
         format!("-4.0{dtype}"),
         nan.clone(),
         format!("2.0{dtype}"),
