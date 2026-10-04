@@ -189,13 +189,18 @@ fn every_contextual_position_holds_the_literal_to_the_adopted_width() {
     );
     assert_rejected(
         "def g(xs: tensor[2, f16]) -> tensor[2, f16] = xs\n\
-         def h() -> tensor[2, f16] = g([1.0, 70000.0])\n",
+         def h() -> tensor[2, f16] = g(to_tensor([1.0, 70000.0]))\n",
         "call_argument.ch",
         &["f16"],
     );
     assert_rejected(
         "def c() -> f16 = cast(70000.0, f16)\n",
         "cast_operand.ch",
+        &["f16"],
+    );
+    assert_rejected(
+        "def c() -> tensor[2, f16] = cast(to_tensor([1.0, 70000.0]), f16)\n",
+        "tensor_cast_operand.ch",
         &["f16"],
     );
     assert_rejected(
