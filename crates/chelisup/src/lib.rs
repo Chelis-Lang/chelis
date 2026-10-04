@@ -42,7 +42,8 @@
 //! `darwin-x86_64`, `linux-x86_64`): no version in the name and no
 //! tarball, distinct from the toolchain tarball
 //! `chelis-v<ver>-<build>.tar.gz` that `install` downloads (on Linux the
-//! glibc-2.31 build, see [`install::release_build`]).
+//! static build when the release publishes one, otherwise the glibc-2.31
+//! build; see [`install::release_builds`]).
 
 pub mod cli;
 pub mod install;

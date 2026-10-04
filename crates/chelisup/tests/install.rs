@@ -533,7 +533,7 @@ fn install_missing_asset_is_a_loud_error() {
 fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
     // 0.7.23 publishes no glibc-2.31 build and installs its linux-x86_64
     // build. From 0.7.24 the linux-x86_64 build, which needs a newer glibc,
-    // is never installed.
+    // is never installed: only the static or the glibc-2.31 build is.
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
     for version in ["0.7.23", "0.7.24"] {
@@ -552,8 +552,8 @@ fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
     assert!(!refused.status.success());
     assert!(
         stderr(&refused).contains(
-            "release asset chelis-v0.7.24-linux-x86_64-glibc2.31.tar.gz not found under \
-             CHELISUP_RELEASE_BASE"
+            "release asset chelis-v0.7.24-linux-x86_64-static.tar.gz or \
+             chelis-v0.7.24-linux-x86_64-glibc2.31.tar.gz not found under CHELISUP_RELEASE_BASE"
         ),
         "stderr: {}",
         stderr(&refused)
@@ -567,6 +567,41 @@ fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
         stdout(&new).contains("installed chelis 0.7.24 (linux-x86_64-glibc2.31) into"),
         "stdout: {}",
         stdout(&new)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_prefers_the_static_build_and_falls_back_to_glibc_2_31() {
+    // A release that publishes a static build installs it. One that does not,
+    // such as 0.18.12, installs its glibc-2.31 build as before.
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    let earlier = ReleaseRuntime::matching("0.18.12");
+    build_release_tarball(
+        release.path(),
+        "0.18.12",
+        "linux-x86_64-glibc2.31",
+        &earlier,
+    );
+    let fallback = install(home.path(), release.path(), "0.18.12");
+    assert!(fallback.status.success(), "stderr: {}", stderr(&fallback));
+    assert!(
+        stdout(&fallback).contains("installed chelis 0.18.12 (linux-x86_64-glibc2.31) into"),
+        "stdout: {}",
+        stdout(&fallback)
+    );
+
+    let later = ReleaseRuntime::matching("0.18.13");
+    for build in ["linux-x86_64-glibc2.31", "linux-x86_64-static"] {
+        build_release_tarball(release.path(), "0.18.13", build, &later);
+    }
+    let preferred = install(home.path(), release.path(), "0.18.13");
+    assert!(preferred.status.success(), "stderr: {}", stderr(&preferred));
+    assert!(
+        stdout(&preferred).contains("installed chelis 0.18.13 (linux-x86_64-static) into"),
+        "stdout: {}",
+        stdout(&preferred)
     );
 }
 

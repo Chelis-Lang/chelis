@@ -58,8 +58,8 @@ def verify_sidecar(path: Path) -> str:
 
 
 # The installer slug and the release build `chelisup install` downloads on each
-# canary host. On Linux that is the glibc-2.31 build (chelis#2686).
-PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-glibc2.31"),
+# canary host. On Linux that is the static build.
+PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-static"),
              ("Darwin", "arm64"): ("darwin-arm64", "darwin-arm64")}
 
 

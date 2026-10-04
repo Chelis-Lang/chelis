@@ -1,7 +1,7 @@
 //! Toolchain install + store management.
 //!
 //! `chelisup install <ver>` downloads the host's release tarball
-//! (`chelis-vX.Y.Z-<build>.tar.gz`, see [`release_build`]) from
+//! (`chelis-vX.Y.Z-<build>.tar.gz`, see [`release_builds`]) from
 //! `Chelis-Lang/chelis` release `v<ver>`, unpacks it, checks its runtime files
 //! against the unpacked compiler's `chelis runtime export` (see
 //! [`crate::runtime_check`]), moves it to `<home>/toolchains/<ver>/`,
@@ -40,9 +40,9 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// What an install did. The CLI prints a different line for each.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// The toolchain was downloaded from release build `build` (see
-    /// [`release_build`]), its runtime files checked, and unpacked into the
-    /// store.
+    /// The toolchain was downloaded from release build `build` (the first of
+    /// [`release_builds`] the release publishes), its runtime files checked,
+    /// and unpacked into the store.
     Installed {
         version: String,
         build: String,
@@ -69,21 +69,30 @@ pub fn detect_slug() -> Result<&'static str, String> {
 /// The first release from which every release publishes a Linux build made
 /// against glibc 2.31 (`chelis-vX.Y.Z-linux-x86_64-glibc2.31.tar.gz`, #330).
 /// The `linux-x86_64` build needs the glibc of the runner that built it (2.39
-/// for recent releases), so from this release on Linux installs the glibc-2.31
-/// build instead (chelis#2686). Of the earlier releases only 0.7.18 publishes
-/// one; they all install their `linux-x86_64` build as before.
+/// for recent releases), so Linux never installs it from this release on
+/// (chelis#2686). Of the earlier releases only 0.7.18 publishes one; they all
+/// install their `linux-x86_64` build.
 const FIRST_GLIBC_231_RELEASE: &str = "0.7.24";
 
-/// The release build `install` downloads for `version` on the platform
-/// `slug`: the slug itself, except that Linux takes the glibc-2.31 build from
-/// [`FIRST_GLIBC_231_RELEASE`] on. `version` is a validated `X.Y.Z`.
-pub fn release_build(version: &str, slug: &str) -> Result<String, String> {
+/// The release builds `install` accepts for `version` on the platform `slug`,
+/// in preference order. From [`FIRST_GLIBC_231_RELEASE`] on, Linux prefers the
+/// static build (`chelis-vX.Y.Z-linux-x86_64-static.tar.gz`), whose `chelis`
+/// names no program interpreter and so starts on any x86-64 Linux, including
+/// musl systems and NixOS without nix-ld. A release that publishes no static
+/// build installs its glibc-2.31 build. `version` is a validated `X.Y.Z`.
+pub fn release_builds(version: &str, slug: &str) -> Result<Vec<String>, String> {
     if slug == "linux-x86_64"
         && release_triple(version)? >= release_triple(FIRST_GLIBC_231_RELEASE)?
     {
-        return Ok(format!("{slug}-glibc2.31"));
+        return Ok(vec![format!("{slug}-static"), format!("{slug}-glibc2.31")]);
     }
-    Ok(slug.to_owned())
+    Ok(vec![slug.to_owned()])
+}
+
+/// The build `install` prefers for `version` on `slug`: the first of
+/// [`release_builds`].
+pub fn release_build(version: &str, slug: &str) -> Result<String, String> {
+    Ok(release_builds(version, slug)?.remove(0))
 }
 
 /// The release-asset file name for a version + release build.
@@ -114,8 +123,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
         });
     }
 
-    let build = release_build(version, detect_slug()?)?;
-    let asset = asset_name(version, &build);
+    let builds = release_builds(version, detect_slug()?)?;
 
     // Stage under the store root so the final rename is same-filesystem.
     fs::create_dir_all(store.home())
@@ -125,8 +133,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
         .tempdir_in(store.home())
         .map_err(|e| format!("could not create a staging directory: {e}"))?;
 
-    let tarball = scratch.path().join(&asset);
-    fetch_asset(version, &asset, &tarball)?;
+    let (build, tarball) = fetch_release(version, &builds, scratch.path())?;
     let unpacked = extract_tarball(&tarball, scratch.path())?;
     let runtime = runtime_check::check(version, &unpacked, scratch.path())?;
     install_into_store(store, version, &unpacked)?;
@@ -141,46 +148,67 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     })
 }
 
-/// Fetch the asset to `target`, choosing the seam from the environment.
-fn fetch_asset(version: &str, asset: &str, target: &Path) -> Result<(), String> {
-    if let Some(base) = std::env::var_os("CHELISUP_RELEASE_BASE") {
-        let base = base.to_string_lossy().into_owned();
-        return fetch_from_base(&base, asset, target);
-    }
-    fetch_from_github(version, asset, target)
+/// Fetch the first of `builds` that release `version` publishes into `dir`,
+/// choosing the seam from the environment. Returns that build and its file.
+fn fetch_release(
+    version: &str,
+    builds: &[String],
+    dir: &Path,
+) -> Result<(String, PathBuf), String> {
+    let assets: Vec<String> = builds
+        .iter()
+        .map(|build| asset_name(version, build))
+        .collect();
+    let index = match std::env::var_os("CHELISUP_RELEASE_BASE") {
+        Some(base) => fetch_from_base(&base.to_string_lossy(), &assets, dir)?,
+        None => fetch_from_github(version, &assets, dir)?,
+    };
+    Ok((builds[index].clone(), dir.join(&assets[index])))
 }
 
-/// `CHELISUP_RELEASE_BASE` fetch: local directory (or `file://`) read,
-/// or a plain unauthenticated `http(s)://` GET.
-fn fetch_from_base(base: &str, asset: &str, target: &Path) -> Result<(), String> {
-    if let Some(rest) = base
-        .strip_prefix("http://")
-        .map(|_| base)
-        .or_else(|| base.strip_prefix("https://").map(|_| base))
-    {
-        let url = format!("{}/{asset}", rest.trim_end_matches('/'));
-        return http_get_to_file(&url, target, None);
-    }
-    let dir = base.strip_prefix("file://").unwrap_or(base);
-    let src = Path::new(dir).join(asset);
-    if !src.is_file() {
+/// `CHELISUP_RELEASE_BASE` fetch of the first of `assets` present, into
+/// `dir`: a local directory (or `file://`) read, or plain unauthenticated
+/// `http(s)://` GETs that move past an HTTP 404 to the next asset.
+fn fetch_from_base(base: &str, assets: &[String], dir: &Path) -> Result<usize, String> {
+    if base.starts_with("http://") || base.starts_with("https://") {
+        let mut missing = Vec::new();
+        for (index, asset) in assets.iter().enumerate() {
+            let url = format!("{}/{asset}", base.trim_end_matches('/'));
+            match http_get_to_file(&url, &dir.join(asset), None) {
+                Ok(()) => return Ok(index),
+                Err(GetError::NotFound(_)) => missing.push(url),
+                Err(GetError::Failed(message)) => return Err(message),
+            }
+        }
         return Err(format!(
-            "release asset {asset} not found under CHELISUP_RELEASE_BASE at {}",
-            src.display()
+            "release asset {} not found under CHELISUP_RELEASE_BASE: {} returned HTTP 404",
+            assets.join(" or "),
+            missing.join(" and ")
         ));
     }
-    fs::copy(&src, target).map_err(|e| {
+    let root = Path::new(base.strip_prefix("file://").unwrap_or(base));
+    let Some(index) = assets.iter().position(|asset| root.join(asset).is_file()) else {
+        return Err(format!(
+            "release asset {} not found under CHELISUP_RELEASE_BASE at {}",
+            assets.join(" or "),
+            root.display()
+        ));
+    };
+    let src = root.join(&assets[index]);
+    let target = dir.join(&assets[index]);
+    fs::copy(&src, &target).map_err(|e| {
         format!(
             "could not copy {} to {}: {e}",
             src.display(),
             target.display()
         )
     })?;
-    Ok(())
+    Ok(index)
 }
 
-/// GitHub REST two-step fetch (the real, private-repo-capable path).
-fn fetch_from_github(version: &str, asset: &str, target: &Path) -> Result<(), String> {
+/// GitHub REST two-step fetch (the real, private-repo-capable path) of the
+/// first of `assets` the release lists, into `dir`.
+fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usize, String> {
     let token = resolve_github_token()?;
     let api = github_api_base();
     let repo = github_repo();
@@ -217,7 +245,7 @@ fn fetch_from_github(version: &str, asset: &str, target: &Path) -> Result<(), St
     let body = resp
         .text()
         .map_err(|e| format!("could not read release metadata from {meta_url}: {e}"))?;
-    let asset_id = find_asset_id(&body, asset, &meta_url)?;
+    let (index, asset_id) = find_asset_id(&body, assets, &meta_url)?;
 
     // Step 2: asset bytes by id.
     let asset_url = format!(
@@ -228,7 +256,7 @@ fn fetch_from_github(version: &str, asset: &str, target: &Path) -> Result<(), St
     );
     http_get_to_file(
         &asset_url,
-        target,
+        &dir.join(&assets[index]),
         Some(GithubAuth {
             client: &client,
             token: &token,
@@ -236,6 +264,22 @@ fn fetch_from_github(version: &str, asset: &str, target: &Path) -> Result<(), St
             repo: &repo,
         }),
     )
+    .map_err(GetError::into_message)?;
+    Ok(index)
+}
+
+/// Why a GET failed: the server has no such file (HTTP 404), or anything else.
+enum GetError {
+    NotFound(String),
+    Failed(String),
+}
+
+impl GetError {
+    fn into_message(self) -> String {
+        match self {
+            Self::NotFound(message) | Self::Failed(message) => message,
+        }
+    }
 }
 
 /// Optional GitHub auth context for [`http_get_to_file`].
@@ -248,8 +292,9 @@ struct GithubAuth<'a> {
 
 /// GET `url` to `target`. With `auth`, send GitHub asset headers and map
 /// HTTP failures to the loud GitHub error; without it, do a plain GET
-/// (the `CHELISUP_RELEASE_BASE` http branch).
-fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Result<(), String> {
+/// (the `CHELISUP_RELEASE_BASE` http branch). HTTP 404 is
+/// [`GetError::NotFound`].
+fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Result<(), GetError> {
     let owned_client;
     let (client, builder) = match &auth {
         Some(a) => (
@@ -265,7 +310,7 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
             owned_client = reqwest::blocking::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
                 .build()
-                .map_err(|e| format!("could not build the HTTP client: {e}"))?;
+                .map_err(|e| GetError::Failed(format!("could not build the HTTP client: {e}")))?;
             let b = owned_client.get(url).header("User-Agent", "chelisup");
             (&owned_client, b)
         }
@@ -274,25 +319,23 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
 
     let mut resp = builder
         .send()
-        .map_err(|e| format!("network error fetching {url}: {e}"))?;
-    if !resp.status().is_success() {
-        return match &auth {
-            Some(a) => Err(github_status_error(
-                url,
-                resp.status().as_u16(),
-                a.tag,
-                a.repo,
-            )),
-            None => Err(format!(
-                "fetching {url} returned HTTP {}",
-                resp.status().as_u16()
-            )),
+        .map_err(|e| GetError::Failed(format!("network error fetching {url}: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let message = match &auth {
+            Some(a) => github_status_error(url, status.as_u16(), a.tag, a.repo),
+            None => format!("fetching {url} returned HTTP {}", status.as_u16()),
         };
+        return Err(if status.as_u16() == 404 {
+            GetError::NotFound(message)
+        } else {
+            GetError::Failed(message)
+        });
     }
     let mut out = fs::File::create(target)
-        .map_err(|e| format!("could not create {}: {e}", target.display()))?;
+        .map_err(|e| GetError::Failed(format!("could not create {}: {e}", target.display())))?;
     resp.copy_to(&mut out)
-        .map_err(|e| format!("could not download {url}: {e}"))?;
+        .map_err(|e| GetError::Failed(format!("could not download {url}: {e}")))?;
     Ok(())
 }
 
@@ -315,22 +358,25 @@ fn github_status_error(url: &str, status: u16, tag: &str, repo: &str) -> String 
     }
 }
 
-/// Find the named asset's numeric id in the release-metadata JSON.
-fn find_asset_id(body: &str, asset: &str, url: &str) -> Result<u64, String> {
+/// The first of `assets` the release-metadata JSON lists: its position in
+/// `assets` and its numeric id.
+fn find_asset_id(body: &str, assets: &[String], url: &str) -> Result<(usize, u64), String> {
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("release metadata at {url} is not valid JSON: {e}"))?;
-    let assets = value
+    let listed = value
         .get("assets")
         .and_then(|a| a.as_array())
         .ok_or_else(|| format!("release metadata at {url} has no assets array"))?;
-    for entry in assets {
-        if entry.get("name").and_then(|n| n.as_str()) == Some(asset)
-            && let Some(id) = entry.get("id").and_then(|i| i.as_u64())
-        {
-            return Ok(id);
+    for (index, asset) in assets.iter().enumerate() {
+        for entry in listed {
+            if entry.get("name").and_then(|n| n.as_str()) == Some(asset.as_str())
+                && let Some(id) = entry.get("id").and_then(|i| i.as_u64())
+            {
+                return Ok((index, id));
+            }
         }
     }
-    let present: Vec<&str> = assets
+    let present: Vec<&str> = listed
         .iter()
         .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
         .collect();
@@ -340,7 +386,8 @@ fn find_asset_id(body: &str, asset: &str, url: &str) -> Result<u64, String> {
         format!("present assets: [{}]", present.join(", "))
     };
     Err(format!(
-        "release asset {asset} not found at {url}; {listing}"
+        "release asset {} not found at {url}; {listing}",
+        assets.join(" or ")
     ))
 }
 
@@ -634,19 +681,22 @@ mod tests {
     }
 
     #[test]
-    fn linux_takes_the_glibc_2_31_build_from_its_first_release() {
-        for (version, slug, build) in [
-            ("0.7.23", "linux-x86_64", "linux-x86_64"),
-            ("0.7.24", "linux-x86_64", "linux-x86_64-glibc2.31"),
+    fn linux_prefers_the_static_build_from_the_first_glibc_2_31_release() {
+        let both = ["linux-x86_64-static", "linux-x86_64-glibc2.31"];
+        for (version, slug, builds) in [
+            ("0.7.23", "linux-x86_64", &["linux-x86_64"][..]),
+            ("0.7.24", "linux-x86_64", &both[..]),
             // Ordered as numbers: 0.10.0 is after 0.7.24.
-            ("0.10.0", "linux-x86_64", "linux-x86_64-glibc2.31"),
-            ("0.18.11", "darwin-arm64", "darwin-arm64"),
+            ("0.10.0", "linux-x86_64", &both[..]),
+            ("0.19.0", "linux-x86_64", &both[..]),
+            ("0.19.0", "darwin-arm64", &["darwin-arm64"][..]),
         ] {
             assert_eq!(
-                release_build(version, slug).unwrap(),
-                build,
+                release_builds(version, slug).unwrap(),
+                builds,
                 "{version} {slug}"
             );
+            assert_eq!(release_build(version, slug).unwrap(), builds[0]);
         }
     }
 
@@ -662,16 +712,31 @@ mod tests {
             {"id":1,"name":"chelis-v0.1.0-linux-x86_64.tar.gz"},
             {"id":2,"name":"chelis-v0.1.0-darwin-arm64.tar.gz"}
         ]}"#;
-        assert_eq!(
-            find_asset_id(body, "chelis-v0.1.0-darwin-arm64.tar.gz", "u").unwrap(),
-            2
-        );
+        let wanted = ["chelis-v0.1.0-darwin-arm64.tar.gz".to_owned()];
+        assert_eq!(find_asset_id(body, &wanted, "u").unwrap(), (0, 2));
+    }
+
+    #[test]
+    fn find_asset_id_takes_the_first_preference_the_release_lists() {
+        let preferences = [
+            "chelis-v0.19.0-linux-x86_64-static.tar.gz".to_owned(),
+            "chelis-v0.19.0-linux-x86_64-glibc2.31.tar.gz".to_owned(),
+        ];
+        let both = r#"{"assets":[
+            {"id":1,"name":"chelis-v0.19.0-linux-x86_64-glibc2.31.tar.gz"},
+            {"id":2,"name":"chelis-v0.19.0-linux-x86_64-static.tar.gz"}
+        ]}"#;
+        assert_eq!(find_asset_id(both, &preferences, "u").unwrap(), (0, 2));
+        let fallback = r#"{"assets":[
+            {"id":1,"name":"chelis-v0.19.0-linux-x86_64-glibc2.31.tar.gz"}
+        ]}"#;
+        assert_eq!(find_asset_id(fallback, &preferences, "u").unwrap(), (1, 1));
     }
 
     #[test]
     fn find_asset_id_lists_present_on_miss() {
         let body = r#"{"assets":[{"id":1,"name":"other.tar.gz"}]}"#;
-        let err = find_asset_id(body, "wanted.tar.gz", "u").unwrap_err();
+        let err = find_asset_id(body, &["wanted.tar.gz".to_owned()], "u").unwrap_err();
         assert!(err.contains("wanted.tar.gz"), "{err}");
         assert!(err.contains("other.tar.gz"), "{err}");
     }

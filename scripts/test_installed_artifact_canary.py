@@ -203,16 +203,17 @@ class ArtifactTests(unittest.TestCase):
                                              "darwin-arm64"),
                          "chelis-dev-abcd1234-darwin-arm64.tar.gz")
         self.assertEqual(canary.archive_name("0.18.6", "v0.18.6", sha,
-                                             "linux-x86_64-glibc2.31"),
-                         "chelis-v0.18.6-linux-x86_64-glibc2.31.tar.gz")
+                                             "linux-x86_64-static"),
+                         "chelis-v0.18.6-linux-x86_64-static.tar.gz")
         for version, label, source, build in [
             ("0.18.6", "dev-ffffffff", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.5", sha, "darwin-arm64"),
             ("../bad", "v0.18.6", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.6", "unknown", "darwin-arm64"),
             ("0.18.6", "v0.18.6", sha, "other"),
-            # chelisup never installs the Linux build that needs glibc 2.39.
+            # chelisup installs the static Linux build, never the dynamic ones.
             ("0.18.6", "v0.18.6", sha, "linux-x86_64"),
+            ("0.18.6", "v0.18.6", sha, "linux-x86_64-glibc2.31"),
         ]:
             with self.subTest(label=label, version=version, source=source, build=build):
                 with self.assertRaises(ValueError):

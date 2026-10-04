@@ -213,6 +213,7 @@ REVIEWED: tuple[Row, ...] = (
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
         ),
         disposition="not-lookup",
         reason=(

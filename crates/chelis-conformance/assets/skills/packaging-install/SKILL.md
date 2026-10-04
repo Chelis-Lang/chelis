@@ -172,8 +172,10 @@ so a bogus token stays `InvalidSubcommand` and the hint still fires.
 - `CHELIS_HOME` — isolate the whole store to a tempdir.
 - `CHELISUP_RELEASE_BASE` — read the toolchain tarball
   (`chelis-vX.Y.Z-<build>.tar.gz`, gzip; name it with
-  `chelisup::install::asset_name` and `release_build`, since on Linux the build
-  is `linux-x86_64-glibc2.31`) from a local dir instead of GitHub.
+  `chelisup::install::asset_name` and `release_build`, which on Linux names the
+  preferred `linux-x86_64-static` build; `install` falls back to
+  `linux-x86_64-glibc2.31` for a release without one) from a local dir instead
+  of GitHub.
 - `CHELISUP_GITHUB_BASE_API`, `CHELISUP_REPO` — wiremock the GitHub REST path.
 - `CHELISUP_BIN` — point `reef setup` at a specific `chelisup` binary.
 - `CHELIS_REEF_GITHUB_BASE_API`, `CHELIS_SRC_REMOTE`, `CHELIS_SRC_HOME` — the
