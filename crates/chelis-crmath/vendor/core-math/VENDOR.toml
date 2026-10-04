@@ -21,6 +21,14 @@ path = "src/binary32/cos/cosf.c"
 sha256 = "3ea4c6d03d32e225a8fd31ee37eb785cefda0f8940c4e826352fc9103a275dcf"
 
 [[file]]
+path = "src/binary32/erf/erff.c"
+sha256 = "9484d4cb785230e86652597b948c0ee82a9924eca93751915738dda9239c7c5b"
+
+[[file]]
+path = "src/binary32/erfc/erfcf.c"
+sha256 = "4e00764901bdedae0802d59486bb5b4f8eecbb8efd158d71a50fa11954aa49dc"
+
+[[file]]
 path = "src/binary32/exp/expf.c"
 sha256 = "598f2e509a1296fa0e4a239e2499e7bb1753fee29a056ce92d7a930b96279e90"
 
@@ -47,6 +55,14 @@ sha256 = "2d62a4d780f233fd0460b8e6076880fcb9d2f55280ead5799180983b6b77c863"
 [[file]]
 path = "src/binary64/cos/cos.c"
 sha256 = "04bffbc8b483c886f78f2c9ab3f2a1ca318dda78ab637a2983a4a9d82374e9d9"
+
+[[file]]
+path = "src/binary64/erf/erf.c"
+sha256 = "a984176d6b175699c0da69827776f6dab98fad9cf17fd8c8af53558f2c85b39f"
+
+[[file]]
+path = "src/binary64/erfc/erfc.c"
+sha256 = "53b96001983317d267b3d9867995a74fe21fffe44931d53cc51d0fd688fe9964"
 
 [[file]]
 path = "src/binary64/exp/exp.c"
@@ -101,6 +117,14 @@ name = "tanhf"
 identifiers = ["b32u32_u", "cr_tanhf"]
 
 [[kernel]]
+name = "erff"
+identifiers = ["b32u32_u", "b64u64_u", "cr_erff"]
+
+[[kernel]]
+name = "erfcf"
+identifiers = ["E", "b32u32_u", "b64u64_u", "cr_erfcf"]
+
+[[kernel]]
 name = "exp"
 identifiers = ["FastFMA_DW", "as_exp_accurate", "as_exp_database", "as_ldexp", "as_todenormal", "b64u64_u", "cr_exp", "db", "fastsum", "fasttwosum", "i64", "muldd", "opolydd", "roundeven_finite", "t0", "t1", "u64"]
 
@@ -128,6 +152,14 @@ identifiers = ["A", "adddd", "as_atan_refine2", "b64u64_u", "c", "cr_atan", "fas
 name = "tanh"
 identifiers = ["as_exp_accurate", "as_tanh_database", "as_tanh_zero", "b64u64_u", "cr_tanh", "fasttwosub", "fasttwosum", "muldd_acc", "mulddd_acc", "polydd", "u64"]
 
+[[kernel]]
+name = "erf"
+identifiers = ["C", "C2", "CH", "CL", "MASK", "SIGN_MASK", "X0", "a_mul", "b64u64_u", "cr_erf", "cr_erf_accurate", "cr_erf_accurate_tiny", "cr_erf_fast", "fast_two_sum", "two_sum"]
+
+[[kernel]]
+name = "erfc"
+identifiers = ["C", "C2", "E2", "INVLOG2", "INVLOG2acc", "LOG2H", "LOG2Hacc", "LOG2L", "LOG2Lacc", "LOG2tiny", "Q_1", "T", "T1", "T2", "THRESHOLD1", "Tacc", "a_mul", "b64u64_u", "cr_erf_accurate", "cr_erf_accurate_tiny", "cr_erf_fast", "cr_erfc", "cr_erfc_accurate", "cr_erfc_fast", "d_mul", "erfc_asympt_accurate", "erfc_asympt_fast", "exp_1", "exp_accurate", "f64_u", "fast_sum", "fast_two_sum", "q_1", "roundeven_finite", "s_mul", "two_sum"]
+
 [[worst_cases]]
 function = "atan"
 path = "src/binary64/atan/atan.wc"
@@ -137,6 +169,16 @@ sha256 = "8ddf2cd76f82bd7478fe620ee4ac639b7b31e007382ee102f56046ac3786c167"
 function = "cos"
 path = "src/binary64/cos/cos.wc"
 sha256 = "a17ad2d8dfd9ea248a03a5a0b393f0534b7438f8d40b7ab14d132495a8368f5d"
+
+[[worst_cases]]
+function = "erf"
+path = "src/binary64/erf/erf.wc"
+sha256 = "bd0bce9af058e038d5fd380cbfa772065a0a316bd6474cdb82982a4f8d31988f"
+
+[[worst_cases]]
+function = "erfc"
+path = "src/binary64/erfc/erfc.wc"
+sha256 = "051141da9606d411b057915b6a0cb0ec155f698d35bf941cb5baaaccc95b488a"
 
 [[worst_cases]]
 function = "exp"

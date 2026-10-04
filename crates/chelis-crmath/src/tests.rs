@@ -16,6 +16,8 @@ mod raw {
         pub safe fn chelis_crmath_ffi_raw_tanf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_raw_atanf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_raw_tanhf(x: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_raw_erff(x: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_raw_erfcf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_raw_exp(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_log(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_sin(x: f64) -> f64;
@@ -23,13 +25,15 @@ mod raw {
         pub safe fn chelis_crmath_ffi_raw_tan(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_atan(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_tanh(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_raw_erf(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_raw_erfc(x: f64) -> f64;
     }
 }
 
 type F32Pair = (&'static str, fn(f32) -> f32, extern "C" fn(f32) -> f32);
 type F64Pair = (&'static str, fn(f64) -> f64, extern "C" fn(f64) -> f64);
 
-const F32_KERNELS: [F32Pair; 7] = [
+const F32_KERNELS: [F32Pair; 9] = [
     ("exp", exp_f32, raw::chelis_crmath_ffi_raw_expf),
     ("log", log_f32, raw::chelis_crmath_ffi_raw_logf),
     ("sin", sin_f32, raw::chelis_crmath_ffi_raw_sinf),
@@ -37,9 +41,11 @@ const F32_KERNELS: [F32Pair; 7] = [
     ("tan", tan_f32, raw::chelis_crmath_ffi_raw_tanf),
     ("atan", atan_f32, raw::chelis_crmath_ffi_raw_atanf),
     ("tanh", tanh_f32, raw::chelis_crmath_ffi_raw_tanhf),
+    ("erf", erf_f32, raw::chelis_crmath_ffi_raw_erff),
+    ("erfc", erfc_f32, raw::chelis_crmath_ffi_raw_erfcf),
 ];
 
-const F64_KERNELS: [F64Pair; 7] = [
+const F64_KERNELS: [F64Pair; 9] = [
     ("exp", exp_f64, raw::chelis_crmath_ffi_raw_exp),
     ("log", log_f64, raw::chelis_crmath_ffi_raw_log),
     ("sin", sin_f64, raw::chelis_crmath_ffi_raw_sin),
@@ -47,6 +53,8 @@ const F64_KERNELS: [F64Pair; 7] = [
     ("tan", tan_f64, raw::chelis_crmath_ffi_raw_tan),
     ("atan", atan_f64, raw::chelis_crmath_ffi_raw_atan),
     ("tanh", tanh_f64, raw::chelis_crmath_ffi_raw_tanh),
+    ("erf", erf_f64, raw::chelis_crmath_ffi_raw_erf),
+    ("erfc", erfc_f64, raw::chelis_crmath_ffi_raw_erfc),
 ];
 
 const CANONICAL_F32: u32 = 0x7fc0_0000;
@@ -112,7 +120,7 @@ fn every_f64_nan_result_is_canonical() {
 #[test]
 fn every_half_nan_result_is_canonical() {
     type HalfKernels = (fn(f16) -> f16, fn(bf16) -> bf16);
-    let kernels: [HalfKernels; 7] = [
+    let kernels: [HalfKernels; 9] = [
         (exp_f16, exp_bf16),
         (log_f16, log_bf16),
         (sin_f16, sin_bf16),
@@ -120,6 +128,8 @@ fn every_half_nan_result_is_canonical() {
         (tan_f16, tan_bf16),
         (atan_f16, atan_bf16),
         (tanh_f16, tanh_bf16),
+        (erf_f16, erf_bf16),
+        (erfc_f16, erfc_bf16),
     ];
     // Negative quiet, payload-carrying quiet, and signaling NaNs at each width.
     let f16_operands = [0xfe00_u16, 0x7e12, 0x7c01];

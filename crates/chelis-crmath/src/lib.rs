@@ -1,7 +1,7 @@
 //! Correctly rounded transcendentals for every Chelis lane.
 //!
-//! [05-OP-46] makes `exp`, `log`, `sin`, `cos`, `tan`, `atan`, and `tanh` correctly
-//! rounded: the exact real value rounded once, ties to even, at [04-NUM-8]'s
+//! [05-OP-46] makes `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and `erfc`
+//! correctly rounded: the exact real value rounded once, ties to even, at [04-NUM-8]'s
 //! arithmetic width, with every NaN result finalized to [04-NUM-2]'s canonical quiet
 //! NaN. This crate is the only place a Rust lane may compute them. The kernels are
 //! CORE-MATH's (vendored unmodified under `vendor/core-math`, MIT licence), compiled
@@ -37,6 +37,8 @@ mod ffi {
         pub safe fn chelis_crmath_ffi_tanf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_atanf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_tanhf(x: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_erff(x: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_erfcf(x: f32) -> f32;
         pub safe fn chelis_crmath_ffi_exp(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_log(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_sin(x: f64) -> f64;
@@ -44,6 +46,8 @@ mod ffi {
         pub safe fn chelis_crmath_ffi_tan(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_atan(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_tanh(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_erf(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_erfc(x: f64) -> f64;
     }
 }
 
@@ -93,6 +97,8 @@ correctly_rounded! {
     ("tangent (radians)", tan_f32, tan_f64, tan_f16, tan_bf16, chelis_crmath_ffi_tanf, chelis_crmath_ffi_tan),
     ("principal arctangent", atan_f32, atan_f64, atan_f16, atan_bf16, chelis_crmath_ffi_atanf, chelis_crmath_ffi_atan),
     ("hyperbolic tangent", tanh_f32, tanh_f64, tanh_f16, tanh_bf16, chelis_crmath_ffi_tanhf, chelis_crmath_ffi_tanh),
+    ("error function", erf_f32, erf_f64, erf_f16, erf_bf16, chelis_crmath_ffi_erff, chelis_crmath_ffi_erf),
+    ("complementary error function", erfc_f32, erfc_f64, erfc_f16, erfc_bf16, chelis_crmath_ffi_erfcf, chelis_crmath_ffi_erfc),
 }
 
 #[cfg(test)]

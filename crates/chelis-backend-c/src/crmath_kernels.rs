@@ -83,4 +83,24 @@ mod tests {
             "#include \"chelis_runtime.h\"\nint my_chelis_cr_expf_count; int chelis_cr_expf2;\n";
         assert_eq!(link_called_kernels(source.to_string()), source);
     }
+
+    /// Every kernel section is text the generated-C contract parses: a unit
+    /// carrying any one of them must parse before preprocessing (binary64
+    /// `erfc` once placed a `#define` inside an `if`/`else` chain).
+    #[test]
+    fn every_kernel_section_parses_as_generated_c() {
+        for kernel in Kernel::ALL {
+            let text = kernel_text(&[kernel]);
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_c::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&text, None).unwrap();
+            assert!(
+                !tree.root_node().has_error(),
+                "kernel {} does not parse as C",
+                kernel.section_name()
+            );
+        }
+    }
 }

@@ -3,7 +3,7 @@
 //! `fixtures/canary.txt` holds MPFR-derived bit patterns for every [05-OP-46] special
 //! case (signed zeros, infinities, NaNs with payload and sign, subnormal operands and
 //! results, overflow and underflow thresholds) and the #2952, #2959, and #2971
-//! witnesses, for each of the seven functions at f32 and f64. The API must match every
+//! witnesses, for each of the nine functions at f32 and f64. The API must match every
 //! row bit for bit.
 //!
 //! Negative partners: the comparison reports a planted one-ULP change on every row,

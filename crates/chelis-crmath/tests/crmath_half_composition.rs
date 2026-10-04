@@ -8,7 +8,7 @@
 //! Negative partner: a planted direct-to-storage rounding (the f64 result rounded
 //! once, straight to f16, which is what "correctly rounded at the storage width"
 //! would mean) is reported by the same check. At bf16 the two readings agree on
-//! every input of these seven kernels (measured exhaustively): the readings differ
+//! every input of these nine kernels (measured exhaustively): the readings differ
 //! only where the f32 result lands exactly on a bf16 tie that the exact value
 //! does not, and with 16 more bits in f32 than in bf16 none of these kernels
 //! produces one, so a bf16 planted mutant has no input to be reported on.
@@ -24,7 +24,7 @@ type Kernels = (
     fn(f64) -> f64,
 );
 
-const KERNELS: [(&str, Kernels); 7] = [
+const KERNELS: [(&str, Kernels); 9] = [
     ("exp", (cr::exp_f16, cr::exp_bf16, cr::exp_f32, cr::exp_f64)),
     ("log", (cr::log_f16, cr::log_bf16, cr::log_f32, cr::log_f64)),
     ("sin", (cr::sin_f16, cr::sin_bf16, cr::sin_f32, cr::sin_f64)),
@@ -37,6 +37,11 @@ const KERNELS: [(&str, Kernels); 7] = [
     (
         "tanh",
         (cr::tanh_f16, cr::tanh_bf16, cr::tanh_f32, cr::tanh_f64),
+    ),
+    ("erf", (cr::erf_f16, cr::erf_bf16, cr::erf_f32, cr::erf_f64)),
+    (
+        "erfc",
+        (cr::erfc_f16, cr::erfc_bf16, cr::erfc_f32, cr::erfc_f64),
     ),
 ];
 
