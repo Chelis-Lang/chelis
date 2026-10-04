@@ -145,6 +145,15 @@ fn import_failures_and_ambiguity_do_not_erase_numeric_capacity() {
 }
 
 #[test]
+fn local_nominal_names_shadow_imported_names() {
+    // Retain the Phase 1 frozen executable identity. Its historical name is
+    // not an import-precedence rule: spec/02 §P2 now distinguishes qualified
+    // imports from rejected unqualified collisions. Exercise both contracts.
+    local_nominal_names_beside_a_qualified_import_stay_local();
+    local_nominal_name_colliding_with_an_import_fails_closed();
+}
+
+#[test]
 fn local_nominal_names_beside_a_qualified_import_stay_local() {
     // A qualified-only import keeps `Std.A.Value` out of unqualified scope,
     // so the bare `Value` is the module's own non-numeric type.
