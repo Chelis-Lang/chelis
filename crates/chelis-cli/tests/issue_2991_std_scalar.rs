@@ -86,38 +86,11 @@ k = grad(magnitude)(neg(div(1.0DTYPE, 0.0DTYPE)))
         );
         let expected = "a = 0.0\nb = 0.0\nc = -1.0\nd = 1.0\ne.0 = 1.0\ne.1 = 0.0\nf.0 = 1.0\nf.1 = 0.0\ng.0 = 0.0\ng.1 = 1.0\nh.0 = 1.0\nh.1 = 0.0\ni = 0.0\nj = 1.0\nk = -1.0\n";
         assert_eq!(eval(&reef, &app), expected, "eval {dtype}");
-        // Both f32 and f64 already reject in the baseline (#2995).
-        if matches!(dtype, "f16" | "bf16") {
-            assert_eq!(
-                build_and_run_app(&reef, &app, "main"),
-                expected,
-                "C {dtype}"
-            );
-        } else {
-            let output = Command::cargo_bin("chelis")
-                .unwrap()
-                .env("CHELIS_STYLE_GATE_DISABLE", "1")
-                .env("CHELIS_REEF_HOME", &reef)
-                .args([
-                    "build",
-                    app.join("src/main.ch").to_str().unwrap(),
-                    "--target",
-                    "c",
-                    "--output",
-                    app.join("out").to_str().unwrap(),
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                !output.status.success(),
-                "the existing {dtype} boundary disappeared; exercise the accepted lane"
-            );
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("can't lower these defs"),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        assert_eq!(
+            build_and_run_app(&reef, &app, "main"),
+            expected,
+            "C {dtype}"
+        );
     }
 }
 
@@ -221,10 +194,8 @@ fn composed_abs_matches_the_primitive_with_nonunit_cotangents() {
         };
         let evaluated = eval(&reef, &app);
         check_pairs(&evaluated);
-        if matches!(dtype, "f16" | "bf16") {
-            let compiled = build_and_run_app(&reef, &app, "main");
-            check_pairs(&compiled);
-            assert_eq!(compiled, evaluated, "{dtype}");
-        }
+        let compiled = build_and_run_app(&reef, &app, "main");
+        check_pairs(&compiled);
+        assert_eq!(compiled, evaluated, "{dtype}");
     }
 }
