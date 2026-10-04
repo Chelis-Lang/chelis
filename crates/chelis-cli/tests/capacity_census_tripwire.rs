@@ -738,6 +738,13 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
+        &[],
+        "[05-OP-38]",
+        "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
         &[],
         "[05-OP-38]",

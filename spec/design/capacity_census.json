@@ -682,6 +682,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
       "flags": [
         "numeric-op"

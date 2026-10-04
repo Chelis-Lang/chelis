@@ -495,3 +495,60 @@ fn numeric_traps_exit_like_eval() {
         assert_eq!(run.stdout, "before\n", "{name}: {run:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// [05-HOST-1] tensor_scan over tensor states (chelis#2999)
+// ---------------------------------------------------------------------------
+
+/// A tensor state stacks to `[n] ++ state_shape` at the state's dtype: the
+/// issue's f16 rows, a rank-0 state, a 2x2 i64 state, a bool state, an
+/// `n = 0` scan that keeps every state extent without running the
+/// callback, and a zero-sized state whose callback still runs `n` times.
+#[test]
+fn tensor_scan_matches_eval_for_tensor_states() {
+    let source = "def doubled(prev: tensor[2, f16], i: i64) -> tensor[2, f16] = mul(prev, to_tensor([2.0f16, 2.0f16]))\n\
+                  def loud(prev: tensor[2, f16], i: i64) -> tensor[2, f16] ! {IO} = {\n\
+                  _ = print(\"never\")\n\
+                  prev\n\
+                  }\n\
+                  def tick(prev: tensor[*, f32], i: i64) -> tensor[*, f32] ! {IO} = {\n\
+                  _ = print(to_string(i))\n\
+                  prev\n\
+                  }\n\
+                  rows = tensor_scan(to_tensor([1.0f16, 2.0f16]), doubled, 3i64)\n\
+                  none = tensor_scan(to_tensor([1.0f16, 2.0f16]), loud, 0i64)\n\
+                  hollow = tensor_scan(to_tensor([]: List[f32]), tick, 3i64)\n\
+                  point = tensor_scan(scalar_to_tensor(3i64), fn (prev: tensor[i64], i: i64) -> add(prev, scalar_to_tensor(i)), 3i64)\n\
+                  grid = tensor_scan(to_tensor([[1i64, 2i64], [3i64, 4i64]]), fn (prev: tensor[2, 2, i64], i: i64) -> add(prev, prev), 2i64)\n\
+                  masks = tensor_scan(to_tensor([true, false]), fn (prev: tensor[2, bool], i: i64) -> not(prev), 2i64)\n";
+    let run = parity::assert_lanes_agree(source, "tensorscans");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "0\n1\n2\n",
+        "rows = tensor(shape=[3, 2], data=[2.0, 4.0, 4.0, 8.0, 8.0, 16.0])\n",
+        "none = tensor(shape=[0, 2], data=[])\n",
+        "hollow = tensor(shape=[3, 0], data=[])\n",
+        "point = tensor(shape=[3], data=[3, 4, 6])\n",
+        "grid = tensor(shape=[2, 2, 2], data=[2, 4, 6, 8, 4, 8, 12, 16])\n",
+        "masks = tensor(shape=[2, 2], data=[false, true, true, false])\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
+    }
+    assert!(!run.stdout.contains("never"), "{run:?}");
+}
+
+/// The failing twin: a callback that changes the state's shape or dtype is
+/// a `tensor_scan` type error at check time, on every lane.
+#[test]
+fn tensor_scan_rejects_a_state_changing_callback_by_type() {
+    for body in [
+        "x = tensor_scan(to_tensor([1.0f32, 2.0f32]), fn (prev: tensor[2, f32], i: i64) -> to_tensor([1.0f32]), 2i64)\n",
+        "x = tensor_scan(to_tensor([1.0f32, 2.0f32]), fn (prev: tensor[2, f32], i: i64) -> to_tensor([1.0f64, 2.0f64]), 2i64)\n",
+    ] {
+        let stderr = build_rejection(body);
+        assert!(stderr.contains("tensor_scan"), "{stderr}");
+    }
+}

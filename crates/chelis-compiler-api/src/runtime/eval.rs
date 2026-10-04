@@ -3953,9 +3953,56 @@ impl<'a> EvalContext<'a> {
                 let precision = match &initial {
                     RuntimeValue::Scalar(payload) => payload.dtype(),
                     RuntimeValue::Bool(_) => Prim::Bool,
+                    RuntimeValue::Tensor(state) => {
+                        // [05-HOST-1]: a tensor state stacks to
+                        // `[n] ++ state_shape` at its own precision. The
+                        // empty result keeps every state extent, and a
+                        // zero-sized state still runs the callback n times.
+                        let state_shape = state.value.shape.clone();
+                        let precision = state.precision;
+                        let callback_type_children = arg_type_exprs
+                            .get(1)
+                            .and_then(Option::as_ref)
+                            .and_then(checked_function_children);
+                        let initial_type = arg_type_exprs.first().cloned().flatten();
+                        let callback_arg_types = [
+                            initial_type.clone(),
+                            callback_type_children.and_then(|children| children.get(1).cloned()),
+                        ];
+                        let mut elements = Vec::new();
+                        let mut acc = initial.clone();
+                        for i in 0..n as usize {
+                            acc = self.apply_resolved_callable_with_arg_types(
+                                callback.clone(),
+                                vec![acc, RuntimeValue::int64(i as i64)],
+                                &callback_arg_types,
+                                initial_type.as_ref(),
+                            )?;
+                            let RuntimeValue::Tensor(next) = &acc else {
+                                return Err(format!(
+                                    "tensor_scan callback must return a tensor state, got {}",
+                                    describe_argument(Some(&acc))
+                                ));
+                            };
+                            if next.precision != precision || next.value.shape != state_shape {
+                                return Err(
+                                    "tensor_scan callback changed the state's dtype or shape"
+                                        .to_string(),
+                                );
+                            }
+                            let storage = next.value.storage();
+                            elements.extend((0..storage.len()).map(|k| storage.scalar_at(k)));
+                        }
+                        let mut shape = Vec::with_capacity(state_shape.len() + 1);
+                        shape.push(n as usize);
+                        shape.extend(state_shape);
+                        return Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_scalars(
+                            precision, shape, &elements,
+                        )));
+                    }
                     other => {
                         return Err(format!(
-                            "tensor_scan expects a scalar initial value (numeric or bool), got {other:?}"
+                            "tensor_scan expects a scalar or tensor initial value, got {other:?}"
                         ));
                     }
                 };

@@ -3581,6 +3581,12 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
 /// function-value diagnostic. Keeping the split in the marker itself
 /// means a plain callable bug is never misdescribed as an AD failure
 /// just because an unrelated transform exists elsewhere in the program.
+/// The internal host builtin that stacks `tensor_scan`'s tensor states,
+/// `(states: List[tensor[..s, p]], template: tensor[..s, p]) ->
+/// tensor[n, ..s, p]`. The leading `#` cannot appear in a Surf or Deep
+/// identifier, so no user definition can collide with it.
+pub const TENSOR_SCAN_STACK: &str = "#chelis-tensor-scan-stack";
+
 pub const HOST_UNRESOLVED_CALLABLE_MARKER: &str = "#chelis-unresolved-callable";
 pub const HOST_UNRESOLVED_TRANSFORM_MARKER: &str = "#chelis-unresolved-transform";
 
@@ -12109,11 +12115,6 @@ fn lower_app_host_expr(
             list: Box::new(indices),
             ty: states_ty,
         });
-        let body = HostExpr::new(HostExprKind::Builtin {
-            name: "to_tensor".to_string(),
-            args: vec![states],
-            ty: ty.clone(),
-        });
         let binding = |name: String, ty: HostTypeTerm, value: HostExpr| HostBinding {
             name,
             display_name: None,
@@ -12121,11 +12122,44 @@ fn lower_app_host_expr(
             ty,
             value,
         };
+        let mut bindings = vec![
+            binding(init_name.clone(), state_ty.clone(), init_expr),
+            binding(length_name, HostTypeTerm::Int64, length_expr),
+        ];
+        // A scalar state stacks through `to_tensor`. A tensor state stacks
+        // against a copy of the initial state taken before the scan
+        // consumes it, so `n = 0` keeps every state extent.
+        let body = if matches!(state_ty, HostTypeTerm::Tensor(_)) {
+            let template_name = names.fresh("__chelis_tensor_scan_template");
+            bindings.push(binding(
+                template_name.clone(),
+                state_ty.clone(),
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "copy".to_string(),
+                    args: vec![HostExpr::new(HostExprKind::Var(
+                        init_name,
+                        state_ty.clone(),
+                    ))],
+                    ty: state_ty.clone(),
+                }),
+            ));
+            HostExpr::new(HostExprKind::Builtin {
+                name: TENSOR_SCAN_STACK.to_string(),
+                args: vec![
+                    states,
+                    HostExpr::new(HostExprKind::Var(template_name, state_ty)),
+                ],
+                ty: ty.clone(),
+            })
+        } else {
+            HostExpr::new(HostExprKind::Builtin {
+                name: "to_tensor".to_string(),
+                args: vec![states],
+                ty: ty.clone(),
+            })
+        };
         return Ok(HostExpr::new(HostExprKind::Let {
-            bindings: vec![
-                binding(init_name, state_ty, init_expr),
-                binding(length_name, HostTypeTerm::Int64, length_expr),
-            ],
+            bindings,
             body: Box::new(body),
             ty,
         }));

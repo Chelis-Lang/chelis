@@ -124,7 +124,13 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 'active_compiler_name == Some("tensor_scan")',
                 "tensor_scan requires a non-negative length, got ",
                 'name: "to_tensor".to_string(),',
+                "name: TENSOR_SCAN_STACK.to_string(),",
             ),
+        ),
+        SourceContract(
+            "tensor states stack against the initial state",
+            HOST_EMIT,
+            ("chelis_tensor_scan_stack(",),
         ),
         SourceContract(
             "assertions are emitted, never stubbed",

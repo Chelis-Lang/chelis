@@ -7629,6 +7629,51 @@ unsafe fn assertion_shape(tensor: *const chelis_tensor) -> Vec<usize> {
         .collect()
 }
 
+/// [05-HOST-1] `tensor_scan` over a tensor state in compiled host code:
+/// stacks the scan's states along a new leading axis, giving
+/// `[len(states)] ++ shape(template)` at the template's dtype. The template
+/// is the initial state, so an empty scan keeps every state extent. A state
+/// whose dtype or shape differs from the template is a checker desync.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_scan_stack(
+    states: *const chelis_list,
+    template: *const chelis_tensor,
+) -> *mut chelis_tensor {
+    let [dtype] = validate_tensor_inputs([(template, "tensor_scan template")]);
+    if states.is_null() {
+        runtime_fail!("tensor_scan: null state list");
+    }
+    let state_shape = (*template).shape().to_vec();
+    let states = (*states).live();
+    let mut shape = Vec::with_capacity(state_shape.len() + 1);
+    shape.push(
+        i64::try_from(states.len())
+            .unwrap_or_else(|_| runtime_fail!("Overflow: tensor_scan length exceeds i64")),
+    );
+    shape.extend_from_slice(&state_shape);
+    let rank = c_int::try_from(shape.len())
+        .unwrap_or_else(|_| runtime_fail!("Overflow: tensor_scan rank exceeds i32"));
+    let out = chelis_alloc(rank, shape.as_ptr(), dtype.id() as chelis_dtype);
+    let width = (scalar_used_bits(dtype) / 8) as usize;
+    let state_bytes = (*template).count() * width;
+    for (index, state) in states.iter().enumerate() {
+        if state.tag != chelis_value_tag::CHELIS_VALUE_TENSOR {
+            runtime_fail!("tensor_scan: a state is not a tensor");
+        }
+        let tensor = state.payload.tensor as *const chelis_tensor;
+        let [state_dtype] = validate_tensor_inputs([(tensor, "tensor_scan state")]);
+        if state_dtype != dtype || (*tensor).shape() != state_shape.as_slice() {
+            runtime_fail!("tensor_scan: a state differs from the initial state's dtype or shape");
+        }
+        ptr::copy_nonoverlapping(
+            tensor_data(tensor),
+            tensor_data(out).add(index * state_bytes),
+            state_bytes,
+        );
+    }
+    out
+}
+
 /// [05-HOST-3] `test_assert` in compiled host code, reached only when the
 /// condition is false.
 #[no_mangle]

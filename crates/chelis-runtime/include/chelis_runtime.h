@@ -590,6 +590,7 @@ chelis_tuple *chelis_clock_wall_read(void);
 chelis_tuple *chelis_clock_monotonic_read(void);
 chelis_tuple *chelis_process_run(chelis_string program, const chelis_list *args);
 chelis_scalar chelis_round_to(chelis_scalar x, chelis_scalar places);
+chelis_tensor *chelis_tensor_scan_stack(const chelis_list *states, const chelis_tensor *shape_template);
 void chelis_test_assert_fail(chelis_string label);
 void chelis_test_assert_eq(chelis_value actual, chelis_value expected, chelis_string label);
 void chelis_test_assert_eq_tensor(const chelis_tensor *actual, const chelis_tensor *expected, chelis_string label);

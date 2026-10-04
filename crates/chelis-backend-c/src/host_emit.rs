@@ -7800,6 +7800,15 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-HOST-1]: `tensor_scan`'s tensor states, stacked against the
+            // initial state's copy by the runtime.
+            name if name == chelis_ir::host::TENSOR_SCAN_STACK => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_scan_stack({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
             // [05-HOST-3]: the assertion family runs in compiled host code
             // through the runtime's shared checks and failure messages. The
             // operands are borrowed; an assertion returns unit or traps.
