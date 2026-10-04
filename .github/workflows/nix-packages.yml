@@ -16,13 +16,12 @@ jobs:
   # Reserve headroom for cold Devenv realization before native checks.
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && fromJSON('{"group":"chelis-ci-trusted","labels":"chelis-ci-warm-x64"}') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 135
-    # Only reviewed manual-main builds use the protected pool. Release tags
-    # and branch validation remain hosted; the host independently checks the pin.
+    # Native package acceptance runs on the hosted builder on every ref.
+    # A protected-runner startup failure must not leave main without checks.
     env:
-      # Bound concurrent derivations and retain signature verification on
-      # both the protected runner and the hosted release fallback.
+      # Bound concurrent derivations and retain signature verification.
       NIX_CONFIG: |
         sandbox = true
         require-sigs = true
@@ -47,30 +46,12 @@ jobs:
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
       - name: Verify the Nix sandbox
         run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
-      - name: Restore protected real-workload caches
-        id: build-cache
-        if: runner.environment != 'github-hosted'
-        uses: ./.github/actions/vendor/ci/actions/restore-build-cache
-        with:
-          mode: read-write
-          kache-binary: ${{ env.RUSTC_WRAPPER }}
-      - name: Declare the activated profile cache root
-        if: steps.build-cache.outcome == 'success'
-        run: python scripts/ci_nix_cache_roots.py
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
       - name: Run the Nix flake contract suite
         run: python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
-      - name: Declare completed native check cache roots
-        if: steps.build-cache.outcome == 'success'
-        run: python scripts/ci_nix_cache_roots.py --checks
-      - name: Publish verified outputs and clean cache state
-        if: always() && steps.build-cache.outcome == 'success'
-        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
-        with:
-          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   nix-darwin-arm64:
     name: Nix Packages (aarch64-darwin)
