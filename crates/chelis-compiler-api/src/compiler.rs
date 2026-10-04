@@ -2731,6 +2731,8 @@ fn compile_rewritten_decls_in_context(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: Some(library_runtime),
+        eval_facts: std::sync::OnceLock::new(),
+        host_program: std::sync::OnceLock::new(),
     })
 }
 
@@ -2914,12 +2916,12 @@ fn eval_compiled(
     // inputs. Specialize that selection into a new manifested program before
     // consuming any roots, so the legacy in-context `main(x)` surface remains
     // manifest-authoritative instead of bypassing the phase boundary.
-    let effective_program = manifested_program_for_eval(
+    let effective_manifest = manifest_for_eval(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
     )?;
-    let manifest = effective_program.manifest();
+    let manifest = effective_manifest.as_ref();
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
@@ -2980,11 +2982,7 @@ fn eval_compiled(
     // rules, or that shares a node that can trap across declarations, is
     // rejected here as ownership lowering for C rejects it, rather than
     // evaluated. The wire codec runs the key rules too.
-    let mut key_rule_errors = Vec::new();
-    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
-    if key_rule_errors.is_empty() {
-        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
-    }
+    let key_rule_errors = &compiled.eval_facts().key_rule_errors;
     if !key_rule_errors.is_empty() {
         return Err(stage_error(
             "eval",
@@ -2995,8 +2993,7 @@ fn eval_compiled(
             GeneralKind::LowerError,
         ));
     }
-    let mut sharing_errors = Vec::new();
-    chelis_ir::verify::verify_declaration_sharing(active_dag, &mut sharing_errors);
+    let sharing_errors = &compiled.eval_facts().sharing_errors;
     if !sharing_errors.is_empty() {
         return Err(stage_error(
             "eval",
@@ -3072,7 +3069,26 @@ fn eval_compiled(
         .iter()
         .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
         .collect::<BTreeMap<_, _>>();
-    let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
+    let host_outcome = if let Some(prepared) = compiled.host_program() {
+        crate::runtime::evaluate_prepared_host_program(
+            prepared,
+            compiled.checked(),
+            compiled
+                .library_runtime
+                .as_ref()
+                .map(|library| &library.checked),
+            compiled
+                .library_runtime
+                .as_ref()
+                .map(|library| &library.lowered_names),
+            crate::runtime::HostEvaluationInputs {
+                roots: &tensor_values_by_name,
+                bindings: Some(&bindings),
+            },
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
+        )
+    } else if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
             Some(&library.checked),
@@ -3184,7 +3200,7 @@ fn eval_compiled(
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
-        manifest: manifest_result(&effective_program),
+        manifest: root_manifest_result(compiled.program.target(), manifest),
         transcript: host_outcome.transcript,
     })
 }
@@ -3446,11 +3462,98 @@ struct CompiledSource {
     /// path (no separate library to merge); `Some` on the in-context
     /// path produced by `compile_new_source_in_context`.
     library_runtime: Option<LibraryRuntime>,
+    /// Evaluation facts that depend on this compile alone, derived on the
+    /// first evaluation and reused by every later one (chelis#3144).
+    eval_facts: std::sync::OnceLock<EvalProgramFacts>,
+    /// The host evaluator's program (the library composed with this source
+    /// when there is a library) with its shared host-lowering facts, built on
+    /// the first evaluation. `None` inside means composition failed, and each
+    /// evaluation reports that failure itself.
+    host_program: std::sync::OnceLock<Option<crate::runtime::PreparedHostEvaluation>>,
+}
+
+/// The facts every evaluation of one [`CompiledSource`] needs and none of
+/// them changes: the manifest an evaluation observes when it specializes no
+/// callable entry, the realizability inputs a specialization reads, and the
+/// lowered DAG's key-rule and sharing verdicts.
+struct EvalProgramFacts {
+    base_manifest: std::sync::Arc<RootManifest>,
+    base_def_names: BTreeSet<String>,
+    realizability: chelis_effects::realizability::RealizabilityResult,
+    key_rule_errors: Vec<String>,
+    sharing_errors: Vec<String>,
+}
+
+/// Program-wide evaluation-fact derivations since the process started: a
+/// work counter that lets a test assert the facts are derived once per
+/// compile rather than once per evaluated root (chelis#3144).
+static EVAL_PROGRAM_FACT_DERIVATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn eval_program_fact_derivations() -> u64 {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    EVAL_PROGRAM_FACT_DERIVATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl CompiledSource {
     fn checked(&self) -> &CheckedProgram {
         self.program.checked()
+    }
+
+    fn eval_facts(&self) -> &EvalProgramFacts {
+        self.eval_facts.get_or_init(|| {
+            EVAL_PROGRAM_FACT_DERIVATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut base_manifest = self.manifest().clone();
+            route_tensor_inputs_from_dag(&mut base_manifest, &self.dag, &self.named_roots);
+            let declaration_order = checked_def_order(self.checked());
+            base_manifest.entries.sort_by_key(|entry| {
+                declaration_order
+                    .get(entry.def_name.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+            let base_def_names = self
+                .manifest()
+                .entries
+                .iter()
+                .map(|entry| entry.def_name.clone())
+                .collect();
+            let realizability = chelis_effects::realizability::infer_realizability(
+                self.checked(),
+                crate::target_capability::tensor_capable_prims(self.program.target()),
+            );
+            let mut key_rule_errors = Vec::new();
+            chelis_ir::verify::verify_random_operands(&self.dag, &mut key_rule_errors);
+            if key_rule_errors.is_empty() {
+                chelis_ir::verify::verify_key_rules(&self.dag, &mut key_rule_errors);
+            }
+            let mut sharing_errors = Vec::new();
+            chelis_ir::verify::verify_declaration_sharing(&self.dag, &mut sharing_errors);
+            EvalProgramFacts {
+                base_manifest: std::sync::Arc::new(base_manifest),
+                base_def_names,
+                realizability,
+                key_rule_errors,
+                sharing_errors,
+            }
+        })
+    }
+
+    /// The host evaluator's prepared program, or `None` when the library and
+    /// this source do not compose.
+    fn host_program(&self) -> Option<&crate::runtime::PreparedHostEvaluation> {
+        self.host_program
+            .get_or_init(|| {
+                let program = match &self.library_runtime {
+                    Some(library) => CheckedProgram::compose(&library.checked, self.checked())?,
+                    None => self.checked().clone(),
+                };
+                Some(crate::runtime::PreparedHostEvaluation::new(
+                    chelis_ir::host::PreparedHostProgram::new(program),
+                ))
+            })
+            .as_ref()
     }
 
     fn manifest(&self) -> &RootManifest {
@@ -3459,10 +3562,13 @@ impl CompiledSource {
 }
 
 fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
+    root_manifest_result(program.target(), program.manifest())
+}
+
+fn root_manifest_result(target: Target, manifest: &RootManifest) -> RootManifestResult {
     RootManifestResult {
-        target: program.target(),
-        entries: program
-            .manifest()
+        target,
+        entries: manifest
             .entries
             .iter()
             .map(|entry| RootManifestEntryResult {
@@ -3471,20 +3577,21 @@ fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
                 required_inputs: entry.required_inputs.iter().cloned().collect(),
             })
             .collect(),
-        requires_main: program.manifest().requires_main(),
+        requires_main: manifest.requires_main(),
     }
 }
 
 /// Specialize callable tensor entries selected for evaluation into owed
 /// roots once all required runtime inputs have bindings. The checked manifest
 /// intentionally excludes parameterized declarations in the abstract; this
-/// produces a new `ManifestedProgram` for the concrete evaluation request
-/// rather than reaching around the manifest to the legacy named-root map.
-fn manifested_program_for_eval<'a>(
+/// produces a new manifest for the concrete evaluation request rather than
+/// reaching around the manifest to the legacy named-root map. A request that
+/// specializes nothing observes the compile's own manifest, derived once.
+fn manifest_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
-) -> Result<ManifestedProgram> {
+) -> Result<std::sync::Arc<RootManifest>> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
@@ -3494,17 +3601,13 @@ fn manifested_program_for_eval<'a>(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_else(|| BTreeSet::from(["main"]));
-    let mut manifest = compiled.manifest().clone();
-    let realizability = chelis_effects::realizability::infer_realizability(
-        compiled.checked(),
-        crate::target_capability::tensor_capable_prims(compiled.program.target()),
-    );
+    let facts = compiled.eval_facts();
+    let realizability = &facts.realizability;
+    let mut specialized: Vec<RootEntry> = Vec::new();
 
     for candidate in candidate_names {
-        if manifest
-            .entries
-            .iter()
-            .any(|entry| entry.def_name == candidate)
+        if facts.base_def_names.contains(candidate)
+            || specialized.iter().any(|entry| entry.def_name == candidate)
         {
             continue;
         }
@@ -3648,9 +3751,14 @@ fn manifested_program_for_eval<'a>(
                     });
             }
         }
-        manifest.entries.extend(selected_entries);
+        specialized.extend(selected_entries);
+    }
+    if specialized.is_empty() {
+        return Ok(facts.base_manifest.clone());
     }
 
+    let mut manifest = compiled.manifest().clone();
+    manifest.entries.extend(specialized);
     route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
     let declaration_order = checked_def_order(compiled.checked());
     manifest.entries.sort_by_key(|entry| {
@@ -3659,11 +3767,7 @@ fn manifested_program_for_eval<'a>(
             .copied()
             .unwrap_or(usize::MAX)
     });
-    Ok(ManifestedProgram::new(
-        compiled.checked().clone(),
-        manifest,
-        compiled.program.target(),
-    ))
+    Ok(std::sync::Arc::new(manifest))
 }
 
 /// Refine selected Host-call admission from the same kernel input carrier
@@ -3963,6 +4067,8 @@ fn compile_source_scoped_mode(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
+        eval_facts: std::sync::OnceLock::new(),
+        host_program: std::sync::OnceLock::new(),
     })
 }
 

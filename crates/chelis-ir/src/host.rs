@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::decode_effect_kind;
@@ -381,6 +382,93 @@ struct DefLaneFacts {
     tensor_helper_def_summaries: RefCell<Option<Arc<BTreeMap<String, TensorHelperDefSummary>>>>,
 }
 
+/// The program-wide facts of [`DefLaneFacts`] that hold for every session over
+/// one [`PreparedHostProgram`], kept across sessions so repeated evaluations
+/// of one prepared program derive each fact once (chelis#3144).
+///
+/// A session consults these only after its own cell misses, and fills them
+/// with what it computes. Each fact is a function of the program alone, and
+/// the program is owned beside them and never changes, so no entry can
+/// describe a different program.
+#[derive(Default)]
+struct SharedProgramFacts {
+    call_graph: OnceLock<Arc<CallGraph>>,
+    program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
+    def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
+    dropout_reaching_defs: OnceLock<Arc<UnordSet<String>>>,
+    tensor_helper_def_summaries: OnceLock<Arc<BTreeMap<String, TensorHelperDefSummary>>>,
+    subexpr_lowering_context: OnceLock<crate::lower::SubexprLoweringContext>,
+    names: OnceLock<TopLevelNameIndex>,
+}
+
+/// A checked program prepared for many host evaluations: it owns the program
+/// and the program-wide facts every session over it shares
+/// (chelis#3144). `chelis test` evaluates each test of a file against one
+/// prepared program, so without the shared facts each test re-derived them
+/// from the whole file and a file's test time grew with the square of its
+/// test count.
+pub struct PreparedHostProgram {
+    program: CheckedProgram,
+    facts: SharedProgramFacts,
+}
+
+impl PreparedHostProgram {
+    pub fn new(program: CheckedProgram) -> Self {
+        Self {
+            program,
+            facts: SharedProgramFacts::default(),
+        }
+    }
+
+    /// The program the facts describe.
+    pub fn program(&self) -> &CheckedProgram {
+        &self.program
+    }
+
+    /// A session over the program that reuses and extends the shared facts.
+    pub fn session(&self) -> HostLoweringSession<'_> {
+        HostLoweringSession {
+            program: &self.program,
+            facts: DefLaneFacts::default(),
+            shared: Some(&self.facts),
+            names: std::cell::OnceCell::new(),
+        }
+    }
+}
+
+/// Program-wide effect-row derivations since the process started: a work
+/// counter that lets a test assert a fact is derived once per prepared
+/// program rather than once per evaluation (chelis#3144).
+static DEF_EFFECT_ROW_DERIVATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn def_effect_row_derivations() -> u64 {
+    DEF_EFFECT_ROW_DERIVATIONS.load(Ordering::Relaxed)
+}
+
+/// Read one program-wide fact: the session's own cell, then the prepared
+/// program's shared cell, and only then `compute`, whose result fills both.
+/// No borrow is held across `compute`, which may read other facts.
+fn program_fact<T: Clone>(
+    local: &RefCell<Option<T>>,
+    shared: Option<&OnceLock<T>>,
+    compute: impl FnOnce() -> T,
+) -> T {
+    if let Some(cached) = local.borrow().clone() {
+        return cached;
+    }
+    if let Some(cached) = shared.and_then(OnceLock::get) {
+        *local.borrow_mut() = Some(cached.clone());
+        return cached.clone();
+    }
+    let value = compute();
+    if let Some(shared) = shared {
+        let _ = shared.set(value.clone());
+    }
+    *local.borrow_mut() = Some(value.clone());
+    value
+}
+
 /// One host-lowering session: a checked program, plus the facts host lowering
 /// derives from it.
 ///
@@ -410,6 +498,9 @@ struct DefLaneFacts {
 pub struct HostLoweringSession<'program> {
     program: &'program CheckedProgram,
     facts: DefLaneFacts,
+    /// The prepared program's shared facts, when the session was opened from
+    /// a [`PreparedHostProgram`].
+    shared: Option<&'program SharedProgramFacts>,
     /// Top-level `def` and `defsig` items by name, borrowed from the program
     /// (chelis#2393). Resolving a short spelling used to walk every item and
     /// compare terminal names, and the kernel decision does that per
@@ -509,6 +600,7 @@ impl<'program> HostLoweringSession<'program> {
         Self {
             program,
             facts: DefLaneFacts::default(),
+            shared: None,
             names: std::cell::OnceCell::new(),
         }
     }
@@ -519,7 +611,7 @@ impl<'program> HostLoweringSession<'program> {
     }
 
     fn names(&self) -> &TopLevelNameIndex {
-        self.names.get_or_init(|| {
+        let build = || {
             TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
             let mut index = TopLevelNameIndex::default();
             let mut path = Vec::new();
@@ -529,7 +621,11 @@ impl<'program> HostLoweringSession<'program> {
                 path.pop();
             }
             index
-        })
+        };
+        match self.shared {
+            Some(shared) => shared.names.get_or_init(build),
+            None => self.names.get_or_init(build),
+        }
     }
 
     fn item_at(&self, path: &[usize]) -> Option<&'program Expr> {
@@ -4500,12 +4596,14 @@ fn def_effect_row_forbids_kernel(program: &HostLoweringSession<'_>, name: &str) 
 fn cached_def_effect_rows(
     program: &HostLoweringSession<'_>,
 ) -> Arc<BTreeMap<String, chelis_types::types::EffectSet>> {
-    if let Some(cached) = program.facts.def_effect_rows.borrow().clone() {
-        return cached;
-    }
-    let rows = Arc::new(chelis_effects::def_effect_rows(program));
-    *program.facts.def_effect_rows.borrow_mut() = Some(rows.clone());
-    rows
+    program_fact(
+        &program.facts.def_effect_rows,
+        program.shared.map(|shared| &shared.def_effect_rows),
+        || {
+            DEF_EFFECT_ROW_DERIVATIONS.fetch_add(1, Ordering::Relaxed);
+            Arc::new(chelis_effects::def_effect_rows(program))
+        },
+    )
 }
 
 /// A form the kernel lowering cannot carry, found before lowering by walking
@@ -15629,9 +15727,14 @@ fn expr_calls_summary_rejecting_top_level_fn(
 /// Shared rather than cloned per ask: the kernel decision reads it on every
 /// application, and a clone copied every caller's callee set (chelis#2392).
 fn top_level_fn_call_graph(program: &HostLoweringSession<'_>) -> Arc<CallGraph> {
-    if let Some(cached) = program.facts.call_graph.borrow().clone() {
-        return cached;
-    }
+    program_fact(
+        &program.facts.call_graph,
+        program.shared.map(|shared| &shared.call_graph),
+        || derive_top_level_fn_call_graph(program),
+    )
+}
+
+fn derive_top_level_fn_call_graph(program: &HostLoweringSession<'_>) -> Arc<CallGraph> {
     let defs = cached_program_defs(program);
     let fn_names = defs
         .iter()
@@ -15649,9 +15752,7 @@ fn top_level_fn_call_graph(program: &HostLoweringSession<'_>) -> Arc<CallGraph> 
             (name.clone(), callees)
         })
         .collect();
-    let graph = Arc::new(graph);
-    *program.facts.call_graph.borrow_mut() = Some(graph.clone());
-    graph
+    Arc::new(graph)
 }
 
 /// A pure declaration used from another declaration is a private tensor
@@ -17378,20 +17479,24 @@ fn expr_contains_vmap_grad(expr: &Expr) -> bool {
 }
 
 fn cached_program_defs(program: &HostLoweringSession<'_>) -> Arc<BTreeMap<String, Expr>> {
-    if let Some(cached) = program.facts.program_defs.borrow().clone() {
-        return cached;
-    }
-    let defs = Arc::new(collect_program_defs(program.exprs()));
-    *program.facts.program_defs.borrow_mut() = Some(defs.clone());
-    defs
+    program_fact(
+        &program.facts.program_defs,
+        program.shared.map(|shared| &shared.program_defs),
+        || Arc::new(collect_program_defs(program.exprs())),
+    )
 }
 
 /// The definitions that reach `dropout` by naming it, or by naming a
 /// definition that does. Computed once per program.
 fn cached_dropout_reaching_defs(program: &HostLoweringSession<'_>) -> Arc<UnordSet<String>> {
-    if let Some(cached) = program.facts.dropout_reaching_defs.borrow().clone() {
-        return cached;
-    }
+    program_fact(
+        &program.facts.dropout_reaching_defs,
+        program.shared.map(|shared| &shared.dropout_reaching_defs),
+        || derive_dropout_reaching_defs(program),
+    )
+}
+
+fn derive_dropout_reaching_defs(program: &HostLoweringSession<'_>) -> Arc<UnordSet<String>> {
     let defs = cached_program_defs(program);
     let mut callers = BTreeMap::<&str, Vec<&str>>::new();
     let mut pending = Vec::new();
@@ -17417,9 +17522,7 @@ fn cached_dropout_reaching_defs(program: &HostLoweringSession<'_>) -> Arc<UnordS
             pending.extend(names.iter().copied());
         }
     }
-    let reaching = Arc::new(reaching);
-    *program.facts.dropout_reaching_defs.borrow_mut() = Some(reaching.clone());
-    reaching
+    Arc::new(reaching)
 }
 
 /// The program's subexpression lowering context, instantiated with the
@@ -17439,9 +17542,18 @@ fn cached_subexpr_lowering_context(
 fn program_subexpr_lowering_context(
     program: &HostLoweringSession<'_>,
 ) -> crate::lower::SubexprLoweringContext {
-    if let Some(cached) = program.facts.subexpr_lowering_context.borrow().clone() {
-        return cached;
-    }
+    program_fact(
+        &program.facts.subexpr_lowering_context,
+        program
+            .shared
+            .map(|shared| &shared.subexpr_lowering_context),
+        || derive_program_subexpr_lowering_context(program),
+    )
+}
+
+fn derive_program_subexpr_lowering_context(
+    program: &HostLoweringSession<'_>,
+) -> crate::lower::SubexprLoweringContext {
     record_host_work(|profile| {
         profile.type_env_clone_nodes += program
             .type_env()
@@ -17449,13 +17561,11 @@ fn program_subexpr_lowering_context(
             .map(deep_expr_nodes)
             .sum::<usize>();
     });
-    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+    crate::lower::prepare_checked_subexpr_lowering_context(
         program,
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
-    );
-    *program.facts.subexpr_lowering_context.borrow_mut() = Some(context.clone());
-    context
+    )
 }
 
 fn definition_declares_list_entry(
@@ -17495,10 +17605,18 @@ fn definition_declares_list_entry(
 fn cached_tensor_helper_def_summaries(
     program: &HostLoweringSession<'_>,
 ) -> Arc<BTreeMap<String, TensorHelperDefSummary>> {
-    if let Some(cached) = program.facts.tensor_helper_def_summaries.borrow().clone() {
-        return cached;
-    }
+    program_fact(
+        &program.facts.tensor_helper_def_summaries,
+        program
+            .shared
+            .map(|shared| &shared.tensor_helper_def_summaries),
+        || derive_tensor_helper_def_summaries(program),
+    )
+}
 
+fn derive_tensor_helper_def_summaries(
+    program: &HostLoweringSession<'_>,
+) -> Arc<BTreeMap<String, TensorHelperDefSummary>> {
     let defs = cached_program_defs(program);
     let def_names = defs.keys().cloned().collect::<BTreeSet<_>>();
     let mut summaries = defs
@@ -17555,9 +17673,7 @@ fn cached_tensor_helper_def_summaries(
         }
     }
 
-    let summaries = Arc::new(summaries);
-    *program.facts.tensor_helper_def_summaries.borrow_mut() = Some(summaries.clone());
-    summaries
+    Arc::new(summaries)
 }
 
 fn collect_dynamic_to_tensor_def_refs(
