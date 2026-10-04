@@ -109,7 +109,11 @@ fn unannotated_bracket_literals_are_lists_in_every_lane_and_after_resugaring() {
         );
         common::write_file(&directory.path().join(&file), &source);
         let report = eval_json(directory.path(), &file);
-        assert_eq!(root(&report, "values")["value"]["type"], "list", "{literal}");
+        assert_eq!(
+            root(&report, "values")["value"]["type"],
+            "list",
+            "{literal}"
+        );
         for size in ["size", "local_size"] {
             assert_eq!(
                 root(&report, size)["value"]["value"]["value"],
@@ -118,7 +122,11 @@ fn unannotated_bracket_literals_are_lists_in_every_lane_and_after_resugaring() {
             );
         }
         let evaluated = eval_text(directory.path(), &file);
-        assert_eq!(common::build_and_run(&source, &name), evaluated, "{literal}");
+        assert_eq!(
+            common::build_and_run(&source, &name),
+            evaluated,
+            "{literal}"
+        );
 
         let resugared = resugar(directory.path(), &file);
         assert_eq!(
@@ -192,9 +200,9 @@ fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
         assert!(!output.status.success(), "{declarations}: {report}");
         let errors = report["errors"].as_array().expect("errors");
         assert!(
-            errors
-                .iter()
-                .any(|error| error["message"].as_str().is_some_and(|m| m.contains("List"))),
+            errors.iter().any(|error| error["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("List"))),
             "{declarations} must be rejected as a List: {report}"
         );
     }

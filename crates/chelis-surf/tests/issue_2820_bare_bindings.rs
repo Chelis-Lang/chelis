@@ -74,7 +74,10 @@ fn lexical_tensor_constructor_capture_is_a_loud_refusal() {
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: List[i32] = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
     ] {
-        assert!(desugar_program(&parse_str(source).unwrap()).is_ok(), "{source}");
+        assert!(
+            desugar_program(&parse_str(source).unwrap()).is_ok(),
+            "{source}"
+        );
     }
 }
 

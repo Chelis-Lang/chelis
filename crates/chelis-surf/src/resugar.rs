@@ -10,7 +10,7 @@ use chelis_deep::annotations::{
     BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
 };
 use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
-use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_deep::{CastMode, DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
 use std::collections::BTreeMap;
@@ -192,6 +192,7 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     validate_grad_selector_consistency(std::slice::from_ref(expr))?;
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
+    let _declared = DeclaredTensorsScope::install(DeclaredTensors::default());
     resugar_expression_inner(expr)
 }
 
@@ -226,6 +227,7 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     for expr in exprs {
         reject_extensions(expr)?;
     }
+    let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
@@ -1747,6 +1749,7 @@ fn resugar_definition(
         let raw_params = node_ref(&function.children[0])?;
         let mut ret_ty = None;
         let mut effects = None;
+        let mut result_precision = declared_tensors().results.get(&name).cloned();
         if let Some(declared_type) = declared_type {
             let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
@@ -1783,7 +1786,9 @@ fn resugar_definition(
                 let ty = resugar_type(ty)?;
                 param.ty = (written || !is_infer_type(&ty)).then_some(ty);
             }
-            let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
+            let result_type = type_node.children.last().expect("nonempty checked");
+            result_precision = tensor_element_precision(result_type).map(str::to_string);
+            let result = resugar_type(result_type)?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
             effects = resugar_effect_metadata(declared_type)?;
         }
@@ -1797,15 +1802,19 @@ fn resugar_definition(
             params,
             ret_ty,
             effects,
-            body: resugar_expression_inner(&function.children[1])?,
+            body: resugar_declared_value(&function.children[1], result_precision.as_deref())?,
             span: definition.span,
         });
     }
 
+    let value_precision = match declared_type {
+        Some(declared_type) => tensor_element_precision(declared_type).map(str::to_string),
+        None => declared_tensors().values.get(&name).cloned(),
+    };
     Ok(Decl::LetDef {
         name,
         ty: declared_type.map(resugar_type).transpose()?,
-        value: resugar_expression_inner(&definition.children[1])?,
+        value: resugar_declared_value(&definition.children[1], value_precision.as_deref())?,
         span: definition.span,
     })
 }
@@ -2691,10 +2700,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 return Ok(operator);
             }
             let function = resugar_expression_inner(&node.children[0])?;
-            let arguments = node.children[1..]
-                .iter()
-                .map(resugar_expression_inner)
-                .collect::<Result<Vec<_>, _>>()?;
+            let arguments = resugar_call_arguments(&node.children[0], &node.children[1..], 0)?;
             Ok(Expr::Apply(Box::new(function), arguments, node.span))
         }
         T::Cast => {
@@ -2726,6 +2732,11 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
             {
                 resugar_literal_with_default_suffix(literal)?
+            } else if mode == CastMode::Checked
+                && let Some(precision) = precision_target
+                && let Some(tensor) = resugar_adopting_tensor_call(&node.children[0], precision)?
+            {
+                tensor
             } else {
                 resugar_expression_inner(&node.children[0])?
             };
@@ -2937,25 +2948,38 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
         })
 }
 
+/// How a literal's suffix prints, given the dtype its position re-derives for
+/// an unsuffixed literal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuffixSpelling {
+    /// The literal's own `surf_literal_style` decides.
+    Authored,
+    /// The position re-derives a non-default dtype, so a default `i32` or
+    /// `f32` suffix is semantic and prints.
+    DefaultSemantic,
+    /// The position re-derives a dtype the literal does not have, so every
+    /// suffix prints, even on a literal authored unsuffixed elsewhere.
+    Every,
+}
+
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, false)
+    resugar_literal_impl(node, SuffixSpelling::Authored)
 }
 
 fn resugar_literal_with_default_suffix(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, true)
+    resugar_literal_impl(node, SuffixSpelling::DefaultSemantic)
 }
 
-fn resugar_literal_impl(
-    node: NodeRef<'_>,
-    preserve_default_suffix: bool,
-) -> Result<Expr, ResugarError> {
+fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
     let suffix = literal_suffix(node.meta)?;
     let style = node.meta.surf_literal_style().map(|v| *v.value());
-    let suppress_suffix = style == Some(LiteralStyle::Unsuffixed);
-    let preserve_default_suffix = preserve_default_suffix || style == Some(LiteralStyle::Explicit);
+    let suppress_suffix =
+        spelling != SuffixSpelling::Every && style == Some(LiteralStyle::Unsuffixed);
+    let preserve_default_suffix =
+        spelling != SuffixSpelling::Authored || style == Some(LiteralStyle::Explicit);
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && *value == i64::MIN
         && suffix == Some(LiteralSuffix::I64)
@@ -3251,7 +3275,16 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             // A let binding's declared type is encoded on its value node. The
             // binding field above consumes that outer annotation; nested child
             // annotations still resugar normally.
-            value: resugar_node(value_node)?,
+            value: match value_node
+                .meta
+                .ty()
+                .filter(|_| binding_style != Some(BindingTypeOrigin::Inferred))
+                .and_then(|ty| tensor_element_precision(ty.expression()))
+            {
+                Some(precision) => resugar_declared_tensor_value(&pair[1], precision, true)?
+                    .map_or_else(|| resugar_node(value_node), Ok)?,
+                None => resugar_node(value_node)?,
+            },
         });
     }
     let body = resugar_expression_inner(&node.children[1])?;
@@ -3757,10 +3790,8 @@ fn resugar_call_first_stage_application(
         return Ok(None);
     }
     let function = resugar_expression_inner(&application.children[0])?;
-    let arguments = application.children[2..]
-        .iter()
-        .map(resugar_expression_inner)
-        .collect::<Result<Vec<_>, _>>()?;
+    let arguments =
+        resugar_call_arguments(&application.children[0], &application.children[2..], 1)?;
     Ok(Some(Expr::Apply(
         Box::new(function),
         arguments,
@@ -3876,6 +3907,311 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         wrt,
         node.span,
     ))
+}
+
+/// Declared tensor element dtypes that the desugarer reads from top-level
+/// signatures by name (`spec/02-surf-syntax.md` §P10b): a value signature
+/// (position 1), a function result (position 3) and each function parameter
+/// (position 2). A resugared tensor literal prints against the contexts its
+/// re-desugaring will see.
+#[derive(Default)]
+struct DeclaredTensors {
+    values: BTreeMap<String, String>,
+    results: BTreeMap<String, String>,
+    parameters: BTreeMap<String, Vec<Option<String>>>,
+}
+
+impl DeclaredTensors {
+    fn collect(exprs: &[DeepExpr]) -> Self {
+        let mut declared = Self::default();
+        declared.collect_into(exprs);
+        declared
+    }
+
+    fn collect_into(&mut self, exprs: &[DeepExpr]) {
+        for expr in exprs {
+            let Ok(node) = node_ref(expr) else {
+                continue;
+            };
+            if node.tag == DeepTag::Module {
+                self.collect_into(node.children.get(1..).unwrap_or_default());
+                continue;
+            }
+            if node.tag != DeepTag::Defsig {
+                continue;
+            }
+            let (Ok(name), Ok((_, ty))) = (name_child(&node, 0), defsig_parts(&node)) else {
+                continue;
+            };
+            if let Some(precision) = tensor_element_precision(ty) {
+                self.values.insert(name.to_string(), precision.to_string());
+            }
+            let Ok(function) = node_ref(ty) else {
+                continue;
+            };
+            let Some((result, parameters)) = (function.tag == DeepTag::TFn)
+                .then(|| function.children.split_last())
+                .flatten()
+            else {
+                continue;
+            };
+            if let Some(precision) = tensor_element_precision(result) {
+                self.results.insert(name.to_string(), precision.to_string());
+            }
+            let parameters: Vec<Option<String>> = parameters
+                .iter()
+                .map(|parameter| tensor_element_precision(parameter).map(str::to_string))
+                .collect();
+            if parameters.iter().any(Option::is_some) {
+                self.parameters.insert(name.to_string(), parameters);
+            }
+        }
+    }
+}
+
+thread_local! {
+    static DECLARED_TENSORS: std::cell::RefCell<std::rc::Rc<DeclaredTensors>> =
+        std::cell::RefCell::default();
+}
+
+/// Installs one program's declared tensor contexts for the duration of its
+/// resugaring and restores the previous contexts when dropped.
+struct DeclaredTensorsScope(std::rc::Rc<DeclaredTensors>);
+
+impl DeclaredTensorsScope {
+    fn install(declared: DeclaredTensors) -> Self {
+        Self(DECLARED_TENSORS.with(|cell| cell.replace(std::rc::Rc::new(declared))))
+    }
+}
+
+impl Drop for DeclaredTensorsScope {
+    fn drop(&mut self) {
+        DECLARED_TENSORS.with(|cell| cell.replace(std::rc::Rc::clone(&self.0)));
+    }
+}
+
+fn declared_tensors() -> std::rc::Rc<DeclaredTensors> {
+    DECLARED_TENSORS.with(|cell| std::rc::Rc::clone(&cell.borrow()))
+}
+
+/// The element dtype name of a Deep tensor type, as the desugarer adopts it.
+fn tensor_element_precision(ty: &DeepExpr) -> Option<&str> {
+    let node = node_ref(ty).ok()?;
+    (node.tag == DeepTag::TTensor)
+        .then(|| node.children.last().and_then(type_name))
+        .flatten()
+}
+
+/// The items of a finite `Cons`/`Nil` chain without `type` metadata, except
+/// on its outermost node when `outer_typed` admits the binding's declared
+/// type there. Checked Deep types every node and keeps its context-free
+/// spelling.
+fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepExpr>> {
+    let mut items = Vec::new();
+    let mut tail = expr;
+    loop {
+        let node = node_ref(tail).ok()?;
+        if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(tail, expr)) {
+            return None;
+        }
+        if variable_name(tail) == Some("Nil") {
+            return Some(items);
+        }
+        if node.tag != DeepTag::App
+            || node.children.len() != 3
+            || variable_name(&node.children[0]) != Some("Cons")
+        {
+            return None;
+        }
+        items.push(&node.children[1]);
+        tail = &node.children[2];
+    }
+}
+
+/// Resugars the items of a chain that re-desugars as a tensor literal adopting
+/// `precision` (`spec/02-surf-syntax.md` §P10b). There an unsuffixed literal
+/// that can bind at `precision`, and such a literal under a negation, which the
+/// desugarer folds into it, take `precision`. A literal of another dtype that
+/// would adopt therefore prints every suffix, and the adopted signed minimum
+/// prints as a negated literal rather than as `(-max - 1)`, which would not
+/// adopt.
+fn resugar_adopting_items(
+    chain: &DeepExpr,
+    precision: &str,
+) -> Result<Option<Vec<Expr>>, ResugarError> {
+    let Some(items) = untyped_chain_items(chain, false) else {
+        return Ok(None);
+    };
+    items
+        .into_iter()
+        .map(|item| resugar_adopting_item(item, precision))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn resugar_adopting_item(item: &DeepExpr, precision: &str) -> Result<Expr, ResugarError> {
+    let node = node_ref(item)?;
+    if node.tag == DeepTag::Lit {
+        return resugar_adopting_literal(node, precision);
+    }
+    if node.tag == DeepTag::App {
+        if let Some(items) = resugar_adopting_items(item, precision)? {
+            return Ok(Expr::List(items, node.span));
+        }
+        if node.meta.ty().is_none()
+            && let [function, operand] = node.children
+            && variable_name(function) == Some("neg")
+            && let Ok(operand) = node_ref(operand)
+            && operand.tag == DeepTag::Lit
+            && match operand.children {
+                [DeepExpr::Atom(Atom::Int(value), _)] => *value >= 0,
+                [DeepExpr::Atom(Atom::Float(value), _)] => !value.is_sign_negative(),
+                _ => false,
+            }
+        {
+            let operand = resugar_adopting_literal(operand, precision)?;
+            return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), node.span));
+        }
+    }
+    resugar_expression_inner(item)
+}
+
+fn resugar_adopting_literal(node: NodeRef<'_>, precision: &str) -> Result<Expr, ResugarError> {
+    let literal_precision = node.meta.ty().map(|v| v.expression()).and_then(type_name);
+    if literal_precision != Some(precision) {
+        let integer = matches!(node.children, [DeepExpr::Atom(Atom::Int(_), _)]);
+        // A literal that cannot bind at `precision` re-derives its default,
+        // exactly as outside an adopting position.
+        let spelling = if crate::desugar::literal_adopts_tensor_element(integer, precision) {
+            SuffixSpelling::Every
+        } else {
+            SuffixSpelling::Authored
+        };
+        return resugar_literal_impl(node, spelling);
+    }
+    let literal = resugar_literal(node)?;
+    let unsuffixed =
+        node.meta.surf_literal_style().map(|v| *v.value()) == Some(LiteralStyle::Unsuffixed);
+    if unsuffixed
+        && let [DeepExpr::Atom(Atom::Int(value), _)] = node.children
+        && *value != i64::MIN
+        && integer_minimum(literal_suffix(node.meta)?) == Some(*value)
+    {
+        return Ok(Expr::Unary(
+            UnaryOp::Neg,
+            Box::new(Expr::Lit(Literal::Int(-*value), node.span)),
+            node.span,
+        ));
+    }
+    Ok(literal)
+}
+
+/// The items of an intrinsic `to_tensor` call of an untyped chain, resugared
+/// for an adopting position with element type `precision`. `binding_typed`
+/// admits the binding's declared type on the call node itself.
+fn adopting_tensor_call_items(
+    node: &NodeRef<'_>,
+    precision: &str,
+    binding_typed: bool,
+) -> Result<Option<Vec<Expr>>, ResugarError> {
+    if node.tag != DeepTag::App || (node.meta.ty().is_some() && !binding_typed) {
+        return Ok(None);
+    }
+    let [function, chain] = node.children else {
+        return Ok(None);
+    };
+    if variable_name(function) != Some("to_tensor") || node_ref(function)?.meta.ty().is_some() {
+        return Ok(None);
+    }
+    resugar_adopting_items(chain, precision)
+}
+
+/// Resugars a `to_tensor([...])` call standing in an adopting position whose
+/// element type is `precision`: a call argument (position 2) or a `cast`
+/// operand (position 4), where only that spelling is a tensor literal.
+fn resugar_adopting_tensor_call(
+    expr: &DeepExpr,
+    precision: &str,
+) -> Result<Option<Expr>, ResugarError> {
+    let node = node_ref(expr)?;
+    let Some(items) = adopting_tensor_call_items(&node, precision, false)? else {
+        return Ok(None);
+    };
+    Ok(Some(Expr::Apply(
+        Box::new(resugar_expression_inner(&node.children[0])?),
+        vec![Expr::List(items, node_ref(&node.children[1])?.span)],
+        node.span,
+    )))
+}
+
+/// Resugars a binding value, or a function body, whose own declaration states
+/// the tensor element type `precision`. A bare bracket literal there is a
+/// tensor literal (`spec/02-surf-syntax.md` §P10b): the `to_tensor` call
+/// prints bare, and a `List` value prints as constructor calls, which the
+/// declaration does not convert. `None` leaves the value to the context-free
+/// printer. `binding_typed` admits the binding's declared type on the value
+/// node itself, where a block binding carries it.
+fn resugar_declared_tensor_value(
+    expr: &DeepExpr,
+    precision: &str,
+    binding_typed: bool,
+) -> Result<Option<Expr>, ResugarError> {
+    let node = node_ref(expr)?;
+    if let Some(items) = adopting_tensor_call_items(&node, precision, binding_typed)? {
+        return Ok(Some(Expr::List(items, node.span)));
+    }
+    let Some(items) = untyped_chain_items(expr, binding_typed) else {
+        return Ok(None);
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let mut value = Expr::Constructor("Nil".to_string(), node.span);
+    for item in items.into_iter().rev() {
+        value = Expr::Apply(
+            Box::new(Expr::Constructor("Cons".to_string(), node.span)),
+            vec![resugar_expression_inner(item)?, value],
+            node.span,
+        );
+    }
+    Ok(Some(value))
+}
+
+/// Resugars a binding value or function body with the declared tensor
+/// element type `precision`, if any, and context-free otherwise.
+fn resugar_declared_value(expr: &DeepExpr, precision: Option<&str>) -> Result<Expr, ResugarError> {
+    match precision {
+        Some(precision) => resugar_declared_tensor_value(expr, precision, false)?
+            .map_or_else(|| resugar_expression_inner(expr), Ok),
+        None => resugar_expression_inner(expr),
+    }
+}
+
+/// Resugars call arguments, printing a `to_tensor([...])` argument at a
+/// declared tensor parameter of a top-level function for that parameter's
+/// dtype (position 2). `first_parameter` is the parameter index of the first
+/// argument, which is 1 when a pipe stage supplies the first.
+fn resugar_call_arguments(
+    function: &DeepExpr,
+    arguments: &[DeepExpr],
+    first_parameter: usize,
+) -> Result<Vec<Expr>, ResugarError> {
+    let declared = declared_tensors();
+    let parameters = variable_name(function).and_then(|name| declared.parameters.get(name));
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let precision = parameters
+                .and_then(|parameters| parameters.get(first_parameter + index))
+                .and_then(Option::as_deref);
+            match precision {
+                Some(precision) => resugar_adopting_tensor_call(argument, precision)?
+                    .map_or_else(|| resugar_expression_inner(argument), Ok),
+                None => resugar_expression_inner(argument),
+            }
+        })
+        .collect()
 }
 
 fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarError> {
