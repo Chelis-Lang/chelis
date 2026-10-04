@@ -258,7 +258,6 @@ fn the_admitting_tags_are_exactly_moves_joins_aggregates_and_applications() {
             "if",
             "record",
             "access",
-            "pipe",
             "block",
             "tuple",
             "tuple-get",

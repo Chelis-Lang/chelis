@@ -297,6 +297,85 @@ fn migration_preserves_literal_dtype_and_old_grouping() {
 }
 
 #[test]
+fn migration_uses_validated_metadata_without_erasing_extensions() {
+    let source = "out = 0.1 |> f\n";
+    let previous = "(def {} out (pipe {} (lit {span: \"surf:6..9\", type: (t-prim {} f32), surf_literal_style: \"unsuffixed\", audit_note: \"literal\"} 0.1) (var {span: \"surf:13..14\"} f)))";
+    let migration = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    assert_eq!(migration.source, "out = 0.1f32 |> f\n");
+    let baseline = print_canonical(&migration.baseline);
+    assert!(baseline.contains("audit_note"));
+    assert!(baseline.contains("literal"));
+    assert!(baseline.contains("surf:13..14"));
+    assert!(baseline.contains("surf_literal_style"));
+    for metadata in [
+        "span: \"surf:6..9\", span: \"surf:6..9\", type: (t-prim {} f32)",
+        "span: \"surf:6..9\", type: (t-prim {} f32), type: (t-prim {} f64)",
+        "span: true, type: (t-prim {} f32)",
+        "span: \"surf:6..9\", type: true",
+    ] {
+        let previous = format!("(def {{}} out (pipe {{}} (lit {{{metadata}}} 0.1) (var {{}} f)))");
+        assert!(
+            chelis_surf::pipe_migration::prepare(source, &previous).is_err(),
+            "{metadata}"
+        );
+    }
+}
+
+#[test]
+fn migration_preserves_metadata_owner_and_bind_value_placement() {
+    let source = "out = {\n  x = 0.1 |> f\n  x\n}\n";
+    let start = source.find("0.1").unwrap();
+    let literal = format!(
+        "(lit {{span: \"surf:{start}..{}\", type: (t-prim {{}} f32), surf_literal_style: \"unsuffixed\"}} 0.1)",
+        start + 3
+    );
+    let previous = format!(
+        "(def {{}} out (let {{}} (bind {{}} x (pipe {{surf_binding_type: \"inferred\"}} {literal} (var {{}} f))) (var {{}} x)))"
+    );
+    let migrated = chelis_surf::pipe_migration::prepare(source, &previous).unwrap();
+    assert!(migrated.source.contains("0.1f32 |> f"));
+    assert!(print_canonical(&migrated.baseline).contains("surf_binding_type"));
+    assert_eq!(
+        meaning(&migrated.source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+    );
+
+    // Literal spelling stays on the literal, while binding annotations require
+    // an actual bind-value parent; neither is admitted on a generic map.
+    let source = "out = {\n  x = 0.1\n  x |> f\n}\n";
+    let start = source.find("0.1").unwrap();
+    let previous = format!(
+        "(def {{}} out (let {{}} (bind {{}} x (lit {{span: \"surf:{start}..{}\", type: (t-prim {{}} f32), surf_literal_style: \"unsuffixed\", surf_binding_type: \"inferred\"}} 0.1)) (pipe {{}} (var {{}} x) (var {{}} f))))",
+        start + 3
+    );
+    chelis_surf::pipe_migration::prepare(source, &previous).unwrap();
+
+    for (source, previous, key) in [
+        (
+            "out = x |> f\n",
+            "(def {} out (pipe {surf_binding_type: \"inferred\"} (var {} x) (var {} f)))",
+            "surf_binding_type",
+        ),
+        (
+            "out = x |> f\n",
+            "(def {} out (pipe {} (block {surf_literal_style: \"unsuffixed\"} (var {} x)) (var {} f)))",
+            "surf_literal_style",
+        ),
+        (
+            "out = 0.1 |> f\n",
+            "(def {} out (pipe {} (lit {surf_binding_type: \"inferred\", span: \"surf:6..9\", type: (t-prim {} f32)} 0.1) (var {} f)))",
+            "surf_binding_type",
+        ),
+    ] {
+        let error = match chelis_surf::pipe_migration::prepare(source, previous) {
+            Ok(_) => panic!("accepted misplaced {key}: {previous}"),
+            Err(error) => error,
+        };
+        assert!(error.contains(key), "{error}");
+    }
+}
+
+#[test]
 fn migration_preserves_trailing_lambda_and_conditional_grouping() {
     for (source, previous) in [
         (

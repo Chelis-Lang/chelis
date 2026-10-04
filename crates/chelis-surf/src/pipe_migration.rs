@@ -1,7 +1,8 @@
 //! Explicit migration from the previous pipe grammar. This is the only reader
 //! of retired raw `pipe` forms; it never admits them to normal Deep ingress.
 use crate::{ast::*, pipe_sugar};
-use chelis_deep::{RawAtom, RawExpr};
+use chelis_deep::annotations::{Metadata, MetadataValue};
+use chelis_deep::{Atom, DeepTag, ExprCarrier, RawAtom, RawExpr, Span};
 use std::collections::BTreeMap;
 
 pub struct PipeMigration {
@@ -55,6 +56,99 @@ fn map_entries(expr: &RawExpr) -> Option<&[(String, RawExpr)]> {
     Some(entries)
 }
 
+fn admitted_owner_metadata(owner: RawExpr, binding_value: bool) -> Result<Metadata, String> {
+    let span = owner.span();
+    // The placement policy checks both the owning tag and its parent slot.
+    // Preserve a real bind-value context rather than admitting maps in isolation.
+    let envelope = if binding_value {
+        RawExpr::List(
+            vec![
+                RawExpr::Atom(RawAtom::Symbol("bind".into()), span),
+                RawExpr::Map(Vec::new(), span),
+                RawExpr::Atom(RawAtom::Symbol("migration_value".into()), span),
+                owner,
+            ],
+            span,
+        )
+    } else {
+        owner
+    };
+    let mut stamped = chelis_deep::stamp_to_typed::stamp_exprs_lenient(vec![envelope])
+        .map_err(|error| error.to_string())?;
+    let owner = stamped
+        .pop()
+        .ok_or("previous Deep annotation owner was not admitted")?;
+    let owner = if binding_value {
+        match &owner {
+            chelis_deep::Expr::Node(node, _) => node.children_slice().get(1),
+            _ => None,
+        }
+        .ok_or("previous Deep annotation owner lost its bind-value context")?
+    } else {
+        &owner
+    };
+    match owner {
+        chelis_deep::Expr::Node(node, _) => Ok(node.meta().clone()),
+        _ => Err("previous Deep annotation owner did not produce a typed node".into()),
+    }
+}
+
+fn decode_metadata(
+    entries: &[(String, RawExpr)],
+    span: Span,
+    binding_value: bool,
+) -> Result<Metadata, String> {
+    // Only the retired spelling is stripped at this historical boundary.
+    // Every surviving annotation uses the ordinary typed admission policy,
+    // including duplicate rejection and extension preservation.
+    let entries = entries
+        .iter()
+        .filter(|(key, _)| key != "surf_pipe_stage")
+        .cloned()
+        .collect();
+    // Admit retired pipe annotations on the replacement block envelope used
+    // when both result and owner carry ascriptions, with the original context.
+    let envelope = RawExpr::List(
+        vec![
+            RawExpr::Atom(RawAtom::Symbol("block".into()), span),
+            RawExpr::Map(entries, span),
+            RawExpr::List(
+                vec![
+                    RawExpr::Atom(RawAtom::Symbol("var".into()), span),
+                    RawExpr::Map(Vec::new(), span),
+                    RawExpr::Atom(RawAtom::Symbol("migration_value".into()), span),
+                ],
+                span,
+            ),
+        ],
+        span,
+    );
+    admitted_owner_metadata(envelope, binding_value)
+}
+
+fn node_metadata(expr: &RawExpr, binding_value: bool) -> Result<Metadata, String> {
+    if map_entries(expr).is_none() {
+        return Ok(Metadata::default());
+    }
+    // Placement-sensitive annotations (literal spelling, quantified bounds,
+    // etc.) must be admitted on their real owner, not a standalone map.
+    let mut raw = expr.clone();
+    if let RawExpr::List(items, _) = &mut raw
+        && let Some(RawExpr::Map(entries, _)) = items.get_mut(1)
+    {
+        entries.retain(|(key, _)| key != "surf_pipe_stage");
+    }
+    admitted_owner_metadata(raw, binding_value)
+}
+
+fn raw_metadata(
+    values: impl IntoIterator<Item = MetadataValue>,
+    span: Span,
+) -> Result<RawExpr, String> {
+    let metadata = Metadata::try_from_values(values).map_err(|error| error.to_string())?;
+    Ok(chelis_deep::Expr::Map(metadata, span).to_raw())
+}
+
 fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
     if head(&stage) == Some("fn")
         && let Some([params, body]) = kids(&stage)
@@ -83,12 +177,8 @@ fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
         }
     }
     let span = stage.span();
-    let span_metadata = map_entries(&stage)
-        .into_iter()
-        .flatten()
-        .filter(|(key, _)| key == "span")
-        .cloned()
-        .collect();
+    let metadata = node_metadata(&stage, false)?;
+    let span_metadata = raw_metadata(metadata.span_id().cloned().map(MetadataValue::Span), span)?;
     if let RawExpr::List(items, _) = &mut stage
         && let Some(RawExpr::Map(entries, _)) = items.get_mut(1)
     {
@@ -97,7 +187,7 @@ fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
     Ok(RawExpr::List(
         vec![
             RawExpr::Atom(RawAtom::Symbol("app".into()), span),
-            RawExpr::Map(span_metadata, span),
+            span_metadata,
             stage,
             carried,
         ],
@@ -105,25 +195,30 @@ fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
     ))
 }
 
-fn fold(expr: &mut RawExpr) -> Result<(), String> {
+fn is_bind_value(parent: Option<&str>, index: usize) -> bool {
+    parent == Some("bind") && index >= 2 && (index - 2) % 2 == 1
+}
+
+fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
+    let parent = head(expr).map(str::to_owned);
     match expr {
         RawExpr::List(items, _) => {
-            for item in items.iter_mut() {
-                fold(item)?;
+            for (index, item) in items.iter_mut().enumerate() {
+                fold(item, is_bind_value(parent.as_deref(), index))?;
             }
         }
         RawExpr::Map(entries, _) => {
             entries.retain(|(key, _)| key != "surf_pipe_stage");
             for (_, value) in entries {
-                fold(value)?;
+                fold(value, false)?;
             }
         }
         RawExpr::MetaExpr { entries, expr, .. } => {
             entries.retain(|(key, _)| key != "surf_pipe_stage");
             for (_, value) in entries {
-                fold(value)?;
+                fold(value, false)?;
             }
-            fold(expr)?;
+            fold(expr, false)?;
         }
         RawExpr::Atom(..) | RawExpr::ExtensionData(_) => {}
     }
@@ -144,20 +239,31 @@ fn fold(expr: &mut RawExpr) -> Result<(), String> {
         carried = fold_stage(stage, carried)?;
     }
     if let RawExpr::Map(entries, _) = metadata {
-        let annotations: Vec<_> = entries
-            .into_iter()
-            .filter(|(key, _)| matches!(key.as_str(), "type" | "surf_binding_type"))
+        let metadata = decode_metadata(&entries, *span, binding_value)?;
+        let annotations: Vec<_> = metadata
+            .values()
+            .filter(|value| {
+                matches!(
+                    value,
+                    MetadataValue::Type(_) | MetadataValue::SurfBindingType(_)
+                )
+            })
+            .cloned()
             .collect();
         if !annotations.is_empty() {
-            let conflict = annotations.iter().any(|(key, _)| {
-                map_entries(&carried)
-                    .is_none_or(|entries| entries.iter().any(|(existing, _)| existing == key))
-            });
+            let carried_metadata = node_metadata(&carried, binding_value)?;
+            let conflict = map_entries(&carried).is_none()
+                || annotations.iter().any(|value| {
+                    carried_metadata
+                        .values()
+                        .any(|existing| existing.key() == value.key())
+                });
+            let annotations = raw_metadata(annotations, *span)?;
             if conflict {
                 carried = RawExpr::List(
                     vec![
                         RawExpr::Atom(RawAtom::Symbol("block".into()), *span),
-                        RawExpr::Map(annotations, *span),
+                        annotations,
                         carried,
                     ],
                     *span,
@@ -165,6 +271,9 @@ fn fold(expr: &mut RawExpr) -> Result<(), String> {
             } else if let RawExpr::List(items, _) = &mut carried
                 && let Some(RawExpr::Map(entries, _)) = items.get_mut(1)
             {
+                let RawExpr::Map(annotations, _) = annotations else {
+                    return Err("typed annotations did not export a metadata map".into());
+                };
                 entries.extend(annotations);
             }
         }
@@ -173,15 +282,23 @@ fn fold(expr: &mut RawExpr) -> Result<(), String> {
     Ok(())
 }
 
-fn literal_dtypes(expr: &RawExpr, result: &mut BTreeMap<(usize, usize), String>) {
+fn literal_dtypes(
+    expr: &RawExpr,
+    result: &mut BTreeMap<(usize, usize), String>,
+    binding_value: bool,
+) -> Result<(), String> {
+    let metadata = if head(expr) == Some("lit") {
+        node_metadata(expr, binding_value)?
+    } else {
+        Metadata::default()
+    };
     if head(expr) == Some("lit")
-        && let Some(entries) = map_entries(expr)
-        && let Some((_, RawExpr::Atom(RawAtom::Str(span), _))) =
-            entries.iter().find(|(key, _)| key == "span")
-        && let Some((_, ty)) = entries.iter().find(|(key, _)| key == "type")
-        && head(ty) == Some("t-prim")
-        && let Some(dtype) = kids(ty).and_then(|items| items.first()).and_then(name)
+        && let Some(span) = metadata.span_id()
+        && let Some(ty) = metadata.ty()
+        && let ExprCarrier::DecodedNode(DeepTag::TPrim, _, children) = ty.expression().carrier()
+        && let Some(chelis_deep::Expr::Atom(Atom::Name(dtype), _)) = children.first()
         && let Some((start, end)) = span
+            .value()
             .strip_prefix("surf:")
             .and_then(|span| span.split_once(".."))
         && let (Ok(start), Ok(end)) = (start.parse(), end.parse())
@@ -190,23 +307,24 @@ fn literal_dtypes(expr: &RawExpr, result: &mut BTreeMap<(usize, usize), String>)
     }
     match expr {
         RawExpr::List(items, _) => {
-            for item in items {
-                literal_dtypes(item, result);
+            for (index, item) in items.iter().enumerate() {
+                literal_dtypes(item, result, is_bind_value(head(expr), index))?;
             }
         }
         RawExpr::Map(entries, _) => {
             for (_, value) in entries {
-                literal_dtypes(value, result);
+                literal_dtypes(value, result, false)?;
             }
         }
         RawExpr::MetaExpr { entries, expr, .. } => {
             for (_, value) in entries {
-                literal_dtypes(value, result);
+                literal_dtypes(value, result, false)?;
             }
-            literal_dtypes(expr, result);
+            literal_dtypes(expr, result, false)?;
         }
         RawExpr::Atom(..) | RawExpr::ExtensionData(_) => {}
     }
+    Ok(())
 }
 
 /// Prepare grouped, explicitly typed source using the previous compiler's Deep.
@@ -217,7 +335,7 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
         chelis_deep::parser::parse_pipe_migration_raw(previous_deep).map_err(|e| e.to_string())?;
     let mut dtypes = BTreeMap::new();
     for expr in &baseline {
-        literal_dtypes(expr, &mut dtypes);
+        literal_dtypes(expr, &mut dtypes, false)?;
     }
     let mut decls = crate::parser::parse_pipe_migration(source).map_err(|e| e.to_string())?;
     let mut edits = BTreeMap::new();
@@ -254,7 +372,7 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
         return Err("pipe migration did not reach a formatter fixed point".into());
     }
     for expr in &mut baseline {
-        fold(expr)?;
+        fold(expr, false)?;
     }
     let baseline = chelis_deep::stamp_deep_file(baseline).map_err(|e| e.to_string())?;
     Ok(PipeMigration { source, baseline })
