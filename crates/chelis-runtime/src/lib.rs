@@ -7849,14 +7849,8 @@ pub unsafe extern "C" fn chelis_test_assert_eq_tensor(
                 (*Bool8::data_ptr_unchecked(actual.cast_mut()).add(index)).get()
                     == (*Bool8::data_ptr_unchecked(expected.cast_mut()).add(index)).get()
             }
-            RuntimeDType::F16 => {
-                let bits = |t: *const chelis_tensor| *(tensor_data(t) as *const u16).add(index);
-                half::f16::from_bits(bits(actual)) == half::f16::from_bits(bits(expected))
-            }
-            RuntimeDType::Bf16 => {
-                let bits = |t: *const chelis_tensor| *(tensor_data(t) as *const u16).add(index);
-                half::bf16::from_bits(bits(actual)) == half::bf16::from_bits(bits(expected))
-            }
+            RuntimeDType::F16 => element_eq::<half::f16>(actual, expected, index),
+            RuntimeDType::Bf16 => element_eq::<half::bf16>(actual, expected, index),
             RuntimeDType::Key => unreachable!("validate_tensor_inputs rejects a key"),
         };
         if !equal {
@@ -7909,11 +7903,10 @@ pub unsafe extern "C" fn chelis_test_assert_close_tensor(
     let count = (*actual).count();
     let half_values = |t: *const chelis_tensor, bf16: bool| {
         (0..count).map(move |index| {
-            let bits = *(tensor_data(t) as *const u16).add(index);
             if bf16 {
-                half::bf16::from_bits(bits).to_f32()
+                (*half::bf16::data_ptr_unchecked(t.cast_mut()).add(index)).to_f32()
             } else {
-                half::f16::from_bits(bits).to_f32()
+                (*half::f16::data_ptr_unchecked(t.cast_mut()).add(index)).to_f32()
             }
         })
     };
@@ -7946,10 +7939,8 @@ pub unsafe extern "C" fn chelis_test_assert_close_tensor(
         let is_nan = |t: *const chelis_tensor| match dtype {
             RuntimeDType::F64 => (*f64::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
             RuntimeDType::F32 => (*f32::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
-            RuntimeDType::F16 => {
-                half::f16::from_bits(*(tensor_data(t) as *const u16).add(index)).is_nan()
-            }
-            _ => half::bf16::from_bits(*(tensor_data(t) as *const u16).add(index)).is_nan(),
+            RuntimeDType::F16 => (*half::f16::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
+            _ => (*half::bf16::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
         };
         let either_nan = is_nan(actual) || is_nan(expected);
         runtime_fail!(

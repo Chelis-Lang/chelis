@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Eighty-three are Rust and eleven are C, C++, or Objective-C sources. A completeness
+Eighty-eight are Rust and eleven are C, C++, or Objective-C sources. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -178,6 +178,11 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-runtime/src/element.rs",
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/fp_env.rs",
+    "crates/chelis-runtime/src/host_assert.rs",
+    "crates/chelis-runtime/src/host_clock.rs",
+    "crates/chelis-runtime/src/host_csv.rs",
+    "crates/chelis-runtime/src/host_process.rs",
+    "crates/chelis-runtime/src/host_round.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
     "crates/chelis-runtime/src/list.rs",
