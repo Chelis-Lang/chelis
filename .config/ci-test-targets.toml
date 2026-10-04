@@ -1455,7 +1455,7 @@ name = "std_decimal_properties_pass_at_the_default_samples_and_their_false_varia
 workflow = "heavy-e2e.yml"
 job = "module-oracles"
 cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "chelis prove compiles the linked program for every sample, guard and shrink step (chelis#3117), so a hundred samples of six Std.Decimal properties and six refutations took 28 CPU minutes on a loaded macOS host; std_decimal_property_canary_passes_and_its_false_variants_fail runs per pull request"
+reason = "chelis prove compiles the linked program for every sample, guard and shrink step (chelis#3117), so a hundred samples of six Std.Decimal properties and six refutations take tens of CPU minutes; std_decimal_property_canary_passes_and_its_false_variants_fail runs per pull request"
 tracking_issue = "chelis#2946"
 
 [[test_exclusion]]

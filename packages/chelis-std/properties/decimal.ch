@@ -19,9 +19,14 @@ def digits_of(text: string) -> string =
     code = char_code(piece)
     if code |> gte(48i64) |> and(lte(code, 57i64)) then string_concat(acc, piece) else acc
   }, "", range(0i64, string_len(text)))
--- Number text `<whole>.<digits of fraction>e<exponent>`, with the exponent in
--- -40..40. It is a number token exactly when `fraction` holds a digit.
-def number_text(whole: i64, fraction: string, exponent: i64) -> string = string_concat(string_concat(to_string(whole), "."), string_concat(digits_of(fraction), string_concat("e", to_string(sub(wrapped(exponent, 81i64), 40i64)))))
+-- `text` written `copies` times in a row.
+def repeated(text: string, copies: i64) -> string = fold(fn (acc: string, unused: i64) -> string_concat(acc, text), "", range(0i64, copies))
+-- Number text `<whole>.<fraction digits>e<exponent>`: the fraction digits are
+-- the digits of `fraction` written 1 to 12 times, as `copies` selects, so a
+-- coefficient reaches 40 significant digits and spans every limb, and the
+-- exponent is in -40..40. It is a number token exactly when `fraction` holds
+-- a digit.
+def number_text(whole: i64, fraction: string, copies: i64, exponent: i64) -> string = string_concat(string_concat(to_string(whole), "."), string_concat(repeated(digits_of(fraction), add(wrapped(copies, 12i64), 1i64)), string_concat("e", to_string(sub(wrapped(exponent, 81i64), 40i64)))))
 def accepted(text: string) -> bool =
   match try_decimal(text) with {
     | Some(x) => true
@@ -64,28 +69,28 @@ def assembled(high: i64, middle: i64, low: i64) -> i64 =
   |> add(mul(mod(middle, 1000000000i64), 1000000i64))
   |> add(mod(low, 1000000i64))
 -- Text the parser accepts prints back to text that parses to the same decimal.
-@property decimal_text_round_trips forall(whole: i64, fraction: string, exponent: i64) where accepted(number_text(whole, fraction, exponent)):
+@property decimal_text_round_trips forall(whole: i64, fraction: string, copies: i64, exponent: i64) where accepted(number_text(whole, fraction, copies, exponent)):
   {
-    x = decimal(number_text(whole, fraction, exponent))
+    x = decimal(number_text(whole, fraction, copies, exponent))
     eq(decimal(decimal_to_string(x)), x)
   }
-@property decimal_add_commutes forall(whole: i64, fraction: string, exponent: i64, other_whole: i64, other_fraction: string, other_exponent: i64) where summable(number_text(whole, fraction, exponent), number_text(other_whole, other_fraction, other_exponent)):
+@property decimal_add_commutes forall(whole: i64, fraction: string, copies: i64, exponent: i64, other_whole: i64, other_fraction: string, other_copies: i64, other_exponent: i64) where summable(number_text(whole, fraction, copies, exponent), number_text(other_whole, other_fraction, other_copies, other_exponent)):
   {
-    x = decimal(number_text(whole, fraction, exponent))
-    y = decimal(number_text(other_whole, other_fraction, other_exponent))
+    x = decimal(number_text(whole, fraction, copies, exponent))
+    y = decimal(number_text(other_whole, other_fraction, other_copies, other_exponent))
     eq(decimal_add(x, y), decimal_add(y, x))
   }
-@property decimal_sub_inverts_decimal_add forall(whole: i64, fraction: string, exponent: i64, other_whole: i64, other_fraction: string, other_exponent: i64) where summable(number_text(whole, fraction, exponent), number_text(other_whole, other_fraction, other_exponent)):
+@property decimal_sub_inverts_decimal_add forall(whole: i64, fraction: string, copies: i64, exponent: i64, other_whole: i64, other_fraction: string, other_copies: i64, other_exponent: i64) where summable(number_text(whole, fraction, copies, exponent), number_text(other_whole, other_fraction, other_copies, other_exponent)):
   {
-    x = decimal(number_text(whole, fraction, exponent))
-    y = decimal(number_text(other_whole, other_fraction, other_exponent))
+    x = decimal(number_text(whole, fraction, copies, exponent))
+    y = decimal(number_text(other_whole, other_fraction, other_copies, other_exponent))
     eq(decimal_sub(decimal_add(x, y), y), x)
     |> and(eq(decimal_add(decimal_sub(x, y), y), x))
   }
 -- Text the parser accepts converts to the f64 that `to_float` reads from it.
-@property decimal_to_f64_agrees_with_to_float forall(whole: i64, fraction: string, exponent: i64) where accepted(number_text(whole, fraction, exponent)):
+@property decimal_to_f64_agrees_with_to_float forall(whole: i64, fraction: string, copies: i64, exponent: i64) where accepted(number_text(whole, fraction, copies, exponent)):
   {
-    text = number_text(whole, fraction, exponent)
+    text = number_text(whole, fraction, copies, exponent)
     x = decimal(text)
     match to_float(text) with {
       | Some(expected) => eq(decimal_to_f64(x), expected)
