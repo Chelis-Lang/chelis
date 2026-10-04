@@ -83,7 +83,7 @@ def metadata(*packages: dict) -> dict:
 
 def config_text(
     *,
-    standing: tuple[str, str] = ("p", "smoke"),
+    standing: tuple[str, str] = ("p", "default_gated"),
     target_exclusion: tuple[str, str] = ("p", "heavy"),
     test_exclusion: tuple[str, str, str] = ("p", "smoke", "slow_case"),
     manual_only_target: tuple[str, str] | None = None,
@@ -361,7 +361,9 @@ class SchemaTests(unittest.TestCase):
             )
         )
         self.assertEqual(config.version, 3)
-        self.assertEqual(config.standing_targets, (owned.Identity("p", "smoke"),))
+        self.assertEqual(
+            config.standing_targets, (owned.Identity("p", "default_gated"),)
+        )
         self.assertEqual(tuple(config.target_exclusions), (owned.Identity("p", "heavy"),))
         self.assertEqual(
             tuple(config.test_exclusions),
@@ -413,7 +415,7 @@ class SchemaTests(unittest.TestCase):
                 'tracking_issue = "PR-126"',
                 1,
             ),
-            valid.replace('name = "smoke"', 'name = "../smoke"', 1),
+            valid.replace('name = "default_gated"', 'name = "../default_gated"', 1),
         ]
         for mutation in mutations:
             with self.subTest(mutation=mutation[-100:]), tempfile.TemporaryDirectory() as tmp:
@@ -516,6 +518,23 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(content=content):
                 with self.assertRaises(ValueError):
                     load_config(content)
+
+    def test_test_exclusion_under_a_standing_target_is_refused(self) -> None:
+        # chelis#3024: ci-fast reuses a standing target and runs every active
+        # test in it unfiltered, never listing it against its exclusions.
+        with self.assertRaisesRegex(
+            ValueError,
+            r"standing targets run every active test in ci-fast.*"
+            r"\['p::smoke::slow_case'\]",
+        ):
+            load_config(config_text(standing=("p", "smoke")))
+
+    def test_test_exclusion_beside_a_different_standing_target_is_accepted(self) -> None:
+        config = load_config(config_text(standing=("p", "default_gated")))
+        self.assertEqual(
+            tuple(config.test_exclusions),
+            (owned.TestIdentity("p", "smoke", "slow_case"),),
+        )
 
     def test_manual_gate_rows_are_exact_and_combine_with_no_other_row(self) -> None:
         config = load_config(config_text() + manual_gate_row())
@@ -2465,18 +2484,18 @@ class PlanningTests(unittest.TestCase):
     def test_direct_target_and_package_expansion_are_disjoint(self) -> None:
         plan = self.plan(
             [
-                owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                owned.ChangeRecord("M", "crates/p/tests/default_gated.rs"),
                 owned.ChangeRecord("M", "crates/p/src/lib.rs"),
             ]
         )
-        self.assertEqual(plan["change_owned"], ["p::smoke"])
-        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(plan["change_owned"], ["p::default_gated"])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::default_gated"])
         self.assertEqual(
             plan["shards"]["change_owned"],
             owned.shard_map([]),
         )
-        self.assertIn("p::default_gated", plan["package_expansion"])
-        self.assertNotIn("p::smoke", plan["package_expansion"])
+        self.assertIn("p::smoke", plan["package_expansion"])
+        self.assertNotIn("p::default_gated", plan["package_expansion"])
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
         self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
@@ -2675,7 +2694,7 @@ class PlanningTests(unittest.TestCase):
             ["p::default_gated", "p::gated", "p::smoke"],
         )
         self.assertEqual(plan["package_expansion"], [])
-        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::default_gated"])
         self.assertEqual(
             plan["path_dispositions"][0]["required_package_rules"],
             [
@@ -2692,7 +2711,7 @@ class PlanningTests(unittest.TestCase):
         )
         owned.verify_plan_digest(plan)
         incomplete = copy.deepcopy(plan)
-        incomplete["change_owned"].remove("p::default_gated")
+        incomplete["change_owned"].remove("p::smoke")
         owned.attach_plan_digest(incomplete)
         with self.assertRaisesRegex(
             ValueError,
@@ -2898,19 +2917,20 @@ class PlanningTests(unittest.TestCase):
     def test_added_target_is_owned_and_renamed_target_is_delete_plus_add(self) -> None:
         base = metadata(
             package("p", [("old", "crates/p/tests/old.rs", []), ("heavy", "crates/p/tests/heavy.rs", [])]),
-            package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+            package("q", [("smoke", "crates/q/tests/smoke.rs", []), ("fast", "crates/q/tests/fast.rs", [])]),
         )
         candidate = metadata(
             package("p", [("new", "crates/p/tests/new.rs", []), ("heavy", "crates/p/tests/heavy.rs", [])]),
-            package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+            package("q", [("smoke", "crates/q/tests/smoke.rs", []), ("fast", "crates/q/tests/fast.rs", [])]),
         )
-        content = config_text(standing=("q", "smoke"), target_exclusion=("p", "heavy"),
+        content = config_text(standing=("q", "fast"), target_exclusion=("p", "heavy"),
                               test_exclusion=("q", "smoke", "q_case"))
         config = load_config(content)
         sources = {
             "crates/p/tests/new.rs": "#[test]\nfn new_case() {}\n",
             "crates/p/tests/heavy.rs": "#[test]\nfn heavy_case() {}\n",
             "crates/q/tests/smoke.rs": "#[test]\nfn q_case() {}\n",
+            "crates/q/tests/fast.rs": "#[test]\nfn fast_case() {}\n",
         }
         plan = owned.make_plan(
             mode="push",
@@ -3246,7 +3266,7 @@ packages = ["chelis-cli", "chelis-e2e"]
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs")])
         for key, value in (
             ("change_owned", []),
-            ("standing_coverage_reuse", []),
+            ("standing_coverage_reuse", ["p::smoke"]),
             ("config_digest", "0" * 64),
         ):
             mutated = copy.deepcopy(plan)
@@ -4138,8 +4158,73 @@ class ShardingAndExecutionTests(unittest.TestCase):
             owned._listing_tests(listing, identity, exclusions)
         del listing["rust-suites"]["p::smoke"]["testcases"]["hidden_case"]
         del listing["rust-suites"]["p::smoke"]["testcases"]["slow_case"]
-        with self.assertRaisesRegex(ValueError, "nonmatching active tests"):
+        with self.assertRaisesRegex(
+            ValueError, r"test_exclusion rows .*\['p::smoke::slow_case'\]"
+        ):
             owned._listing_tests(listing, identity, exclusions)
+
+    # chelis#3024: the shapes `cargo nextest list --message-format json`
+    # reports, under the exclusion filter, for the excluded test after each
+    # drift that a source-text check of `fn slow_case()` cannot see.
+    MOVED_INTO_MODULE = {
+        "m::slow_case": {
+            "ignored": False,
+            "filter-match": {"status": "matches"},
+        }
+    }
+    MARKED_IGNORED = {
+        "slow_case": {
+            "ignored": True,
+            "filter-match": {"status": "mismatch", "reason": "ignored"},
+        }
+    }
+
+    def _drift_listing(self, excluded: dict) -> dict:
+        return {
+            "rust-suites": {
+                "p::smoke": {
+                    "testcases": {
+                        "fast_case": {
+                            "ignored": False,
+                            "filter-match": {"status": "matches"},
+                        },
+                        **excluded,
+                    }
+                }
+            }
+        }
+
+    def test_listing_rejects_an_exclusion_moved_into_a_module_or_ignored(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        exclusions = {owned.TestIdentity("p", "smoke", "slow_case"): OWNER}
+        for drift in (self.MOVED_INTO_MODULE, self.MARKED_IGNORED):
+            with self.subTest(drift=drift):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"test_exclusion rows match no active test .*"
+                    r"\['p::smoke::slow_case'\]",
+                ):
+                    owned._listing_tests(
+                        self._drift_listing(drift), identity, exclusions
+                    )
+
+    def test_listing_accepts_an_exclusion_that_is_an_active_filtered_test(self) -> None:
+        # The negative twin: the excluded test is still a top-level active
+        # test, so the filter alone removes it and the listing is accepted.
+        identity = owned.Identity("p", "smoke")
+        exclusions = {owned.TestIdentity("p", "smoke", "slow_case"): OWNER}
+        listing = self._drift_listing(
+            {
+                "slow_case": {
+                    "ignored": False,
+                    "filter-match": {"status": "mismatch", "reason": "expression"},
+                }
+            }
+        )
+        self.assertEqual(
+            owned._listing_tests(listing, identity, exclusions),
+            ["p::smoke::fast_case"],
+        )
 
     def test_listing_rejects_malformed_filter_match_shape(self) -> None:
         identity = owned.Identity("p", "smoke")
@@ -4257,6 +4342,45 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 {"commands.json", "timings.json", "test-list.json", "junit.xml"},
             )
             self.assertEqual(len(owned.load_receipts(output)), 1)
+
+    def test_change_owned_shard_fails_naming_a_drifted_exclusion_row(self) -> None:
+        # chelis#3024's oracle: a pull request that moves an excluded test
+        # into a module or marks it #[ignore] fails its change-owned shard,
+        # and the failure names the row.
+        identity = owned.Identity("p", "smoke")
+        for drift in (self.MOVED_INTO_MODULE, self.MARKED_IGNORED):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                payload = self._drift_listing(drift)
+
+                def run(command, **kwargs):
+                    if command[1:3] == ["nextest", "list"]:
+                        return mock.Mock(
+                            stdout=json.dumps(payload), stderr="", returncode=0
+                        )
+                    if command[1:3] == ["nextest", "run"]:
+                        self.fail("a drifted listing must not reach the run")
+                    return mock.Mock(stdout="", stderr="", returncode=0)
+
+                with (
+                    mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                    mock.patch.object(owned, "_commit", return_value="b" * 40),
+                ):
+                    receipt = owned.execute_shard(
+                        self._plan(),
+                        lane="change-owned",
+                        shard=owned.shard_for(identity),
+                        output=root / "receipt",
+                        repo=root,
+                        runner=run,
+                    )
+                self.assertFalse(receipt["success"])
+                self.assertRegex(
+                    " ".join(receipt["failures"]),
+                    r"p::smoke: list failed: test_exclusion rows .*"
+                    r"\['p::smoke::slow_case'\]",
+                )
 
     def test_manual_only_target_executes_the_complete_ignored_suite(self) -> None:
         identity = owned.Identity("p", "smoke")
@@ -6436,10 +6560,11 @@ name = {json.dumps(name)}
         return missing
 
     def test_repository_selection_names_existing_tests(self) -> None:
-        # A source-text check: per pull request it catches a renamed or
-        # deleted test. A test moved into a module or given #[ignore] still
-        # passes here; the nightly exact-selection check in
-        # test_nextest_profile_partition catches that drift (chelis#3024).
+        # A source-text check that catches a renamed or deleted test. A test
+        # moved into a module or given #[ignore] still passes here; the
+        # change-owned lane catches that drift on the pull request that
+        # touches the target, because its nextest listing no longer shows the
+        # row as an active filtered test (chelis#3024).
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
         tests = owned.module_oracle_tests(config)
