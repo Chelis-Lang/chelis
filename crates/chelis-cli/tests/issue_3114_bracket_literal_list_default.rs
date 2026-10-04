@@ -184,7 +184,9 @@ fn a_declared_or_suffixed_tensor_literal_keeps_its_bits_through_resugaring() {
 }
 
 /// A cast or a callee's tensor parameter never converts a bare bracket
-/// literal: it is a `List`.
+/// literal: it is a `List`, and the diagnostic names a conversion that keeps
+/// each element's value at the dtype the position wants, because a plain
+/// `to_tensor` wrapper keeps the f32 literal default.
 #[test]
 fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
     for (index, declarations) in [
@@ -204,11 +206,17 @@ fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
         let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
         assert!(!output.status.success(), "{declarations}: {report}");
         let errors = report["errors"].as_array().expect("errors");
+        let error = errors
+            .iter()
+            .find(|error| {
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("List"))
+            })
+            .unwrap_or_else(|| panic!("{declarations} must be rejected as a List: {report}"));
         assert!(
-            errors.iter().any(|error| error["message"]
-                .as_str()
-                .is_some_and(|m| m.contains("List"))),
-            "{declarations} must be rejected as a List: {report}"
+            error.to_string().contains("to_tensor([1.1f64, 2.2f64])"),
+            "{declarations}: the diagnostic must name the value-preserving spelling: {error}"
         );
     }
     // A `to_tensor` argument is an ordinary List: under an f64 cast its

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
 pub use crate::session::DiagnosticSink;
-use crate::types::Type;
+use crate::types::{Prim, Type};
 use crate::unify::{TypeError, TypeErrorKind};
 use crate::unsupported::Unsupported;
 
@@ -576,6 +576,51 @@ pub fn enrich_type_mismatch_suggestions(message: &str, suggestions: &mut Vec<Str
     if let Some(hint) = opaque_accessor_hint(message) {
         suggestions.push(hint);
     }
+    // Detect a List where a tensor is expected
+    if let Some(hint) = list_for_tensor_hint(message) {
+        suggestions.push(hint);
+    }
+}
+
+/// If the mismatch is a tensor against a `List`, name a conversion that keeps
+/// each element's value: a bracket literal is a `List` unless its own
+/// declaration states a tensor type (spec/02-surf-syntax.md §P10b).
+fn list_for_tensor_hint(message: &str) -> Option<String> {
+    let (_, type_part) = message.split_once(": ")?;
+    let (left, right) = type_part.split_once(" vs ")?;
+    let (left, right) = (left.trim(), right.trim());
+    let tensor = match (left.starts_with("List"), right.starts_with("List")) {
+        (false, true) => left,
+        (true, false) => right,
+        _ => return None,
+    };
+    let element = tensor
+        .strip_prefix("tensor[")?
+        .strip_suffix(']')?
+        .rsplit(", ")
+        .next()
+        .map(str::trim);
+    Some(list_to_tensor_hint(element))
+}
+
+/// The value-preserving ways to write a tensor whose elements have dtype
+/// `element`. `to_tensor` alone keeps each literal's own suffix or §5.3
+/// default, so the elements carry the suffix (spec/04-type-system.md §5.6).
+pub fn list_to_tensor_hint(element: Option<&str>) -> String {
+    let element = element
+        .filter(|name| Prim::parse_name(name).is_some_and(|prim| prim.is_data_element_dtype()))
+        .unwrap_or("f64");
+    let (first, second) = if element.starts_with('i') {
+        ("1", "2")
+    } else {
+        ("1.1", "2.2")
+    };
+    format!(
+        "a bracket literal is a List, and only its own declared tensor type converts it; \
+         write `to_tensor([{first}{element}, {second}{element}])`, with each element suffixed at \
+         the dtype it keeps, or bind the literal under a declared tensor type such as \
+         `xs: tensor[2, {element}] = [{first}, {second}]`"
+    )
 }
 
 /// If the mismatch is `Option[T]` vs `T`, suggest pattern matching.
