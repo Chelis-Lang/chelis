@@ -177,9 +177,12 @@ requires a finite, integral value in range. Integer literals default to
 3. An unsuffixed literal passed directly to `cast` adopts its numeric target
    dtype, including a bare scalar literal.
 
-A list literal and a bare scalar passed to an ordinary function do not adopt
-a callee's dtype. Structural lists such as reshape sizes therefore spell
-their `i64` elements explicitly.
+A bracket literal is a `List`. It is a tensor literal only as the argument of
+`to_tensor`, or where its own binding or function result declares a tensor
+type; a tensor parameter or a `cast` takes the `to_tensor` spelling. A list
+literal and a bare scalar passed to an ordinary function do not adopt a
+callee's dtype. Structural lists such as reshape sizes therefore spell their
+`i64` elements explicitly.
 
 ```chelis-surf-fragment
 -- explicit tensor conversion
@@ -189,7 +192,7 @@ b = 1.0f64
 -- suffix binds i64; cast(3000000000, i64) binds the same literal the same way
 c = 3000000000i64
 -- each element binds directly at f64, not at f32 and then widened
-d = cast([1.1, 2.2], f64)
+d = cast(to_tensor([1.1, 2.2]), f64)
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with

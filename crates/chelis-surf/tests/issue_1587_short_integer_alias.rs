@@ -106,12 +106,14 @@ fn contextual_tensor_literals_normalize_aliases_in_all_four_positions() {
     for name in ["i8", "i16", "i32", "i64"] {
         for source in [
             format!("xs: tensor[2, {name}] = [1, -2]\n"),
-            format!("def f(x: tensor[2, {name}]) -> tensor[2, {name}] = x\nr = f([1, -2])\n"),
+            format!(
+                "def f(x: tensor[2, {name}]) -> tensor[2, {name}] = x\nr = f(to_tensor([1, -2]))\n"
+            ),
             format!("def f() -> tensor[2, {name}] = [1, -2]\n"),
-            format!("xs = cast([1, -2], {name})\n"),
+            format!("xs = cast(to_tensor([1, -2]), {name})\n"),
             format!("def f() = {{\n  xs: tensor[2, {name}] = [1, -2]\n  xs\n}}\n"),
             format!(
-                "sig f: tensor[2, {name}] -> tensor[2, {name}]\ndef f(x) = x\nr = f([1, -2])\n"
+                "sig f: tensor[2, {name}] -> tensor[2, {name}]\ndef f(x) = x\nr = f(to_tensor([1, -2]))\n"
             ),
         ] {
             let deep = deep_of(&source);

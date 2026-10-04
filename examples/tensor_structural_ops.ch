@@ -34,4 +34,4 @@ conv_kernel: tensor[1, 1, 2, f32] = [10.0f32, 1.0f32] |> to_tensor |> reshape([1
 convolved = convolve_line(conv_input, conv_kernel)
 def batched_product(a: tensor[2, 2, f32], b: tensor[2, 2, f32], keep: tensor[2, 2, bool]) -> tensor[2, 2, 2, f32] = matmul(insert(where(keep, a, a), 0, 2i64), b)
 batched_matrices = batched_product(lhs, rhs, mask)
-bare_literal = [1.0, 2.0, 3.0]
+literal_tensor = to_tensor([1.0, 2.0, 3.0])

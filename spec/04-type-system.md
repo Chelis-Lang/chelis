@@ -2028,9 +2028,9 @@ defaults can be overridden in three ways:
 3. an explicit `cast` around the literal expression
 
 There is **no implicit precision promotion** from these defaults to any other
-type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, i32]`, not
-`tensor[3, i64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
-`tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
+type. `to_tensor([1, 2, 3])` in an unannotated position is `tensor[3, i32]`,
+not `tensor[3, i64]`. `to_tensor([1.0, 2.0, 3.0])` in an unannotated position
+is `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
 type must say so via suffix, declared element type, or `cast`.
 
 The default is the **user-facing contract** and is non-overridable except by
@@ -2156,6 +2156,11 @@ and Deep (`spec/03-deep-syntax.md` §6.4).
 
 ### 5.6 Contextual Tensor-Literal Inference
 
+A bracket literal is a `List`, whatever its elements and wherever it stands. A
+tensor literal is the bracket-literal argument of a `to_tensor` call, or a bare
+bracket literal whose own binding or function result declares a tensor type
+(`spec/02-surf-syntax.md` §P10b); no other context converts a bracket literal.
+
 When a tensor literal appears in a position with a **known element type**, the
 numeric literals in the tensor body adopt that element type instead of the
 literal default in §5.3. The closed set of "known-element-type" positions is
@@ -2165,12 +2170,21 @@ exactly:
    `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
 2. the corresponding argument position of a call whose callee has a declared
    signature whose parameter at that position is a tensor type, e.g.
-   `f(xs)` where `f : tensor[3, f64] -> ...`
+   `f(to_tensor([1.0, 2.0, 3.0]))` where `f : tensor[3, f64] -> ...`
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is a tensor literal
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
    precision type literal or a dtype-bounded type binder
    ([04-DTYPE-2]) — the literal body adopts `p`
+
+The bracket-literal argument of a `to_tensor` call that stands in one of these
+positions takes that position's element type, exactly as a bare bracket
+literal in position 1 or 3 does: `cast(to_tensor([1.1, 2.2]), f64)` binds both
+decimals at `f64` and does not round them through the `f32` default. The kind
+is fixed in positions 2 and 4: a callee's tensor parameter or a `cast` never
+converts a bare bracket literal, which stays a `List` there. A call through a
+lexical binding that shadows `to_tensor` is an ordinary call and adopts
+nothing.
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
 tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
@@ -2222,9 +2236,10 @@ suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
 `f32`-context is a type error: the f64-suffixed literal at index 1 has an
 explicit dtype that disagrees with the surrounding `f32` element type.
 
-A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
-`tensor[3, i32]`, not `tensor[3, i64]`. The fallback to the §5.3
-default is the spec contract; no stage may silently widen it.
+The tensor literal `to_tensor([1, 2, 3])` in an unannotated position evaluates
+to `tensor[3, i32]`, not `tensor[3, i64]`, and a bare `[1, 2, 3]` there is a
+`List i32`. The fallback to the §5.3 default is the spec contract; no stage
+may silently widen it.
 
 ### 5.7 Mixed-Precision Accumulator Parameter
 

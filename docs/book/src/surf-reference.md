@@ -132,11 +132,12 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Booleans: `true`, `false`.
 - Unit: `()` is the unit value; `unit` is the unit type.
 - Tuples: `(a, b, c)`. `(a)` is grouping; a one-element tuple is `(a,)`.
-- Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
-  arguments to operators, for example the window and stride lists in
-  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. Brackets can also build a
-  `List`, depending on the expected type. A negative numeral is unary minus applied to a
-  literal, so write `f(-42)` to pass a negative argument.
+- Bracket literals: `[1.0, 2.0, 3.0]` builds a `List`, whatever its elements and
+  wherever it stands, and bracket lists pass list arguments to operators, for example
+  the window and stride lists in `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`.
+  `to_tensor([1.0, 2.0, 3.0])` builds a tensor, and so does a bracket literal whose own
+  binding or function result declares a tensor type. A negative numeral is unary minus
+  applied to a literal, so write `f(-42)` to pass a negative argument.
 
 Delimited nonempty lists may carry one trailing comma (or a trailing semicolon in
 `do`). The parser discards it and the formatter omits it; the comma in `(a,)`
@@ -151,9 +152,11 @@ integer body, invalid escapes, and semantic suffix/adoption changes remain error
 A tensor literal's unsuffixed elements can adopt a known element type when the literal
 is assigned to a tensor-typed binding, passed to a declared tensor parameter, or used
 as a declared tensor return body. An unsuffixed literal passed directly to `cast`
-adopts the cast target, including a bare numeric scalar. These are the only adoption
-positions: an unannotated `[1, 2, 3]` uses `i32` elements, while a structural list
-such as the window sizes above needs explicit `i64` elements.
+adopts the cast target, including a bare numeric scalar. A tensor parameter or a `cast`
+never turns a bracket literal into a tensor, so those positions take the `to_tensor`
+spelling: `f(to_tensor([1.0, 2.0]))` and `cast(to_tensor([1.1, 2.2]), f64)`. These are
+the only adoption positions: an unannotated `to_tensor([1, 2, 3])` uses `i32` elements,
+while a structural list such as the window sizes above needs explicit `i64` elements.
 
 ## Operators
 

@@ -4,18 +4,23 @@
 //! - `spec/02-surf-syntax.md` §P10b
 //! - `spec/04-type-system.md` §5.6
 //!
-//! When a tensor literal `[e1, e2, ...]` appears in a position with a
-//! known element type, the unsuffixed numeric literals in the body
-//! adopt that element type instead of the §5.3 / §P10 literal default
-//! (i32 for integer literals, f32 for float literals).
+//! When a tensor literal appears in a position with a known element type,
+//! the unsuffixed numeric literals in the body adopt that element type
+//! instead of the §5.3 / §P10 literal default (i32 for integer literals, f32
+//! for float literals). A tensor literal is `to_tensor([...])`, or a bare
+//! bracket literal under its own declared tensor type (positions 1 and 3).
 //!
 //! The closed set of "known-element-type" positions is exactly four:
 //!   1. RHS of a let-binding whose declared type is a tensor type
 //!   2. Argument position of a call whose callee has a declared signature
-//!      with a tensor parameter at that position
+//!      with a tensor parameter at that position, for `to_tensor([...])`
 //!   3. Body expression of a function with a declared return type that is
 //!      a tensor type, when the body is itself a tensor literal
-//!   4. First argument of an explicit `cast(literal, p)`
+//!   4. First argument of an explicit `cast(literal, p)`, for a scalar
+//!      literal or `to_tensor([...])`
+//!
+//! A bare bracket literal in position 2 or 4 is a List and is never
+//! converted.
 //!
 //! Outside the closed set, numeric literals fall back to the WS-0 / D1
 //! default: integer literals → i32, float literals → f32.
@@ -181,7 +186,7 @@ fn position_1_no_annotation_int_default_is_int32() {
 
 #[test]
 fn position_4_cast_int_list_to_int8() {
-    let (printed, result) = pipeline("xs = cast([1, 2, 3], i8)");
+    let (printed, result) = pipeline("xs = cast(to_tensor([1, 2, 3]), i8)");
     assert!(
         result.errors.is_empty(),
         "expected no errors, got:\n{}",
@@ -196,7 +201,7 @@ fn position_4_cast_int_list_to_int8() {
 
 #[test]
 fn position_4_cast_float_list_to_f64() {
-    let (printed, result) = pipeline("xs = cast([1.0, 2.0, 3.0], f64)");
+    let (printed, result) = pipeline("xs = cast(to_tensor([1.0, 2.0, 3.0]), f64)");
     assert!(
         result.errors.is_empty(),
         "expected no errors, got:\n{}",
@@ -236,14 +241,14 @@ fn position_3_fn_return_tensor_f64_narrows_body_literals() {
 
 #[test]
 fn position_2_call_with_tensor_f64_param_narrows_arg_literals() {
-    let src = "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f([1.0, 2.0, 3.0])";
+    let src = "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f(to_tensor([1.0, 2.0, 3.0]))";
     let (printed, result) = pipeline(src);
     assert!(
         result.errors.is_empty(),
         "expected no errors, got:\n{}",
         errors_summary(&result)
     );
-    // The `ys = f([1.0, 2.0, 3.0])` form must narrow argument
+    // The `ys = f(to_tensor([1.0, 2.0, 3.0]))` form must narrow argument
     // literals to f64 because f's declared signature is
     // `tensor[3, f64] -> tensor[3, f64]`.
     assert!(
@@ -262,7 +267,7 @@ fn position_2_call_with_sig_decl_tensor_f64_param_narrows_arg_literals() {
     // the Decl::Sig branch of `collect_top_level_fn_tensor_param_prec`.
     let src = "sig f: tensor[3, f64] -> tensor[3, f64]\n\
                def f(xs) = xs\n\
-               ys = f([1.0, 2.0, 3.0])";
+               ys = f(to_tensor([1.0, 2.0, 3.0]))";
     let (printed, result) = pipeline(src);
     assert!(
         result.errors.is_empty(),
@@ -410,4 +415,27 @@ fn position_1_block_level_let_with_tensor_type_narrows_literals() {
         "expected f64-typed literals at block-let position, got:\n{}",
         printed.join("\n")
     );
+}
+
+#[test]
+fn negative_bare_brackets_in_positions_2_and_4_stay_lists() {
+    // The kind is fixed in positions 2 and 4: a callee's tensor parameter
+    // or a `cast` never converts a bare bracket literal (§5.6).
+    for src in [
+        "xs = cast([1.0, 2.0, 3.0], f64)",
+        "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f([1.0, 2.0, 3.0])",
+        "sig f: tensor[3, f64] -> tensor[3, f64]\ndef f(xs) = xs\nys = f([1.0, 2.0, 3.0])",
+    ] {
+        let (printed, result) = pipeline(src);
+        let combined = printed.join("\n");
+        assert!(!combined.contains("to_tensor"), "{src}: {combined}");
+        assert!(
+            !contains_lit_with_prim(&printed, "f64"),
+            "a List element must not adopt the context dtype: {combined}"
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "{src}: a List is not a tensor, got (no errors)"
+        );
+    }
 }
