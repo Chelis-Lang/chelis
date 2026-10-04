@@ -6620,7 +6620,7 @@ impl<'a> HostEmitter<'a> {
                 c_string_literal(&binder)
             ));
             self.lines
-                .push(format!("{indent}    chelis_flush_and_abort();"));
+                .push(format!("{indent}    chelis_flush_and_exit_trap();"));
             self.lines.push(format!(
                 "{indent}}} else if ({recorded}.value != {extent}) {{"
             ));

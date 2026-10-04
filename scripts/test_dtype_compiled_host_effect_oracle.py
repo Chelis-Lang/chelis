@@ -125,6 +125,11 @@ class OracleMutationTests(unittest.TestCase):
             '    "process_run",\n    "test_assert_eq_f64",\n',
         )
 
+    def test_restored_trap_abort_fails(self):
+        self.assert_mutation_fails(
+            "crates/chelis-runtime/include/chelis_runtime.h", "    exit(1);\n}", "    abort();\n}"
+        )
+
     def test_restored_compiled_target_rejection_fails(self):
         self.assert_mutation_fails(
             "crates/chelis-compiler-api/src/compiler.rs",

@@ -55,11 +55,15 @@ impl Drop for Probe {
 
 const SOURCE: &str = r#"
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #ifdef NONFLUSHING_ABORT
-/* Darwin's abort can flush itself. This twin isolates the runtime's own
- * obligation; the native twin below exercises the real libc, including Linux. */
-static _Noreturn void nonflushing_abort(void) { _Exit(99); }
-#define abort nonflushing_abort
+/* A trap ends the process with exit(1) ([04-NUM-10]), and exit flushes the
+ * streams itself. This twin substitutes an exit that does not, so it isolates
+ * the runtime's own flush obligation; the native twin below exercises the real
+ * libc. */
+static _Noreturn void nonflushing_exit(int status) { _Exit(status); }
+#define exit nonflushing_exit
 #endif
 #include "chelis_runtime.h"
 int main(int argc, char **argv) {

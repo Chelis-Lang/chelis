@@ -71,13 +71,15 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
     memcpy(&v, &bits, sizeof(double));
     return v;
 }
-/* spec/04 section 4.7: output from preceding effects survives a later trap.
- * abort() need not flush C streams (notably on glibc). Preserve the original
- * failure even if a stream itself cannot be flushed. */
-static inline void chelis_flush_and_abort(void) {
+/* [04-NUM-10]: a trap becomes a process failure at the lane boundary - the
+ * binary writes its message to stderr and exits with status 1, as `chelis
+ * eval` does; it never aborts. spec/04 section 4.7: output from preceding
+ * effects survives the trap, so both streams are flushed first, and the
+ * original failure is preserved even if a stream cannot be flushed. */
+static inline void chelis_flush_and_exit_trap(void) {
     (void)fflush(stdout);
     (void)fflush(stderr);
-    abort();
+    exit(1);
 }
 
 /* chelis#729 Phase 3: exact signed-integer absolute value. The generated
@@ -94,15 +96,15 @@ static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
         case 64: minimum = INT64_MIN; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
-            chelis_flush_and_abort();
+            chelis_flush_and_exit_trap();
             /* Keep the published header warning-clean even when a C/C++
-             * compiler does not infer abort's non-returning contract through
+             * compiler does not infer exit's non-returning contract through
              * this inline wrapper. The return is unreachable. */
             return value;
     }
     if (value == minimum) {
         fprintf(stderr, "%s\n", trap_message);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
     return value < 0 ? -value : value;
 }
@@ -119,13 +121,13 @@ static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximu
         case 64: *minimum = INT64_MIN; *maximum = INT64_MAX; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer width %d\n", bits);
-            chelis_flush_and_abort();
+            chelis_flush_and_exit_trap();
     }
 }
 
 static inline void chelis_numeric_trap(const char *message) {
     fprintf(stderr, "%s\n", message);
-    chelis_flush_and_abort();
+    chelis_flush_and_exit_trap();
 }
 
 static inline int64_t chelis_int_checked_add(int64_t lhs, int64_t rhs, int bits,
@@ -296,12 +298,12 @@ static inline int64_t chelis_int_from_twos(uint64_t value, int bits) {
 static inline void chelis_int_shift_validate(int64_t amount, int bits) {
     if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
         fprintf(stderr, "invalid integer shift width: %d\n", bits);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
     if (amount < 0) {
         fprintf(stderr, "shift amount must be non-negative, got %lld\n",
                 (long long)amount);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
 }
 

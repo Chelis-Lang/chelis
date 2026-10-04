@@ -9,9 +9,7 @@ effect order, as `chelis eval`.
 
 Parity rule: two lanes agree when they print the same stdout, exit with the
 same status, and report the same failure body. The one presentation
-difference ignored is eval's `error: ` prefix on a runtime failure. A
-numeric trap is compared on stdout and message only, because compiled C
-aborts where eval exits 1 (chelis#3107).
+difference ignored is eval's `error: ` prefix on a runtime failure.
 
 The structural leg forbids the evaluator-only and host-only build rosters,
 the compiled-target rejection text, lossy process decoding, and
@@ -110,8 +108,14 @@ def source_contracts() -> tuple[SourceContract, ...]:
         SourceContract(
             "strict process captures",
             "crates/chelis-runtime/src/host_process.rs",
-            ("String::from_utf8(stdout)", "String::from_utf8(stderr)", "exit_status.map_or(-1, i64::from)"),
+            ("String::from_utf8(stdout)", "String::from_utf8(stderr)", "exit_status.map_or(-1_i64, i64::from)"),
             ("from_utf8_lossy",),
+        ),
+        SourceContract(
+            "numeric traps exit with eval's status",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            ("static inline void chelis_flush_and_exit_trap(void) {\n    (void)fflush(stdout);\n    (void)fflush(stderr);\n    exit(1);\n}",),
+            ("chelis_flush_and_abort",),
         ),
         SourceContract(
             "tensor_scan composes the list scan at the state dtype",

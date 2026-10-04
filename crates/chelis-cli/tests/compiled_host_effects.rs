@@ -389,10 +389,11 @@ fn tensor_scan_failures_match_eval() {
         run.failure, "tensor_scan requires a non-negative length, got -1",
         "{run:?}"
     );
-    let run = parity::assert_lanes_agree_on_numeric_trap(
+    let run = parity::assert_lanes_agree(
         "def step(prev: i32, i: i64) -> i32 ! {IO} = {\n_ = print(to_string(i))\nadd(prev, 1i32)\n}\nxs = tensor_scan(2147483646i32, step, 3i64)\n",
         "overflow",
     );
+    assert_eq!(run.status, Some(1), "{run:?}");
     assert_eq!(run.stdout, "0\n1\n", "{run:?}");
     assert_eq!(
         run.failure, "numeric trap: overflow in add at i32",
@@ -456,4 +457,41 @@ fn the_comparator_rejects_each_named_divergence() {
         parity::compiled_failure_body("assert failed: flag\n"),
         "the presentation prefix alone is not a divergence"
     );
+}
+
+// ---------------------------------------------------------------------------
+// [04-NUM-10] a numeric trap ends a compiled program as it ends eval
+// ---------------------------------------------------------------------------
+
+/// Every numeric trap class exits with eval's status 1 and message, after
+/// the output that precedes it; no compiled trap aborts (chelis#3107).
+#[test]
+fn numeric_traps_exit_like_eval() {
+    for (name, body, failure) in [
+        (
+            "overflow",
+            "x = f(2147483647i32)\n",
+            "numeric trap: overflow in add at i32",
+        ),
+        (
+            "divide",
+            "x = floor_div(7i64, g(0i64))\n",
+            "numeric trap: division by zero in floor_div at i64",
+        ),
+        (
+            "tensor",
+            "x = add(to_tensor([2147483647i32]), to_tensor([1i32]))\n",
+            "",
+        ),
+    ] {
+        let source = format!(
+            "def f(a: i32) -> i32 = add(a, 1i32)\ndef g(a: i64) -> i64 = a\nbefore = print(\"before\")\n{body}"
+        );
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        if !failure.is_empty() {
+            assert_eq!(run.failure, failure, "{name}: {run:?}");
+        }
+        assert_eq!(run.stdout, "before\n", "{name}: {run:?}");
+    }
 }

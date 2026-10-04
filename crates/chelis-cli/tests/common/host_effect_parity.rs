@@ -114,23 +114,6 @@ pub fn compiled_lane(source: &str, name: &str) -> LaneRun {
     }
 }
 
-/// Runs both lanes and asserts that they agree on a numeric trap: the same
-/// stdout and failure message, and failure on both. The exit statuses are not
-/// compared: compiled C aborts on a numeric trap where eval exits 1, which
-/// [04-NUM-10] forbids (chelis#3107).
-pub fn assert_lanes_agree_on_numeric_trap(source: &str, name: &str) -> LaneRun {
-    let eval = eval_lane(source, name);
-    let compiled = compiled_lane(source, name);
-    assert_eq!(eval.status, Some(1), "{name}: {eval:?}");
-    assert_ne!(compiled.status, Some(0), "{name}: {compiled:?}");
-    assert_eq!(
-        (&eval.stdout, &eval.failure),
-        (&compiled.stdout, &compiled.failure),
-        "{name}: eval and compiled C disagree\nsource:\n{source}"
-    );
-    eval
-}
-
 /// The parity rule: the same stdout, exit status, and failure body.
 pub fn lanes_agree(eval: &LaneRun, compiled: &LaneRun) -> bool {
     eval == compiled
