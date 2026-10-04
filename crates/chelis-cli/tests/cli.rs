@@ -9832,6 +9832,44 @@ fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
     }
 }
 
+/// chelis#3009: a `sum`-family rejection decided after the call was checked
+/// (at the declaration boundary, or when a hole binds) carries the call's
+/// span. `g1h` is an authored `Int` binder; `a4` is a hole bound to bool.
+#[test]
+fn deferred_sum_result_rejections_carry_the_call_span() {
+    let dir = tempdir().expect("tempdir");
+    for (stem, source, span_id) in [
+        (
+            "g1h",
+            include_str!("fixtures/sum_result_holes/g1h.dp"),
+            "surf:83..95",
+        ),
+        (
+            "a4",
+            include_str!("fixtures/sum_result_holes/a4.dp"),
+            "surf:82..94",
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.dp"));
+        write_file(&path, source);
+        let json = run_json_check(&path);
+        let errors = json["errors"].as_array().expect("errors array");
+        let sum_result = errors
+            .iter()
+            .find(|error| {
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("sum_result"))
+            })
+            .unwrap_or_else(|| panic!("{stem}: no sum_result rejection: {json}"));
+        assert_eq!(sum_result["span_id"], span_id, "{stem}: {sum_result}");
+        assert!(
+            sum_result["span"]["offset"].is_u64(),
+            "{stem}: {sum_result}"
+        );
+    }
+}
+
 /// Negative parity for `realize`: exercising it in the host lane with
 /// no inner expression must produce a clean error rather than a panic.
 /// Synthesized programs with bad shape are caught at type-check; this

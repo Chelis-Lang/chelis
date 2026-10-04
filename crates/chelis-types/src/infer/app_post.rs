@@ -849,6 +849,7 @@ pub(super) fn finish_unified_app(
                     &type_for_readonly_check(&arg_tys[1], subst),
                     &type_for_readonly_check(&arg_tys[2], subst),
                     SumResultSlot::Fresh(vg),
+                    source_site.owned_location(),
                     subst,
                 ) {
                     Ok(result) => result,
@@ -1008,6 +1009,7 @@ pub(super) fn finish_unified_app(
                                 dims,
                                 result,
                                 SumResultSlot::Fresh(vg),
+                                source_site.owned_location(),
                                 subst,
                             ),
                             Err(message) => report(

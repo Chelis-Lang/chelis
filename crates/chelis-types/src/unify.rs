@@ -503,6 +503,7 @@ pub(crate) enum DeferredOperandGate {
         op: String,
         dims: Vec<crate::types::Dim>,
         result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
 }
 
@@ -621,8 +622,9 @@ impl DeferredOperandGate {
         match self {
             Self::Copy { location, .. }
             | Self::Cast { location, .. }
-            | Self::CastToBinder { location, .. } => location.as_ref(),
-            Self::HostSlot { .. } | Self::ShapeRoute { .. } | Self::SumResult { .. } => None,
+            | Self::CastToBinder { location, .. }
+            | Self::SumResult { location, .. } => location.as_ref(),
+            Self::HostSlot { .. } | Self::ShapeRoute { .. } => None,
         }
     }
 
@@ -740,6 +742,7 @@ impl DeferredOperandGate {
                     route,
                     resolved,
                     crate::infer::SumResultSlot::Existing(result),
+                    None,
                     subst,
                 ) {
                     Ok((settled, updates)) => {
@@ -781,6 +784,7 @@ impl DeferredOperandGate {
                 ref op,
                 ref dims,
                 ref result,
+                ..
             } => match crate::infer::settled_sum_result_precision(op, resolved) {
                 Ok(precision) => {
                     self.reconcile_result(
@@ -790,11 +794,11 @@ impl DeferredOperandGate {
                     );
                 }
                 Err(message) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                    error: crate::errors::CheckError::new(
+                    error: self.attach_location(crate::errors::CheckError::new(
                         crate::errors::CheckErrorKind::TypeMismatch,
                         message,
                         Vec::new(),
-                    ),
+                    )),
                 }),
             },
         }
@@ -2138,6 +2142,7 @@ impl Subst {
                 ref op,
                 ref dims,
                 ref result,
+                ..
             } = gate
             else {
                 unreachable!("only sum-result gates were taken");
@@ -2149,11 +2154,11 @@ impl Subst {
                     }
                     Err(message) => {
                         self.record_operand_gate_failure(OperandGateFailure::Decision {
-                            error: crate::errors::CheckError::new(
+                            error: gate.attach_location(crate::errors::CheckError::new(
                                 crate::errors::CheckErrorKind::TypeMismatch,
                                 message,
                                 Vec::new(),
-                            ),
+                            )),
                         })
                     }
                 },

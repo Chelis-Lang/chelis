@@ -1066,6 +1066,7 @@ pub(super) fn check_reduction_signature(
             out_dims,
             SumResultPrecision::Pending(variable),
             SumResultSlot::Fresh(vg),
+            site.owned_location(),
             subst,
         ),
         None => Type::Tensor(out_dims, result_prec),

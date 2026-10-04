@@ -555,7 +555,13 @@ pub(crate) fn decide_shape_route(
         );
         return result;
     }
-    match shape_route_result(&route, operand, SumResultSlot::Fresh(vg), subst) {
+    match shape_route_result(
+        &route,
+        operand,
+        SumResultSlot::Fresh(vg),
+        TypeDiagnosticLocation::from_node(node),
+        subst,
+    ) {
         Ok((result, updates)) => {
             if let Some(expected_updates) = updates
                 && let crate::unify::ShapeRoute::Gather {
@@ -609,6 +615,7 @@ pub(crate) fn shape_route_result(
     route: &crate::unify::ShapeRoute,
     operand: &Type,
     slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
     subst: &Subst,
 ) -> Result<(Type, Option<Type>), String> {
     use crate::unify::ShapeRoute;
@@ -650,7 +657,7 @@ pub(crate) fn shape_route_result(
             let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
             let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
             Ok((
-                infer_trace_result_type(operand, axis1, axis2, slot, subst)?,
+                infer_trace_result_type(operand, axis1, axis2, slot, location, subst)?,
                 None,
             ))
         }
@@ -719,6 +726,7 @@ pub(super) fn infer_trace_result_type(
     axis1: usize,
     axis2: usize,
     slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
     subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
@@ -737,7 +745,7 @@ pub(super) fn infer_trace_result_type(
         .collect();
     let precision = default_sum_result_precision("trace", precision, subst)?;
     Ok(publish_sum_result(
-        "trace", out_dims, precision, slot, subst,
+        "trace", out_dims, precision, slot, location, subst,
     ))
 }
 
@@ -754,6 +762,7 @@ pub(super) fn infer_einsum_result_type(
     left: &Type,
     right: &Type,
     slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
     subst: &Subst,
 ) -> Result<Type, String> {
     let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
@@ -827,7 +836,9 @@ pub(super) fn infer_einsum_result_type(
         dims.push(dim.clone());
     }
     let precision = default_sum_result_precision("einsum", precision, subst)?;
-    Ok(publish_sum_result("einsum", dims, precision, slot, subst))
+    Ok(publish_sum_result(
+        "einsum", dims, precision, slot, location, subst,
+    ))
 }
 
 /// How a `sum`-family call's result precision stands when the call is checked.
@@ -883,6 +894,7 @@ pub(super) fn publish_sum_result(
     dims: Vec<Dim>,
     precision: SumResultPrecision,
     slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
     subst: &Subst,
 ) -> Type {
     match precision {
@@ -900,6 +912,7 @@ pub(super) fn publish_sum_result(
                     op: op.to_string(),
                     dims,
                     result: Box::new(published.clone()),
+                    location,
                 },
             );
             published
