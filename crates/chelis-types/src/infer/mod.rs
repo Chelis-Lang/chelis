@@ -166,7 +166,7 @@ use checked::*;
 use common::*;
 pub(crate) use common::{
     SumResultSlot, bound_sum_result_precision, decide_shape_route, settled_sum_result_precision,
-    shape_route_result,
+    shape_route_result, sum_result_widening_note,
 };
 use declaration_close::*;
 use declaration_collect::*;

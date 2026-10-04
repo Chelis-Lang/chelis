@@ -2452,3 +2452,131 @@ fn variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds() {
         "the replayed sum must type at i32"
     );
 }
+
+/// Every rejection that spec/04 §5.7.1's widening causes (an i8 or i16
+/// `sum`, `cumsum`, `trace` or `einsum` returns i32) names the operation,
+/// the operand and result dtypes and the rule, and says how to repair it:
+/// declare the widened result, or narrow it explicitly.
+#[test]
+fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
+    let message_of = |source: &str| -> String {
+        let errors = surf_check_errors(source);
+        assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+        errors[0].message.clone()
+    };
+    let assert_contains = |message: &str, phrases: &[&str]| {
+        for phrase in phrases {
+            assert!(message.contains(phrase), "missing `{phrase}` in: {message}");
+        }
+    };
+    for operand in ["i8", "i16"] {
+        let repair = format!(
+            "declare the result as i32, or narrow it explicitly with `cast(..., {operand})`"
+        );
+        // The concrete mismatch against a declared result, per operation.
+        for (op, source) in [
+            (
+                "cumsum",
+                format!("def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n"),
+            ),
+            (
+                "sum",
+                format!("def f(x: tensor[3, {operand}]) -> tensor[{operand}] = sum(x, 0i32)\n"),
+            ),
+            (
+                "trace",
+                format!(
+                    "def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n"
+                ),
+            ),
+            (
+                "einsum",
+                format!(
+                    "def f(a: tensor[2, {operand}], b: tensor[2, {operand}]) -> tensor[{operand}] = einsum(\"i,i->\", a, b)\n"
+                ),
+            ),
+            (
+                "cumsum",
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = {{\n  y: tensor[3, {operand}] = cumsum(x, 0)\n  y\n}}\n"
+                ),
+            ),
+            (
+                "sum",
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[i32] = {{\n  y: tensor[{operand}] = sum(x, 0i32)\n  cast(y, i32)\n}}\n"
+                ),
+            ),
+        ] {
+            let message = message_of(&source);
+            assert_contains(
+                &message,
+                &[
+                    &format!("`{op}` over {operand} returns i32"),
+                    "spec/04 §5.7.1",
+                    &repair,
+                ],
+            );
+        }
+        // A downstream operation that needs the operand dtype, and a call
+        // through a local function, cannot name the operation.
+        for source in [
+            format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+            ),
+            format!(
+                "def f(x: tensor[seq, head, {operand}]) -> tensor[{operand}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+            ),
+        ] {
+            let message = message_of(&source);
+            assert_contains(
+                &message,
+                &[
+                    &format!(
+                        "if the i32 value is the result of `sum`, `cumsum`, `trace` or `einsum` over {operand}"
+                    ),
+                    "spec/04 §5.7.1",
+                    &repair,
+                ],
+            );
+        }
+        // Both repairs check.
+        assert!(
+            surf_check_errors(&format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, i32] = cumsum(x, 0)\n"
+            ))
+            .is_empty()
+        );
+        let narrowed = format!(
+            "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cast(cumsum(x, 0), {operand})\n"
+        );
+        assert!(surf_check_errors(&narrowed).is_empty(), "{narrowed}");
+    }
+    // A mismatch the widening cannot explain carries no note.
+    let message = message_of("def f(x: tensor[3, i64]) -> tensor[3, i32] = cumsum(x, 0)\n");
+    assert!(!message.contains("§5.7.1"), "{message}");
+    // The generic-binder rejection, and the same rejection decided for a hole.
+    let generic = [
+        "spec/04 §5.7.1 sums an i8 or i16 operand in i32",
+        "bound the variable to dtypes that share one result",
+        "declare the widened result",
+    ];
+    assert_contains(
+        &message_of("def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n"),
+        &generic,
+    );
+    let hole = chelis_deep::parser::parse_str(include_str!(
+        "../../../../chelis-cli/tests/fixtures/sum_result_holes/g1h.dp"
+    ))
+    .expect("deep parse");
+    let errors = match check_ir_program(&hole) {
+        Ok(_) => Vec::new(),
+        Err(result) => result.errors,
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|error| generic.iter().all(|phrase| error.message.contains(phrase))),
+        "{errors:?}"
+    );
+}

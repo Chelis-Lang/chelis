@@ -3640,7 +3640,20 @@ pub fn unify_tensor_prec(
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            message: match crate::infer::sum_result_widening_note(
+                None,
+                &Type::Prim(*a),
+                &Type::Prim(*b),
+            ) {
+                Some(note) => {
+                    format!(
+                        "tensor precision mismatch: {} vs {}; {note}",
+                        a.name(),
+                        b.name()
+                    )
+                }
+                None => format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            },
         }),
         (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
         (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),

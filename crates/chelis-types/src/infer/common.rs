@@ -1001,13 +1001,76 @@ pub(crate) fn bound_sum_result_precision(
         None => "an unbounded variable".to_string(),
     };
     Err(format!(
-        "{op} over a tensor whose precision is a type variable has no single result dtype: \
-         its result is sum_result(p, default(p)) (spec/04-type-system.md §5.7.1), \
-         the variable denotes every dtype {bound} admits ([04-INF-6]), and \
-         sum_result does not give one dtype across them; bound the variable to \
-         `Float`, or to dtypes that share one sum_result, or cast the operand to a \
-         concrete dtype"
+        "{op} over a tensor whose precision is a type variable has no single result dtype, \
+         because spec/04 §5.7.1 sums an i8 or i16 operand in i32 and returns that i32 total \
+         but returns i32, i64 and the floats at their own dtype, so sum_result(p, default(p)) \
+         is not one dtype across the dtypes {bound} admits ([04-INF-6]); bound the variable to dtypes that \
+         share one result (`Float`, `{{i32, i64}}`, or `{{i8, i16}}` with an i32 result), \
+         or cast the operand to a concrete dtype and declare the widened result"
     ))
+}
+
+/// The spec/04 §5.7.1 repair note for a mismatch between a dtype `p` that
+/// `sum`, `cumsum`, `trace` and `einsum` widen (i8, i16) and the dtype they
+/// return for it (i32), in either order. `op` names the operation when the
+/// mismatched expression is known to be one; otherwise the note names all
+/// four conditionally. A function type compares its results, so a def whose
+/// body mismatches its declared signature gets the note too.
+pub(crate) fn sum_result_widening_note(
+    op: Option<&str>,
+    left: &Type,
+    right: &Type,
+) -> Option<String> {
+    fn result_prim(ty: &Type) -> Option<Prim> {
+        match ty {
+            Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(*prim),
+            Type::Fn(_, result) => result_prim(result),
+            _ => None,
+        }
+    }
+    let (left, right) = (result_prim(left)?, result_prim(right)?);
+    let widened = |operand: Prim, result: Prim| {
+        operand.default_reduce_sum_result_precision() == Ok(result) && operand != result
+    };
+    let (operand, result) = if widened(left, right) {
+        (left.name(), right.name())
+    } else if widened(right, left) {
+        (right.name(), left.name())
+    } else {
+        return None;
+    };
+    Some(match op {
+        Some(op) => format!(
+            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
+             {result} and returns that {result} total; declare the result as {result}, or \
+             narrow it explicitly with `cast(..., {operand})`"
+        ),
+        None => format!(
+            "if the {result} value is the result of `sum`, `cumsum`, `trace` or `einsum` over \
+             {operand}, spec/04 §5.7.1 widened it, because those operations sum {operand} in \
+             {result} and return that {result} total; declare the result as {result}, or \
+             narrow it explicitly with `cast(..., {operand})`"
+        ),
+    })
+}
+
+/// The `sum`-family operation `expr` evaluates to directly: a call to `sum`,
+/// `cumsum`, `trace` or `einsum`, or a `let` or `fn` whose tail is one.
+pub(crate) fn sum_family_tail_op(expr: &deep::Expr) -> Option<&'static str> {
+    let mut tail = expr;
+    loop {
+        let (tag, _, kids) = stamped_parts(tail)?;
+        match tag {
+            DeepTag::App => {
+                let name = ir_builtin_name_of_expr(kids.first()?)?;
+                return ["sum", "cumsum", "trace", "einsum"]
+                    .into_iter()
+                    .find(|op| *op == name);
+            }
+            DeepTag::Let | DeepTag::Fn => tail = kids.last()?,
+            _ => return None,
+        }
+    }
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the
@@ -2024,13 +2087,9 @@ pub(super) fn infer_top_level(
                     Some(TypeErrorKind::DtypeFamilyMismatch) => CheckErrorKind::PrecisionMismatch,
                     _ => CheckErrorKind::TypeMismatch,
                 };
-                // RT-2 fixup B1: when the mismatch is a tensor
-                // precision mismatch (notably a `reduce_sum` body
-                // whose result precision differs from the declared
-                // one), include a §5.7.1 cite directly in the message
-                // so the user sees the result-precision table rule
-                // rather than a generic "doesn't match declared
-                // signature".
+                // A §5.7.1 widening (an i8 or i16 `sum`-family result is
+                // i32) gets its repair note here rather than leaving the
+                // reader to find the rule behind a whole-signature mismatch.
                 let extra = if let Some(error) = unify_result
                     .as_ref()
                     .err()
@@ -2038,23 +2097,13 @@ pub(super) fn infer_top_level(
                 {
                     format!(": {}", error.message)
                 } else {
-                    match (&resolved_body, &resolved_decl) {
-                        (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
-                            if body_prec != decl_prec =>
-                        {
-                            format!(
-                                " (precision `{}` vs declared `{}`; if the body is a \
-                             `reduce_sum`, see spec/04-type-system.md §5.7.1: \
-                             narrow integer operands widen to i32 to prevent \
-                             silent overflow; use `tensor[{}]` or omit the result \
-                             type)",
-                                body_prec.name(),
-                                decl_prec.name(),
-                                body_prec.name(),
-                            )
-                        }
-                        _ => String::new(),
-                    }
+                    sum_result_widening_note(
+                        sum_family_tail_op(&kids[1]),
+                        &resolved_body,
+                        &resolved_decl,
+                    )
+                    .map(|note| format!("; {note}"))
+                    .unwrap_or_default()
                 };
                 let error = CheckError::with_types(
                     mismatch_kind,

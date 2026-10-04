@@ -552,11 +552,18 @@ pub(super) fn infer_let(
                             Err(e) => {
                                 let expected = subst.apply(&declared_ty);
                                 let got = subst.apply(&expr_ty);
+                                let note = sum_result_widening_note(
+                                    sum_family_tail_op(rhs_expr),
+                                    &got,
+                                    &expected,
+                                )
+                                .map(|note| format!("; {note}"))
+                                .unwrap_or_default();
                                 let mut diagnostic = CheckError::with_types(
                                     check_error_kind_from_type_error_kind(&e.kind),
                                     format!(
                                         "let-binding `{name}` ascription does not match RHS: \
-                                         expected {expected}, got {got}"
+                                         expected {expected}, got {got}{note}"
                                     ),
                                     expected.to_string(),
                                     got.to_string(),
