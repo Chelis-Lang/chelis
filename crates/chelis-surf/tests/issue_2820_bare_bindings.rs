@@ -61,6 +61,10 @@ fn lexical_tensor_constructor_capture_is_a_loud_refusal() {
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: tensor[2, i32] = [1, 2]\n xs\n}\nresult = sample()\n",
         "def sample(to_tensor) = {\n xs: tensor[2, i32] = [1, 2]\n xs\n}\n",
         "def sample() = {\n (to_tensor, other) = (fn (xs: List[i32]) -> xs, 1)\n xs: tensor[2, i32] = [1, 2]\n xs\n}\n",
+        // A declared tensor result converts a bare bracket-literal body too,
+        // whether the result is inline or in a standalone `sig`.
+        "def sample(to_tensor: List[i32] -> tensor[2, i32]) -> tensor[2, i32] = [1, 2]\n",
+        "sig sample: (List[i32] -> tensor[2, i32]) -> tensor[2, i32]\ndef sample(to_tensor) = [1, 2]\n",
     ] {
         let parsed = parse_str(source).unwrap();
         let error = desugar_program(&parsed)
