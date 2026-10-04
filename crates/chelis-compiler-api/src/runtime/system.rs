@@ -122,10 +122,10 @@ impl fmt::Display for EvalSystemError {
                 operation: EvalSystemOperation::ProcessRun,
                 path_or_program,
                 source,
-            } => write!(
-                f,
-                "process_run failed to spawn `{path_or_program}`: {source}"
-            ),
+            } => f.write_str(&chelis_runtime::host_process::spawn_failure_message(
+                path_or_program,
+                source,
+            )),
             Self::System {
                 operation,
                 path_or_program,
@@ -155,11 +155,8 @@ impl From<EvalSystemError> for String {
     }
 }
 
-pub(crate) struct EvalProcessOutput {
-    pub(crate) exit_status: Option<i32>,
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
-}
+// spec/05 §2.6: the raw child process, decoded by the runtime's shared rule.
+pub(crate) use chelis_runtime::host_process::RawProcessOutput as EvalProcessOutput;
 
 // [05-OP-75]: the reading types, normalization, and failure text are the
 // runtime's, shared with compiled host code so the two lanes cannot drift.

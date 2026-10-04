@@ -329,7 +329,7 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 | Name | Signature | Notes |
 |---|---|---|
 | `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
-| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; CLI and compiler API reject compiled builds. |
+| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval and compiled C run it; a signal reports `-1`, and a capture that is not UTF-8 traps `IO`. |
 | `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval and compiled C run it. [05-OP-75] |
 | `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval and compiled C run it. [05-OP-75] |
 

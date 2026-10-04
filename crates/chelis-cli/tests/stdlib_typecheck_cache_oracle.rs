@@ -81,15 +81,14 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// The `build`-oracle corpus excludes Std.Test and Std.Process. Their
-/// `test_*` and `process_run` builtins are host-only, so `chelis build`
-/// loudly rejects those modules (chelis#796; spec/05-risc-primitives.md
-/// §§2.6, 3.6.1, 3.7). Both remain in [`stdlib_corpus`] for the check
-/// oracles. Exclude exact canonical paths so an unrelated future module
+/// The `build`-oracle corpus excludes Std.Test. Its `test_*` builtins are
+/// host-only, so `chelis build` loudly rejects the module (chelis#796;
+/// spec/05-risc-primitives.md §3.6.1). It remains in [`stdlib_corpus`] for
+/// the check oracles. Exclude exact canonical paths so an unrelated future module
 /// with the same filename is never silently dropped.
 fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
     let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
-    let host_only_modules: Vec<PathBuf> = ["src/test.ch", "src/process.ch"]
+    let host_only_modules: Vec<PathBuf> = ["src/test.ch"]
         .iter()
         .map(|rel| {
             std_root
@@ -117,13 +116,6 @@ fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
 #[test]
 fn std_test_module_build_is_host_only_rejected() {
     assert_std_module_build_is_host_only_rejected("test.ch", "test_assert", "host emission");
-}
-
-/// `Std.Process` stays in the check corpus but cannot be built because
-/// `process_run` is host-only under [05-HOST-2].
-#[test]
-fn std_process_module_build_is_host_only_rejected() {
-    assert_std_module_build_is_host_only_rejected("process.ch", "process_run", "compiled targets");
 }
 
 fn assert_std_module_build_is_host_only_rejected(

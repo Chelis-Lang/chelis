@@ -7800,6 +7800,15 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // spec/05 §2.6: the runtime's one `process_run` definition,
+            // shared with the evaluator.
+            "process_run" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_process_run({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
             // [05-OP-75]: one checked host reading, shared with the
             // evaluator through the runtime's `host_clock` definition.
             "clock_wall_read" => {

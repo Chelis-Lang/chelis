@@ -101,18 +101,12 @@ impl EvalSystem for DefaultEvalSystem {
         program: &str,
         args: &[String],
     ) -> Result<EvalProcessOutput, EvalSystemError> {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|source| EvalSystemError::System {
+        chelis_runtime::host_process::spawn_process(program, args).map_err(|source| {
+            EvalSystemError::System {
                 operation: EvalSystemOperation::ProcessRun,
                 path_or_program: program.to_string(),
                 source,
-            })?;
-        Ok(EvalProcessOutput {
-            exit_status: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            }
         })
     }
 

@@ -746,6 +746,13 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_process_run ( chelis_string program , const chelis_list * args ) ;",
+        &[],
+        "[05-OP-38]",
+        "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
         &["numeric-op"],
         "[05-OP-32]",

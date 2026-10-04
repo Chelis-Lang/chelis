@@ -673,6 +673,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_process_run ( chelis_string program , const chelis_list * args ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
       "flags": [
         "numeric-op"

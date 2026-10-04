@@ -28,7 +28,7 @@ The Chelis type system statically checks properties that matter for numerical co
 | Differentiability | Wrong gradients from non-differentiable operations, in-place mutation inside grad | `grad(f)` only compiles if f is pure and differentiable |
 | Reproducibility | Unseeded Monte Carlo, non-deterministic simulation | `chelis manifest --check` verifies every random draw's key derives from a `key_from_seed` root |
 
-The shipped `Effect` enum has four variants: `Accum`, `Io`, `Test`, and `Resource(String)`. Randomness is not an effect: `dropout`, `uniform_like`, and the stdlib random helpers take an explicit `key` ([05-RNG-1]). `Accum` is reserved as an internal design hook for backward-pass accumulation (not yet user-facing). `Io` covers print/debug, filesystem builtins, `process_run`, and the clock reads `clock_wall_read` and `clock_monotonic_read` (`spec/04-type-system.md` §7.1, [05-HOST-2], [05-HOST-4], [05-OP-75]); it does not cover network access. `process_run` is implemented for evaluation today, while its compiled host parity remains outstanding under chelis#1297. `Test` is the in-language test runner's effect. `Resource(String)` carries device-resource boundaries (`gpu:0`, `cpu`) and is validated by `chelis build --target {c,hip}` at the build boundary. The proposed finer taxonomy lives in `effect_taxonomy_expansion.md`.
+The shipped `Effect` enum has four variants: `Accum`, `Io`, `Test`, and `Resource(String)`. Randomness is not an effect: `dropout`, `uniform_like`, and the stdlib random helpers take an explicit `key` ([05-RNG-1]). `Accum` is reserved as an internal design hook for backward-pass accumulation (not yet user-facing). `Io` covers print/debug, filesystem builtins, `process_run`, and the clock reads `clock_wall_read` and `clock_monotonic_read` (`spec/04-type-system.md` §7.1, [05-HOST-2], [05-HOST-4], [05-OP-75]); it does not cover network access. `process_run` runs under evaluation and in compiled C through one runtime definition. `Test` is the in-language test runner's effect. `Resource(String)` carries device-resource boundaries (`gpu:0`, `cpu`) and is validated by `chelis build --target {c,hip}` at the build boundary. The proposed finer taxonomy lives in `effect_taxonomy_expansion.md`.
 
 #### Planned expansion
 
@@ -39,7 +39,7 @@ The current taxonomy is bounded but does not yet distinguish network or filesyst
 - **Item 3** — `chelis run --refuse Network,Filesystem` for signature-based pre-flight refusal of binaries whose declared effects exceed an operator's allowlist (not runtime sandboxing; the binary is still trusted to honestly describe itself).
 - **Item 4** — wire effect aggregation into `chelis reef install` so the install path can `--print-effects` and `--refuse` at the package boundary.
 
-A distinct subprocess *effect variant* is deferred; today's evaluator implements `process_run` under `Io`, and [05-HOST-2] also requires compiled host execution (chelis#1297). Signing of artifacts is a separate concern tracked but not in the bounded taxonomy expansion.
+A distinct subprocess *effect variant* is deferred; `process_run` runs under `Io` in every execution mode ([05-HOST-2]). Signing of artifacts is a separate concern tracked but not in the bounded taxonomy expansion.
 
 These guarantee that a program is internally consistent. They do NOT guarantee it computes the right answer. A program can be dimension-safe, effect-correct, linear, and differentiable while implementing the wrong formula entirely.
 

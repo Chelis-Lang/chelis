@@ -24,6 +24,7 @@ mod decimal_parse;
 pub mod dtype_header;
 mod element;
 pub mod host_clock;
+pub mod host_process;
 mod ieee_narrow;
 mod list;
 mod metadata;
@@ -7599,6 +7600,46 @@ pub unsafe extern "C" fn chelis_clock_wall_read() -> *mut chelis_tuple {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_clock_monotonic_read() -> *mut chelis_tuple {
     clock_read_tuple(host_clock::ClockOperation::Monotonic)
+}
+
+/// `process_run` in compiled host code: the `(exit_code, stdout, stderr)`
+/// tuple, or the call's failure. The evaluator decodes through the same
+/// [`host_process::decode_process_output`] definition.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_process_run(
+    program: chelis_string,
+    args: *const chelis_list,
+) -> *mut chelis_tuple {
+    let program_text = string_value(program).value.clone();
+    if args.is_null() {
+        runtime_fail!("process_run: null argument list");
+    }
+    let argv = (*args)
+        .live()
+        .iter()
+        .map(|value| match value.tag {
+            chelis_value_tag::CHELIS_VALUE_STRING => {
+                string_value(value.payload.string).value.clone()
+            }
+            _ => runtime_fail!("process_run: argument list holds a non-string value"),
+        })
+        .collect::<Vec<_>>();
+    let raw = host_process::spawn_process(&program_text, &argv).unwrap_or_else(|source| {
+        runtime_fail!(
+            "{}",
+            host_process::spawn_failure_message(&program_text, &source)
+        )
+    });
+    let output = host_process::decode_process_output(&program_text, raw)
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    new_tuple(
+        vec![
+            internal_value_from_i64(output.exit_code),
+            internal_value_from_string(new_runtime_string(output.stdout)),
+            internal_value_from_string(new_runtime_string(output.stderr)),
+        ],
+        "chelis_process_run",
+    )
 }
 
 #[no_mangle]

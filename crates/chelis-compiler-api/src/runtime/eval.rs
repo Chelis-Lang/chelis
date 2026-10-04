@@ -4526,14 +4526,11 @@ impl<'a> EvalContext<'a> {
                 let column = expect_string_arg(args, 2)?;
                 super::csv::csv_str_at(value, row_idx, &column).map(RuntimeValue::String)
             }
-            // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
-            //
-            // Current eval/test implementation of subprocess exec. Arguments
-            // pass straight to the OS as argv, without implicit shell, glob,
-            // `$VAR`, or backtick interpolation. The C and HIP build backends
-            // currently reject this builtin; compiled host parity remains
-            // required by [05-HOST-2] and tracked by chelis#1297. This
-            // evaluator boundary does not implement that separate lane.
+            // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout,
+            // stderr)`. Arguments pass straight to the OS as argv, without
+            // implicit shell, glob, `$VAR`, or backtick interpolation. The
+            // result comes from the runtime's one decoding, shared with
+            // compiled host code (chelis#1297).
             "process_run" => {
                 let cmd = expect_string_arg(args, 0)?;
                 let raw_args = expect_list_arg(args, 1)?;
@@ -4548,23 +4545,20 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                let output = self.system.run_process(&cmd, &argv)?;
-                // A process killed by a signal has no exit code; report -1 so
-                // callers can distinguish it from a clean exit 0.
-                let exit_code = output.exit_status.map_or(-1_i64, i64::from);
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let raw = self.system.run_process(&cmd, &argv)?;
+                let output = chelis_runtime::host_process::decode_process_output(&cmd, raw)?;
                 Ok(RuntimeValue::Tuple(
                     vec![
-                        RuntimeValue::int64(exit_code),
-                        RuntimeValue::String(stdout),
-                        RuntimeValue::String(stderr),
+                        RuntimeValue::int64(output.exit_code),
+                        RuntimeValue::String(output.stdout),
+                        RuntimeValue::String(output.stderr),
                     ]
                     .into(),
                 ))
             }
             // [05-OP-75]: `(seconds, nanoseconds)` from one policy-checked
-            // host reading. Compiled host execution is chelis#1297.
+            // host reading, through the runtime definition compiled host
+            // code also calls.
             "clock_wall_read" => Ok(clock_time_value(self.system.clock_wall_read()?)),
             "clock_monotonic_read" => Ok(clock_time_value(self.system.clock_monotonic_read()?)),
             "write_file" => {

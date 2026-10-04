@@ -3646,7 +3646,6 @@ fn host_program_call_name_sites<T>(
 /// [`find_eval_only_host_builtin`], sharing this one list so the two
 /// gates cannot drift (chelis#891 review finding 13).
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
-    "process_run",
     "round_to",
     // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
     // carrier is evaluator-only. Compiled structured I/O lives in the
@@ -19901,6 +19900,8 @@ fn conform_builtin_arguments(
                 ("copy" | "debug", _, 0) => Some(result_ty.clone()),
                 ("append", HostTypeTerm::List(_), 0) => Some(result_ty.clone()),
                 ("append", HostTypeTerm::List(inner), 1) => Some((**inner).clone()),
+                // spec/05 §2.6: argv is `List[string]`, even when empty.
+                ("process_run", _, 1) => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
                 ("dict_of", HostTypeTerm::Dict(key, value), 0) => {
                     Some(HostTypeTerm::List(Box::new(HostTypeTerm::Tuple(vec![
                         (**key).clone(),
@@ -20654,15 +20655,13 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "mmap_file" => Some(HostTypeTerm::MappedFile),
         "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "mmap_len" => Some(HostTypeTerm::Int64),
-        // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
-        // Eval/test-only; the C/HIP build backends reject it before codegen
-        // (see `host_program_uses_builtin` / `reject_eval_only_builtins_host`).
+        // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         "process_run" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,
             HostTypeTerm::String,
             HostTypeTerm::String,
         ])),
-        // [05-OP-75]: `(seconds, nanoseconds)`; eval/test-only like `process_run`.
+        // [05-OP-75]: `(seconds, nanoseconds)`.
         "clock_wall_read" | "clock_monotonic_read" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,
             HostTypeTerm::Int64,

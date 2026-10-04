@@ -586,6 +586,7 @@ bool chelis_file_exists(chelis_string path);
 chelis_list *chelis_list_dir(chelis_string path);
 chelis_tuple *chelis_clock_wall_read(void);
 chelis_tuple *chelis_clock_monotonic_read(void);
+chelis_tuple *chelis_process_run(chelis_string program, const chelis_list *args);
 chelis_mapped_file *chelis_mmap_file(chelis_string path);
 chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
