@@ -557,8 +557,10 @@ impl GradSelectorResolver {
                 // a synthesized conversion, which no parameter may capture.
                 if let Decl::FunDef { ret_ty, .. } = decl
                     && matches!(body, Expr::List(_, _))
-                    && (ret_ty.as_ref().and_then(tensor_element_prim_name).is_some()
-                        || self.tensor_result_signatures.contains(name))
+                    && match ret_ty {
+                        Some(ret_ty) => tensor_element_prim_name(ret_ty).is_some(),
+                        None => self.tensor_result_signatures.contains(name),
+                    }
                     && scope.values.contains_key("to_tensor")
                 {
                     return Err(DesugarError::CapturedTensorConstructor {
@@ -2190,8 +2192,9 @@ impl DesugarCtx {
         // Position 3 (spec §P10b / §5.6): body expression of a function
         // whose declared return type is a tensor type and whose body is
         // itself a tensor literal. Narrow numeric literals in `body` to
-        // the tensor element type. The declared result may come from the
-        // `def` or from its standalone `sig`.
+        // the tensor element type. An inline result type decides; only a
+        // `def` without one takes its standalone `sig`'s result, so an
+        // inline `List[...]` result keeps a `List` body under any `sig`.
         // Binder scope controls `t-var` cast targets and literal adoption.
         let restore_binders = self.current_type_binders.replace(
             self.declared_type_binders
@@ -2199,10 +2202,10 @@ impl DesugarCtx {
                 .cloned()
                 .unwrap_or_default(),
         );
-        let declared_result = ret_ty
-            .as_ref()
-            .and_then(tensor_element_prim_name)
-            .or_else(|| self.top_level_fn_result_tensor_prec.get(name).cloned());
+        let declared_result = match ret_ty {
+            Some(ret_ty) => tensor_element_prim_name(ret_ty),
+            None => self.top_level_fn_result_tensor_prec.get(name).cloned(),
+        };
         let desugared_body = match (declared_result, body) {
             (Some(prec), Expr::List(items, _)) => {
                 self.desugar_list_as_tensor_literal(items, &prec, &body_scope)

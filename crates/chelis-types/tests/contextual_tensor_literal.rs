@@ -429,3 +429,35 @@ fn negative_bare_brackets_at_a_tensor_parameter_or_cast_stay_lists() {
         );
     }
 }
+
+/// A `def`'s inline result type decides whether its bare bracket body is a
+/// tensor literal, and only a `def` without one takes its standalone `sig`'s
+/// result (spec/02-surf-syntax.md §P10b). An inline `List[...]` result keeps
+/// a `List` body, which the tensor `sig` then rejects loudly, and a lambda
+/// bound under a `sig` is not a `def`, so its bare bracket body stays a
+/// `List` too.
+#[test]
+fn an_inline_result_type_decides_over_a_standalone_sig() {
+    let (printed, result) = pipeline("sig f: i32 -> tensor[2, f64]\ndef f(n) = [1.1, 2.2]");
+    assert!(result.errors.is_empty(), "{}", errors_summary(&result));
+    assert!(
+        printed.join("\n").contains("to_tensor") && contains_lit_with_prim(&printed, "f64"),
+        "the sig's tensor result converts and types the body: {}",
+        printed.join("\n")
+    );
+    for src in [
+        "sig f: i32 -> tensor[2, f32]\ndef f(n: i32) -> List[f32] = [1.1, 2.2]",
+        "sig g: i32 -> tensor[2, f32]\ng = fn (n) -> [1.1, 2.2]",
+    ] {
+        let (printed, result) = pipeline(src);
+        assert!(
+            !printed.join("\n").contains("to_tensor"),
+            "{src}: the body must stay a List: {}",
+            printed.join("\n")
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "{src}: a List body under a tensor sig must be rejected, got (no errors)"
+        );
+    }
+}
