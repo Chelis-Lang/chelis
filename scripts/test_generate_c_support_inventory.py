@@ -32,11 +32,10 @@ class SourceRosterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "metadata"):
             inventory.route_metadata("future_builtin")
 
-    def test_csv_route_is_not_a_drop_in_numeric_document_conversion(self):
-        route = inventory.route_metadata("csv_f64s")
-        self.assertIn("Std.Io.Csv.read_csv", route)
-        self.assertIn("string", route)
-        self.assertIn("explicit", route)
+    def test_compiled_host_operations_need_no_route(self):
+        for name in ["process_run", "clock_wall_read", "round_to", "parse_csv", "csv_f64s"]:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "metadata"):
+                inventory.route_metadata(name)
 
 
 class PublishedInventoryTests(unittest.TestCase):
@@ -62,8 +61,8 @@ class PublishedInventoryTests(unittest.TestCase):
 
     def test_kernel_routing_roster_is_not_published_as_exclusions(self):
         names = {row[0] for row in inventory.exclusions(self.root)}
-        self.assertNotIn("print", names)
-        self.assertNotIn("string_concat", names)
+        for name in ["print", "string_concat", "process_run", "round_to", "parse_csv", "csv_int"]:
+            self.assertNotIn(name, names)
 
     def test_test_assertions_are_live_scoped_implementation_gaps(self):
         text = inventory.render(self.root)

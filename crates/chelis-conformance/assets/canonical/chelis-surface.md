@@ -378,14 +378,15 @@ eval-only gate. [05-HOST-2] requires compiled-host support.
 The source-defined `Std.Io.Json` module (§11) provides JSON values with
 distinct `JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
 
-### 3.9 CSV I/O — Eval/test availability
+### 3.9 CSV I/O
 
 The builtin CSV carrier is exactly `List[Dict[string,string]]`: the input's
 first record supplies the column names, the carrier contains only data rows,
 and parsing keeps every cell as text. Numeric meaning enters only through an
 explicit `csv_int*` or `csv_f64*` accessor ([05-OP-2..3]).
 Every operation validates the carrier and fails loudly; no cell is silently
-coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
+coerced or defaulted. Eval and compiled C share one definition of every
+operation. The separate source-defined module is `Std.Io.Csv` (§11).
 
 | Name | Signature | Notes |
 |---|---|---|

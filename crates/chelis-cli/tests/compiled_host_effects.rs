@@ -105,3 +105,94 @@ fn round_to_rejects_an_unadmitted_dtype_by_type() {
     let stderr = build_rejection("a = round_to(3i64, 2i64)\n");
     assert!(stderr.contains("round_to"), "{stderr}");
 }
+
+// ---------------------------------------------------------------------------
+// [05-OP-61], [05-OP-2..3], [05-OP-5] CSV text tables
+// ---------------------------------------------------------------------------
+
+const CSV_TABLE: &str =
+    "t = parse_csv(\"b,a,note\\n9007199254740993,1.5,\\\"x,y\\\"\\n-2, 2e3 ,plain\\n\")\n";
+
+/// Parsing keeps cells as text in header order; every accessor reads them
+/// exactly, and serialization requotes them.
+#[test]
+fn csv_matches_eval_for_every_accessor() {
+    let source = format!(
+        "{CSV_TABLE}\
+         def cell(table: List[Dict[string, string]], row: i64) -> i64 = csv_int(table, row, \"b\")\n\
+         cols = csv_cols(t)\n\
+         rows = csv_nrows(t)\n\
+         notes = csv_strs(t, \"note\")\n\
+         prices = csv_f64s(t, \"a\")\n\
+         ids = csv_ints(t, \"b\")\n\
+         note = csv_str(t, 0i64, \"note\")\n\
+         price = csv_f64(t, 1i64, \"a\")\n\
+         id = cell(t, 0i64)\n\
+         text = to_csv(t)\n\
+         empty = to_csv(parse_csv(\"only\\n\"))\n"
+    );
+    let run = parity::assert_lanes_agree(&source, "csvread");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "rows = 2\n",
+        "notes = [x,y, plain]\n",
+        "prices = [1.5, 2000.0]\n",
+        "ids = [9007199254740993, -2]\n",
+        "note = x,y\n",
+        "price = 2000.0\n",
+        "id = 9007199254740993\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
+    }
+}
+
+/// The failing twins: each malformed table or cell is the same named
+/// failure on both lanes, never a default, NaN, or skipped cell.
+#[test]
+fn csv_failures_match_eval() {
+    for (name, body, failure) in [
+        (
+            "missing",
+            "x = csv_f64(t, 0i64, \"zz\")\n",
+            "csv_f64: column `zz` not found; available columns: b, a, note",
+        ),
+        (
+            "floatsyntax",
+            "x = csv_ints(t, \"a\")\n",
+            "csv_ints: cell `1.5` uses float syntax; use the corresponding csv_f64 accessor",
+        ),
+        (
+            "textcell",
+            "x = csv_f64s(t, \"note\")\n",
+            "csv_f64s: cell `x,y` is not a finite f64: invalid number (expected a digit)",
+        ),
+        (
+            "range",
+            "x = csv_str(t, 2i64, \"b\")\n",
+            "csv_str: data row 2 out of range for 2 rows",
+        ),
+        (
+            "negative",
+            "x = csv_int(t, -1i64, \"b\")\n",
+            "csv_int: row index must be nonnegative, got -1",
+        ),
+        (
+            "ragged",
+            "x = parse_csv(\"a,b\\n1\\n\")\n",
+            "parse_csv: row 2 has 1 fields, expected 2",
+        ),
+        (
+            "overflow",
+            "x = csv_ints(parse_csv(\"n\\n9223372036854775808\\n\"), \"n\")\n",
+            "csv_ints: cell `9223372036854775808` overflows i64",
+        ),
+    ] {
+        let source = format!("{CSV_TABLE}{body}");
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(run.failure, failure, "{name}: {run:?}");
+    }
+}

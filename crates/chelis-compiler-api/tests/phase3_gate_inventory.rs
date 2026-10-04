@@ -176,11 +176,6 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
     let expected_compiler = BTreeSet::from([
         (
             "compiler.rs".to_string(),
-            "reject_eval_only_builtins".to_string(),
-            true,
-        ),
-        (
-            "compiler.rs".to_string(),
             "reject_host_only_builtins".to_string(),
             true,
         ),

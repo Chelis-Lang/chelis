@@ -223,6 +223,26 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_cols ( const chelis_list * table ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_f64s ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_ints ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_strs ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
       "flags": []
     },
@@ -310,6 +330,11 @@
       "flags": [
         "numeric-op"
       ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_parse_csv ( chelis_string text ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -441,6 +466,21 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_f64 ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_int ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_nrows ( const chelis_list * table ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
       "flags": []
     },
@@ -477,6 +517,11 @@
       "flags": [
         "numeric-op"
       ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_csv_str ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -530,6 +575,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_to_csv ( const chelis_list * table ) ;",
       "flags": []
     },
     {

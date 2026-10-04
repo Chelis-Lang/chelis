@@ -160,7 +160,6 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
     // column accessors over List[Dict[string,string]].
-    // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
     "parse_csv",
     "to_csv",
     "csv_f64s",
@@ -1886,7 +1885,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
+    // ─── Host-lane CSV I/O (chelis#903, HostOnly) ─────────
     BuiltinDecl {
         name: "parse_csv",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ParseCsv),

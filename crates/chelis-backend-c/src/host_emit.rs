@@ -7800,6 +7800,46 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-OP-61], [05-OP-2..3], [05-OP-5]: the runtime's one CSV
+            // definition over the `List[Dict[string,string]]` carrier; row
+            // indices and numeric results cross as exact tagged scalars.
+            "parse_csv" | "to_csv" | "csv_cols" | "csv_strs" | "csv_f64s" | "csv_ints" => {
+                let call_args = arg_vars
+                    .iter()
+                    .map(|(var, _)| var.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.lines.push(format!(
+                    "{}{target} = chelis_{name}({call_args});",
+                    self.indent
+                ));
+                return Ok(());
+            }
+            "csv_nrows" => {
+                let call = format!("chelis_csv_nrows({})", arg_vars[0].0);
+                self.lines.push(format!(
+                    "{}{target} = {};",
+                    self.indent,
+                    scalar_carrier_value_expr(&call, ty)?
+                ));
+                return Ok(());
+            }
+            "csv_str" | "csv_f64" | "csv_int" => {
+                let call = format!(
+                    "chelis_{name}({}, {}, {})",
+                    arg_vars[0].0,
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?,
+                    arg_vars[2].0
+                );
+                let value = if name == "csv_str" {
+                    call
+                } else {
+                    scalar_carrier_value_expr(&call, ty)?
+                };
+                self.lines
+                    .push(format!("{}{target} = {value};", self.indent));
+                return Ok(());
+            }
             // [05-OP-1]: the runtime's one decimal rounding, over the exact
             // tagged carriers of the operand and `places`.
             "round_to" => {

@@ -24,6 +24,7 @@ mod decimal_parse;
 pub mod dtype_header;
 mod element;
 pub mod host_clock;
+pub mod host_csv;
 pub mod host_process;
 pub mod host_round;
 mod ieee_narrow;
@@ -7601,6 +7602,182 @@ pub unsafe extern "C" fn chelis_clock_wall_read() -> *mut chelis_tuple {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_clock_monotonic_read() -> *mut chelis_tuple {
     clock_read_tuple(host_clock::ClockOperation::Monotonic)
+}
+
+/// The compiled carrier of a CSV text table, `List[Dict[string,string]]`, as
+/// the runtime's borrowed rows. The checked type guarantees the shape; a
+/// carrier that violates it is a runtime invariant failure.
+unsafe fn csv_table_rows<'a>(
+    table: *const chelis_list,
+    builtin: &str,
+) -> Vec<Vec<(&'a str, &'a str)>> {
+    if table.is_null() {
+        runtime_fail!("{builtin}: null table");
+    }
+    (*table)
+        .live()
+        .iter()
+        .map(|row| {
+            if row.tag != chelis_value_tag::CHELIS_VALUE_DICT || row.payload.dict.is_null() {
+                runtime_fail!("{builtin}: a table row is not Dict[string,string]");
+            }
+            (*row.payload.dict)
+                .entries
+                .iter()
+                .map(|entry| {
+                    if entry.key.tag != chelis_value_tag::CHELIS_VALUE_STRING
+                        || entry.value.tag != chelis_value_tag::CHELIS_VALUE_STRING
+                    {
+                        runtime_fail!("{builtin}: a table cell is not a string");
+                    }
+                    (
+                        string_value(entry.key.payload.string).value.as_str(),
+                        string_value(entry.value.payload.string).value.as_str(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A CSV result, or the operation's failure.
+fn csv_result<T>(result: Result<T, String>) -> T {
+    result.unwrap_or_else(|message| runtime_fail!("{message}"))
+}
+
+fn csv_row_index(row: chelis_scalar, builtin: &str) -> i64 {
+    exact_i64_scalar(row, builtin)
+}
+
+unsafe fn csv_string_list(values: Vec<String>, site: &str) -> *mut chelis_list {
+    new_list(
+        values
+            .into_iter()
+            .map(|value| internal_value_from_string(new_runtime_string(value)))
+            .collect(),
+        site,
+    )
+}
+
+/// [05-OP-61] `parse_csv` in compiled host code; the evaluator parses
+/// through the same [`host_csv::parse_csv_text`].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_parse_csv(text: chelis_string) -> *mut chelis_list {
+    let rows = csv_result(host_csv::parse_csv_text(&string_value(text).value));
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let entries = row
+                .into_iter()
+                .map(|(key, value)| chelis_dict_entry {
+                    key: internal_value_from_string(new_runtime_string(key)),
+                    value: internal_value_from_string(new_runtime_string(value)),
+                })
+                .collect();
+            chelis_value_take_dict(new_dict(entries, "chelis_parse_csv"))
+        })
+        .collect();
+    new_list(items, "chelis_parse_csv")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_to_csv(table: *const chelis_list) -> chelis_string {
+    new_runtime_string(csv_result(host_csv::to_csv(csv_table_rows(
+        table, "to_csv",
+    ))))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_cols(table: *const chelis_list) -> *mut chelis_list {
+    let columns = csv_result(host_csv::csv_cols(csv_table_rows(table, "csv_cols")));
+    csv_string_list(columns, "chelis_csv_cols")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_nrows(table: *const chelis_list) -> chelis_scalar {
+    let rows = csv_result(host_csv::csv_nrows(csv_table_rows(table, "csv_nrows")));
+    chelis_scalar_from_bits(CHELIS_DTYPE_I64, u64::from_ne_bytes(rows.to_ne_bytes()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_strs(
+    table: *const chelis_list,
+    column: chelis_string,
+) -> *mut chelis_list {
+    let rows = csv_table_rows(table, "csv_strs");
+    let values = csv_result(host_csv::csv_strs(rows, &string_value(column).value));
+    csv_string_list(values, "chelis_csv_strs")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_f64s(
+    table: *const chelis_list,
+    column: chelis_string,
+) -> *mut chelis_list {
+    let rows = csv_table_rows(table, "csv_f64s");
+    let values = csv_result(host_csv::csv_f64s(rows, &string_value(column).value));
+    new_list(
+        values
+            .into_iter()
+            .map(|value| internal_value_from_f64(value))
+            .collect(),
+        "chelis_csv_f64s",
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_ints(
+    table: *const chelis_list,
+    column: chelis_string,
+) -> *mut chelis_list {
+    let rows = csv_table_rows(table, "csv_ints");
+    let values = csv_result(host_csv::csv_ints(rows, &string_value(column).value));
+    new_list(
+        values
+            .into_iter()
+            .map(|value| internal_value_from_i64(value))
+            .collect(),
+        "chelis_csv_ints",
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_str(
+    table: *const chelis_list,
+    row: chelis_scalar,
+    column: chelis_string,
+) -> chelis_string {
+    let rows = csv_table_rows(table, "csv_str");
+    let row = csv_row_index(row, "csv_str");
+    new_runtime_string(csv_result(host_csv::csv_str(
+        rows,
+        row,
+        &string_value(column).value,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_f64(
+    table: *const chelis_list,
+    row: chelis_scalar,
+    column: chelis_string,
+) -> chelis_scalar {
+    let rows = csv_table_rows(table, "csv_f64");
+    let row = csv_row_index(row, "csv_f64");
+    let value = csv_result(host_csv::csv_f64(rows, row, &string_value(column).value));
+    chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_csv_int(
+    table: *const chelis_list,
+    row: chelis_scalar,
+    column: chelis_string,
+) -> chelis_scalar {
+    let rows = csv_table_rows(table, "csv_int");
+    let row = csv_row_index(row, "csv_int");
+    let value = csv_result(host_csv::csv_int(rows, row, &string_value(column).value));
+    chelis_scalar_from_bits(CHELIS_DTYPE_I64, u64::from_ne_bytes(value.to_ne_bytes()))
 }
 
 /// [05-OP-1] `round_to` in compiled host code over tagged scalars: the

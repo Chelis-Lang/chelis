@@ -760,6 +760,76 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_list * chelis_parse_csv ( chelis_string text ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_to_csv ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-5]",
+        "`to_csv(table: List[Dict[string,string]]) -> string` returns the serialized"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_cols ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_nrows ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_strs ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_f64s ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_ints ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_csv_str ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_f64 ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_int ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
         &["numeric-op"],
         "[05-OP-32]",

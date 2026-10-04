@@ -3637,55 +3637,6 @@ fn host_program_call_name_sites<T>(
     out
 }
 
-/// Builtins available only under `chelis eval` / `chelis test` (the host
-/// evaluator) and deliberately absent from every compiled backend:
-/// emitting the C codegen catch-all for them would produce a silent wrong
-/// value (the chelis#734 class). Both public build entry points -- the CLI
-/// build pipeline and `chelis-compiler-api::compile_for_execution` (the
-/// chelis-python path) -- reject them via
-/// [`find_eval_only_host_builtin`], sharing this one list so the two
-/// gates cannot drift (chelis#891 review finding 13).
-pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
-    // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
-    // carrier is evaluator-only. Compiled structured I/O lives in the
-    // source-defined Std.Io modules instead.
-    "parse_csv",
-    "to_csv",
-    "csv_f64s",
-    "csv_ints",
-    "csv_strs",
-    "csv_nrows",
-    "csv_cols",
-    "csv_f64",
-    "csv_int",
-    "csv_str",
-];
-
-/// First eval/test-only builtin applied anywhere in the lowered host
-/// program, if any (see [`EVAL_ONLY_HOST_BUILTINS`]).
-pub fn find_eval_only_host_builtin<T>(program: &HostProgram<T>) -> Option<&'static str> {
-    EVAL_ONLY_HOST_BUILTINS
-        .iter()
-        .copied()
-        .find(|builtin| host_program_uses_builtin(program, builtin))
-}
-
-/// Returns `true` if any global binding or function body in `program`
-/// applies the named builtin. Used by the build backends to reject
-/// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
-/// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
-/// fallthrough in C codegen.
-pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> bool {
-    program
-        .globals
-        .iter()
-        .any(|binding| host_body_uses_builtin(&binding.value, builtin))
-        || program
-            .functions
-            .iter()
-            .any(|function| host_body_uses_builtin(&function.body, builtin))
-}
-
 /// Find a direct application of one of `builtins` in checked Deep before host
 /// expression lowering descends into its arguments. Target frontends use this
 /// to preserve the owning builtin rejection when an argument (such as an
@@ -3738,113 +3689,6 @@ fn find_direct_builtin_call_in_expr(expr: &Expr, builtins: &[&str]) -> Option<St
             })
         }
         ExprCarrier::Atom(_) => None,
-    }
-}
-
-fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
-    match &callback.kind {
-        HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
-        HostCallbackKind::Named { .. } => false,
-    }
-}
-
-fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
-    match &expr.kind {
-        HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
-        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
-            host_body_uses_builtin(value, builtin)
-        }
-        HostExprKind::Builtin { name, args, .. } => {
-            name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::Call { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::SignatureEntry { args, lists, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-                || lists
-                    .iter()
-                    .any(|entry| host_body_uses_builtin(&entry.value, builtin))
-        }
-        HostExprKind::TensorCall { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::AdtConstruct { fields, .. } => {
-            fields.iter().any(|f| host_body_uses_builtin(f, builtin))
-        }
-        HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => {
-            items.iter().any(|i| host_body_uses_builtin(i, builtin))
-        }
-        HostExprKind::AdtFieldAccess { base, .. } => host_body_uses_builtin(base, builtin),
-        HostExprKind::Let { bindings, body, .. }
-        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            bindings
-                .iter()
-                .any(|b| host_body_uses_builtin(&b.value, builtin))
-                || host_body_uses_builtin(body, builtin)
-        }
-        HostExprKind::If {
-            cond,
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            host_body_uses_builtin(cond, builtin)
-                || host_body_uses_builtin(then_expr, builtin)
-                || host_body_uses_builtin(else_expr, builtin)
-        }
-        HostExprKind::MatchOption {
-            scrutinee,
-            some_expr,
-            none_expr,
-            ..
-        } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || host_body_uses_builtin(some_expr, builtin)
-                || host_body_uses_builtin(none_expr, builtin)
-        }
-        HostExprKind::MatchAdt {
-            scrutinee,
-            arms,
-            default_expr,
-            ..
-        } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || arms
-                    .iter()
-                    .any(|arm| host_body_uses_builtin(&arm.expr, builtin))
-                || default_expr
-                    .as_ref()
-                    .is_some_and(|d| host_body_uses_builtin(d, builtin))
-        }
-        HostExprKind::Map { callback, list, .. }
-        | HostExprKind::Filter { callback, list, .. }
-        | HostExprKind::Partition { callback, list, .. }
-        | HostExprKind::FlatMap { callback, list, .. } => {
-            host_callback_uses_builtin(callback, builtin) || host_body_uses_builtin(list, builtin)
-        }
-        HostExprKind::Fold {
-            callback,
-            init,
-            list,
-            ..
-        }
-        | HostExprKind::Scan {
-            callback,
-            init,
-            list,
-            ..
-        } => {
-            host_callback_uses_builtin(callback, builtin)
-                || host_body_uses_builtin(init, builtin)
-                || host_body_uses_builtin(list, builtin)
-        }
-        HostExprKind::Int(_)
-        | HostExprKind::Float(_)
-        | HostExprKind::Bool(_)
-        | HostExprKind::String(_)
-        | HostExprKind::Var(_, _)
-        | HostExprKind::Unit => false,
     }
 }
 
@@ -24083,32 +23927,6 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         assert!(
             error.message.contains("unresolved host inference variable"),
             "{error:?}"
-        );
-    }
-
-    #[test]
-    fn host_program_uses_builtin_detects_process_run() {
-        // Hull subprocess exec: a global binding that applies process_run is
-        // detected so the build backends can reject it before codegen.
-        let checked = surf_check("result = process_run(\"echo\", [\"hi\"])\n");
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must detect a process_run global binding"
-        );
-    }
-
-    #[test]
-    fn host_program_uses_builtin_is_false_without_process_run() {
-        // Negative parity: a program that uses only file IO must not report
-        // process_run usage, so the positive assertion is not vacuous.
-        let checked = surf_check("contents = read_file(\"dataset.txt\")\n");
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            !host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must be false for a read_file-only program"
         );
     }
 
