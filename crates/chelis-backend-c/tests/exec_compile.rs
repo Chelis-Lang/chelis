@@ -2763,9 +2763,9 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
     assert!(!generated.c_source.contains("t0->ndim"));
     for balanced_tree_fragment in [
         "while (__level_n_1 > 1)",
-        "int64_t __left_1 = 2 * __j_1",
-        "int64_t __right_1 = __left_1 + 1",
-        "chelis_int_checked_add(__level_1[__left_1], __level_1[__right_1]",
+        "int64_t __pair_left = 2 * __pair",
+        "int64_t __pair_right = __pair_left + 1",
+        "chelis_int_checked_add(__level_1[__pair_left], __level_1[__pair_right]",
     ] {
         assert!(
             generated.c_source.contains(balanced_tree_fragment),

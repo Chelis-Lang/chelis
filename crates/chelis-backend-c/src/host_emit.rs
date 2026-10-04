@@ -9446,6 +9446,35 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}if ({bytes} != 0) memcpy({view}.data, chelis_host_tensor_data({base}), (size_t){bytes});", self.indent));
         }
+        if matches!(kind, SparseSummaryKind::ScatterAdd) {
+            let updates = &args[summary.input_indices[2]];
+            let prefix = self.next_temp("sparse_add");
+            let lines = CEmitter::scatter_add_tree_lines(
+                &prefix,
+                plan,
+                count,
+                &format!("chelis_host_tensor_data({indices})"),
+                index_element,
+                &format!("{view}.data"),
+                &format!("chelis_tensor_numel({target})"),
+                &format!("chelis_host_tensor_data({updates})"),
+                summary.output.precision,
+                crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                    axis: summary.axis,
+                    batch_rank: 0,
+                }),
+            );
+            for (depth, line) in lines {
+                self.lines
+                    .push(format!("{}{}{line}", self.indent, "    ".repeat(depth)));
+            }
+            self.end_tensor_write(&guard);
+            self.lines.push(format!(
+                "{}chelis_sparse_plan_release({plan});",
+                self.indent
+            ));
+            return;
+        }
         let linear = self.next_temp("sparse_linear");
         let slot = self.next_temp("sparse_slot");
         let selected = self.next_temp("sparse_selected");
@@ -9460,18 +9489,7 @@ impl<'a> HostEmitter<'a> {
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
             SparseSummaryKind::ScatterAdd => {
-                let updates = &args[summary.input_indices[2]];
-                let destination = format!("(({element}*){view}.data)[{offset}]");
-                let sum = CEmitter::scatter_add_sum(
-                    crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
-                        axis: summary.axis,
-                        batch_rank: 0,
-                    }),
-                    &destination,
-                    &format!("((const {element}*)chelis_host_tensor_data({updates}))[{linear}]"),
-                    summary.output.precision,
-                );
-                self.lines.push(format!("{}    {destination} = {sum};", self.indent));
+                unreachable!("scatter-add emits the balanced tree above")
             }
             SparseSummaryKind::ScatterReplace => {
                 let updates = &args[summary.input_indices[2]];
