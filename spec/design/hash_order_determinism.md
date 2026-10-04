@@ -333,7 +333,7 @@ program, a result carrying several obligations took the position of its earliest
 `expand`, and the element-count relations of the `reshape` expressions consuming a
 settled result resolved in `reshape` source order before the next result settled.
 `TypeVar(u32)` allocation order is not that order, because inference visits
-definitions in dependency order (`infer/declarations.rs` Tarjan SCCs), so the
+definitions in dependency order (`infer/declaration_graph.rs` Tarjan SCCs), so the
 implementation recorded a source ordinal on each obligation and `bind_tvar`'s
 obligation `extend` became an ordered merge.
 
