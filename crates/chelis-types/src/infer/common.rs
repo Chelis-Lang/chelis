@@ -180,6 +180,29 @@ pub(super) fn deftype_opaque_meta(meta: &deep::Metadata) -> bool {
     meta.opaque().is_some()
 }
 
+/// Whether `expr` is the finite, untyped `Cons`/`Nil` chain a bracket literal
+/// desugars to (spec/02-surf-syntax.md §P10b).
+pub(super) fn is_bracket_literal(expr: &deep::Expr) -> bool {
+    let is_variable = |expr: &deep::Expr, name: &str| {
+        matches!(stamped_parts(expr), Some((DeepTag::Var, meta, [atom]))
+            if meta.ty().is_none() && symbol_name(atom) == Some(name))
+    };
+    let mut tail = expr;
+    loop {
+        if is_variable(tail, "Nil") {
+            return true;
+        }
+        match stamped_parts(tail) {
+            Some((DeepTag::App, meta, [cons, _, rest]))
+                if meta.ty().is_none() && is_variable(cons, "Cons") =>
+            {
+                tail = rest;
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Extract a symbol name from an Expr.
 pub(super) fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     match expr {

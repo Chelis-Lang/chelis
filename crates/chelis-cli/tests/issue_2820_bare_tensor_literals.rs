@@ -1,4 +1,6 @@
-//! Observable binding kind/default dtype is shared by both execution lanes.
+//! Observable binding kind/default dtype is shared by both execution lanes: a
+//! bare bracket literal is a List, and `to_tensor` or a declared tensor type
+//! makes a tensor (spec/02-surf-syntax.md §P10b).
 #[path = "common/mod.rs"]
 mod common;
 use assert_cmd::Command;
@@ -11,7 +13,7 @@ fn cli(reef: &std::path::Path, app: &std::path::Path) -> Command {
     cmd
 }
 #[test]
-fn bare_and_declared_tensor_roots_agree_in_json_and_native_execution() {
+fn explicit_and_declared_tensor_roots_agree_in_json_and_native_execution() {
     let (_dir, reef, app) = common::make_app("issue-2820");
     for (literal, ty, shape) in [
         ("[1, 2, 3]", "tensor[3, i32]", json!([3])),
@@ -27,7 +29,9 @@ fn bare_and_declared_tensor_roots_agree_in_json_and_native_execution() {
     ] {
         common::write_file(
             &app.join("src/main.ch"),
-            &format!("module Demo.Main\nbare = {literal}\ndeclared: {ty} = {literal}\n"),
+            &format!(
+                "module Demo.Main\nbare = {literal}\nexplicit = to_tensor({literal})\ndeclared: {ty} = {literal}\n"
+            ),
         );
         let checked = cli(&reef, &app)
             .args(["check", "src/main.ch"])
@@ -45,10 +49,12 @@ fn bare_and_declared_tensor_roots_agree_in_json_and_native_execution() {
         let report: Value = serde_json::from_slice(&eval.stdout).unwrap();
         let roots = report["roots"].as_array().unwrap();
         let bare = roots.iter().find(|r| r["name"] == "bare").unwrap();
+        let explicit = roots.iter().find(|r| r["name"] == "explicit").unwrap();
         let declared = roots.iter().find(|r| r["name"] == "declared").unwrap();
-        assert_eq!(bare["value"]["type"], "tensor");
-        assert_eq!(bare["value"]["value"]["shape"], shape);
-        assert_eq!(bare["value"], declared["value"]);
+        assert_eq!(bare["value"]["type"], "list");
+        assert_eq!(explicit["value"]["type"], "tensor");
+        assert_eq!(explicit["value"]["value"]["shape"], shape);
+        assert_eq!(explicit["value"], declared["value"]);
         let text = cli(&reef, &app)
             .args(["eval", "--file", "src/main.ch"])
             .output()
@@ -57,7 +63,8 @@ fn bare_and_declared_tensor_roots_agree_in_json_and_native_execution() {
         let evaluated = String::from_utf8(text.stdout).unwrap();
         let native = common::build_and_run_app(&reef, &app, "main");
         assert_eq!(native, evaluated);
-        assert!(native.contains("bare = tensor("), "{native}");
+        assert!(native.contains("explicit = tensor("), "{native}");
+        assert!(!native.contains("bare = tensor("), "{native}");
     }
 }
 #[test]
@@ -88,7 +95,12 @@ fn explicit_list_roots_retain_list_kind_and_mixed_tensor_dtypes_reject() {
             String::from_utf8(evaluated.stdout).unwrap()
         );
     }
-    for literal in ["[1.0, 2.0f64]", "[1i32, 2i64]", "[[1.0], [2.0, 3.0]]"] {
+    for literal in [
+        "[1.0, 2.0f64]",
+        "[1i32, 2i64]",
+        "to_tensor([1.0, 2.0f64])",
+        "to_tensor([[1.0], [2.0, 3.0]])",
+    ] {
         common::write_file(
             &app.join("src/main.ch"),
             &format!("module Demo.Main\nresult = {literal}\n"),
@@ -109,7 +121,7 @@ fn explicit_list_roots_retain_list_kind_and_mixed_tensor_dtypes_reject() {
 #[test]
 fn captured_constructor_refuses_and_ragged_rejection_has_a_source_location() {
     let (_dir, reef, app) = common::make_app("issue-2820-capture");
-    let source = "module Demo.Main\ndef sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n xs\n}\nresult = sample()\n";
+    let source = "module Demo.Main\ndef sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: tensor[2, i32] = [1, 2]\n xs\n}\nresult = sample()\n";
     common::write_file(&app.join("src/main.ch"), source);
     for command in [
         ["check", "src/main.ch"].as_slice(),
@@ -136,7 +148,7 @@ fn captured_constructor_refuses_and_ragged_rejection_has_a_source_location() {
     assert!(!app.join("capture-output/main").exists());
     common::write_file(
         &app.join("src/main.ch"),
-        "module Demo.Main\nresult = [[1i32], [2i32, 3i32]]\n",
+        "module Demo.Main\nresult = to_tensor([[1i32], [2i32, 3i32]])\n",
     );
     let output = cli(&reef, &app)
         .args(["check", "src/main.ch"])
