@@ -606,3 +606,47 @@ fn a_tensor_literal_cast_to_a_dtype_binder_is_typed_at_the_binder_and_refused() 
         assert!(errors.is_empty(), "{source}{errors:?}");
     }
 }
+
+/// A cast operand prints for the dtype its re-desugaring derives, in the call
+/// and the pipe spelling alike: the desugarer adopts an operand printed as an
+/// unsuffixed or negated literal (spec/04 §5.6 position 4), so an operand that
+/// did not adopt keeps its suffix, at a primitive and at a dtype binder.
+#[test]
+fn every_cast_operand_spelling_round_trips() {
+    const PRELUDE: &str = "macro half() = 1.1\nmacro minus_half() = neg(1.1)\n";
+    let operands = [
+        "1.1",
+        "-1.1",
+        "neg(1.1)",
+        "(1.1 : f32)",
+        "(neg(1.1) : f32)",
+        "1.1f32",
+        "half()",
+        "minus_half()",
+        "7",
+        "-128",
+    ];
+    let mut failures = Vec::new();
+    for operand in operands {
+        for (target, wrap) in [
+            ("f64", None),
+            ("i8", None),
+            ("p", Some("def g[p: Float](w: p) -> p = ")),
+        ] {
+            for spelling in [
+                format!("cast({operand}, {target})"),
+                format!("{operand} |> cast({target})"),
+            ] {
+                let body = match wrap {
+                    Some(prefix) => format!("{prefix}{spelling}\n"),
+                    None => format!("values = {spelling}\n"),
+                };
+                let source = format!("{PRELUDE}{body}");
+                if let Some(failure) = check(&source, Expected::Conversions(0)) {
+                    failures.push(failure);
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

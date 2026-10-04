@@ -347,3 +347,42 @@ fn lint_fix_keeps_the_bits_of_the_recommended_cast_spelling() {
         "lint --fix changed the bits ({fixed:?}):\n{rewritten}"
     );
 }
+
+/// Round 1 verification of chelis#3145: a cast operand that did not adopt
+/// (a macro's `neg(lit)`, an ascribed literal, a macro literal) keeps its value
+/// through `chelis surf`, in the call and pipe spellings, at a primitive and at
+/// a dtype binder.
+#[test]
+fn cast_operands_keep_their_values_through_resugaring() {
+    for (index, source) in [
+        "macro mh() = neg(1.1)\n\
+         a = cast(mh(), f64)\n\
+         b = mh() |> cast(f64)\n\
+         c = (neg(1.1) : f32) |> cast(f64)\n\
+         d = (1.1 : f32) |> cast(f64)\n\
+         e = cast((1.1 : f32), f64)\n",
+        "macro half() = 1.1\n\
+         def b[p: Float](x: p) -> p = add(x, half() |> cast(p))\n\
+         def c[p: Float](x: p) -> p = add(x, cast(half(), p))\n\
+         rb = b(0.0f64)\n\
+         rc = c(0.0f64)\n",
+        "def b[p: Float](x: p) -> p = add(x, (1.1 : f32) |> cast(p))\n\
+         def c[p: Float](x: p) -> p = add(x, cast((1.1 : f32), p))\n\
+         rb = b(0.0f64)\n\
+         rc = c(0.0f64)\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = tempdir().expect("tempdir");
+        let file = format!("operands{index}.ch");
+        common::write_file(&directory.path().join(&file), source);
+        let report = eval_json(directory.path(), &file);
+        let resugared = resugar(directory.path(), &file);
+        assert_eq!(
+            eval_json(directory.path(), "resugared.ch")["roots"],
+            report["roots"],
+            "{source} changed value through chelis surf:\n{resugared}"
+        );
+    }
+}
