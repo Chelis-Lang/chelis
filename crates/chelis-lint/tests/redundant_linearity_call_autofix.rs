@@ -497,22 +497,53 @@ def f(xs: List[i64], n: i64) -> List[i64] = xs |> skip(n)
 /// `drop(x)` redundancy warning must still fire (and offer a `[fix]`)
 /// on a tensor argument where the strip is safe under implicit
 /// linearity. Pins that the Item 3 fix does not over-suppress
-/// legitimate linearity-primitive `drop()` flagging.
+/// legitimate linearity-primitive `drop()` flagging. The typed
+/// pipeline accepts both the original and the stripped program.
 #[test]
 fn f13_warning_still_fires_on_legitimate_redundant_drop() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("redundant_drop.ch");
     let source = "\
-def f(w: tensor[2, f32]) -> tensor[2, f32] = drop(realize(w))
-
-result = f(to_tensor([1.0, 2.0]))
+def f(w: tensor[2, f32]) -> tensor[2, f32] = realize(w)
+result = drop(f(to_tensor([1.0, 2.0])))
 ";
     write_and_format(&path, source);
 
     let lint_stdout = chelis_lint_check_stdout(&path);
     assert!(
-        lint_stdout.contains("redundant-linearity-call"),
-        "f13: warning should still fire on legitimate single-arg drop(tensor); got:\n{lint_stdout}",
+        lint_stdout.contains("redundant-linearity-call") && lint_stdout.contains("[fix]"),
+        "f13: warning should still fire with a fix on legitimate single-arg drop(tensor); got:\n{lint_stdout}",
+    );
+}
+
+/// F13b (chelis#3108): a strip is offered only as a rewrite that
+/// preserves semantics, which needs the typed pipeline to accept the
+/// original too. `drop(realize(w))` returns `()` where the signature
+/// promises a tensor, so the original is rejected; stripping `drop`
+/// would turn a rejected program into an accepted one, which is not a
+/// preserving rewrite. The warning is suppressed and `--fix` leaves
+/// the source unchanged.
+#[test]
+fn f13b_no_strip_offered_when_the_original_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rejected_drop.ch");
+    let source = "\
+def f(w: tensor[2, f32]) -> tensor[2, f32] = drop(realize(w))
+result = f(to_tensor([1.0, 2.0]))
+";
+    write_and_format(&path, source);
+    let before = fs::read_to_string(&path).expect("read fixture");
+
+    let lint_stdout = chelis_lint_check_stdout(&path);
+    assert!(
+        !lint_stdout.contains("redundant-linearity-call"),
+        "f13b: no strip is offered for a rejected original; got:\n{lint_stdout}",
+    );
+    chelis_lint_fix(&path);
+    assert_eq!(
+        fs::read_to_string(&path).expect("read fixture"),
+        before,
+        "f13b: --fix must not rewrite a rejected original",
     );
 }
 
