@@ -481,6 +481,12 @@ fn pipe_spellings_adopt_exactly_like_the_nested_call() {
             "values = 1.5f32 |> cast(f64)\n",
         ],
         &["values = cast(7i32, i64)\n", "values = 7i32 |> cast(i64)\n"],
+        // A macro's expansion is a default f32 literal that never adopted; its
+        // f32 suffix is semantic in both spellings.
+        &[
+            "macro half() = 1.5\nvalues = cast(half(), f64)\n",
+            "macro half() = 1.5\nvalues = half() |> cast(f64)\n",
+        ],
         &["values = cast(-1.1, f64)\n", "values = -1.1 |> cast(f64)\n"],
         &[
             "values = cast(3000000000, i64)\n",
