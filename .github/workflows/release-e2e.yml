@@ -1,0 +1,238 @@
+name: Release E2E
+
+# Proves that a published release installs and runs on each host class it
+# claims, using the published assets and the gates from the tagged source.
+# Nothing here builds Chelis. scripts/release_e2e.py owns the steps and the
+# report; this workflow only provides the hosts.
+on:
+  push:
+    branches: [agent/release-e2e-proof]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to prove (vX.Y.Z)
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || 'v0.18.12' }}
+
+jobs:
+  inputs:
+    name: Published assets and tagged gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source-sha: ${{ steps.identity.outputs.source-sha }}
+    steps:
+      - name: Checkout the tagged release gates
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: tagged
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/installed_artifact_canary.py
+            .github/scripts/smoke_macos_manifested_callable.py
+            .github/scripts/verify_release_smt.py
+            docs/book/src/first-program.md
+          sparse-checkout-cone-mode: false
+      - name: Download and verify the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p e2e/assets e2e/gates/scripts e2e/gates/.github/scripts e2e/gates/docs/book/src
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir e2e/assets
+          (cd e2e/assets && sha256sum -c ./*.sha256)
+          cp tagged/scripts/installed_artifact_canary.py e2e/gates/scripts/
+          cp tagged/.github/scripts/smoke_macos_manifested_callable.py \
+            tagged/.github/scripts/verify_release_smt.py e2e/gates/.github/scripts/
+          cp tagged/docs/book/src/first-program.md e2e/gates/docs/book/src/
+      - name: Record the tagged commit
+        id: identity
+        run: echo "source-sha=$(git -C tagged rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-e2e-inputs
+          path: e2e
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  hosts:
+    name: ${{ matrix.runner }}
+    needs: inputs
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15, macos-26, ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-e2e-inputs
+          path: e2e
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Prove the release on this host
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+          LABEL: ${{ matrix.runner }}
+        run: >-
+          uv run --python 3.11 --no-project python scripts/release_e2e.py run --online
+          --label "$LABEL" --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+          --assets e2e/assets --gates e2e/gates --evidence "$RUNNER_TEMP/evidence"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-e2e-evidence-${{ matrix.runner }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  distros:
+    name: ${{ matrix.image }}
+    needs: inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.31, the floor the Linux build targets.
+          - image: debian:11
+            id: debian-11
+            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
+          - image: ubuntu:20.04
+            id: ubuntu-20.04
+            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
+          - image: debian:12
+            id: debian-12
+            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
+          - image: debian:13
+            id: debian-13
+            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
+          - image: fedora:latest
+            id: fedora
+            prepare: dnf -y -q install gcc gcc-c++ tar gzip
+          - image: almalinux:9
+            id: almalinux-9
+            prepare: dnf -y -q install gcc gcc-c++ tar gzip
+          - image: amazonlinux:2023
+            id: amazonlinux-2023
+            prepare: dnf -y -q install gcc gcc-c++ tar gzip
+          - image: opensuse/leap:15.6
+            id: opensuse-leap-15.6
+            prepare: zypper -n -q install gcc gcc-c++ tar gzip
+          - image: archlinux:latest
+            id: archlinux
+            prepare: pacman -Syu --noconfirm --needed --quiet gcc tar gzip
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-e2e-inputs
+          path: e2e
+      - uses: astral-sh/setup-uv@v8.1.0
+      # Each image gets the documented native prerequisites and nothing else.
+      # uv supplies the harness interpreter; gh is absent, so the run covers
+      # the GitHub API install but not the gh bootstrap.
+      - name: Prove the release inside ${{ matrix.image }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+          IMAGE: ${{ matrix.image }}
+          PREPARE: ${{ matrix.prepare }}
+        run: |
+          set -euo pipefail
+          mkdir -p .uv && cp "$(command -v uv)" .uv/uv
+          docker run --rm -e GITHUB_TOKEN -e RELEASE_TAG -e SOURCE_SHA -e IMAGE -e PREPARE \
+            -v "$PWD:/work" -w /work "$IMAGE" sh -c '
+              set -e
+              sh -c "$PREPARE" >/dev/null
+              /work/.uv/uv run --python 3.11 --no-project python scripts/release_e2e.py run --online \
+                --label "$IMAGE" --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
+                --assets e2e/assets --gates e2e/gates --evidence /work/evidence'
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-e2e-evidence-${{ matrix.id }}
+          path: evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  nixos:
+    name: NixOS 26.05 VMs (stock, nix-ld)
+    needs: inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-e2e-inputs
+          path: e2e
+      - name: Give the build users KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "::warning::no /dev/kvm; the NixOS VMs run under emulation"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.4/install
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Run the release inside both VMs
+        env:
+          SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs --out-link nixos-result \
+            --file nix/tests/release-e2e-nixos.nix \
+            --arg assets "$PWD/e2e/assets" --arg gates "$PWD/e2e/gates" \
+            --arg harness "$PWD/scripts/release_e2e.py" \
+            --argstr tag "$RELEASE_TAG" --argstr sourceSha "$SOURCE_SHA"
+          for node in stock nixld; do
+            mkdir -p "nixos-evidence/$node"
+            tar -C "nixos-evidence/$node" -xzf "nixos-result/$node/evidence.tar.gz"
+          done
+      - name: Require both VMs to pass
+        run: python3 scripts/release_e2e.py summarize nixos-evidence --require-pass
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-e2e-evidence-nixos
+          path: nixos-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  summary:
+    name: Summary
+    needs: [hosts, distros, nixos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-e2e-evidence-*
+          path: evidence
+      - name: Render every host's report
+        run: python3 scripts/release_e2e.py summarize evidence | tee -a "$GITHUB_STEP_SUMMARY"
