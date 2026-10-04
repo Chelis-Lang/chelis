@@ -2114,6 +2114,28 @@ def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
     _assert_hash_partition_contract(shard_block, expected_count=4)
 
 
+MODULE_ORACLES_FILTERSET = "${{ needs.module-oracles-plan.outputs.filterset }}"
+
+
+def _assert_negates_module_oracles(job_block: str) -> None:
+    """The job waits for the module-oracles plan and negates its filterset.
+
+    `ci_change_owned.py module-oracles` derives that filterset from the
+    `module-oracles` test exclusions; a lane that drops it runs those tests
+    against its own, shorter budget (chelis#3100).
+    """
+    if not re.search(r"(?m)^    needs: (module-oracles-plan|\[[^\]]*\bmodule-oracles-plan\b[^\]]*\])$", job_block):
+        raise AssertionError("the job does not need module-oracles-plan")
+    expressions = re.findall(r"cargo nextest run [^\n]*? -E '([^']*)'", job_block)
+    if len(expressions) != 1:
+        raise AssertionError(f"expected one nextest filter, found {len(expressions)}")
+    expression = expressions[0]
+    if not (expression.startswith("not (") and expression.endswith(f" | {MODULE_ORACLES_FILTERSET})")):
+        raise AssertionError(
+            "the nextest filter does not negate the module-oracles filterset"
+        )
+
+
 def _assert_read_only_workspace_cache(job_block: str) -> None:
     inputs = _rust_cache_inputs(job_block)
     if inputs.get("shared-key") != "linux-workspace":
@@ -2322,7 +2344,8 @@ class CiParityTests(unittest.TestCase):
             "binary_id(/^chelis-python::capacity_census_bindings$/) | "
             "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
             "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
-            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) "
+            f"| {MODULE_ORACLES_FILTERSET})' "
             "--partition hash:${{ matrix.shard }}/4"
         )
 
@@ -2333,9 +2356,10 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("shard: [1, 2, 3, 4]", shard_block)
-        self.assertNotIn("    needs:", shard_block)
+        self.assertIn("    needs: module-oracles-plan\n", shard_block)
         self.assertIn("contents: read", shard_block)
         _assert_executable_run_once(shard_block, command)
+        _assert_negates_module_oracles(shard_block)
 
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
         self.assertIn(
@@ -2356,6 +2380,25 @@ class CiParityTests(unittest.TestCase):
     def test_generalize_sweep_partition_contract_has_no_gap_or_overlap(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
         _assert_generalize_sweep_partition_contract(shard_block)
+
+    def test_workspace_and_generalization_lanes_negate_the_module_oracles(self):
+        for job in ("full-workspace", "generalize-sweep-oracle-shard"):
+            with self.subTest(job=job):
+                _assert_negates_module_oracles(_ci_job_block(job))
+
+    def test_module_oracles_negation_rejects_a_dropped_filterset_or_need(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        dropped_term = shard_block.replace(f" | {MODULE_ORACLES_FILTERSET}", "", 1)
+        dropped_need = shard_block.replace("    needs: module-oracles-plan\n", "", 1)
+        un_negated = shard_block.replace(
+            f" | {MODULE_ORACLES_FILTERSET})'",
+            f") | {MODULE_ORACLES_FILTERSET}'",
+            1,
+        )
+        for mutated in (dropped_term, dropped_need, un_negated):
+            self.assertNotEqual(mutated, shard_block)
+            with self.assertRaises(AssertionError):
+                _assert_negates_module_oracles(mutated)
 
     def test_generalize_sweep_partition_contract_rejects_a_missing_shard(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")

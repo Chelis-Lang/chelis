@@ -554,7 +554,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # The generalization lane excludes the `module-oracles` tests by the same
+  # derived filterset the workspace suite negates; their own job runs them.
   generalize-sweep-oracle-shard:
+    needs: module-oracles-plan
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
     strategy:
@@ -598,7 +601,7 @@ jobs:
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify generalization lane selection
         if: matrix.shard == 1

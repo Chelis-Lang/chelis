@@ -131,10 +131,33 @@ CENSUS_SELECTOR = (
     "binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
     "binary_id(/^chelis-python::capacity_census_bindings$/)"
 )
-GENERALIZATION_PR_FILTER = (
-    f"not ({CENSUS_SELECTOR} | {NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
-    f"({NIGHTLY_RECURSIVE_SELECTOR}))"
+HEAVY_E2E_YML = REPO_ROOT / ".github" / "workflows" / "heavy-e2e.yml"
+MODULE_ORACLES_FILTERSET = "${{ needs.module-oracles-plan.outputs.filterset }}"
+GENERALIZATION_LANE_PREFIX = (
+    "cargo nextest run --workspace --profile ci-full --ignore-default-filter "
+    "--features chelis-types/generalize-sweep-oracle --no-fail-fast -E '"
 )
+
+
+def _module_oracles_filterset() -> str:
+    """The filterset `module-oracles-plan` derives in CI."""
+    config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+    return ci_change_owned.module_oracles_filterset(config)
+
+
+def _generalization_pr_filter() -> str:
+    """The generalization lane's `-E` filter as the workflow runs it.
+
+    Read from `heavy-e2e.yml` with the planned module-oracles filterset
+    substituted, so this listing selects exactly what the shards run.
+    """
+    text = HEAVY_E2E_YML.read_text()
+    filters = re.findall(re.escape(GENERALIZATION_LANE_PREFIX) + r"([^']*)'", text)
+    if len(filters) != 1:
+        raise AssertionError(
+            f"expected one generalization lane command, found {len(filters)}"
+        )
+    return filters[0].replace(MODULE_ORACLES_FILTERSET, _module_oracles_filterset())
 CONTENDED_DEADLINE_RETRY_SELECTOR = (
     "binary_id(/^chelis-cli::test_suite_timeout$/) & "
     "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
@@ -393,7 +416,7 @@ def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
         "--message-format",
         "json",
         "-E",
-        GENERALIZATION_PR_FILTER,
+        _generalization_pr_filter(),
     ]
     result = subprocess.run(
         cmd,
@@ -778,6 +801,23 @@ class GeneralizationPartitionTests(unittest.TestCase):
             "the generalization PR selector must exclude the entire "
             "nightly-owned cache-concurrency binary",
         )
+
+    def test_module_oracle_tests_are_excluded_from_generalization(self):
+        # The `module-oracles` job owns these tests and their budget; the
+        # generalization shards negate the same derived filterset
+        # (chelis#3100).
+        config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+        module = {
+            identity.canonical
+            for identity in ci_change_owned.module_oracle_tests(config)
+        }
+        self.assertTrue(module)
+        selected = {
+            key
+            for key, (status, _ignored) in self.generalization_pr.items()
+            if status == "matches"
+        }
+        self.assertEqual(module & selected, set())
 
 
 if __name__ == "__main__":
