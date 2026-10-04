@@ -4024,14 +4024,6 @@ fn cmd_build(
         None => checked_compilation_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?,
     };
-    // This gate covers tensor_scan in the selected program independently of
-    // the later backend checks on the retained emission program.
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            selected_checked.program(),
-            target,
-        ),
-    )?;
 
     // Pruning only removes definitions. Compare lengths to know whether the
     // checked program still represents the exact emission input.
@@ -4064,11 +4056,6 @@ fn cmd_build(
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4139,7 +4126,6 @@ fn cmd_build(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4197,7 +4183,6 @@ fn cmd_build(
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4295,7 +4280,6 @@ fn cmd_build(
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4431,16 +4415,6 @@ fn cmd_build_deep(
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
     let pruning_fired = pruned_deep_exprs.len() != deep_exprs.len();
     // The backend gate must also see declarations that pruning would remove.
-    // When nothing was pruned, the retained-program gate below sees the same
-    // checked program and needs no duplicate pass.
-    if pruning_fired {
-        shared_compiler_gate(
-            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                selected_checked.program(),
-                target,
-            ),
-        )?;
-    }
     let preserve_host_library_surface = target == BuildTarget::C
         && pruning_fired
         && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
@@ -4462,11 +4436,6 @@ fn cmd_build_deep(
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4519,7 +4488,6 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4577,7 +4545,6 @@ fn cmd_build_deep(
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4670,7 +4637,6 @@ fn cmd_build_deep(
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -7875,15 +7841,6 @@ fn shared_compiler_gate(
     result: Result<(), chelis_compiler_api::compiler::CompilerError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     result.map_err(|error| boxed_string_error(compiler_error_messages(&error)))
-}
-
-fn apply_shared_host_builtin_gates(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    shared_compiler_gate(chelis_compiler_api::compiler::reject_host_only_builtins(
-        program, target,
-    ))
 }
 
 fn apply_shared_window_gates(

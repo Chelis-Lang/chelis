@@ -279,12 +279,12 @@ implemented for selected paths, with wider semantics specified by
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval supports scalar state; compiled execution and transform coverage are incomplete. |
+| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval and compiled C run scalar state; tensor state ([#2999](https://github.com/Chelis-Lang/chelis/issues/2999)) and transform coverage are incomplete. |
 
 `tensor_scan` stacks successive states into a tensor; list `scan` (§3.3)
-returns a `List`. Its spec includes float-state AD and `vmap` rules. Build
-paths reject unsupported `tensor_scan` forms
-(`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
+returns a `List`. Its spec includes float-state AD and `vmap` rules.
+Compiled C runs it as the list `scan` over `range(0, n)` stacked at the
+state's own dtype.
 
 ### 3.3 Higher-order list / sequence combinators
 

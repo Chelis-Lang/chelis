@@ -12047,6 +12047,89 @@ fn lower_app_host_expr(
             ty,
         }));
     }
+    // [05-HOST-1]: `tensor_scan(initial, fn, n)` composes the list `scan` of
+    // `fn` over `range(0, n)` with `to_tensor` at the state's exact dtype.
+    // `initial` and then `n` are bound first, in argument order; a negative
+    // `n` fails before any callback runs, and `n = 0` invokes nothing.
+    if active_compiler_name == Some("tensor_scan") && kids.len() == 4 {
+        let callback =
+            lower_host_callback(&kids[2], program, scope, tensor_helpers)?.ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "`tensor_scan` requires a lowerable callback")
+            })?;
+        let init_expr = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
+        let length_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
+        let state_ty = host_expr_type(&init_expr);
+        let ty = expr_host_type(app_expr, program, scope);
+        let mut names = HostMatchNameSupply::new(app_expr, scope);
+        names.avoid_lowered(&init_expr);
+        names.avoid_lowered(&length_expr);
+        let init_name = names.fresh("__chelis_tensor_scan_initial");
+        let length_name = names.fresh("__chelis_tensor_scan_length");
+        let length = || HostExpr::new(HostExprKind::Var(length_name.clone(), HostTypeTerm::Int64));
+        let index_list_ty = HostTypeTerm::List(Box::new(HostTypeTerm::Int64));
+        let negative_length = HostExpr::new(HostExprKind::Builtin {
+            name: "fail".to_string(),
+            args: vec![HostExpr::new(HostExprKind::Builtin {
+                name: "string_concat".to_string(),
+                args: vec![
+                    HostExpr::new(HostExprKind::String(
+                        "tensor_scan requires a non-negative length, got ".to_string(),
+                    )),
+                    HostExpr::new(HostExprKind::Builtin {
+                        name: "to_string".to_string(),
+                        args: vec![length()],
+                        ty: HostTypeTerm::String,
+                    }),
+                ],
+                ty: HostTypeTerm::String,
+            })],
+            ty: index_list_ty.clone(),
+        });
+        let indices = HostExpr::new(HostExprKind::If {
+            cond: Box::new(HostExpr::new(HostExprKind::Builtin {
+                name: "lt".to_string(),
+                args: vec![length(), HostExpr::new(HostExprKind::Int(0))],
+                ty: HostTypeTerm::Bool,
+            })),
+            then_expr: Box::new(negative_length),
+            else_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
+                name: "range".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Int(0)), length()],
+                ty: index_list_ty.clone(),
+            })),
+            ty: index_list_ty,
+        });
+        let states_ty = HostTypeTerm::List(Box::new(state_ty.clone()));
+        let states = HostExpr::new(HostExprKind::Scan {
+            callback,
+            init: Box::new(HostExpr::new(HostExprKind::Var(
+                init_name.clone(),
+                state_ty.clone(),
+            ))),
+            list: Box::new(indices),
+            ty: states_ty,
+        });
+        let body = HostExpr::new(HostExprKind::Builtin {
+            name: "to_tensor".to_string(),
+            args: vec![states],
+            ty: ty.clone(),
+        });
+        let binding = |name: String, ty: HostTypeTerm, value: HostExpr| HostBinding {
+            name,
+            display_name: None,
+            display_roots: Vec::new(),
+            ty,
+            value,
+        };
+        return Ok(HostExpr::new(HostExprKind::Let {
+            bindings: vec![
+                binding(init_name, state_ty, init_expr),
+                binding(length_name, HostTypeTerm::Int64, length_expr),
+            ],
+            body: Box::new(body),
+            ty,
+        }));
+    }
     if active_compiler_name == Some("partition") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {

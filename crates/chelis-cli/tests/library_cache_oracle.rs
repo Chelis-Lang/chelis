@@ -54,7 +54,7 @@
 //! 11. Selected type, effect, and linearity errors in such a chain reject
 //!     with identical diagnostics in cache-disabled, cold, and warm builds.
 //! 12. An invalid file outside the selected Reef target does not block build.
-//! 13. The separate tensor_scan build gate still sees selected definitions.
+//! 13. An unreachable tensor_scan definition builds in every cache mode.
 
 use assert_cmd::Command;
 use std::fs;
@@ -622,7 +622,7 @@ fn unselected_reef_file_does_not_enter_build_semantic_gate() {
 }
 
 #[test]
-fn unreachable_tensor_scan_keeps_its_separate_build_gate() {
+fn unreachable_tensor_scan_builds_in_every_cache_mode() {
     let (scratch, cache_home) = fresh_cache_home();
     let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_scan(x: i64) -> tensor[*, i64] = tensor_scan(\n  x,\n  fn (previous: i64, _index: i64) -> add(previous, cast(1, i64)),\n  cast(3, i64)\n)\n";
     let (_, entry_body) = plain_bodies();
@@ -637,13 +637,12 @@ fn unreachable_tensor_scan_keeps_its_separate_build_gate() {
         build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
     let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
     let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
-    assert!(!disabled_ok && !cold_ok && !warm_ok);
+    assert!(
+        disabled_ok && cold_ok && warm_ok,
+        "an unreachable tensor_scan builds in every cache mode (chelis#1297): {disabled_error}"
+    );
     assert_eq!(disabled_error, cold_error);
     assert_eq!(cold_error, warm_error);
-    assert!(
-        disabled_error.contains("tensor_scan"),
-        "the separate backend gate must identify tensor_scan: {disabled_error}"
-    );
 }
 
 // ── Differential cache-parity sweep (chelis#1176) ───────────────────

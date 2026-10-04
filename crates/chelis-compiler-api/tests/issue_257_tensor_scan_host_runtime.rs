@@ -272,15 +272,13 @@ out = tensor_scan(
 }
 
 // ---------------------------------------------------------------------------
-// Compiled-backend rejection: `chelis build --target c` must refuse a
-// program that calls `tensor_scan`. Without this guard the C emitter
-// silently produces `__binding_0_value = /* unsupported builtin
-// tensor_scan */ 0` and the compiled binary returns garbage at run
-// time. Spec §3.6 marks the builtin host-only by design.
+// Compiled host targets execute `tensor_scan` ([05-HOST-1], chelis#1297)
+// through the host lane's list `scan`; no build gate refuses it and no
+// stub stands in for it.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn issue257_tensor_scan_build_target_c_rejected() {
+fn issue257_tensor_scan_build_target_c_compiles() {
     let src = r#"
 out = tensor_scan(
   cast(0, i64),
@@ -294,34 +292,17 @@ out = tensor_scan(
         target: CompileTarget::C,
         entry_name: None,
     });
-    let err = result.expect_err("chelis build --target c must reject tensor_scan");
-    let message = format!("{err:?}");
+    let artifact = result.unwrap_or_else(|err| {
+        panic!("tensor_scan compiles for a compiled host target (chelis#1297): {err:?}")
+    });
     assert!(
-        message.contains("tensor_scan"),
-        "rejection must name the builtin, got: {message}"
-    );
-    // [05-UNS-5]: the host-only contract is now carried by the TYPED
-    // authority rather than the prose "host-only builtin" this replaced.
-    // [05-HOST-1] is the atom that decides it, so pin the citation and the
-    // explanation together - strictly stronger than the former either/or
-    // spelling check.
-    assert!(
-        message.contains("deliberate [05-HOST-1]") && message.contains("host-runtime"),
-        "rejection must cite the deciding atom and explain the host-only contract, \
-         got: {message}"
-    );
-    // Belt-and-suspenders: confirm no C source containing the silent
-    // stub was emitted via the err path. The previous regression
-    // surfaced as compile-Ok with `/* unsupported builtin tensor_scan */`
-    // in the C source.
-    assert!(
-        !message.contains("/* unsupported builtin"),
-        "rejection must not be paired with a silent C stub, got: {message}"
+        !format!("{artifact:?}").contains("unsupported builtin"),
+        "a compiled tensor_scan must not leave a stub"
     );
 }
 
 #[test]
-fn issue257_tensor_scan_build_target_hip_rejected() {
+fn issue257_tensor_scan_build_target_hip_compiles() {
     let src = r#"
 out = tensor_scan(
   cast(0, i64),
@@ -335,11 +316,12 @@ out = tensor_scan(
         target: CompileTarget::Hip,
         entry_name: None,
     });
-    let err = result.expect_err("chelis build --target hip must reject tensor_scan");
-    let message = format!("{err:?}");
+    let artifact = result.unwrap_or_else(|err| {
+        panic!("tensor_scan compiles for a compiled host target (chelis#1297): {err:?}")
+    });
     assert!(
-        message.contains("tensor_scan"),
-        "rejection must name the builtin, got: {message}"
+        !format!("{artifact:?}").contains("unsupported builtin"),
+        "a compiled tensor_scan must not leave a stub"
     );
 }
 
@@ -438,17 +420,12 @@ out = grad(target)(cast(1.0, f32))
 }
 
 // ---------------------------------------------------------------------------
-// Compiled-backend rejection through higher-order callbacks (round-2
-// review). `reject_host_only_builtins` must descend into inline
-// map/fold/etc. callback bodies and into named helper functions, not
-// just top-level binding values. Without the callback-body descent a
-// `chelis build` of `map(fn (x) -> tensor_scan(...), xs)` slipped past
-// the guard and the C emitter produced the silent `/* unsupported
-// builtin tensor_scan */ 0` stub.
+// The same holds through higher-order callbacks, named helpers, and
+// unreachable helpers.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn issue257_tensor_scan_build_c_rejected_inside_map_callback() {
+fn issue257_tensor_scan_build_c_compiles_inside_map_callback() {
     let src = r#"
 out = map(
   fn (x: i64) -> tensor_scan(
@@ -465,21 +442,17 @@ out = map(
         target: CompileTarget::C,
         entry_name: None,
     });
-    let err =
-        result.expect_err("chelis build --target c must reject tensor_scan in a map callback");
-    let message = format!("{err:?}");
+    let artifact = result.unwrap_or_else(|err| {
+        panic!("tensor_scan compiles for a compiled host target (chelis#1297): {err:?}")
+    });
     assert!(
-        message.contains("tensor_scan"),
-        "rejection must name the builtin, got: {message}"
-    );
-    assert!(
-        !message.contains("/* unsupported builtin"),
-        "rejection must not be paired with a silent C stub, got: {message}"
+        !format!("{artifact:?}").contains("unsupported builtin"),
+        "a compiled tensor_scan must not leave a stub"
     );
 }
 
 #[test]
-fn issue257_tensor_scan_build_c_rejected_inside_named_helper() {
+fn issue257_tensor_scan_build_c_compiles_inside_named_helper() {
     let src = r#"
 def builder(x: i64) -> tensor[*, i64] = tensor_scan(
   x,
@@ -494,12 +467,12 @@ out = map(builder, [cast(1, i64), cast(2, i64)])
         target: CompileTarget::C,
         entry_name: None,
     });
-    let err =
-        result.expect_err("chelis build --target c must reject tensor_scan in a named helper");
-    let message = format!("{err:?}");
+    let artifact = result.unwrap_or_else(|err| {
+        panic!("tensor_scan compiles for a compiled host target (chelis#1297): {err:?}")
+    });
     assert!(
-        message.contains("tensor_scan"),
-        "rejection must name the builtin, got: {message}"
+        !format!("{artifact:?}").contains("unsupported builtin"),
+        "a compiled tensor_scan must not leave a stub"
     );
 }
 
@@ -567,7 +540,7 @@ out = vmap(target)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
 // ---------------------------------------------------------------------------
 
 #[test]
-fn issue257_tensor_scan_build_c_rejected_in_unreachable_helper() {
+fn issue257_tensor_scan_build_c_compiles_in_unreachable_helper() {
     let src = r#"
 def helper(x: i64) -> tensor[*, i64] = tensor_scan(
   x,
@@ -582,15 +555,11 @@ def main[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
         target: CompileTarget::C,
         entry_name: None,
     });
-    let err = result
-        .expect_err("chelis build --target c must reject an entry-unreachable tensor_scan helper");
-    let message = format!("{err:?}");
+    let artifact = result.unwrap_or_else(|err| {
+        panic!("tensor_scan compiles for a compiled host target (chelis#1297): {err:?}")
+    });
     assert!(
-        message.contains("tensor_scan"),
-        "rejection must name the builtin, got: {message}"
-    );
-    assert!(
-        !message.contains("/* unsupported builtin"),
-        "rejection must not be paired with a silent C stub, got: {message}"
+        !format!("{artifact:?}").contains("unsupported builtin"),
+        "a compiled tensor_scan must not leave a stub"
     );
 }

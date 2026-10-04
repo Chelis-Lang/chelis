@@ -1915,7 +1915,6 @@ fn execution_artifact_from_compiled_observed(
     let collect_trace = observer
         .as_ref()
         .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
     {
@@ -1937,16 +1936,6 @@ fn execution_artifact_from_compiled_observed(
     #[cfg(feature = "emission-observer")]
     let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
     let func_name = execution_c_symbol(entry_name);
-
-    // Reject host-runtime-only builtins early for any compiled-backend
-    // target so both public compiler APIs preserve the owning builtin's
-    // specific diagnostic. The fallible emitter independently rejects an
-    // unknown compiled-lane builtin; this gate improves ordering and context,
-    // and is not the correctness boundary. See spec/05-risc-primitives.md
-    // §3.6 and spec/design/loud_unsupported.md §C6.3.
-    if let Some(host_program) = host_program {
-        reject_host_only_builtins(host_program, build_target)?;
-    }
 
     match target {
         CompileTarget::C => {
@@ -4142,8 +4131,6 @@ fn compiled_from_pipeline_outcome(
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
         crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
             // C execution selects host lowering here, before artifact emission.
-            // Preserve the host-only builtin diagnostic before lowering callbacks.
-            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
             let realizability = chelis_effects::realizability::infer_realizability(
                 checked.program(),
                 crate::target_capability::tensor_capable_prims(target),
@@ -4761,12 +4748,6 @@ pub fn reject_unsupported_reduce_window_precision(
     Ok(())
 }
 
-/// Host-only builtins that have no compiled-backend lowering. Calls
-/// to these from a `chelis build` program must fail at compile time
-/// with the owning early diagnostic. The emitter's Result boundary remains
-/// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
-const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
-
 /// Closed target vocabulary for shared pre-codegen build gates.
 ///
 /// Gate callers cannot pass an arbitrary string: every target spelling is
@@ -4819,12 +4800,6 @@ impl TryFrom<&str> for BuildTarget {
             )),
         }
     }
-}
-
-fn host_only_builtin_error(name: &str, target: BuildTarget) -> CompilerError {
-    let unsupported =
-        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target.as_str());
-    unsupported_stage_error(unsupported)
 }
 
 fn unsupported_gate_error(
@@ -4967,186 +4942,6 @@ pub fn reject_inexact_device_reduction_cells(
             ),
         ));
     }
-    Ok(())
-}
-
-/// Reject direct host-runtime-only calls on checked Deep before host lowering
-/// descends into their callback arguments. This preserves the owning builtin
-/// diagnostic even when an argument is itself intentionally unrepresentable
-/// in compiled code (for example `tensor_scan(..., fn (...), ...)`). The
-/// concrete-HostProgram scan below remains the second boundary for aliases
-/// and other shapes materialized by lowering.
-pub fn reject_host_only_builtins_before_host_lowering(
-    program: &CheckedProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
-        return Err(host_only_builtin_error(&name, target));
-    }
-    Ok(())
-}
-
-pub fn reject_host_only_builtins(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    use chelis_ir::host::{
-        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
-    };
-
-    // A higher-order helper's callback can itself reach a host-only
-    // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
-    // callback carries its body inline, so we descend into it. A *named*
-    // callback refers to a top-level function by name; that function's
-    // body is scanned separately when we walk `program.functions`, so we
-    // do not need to chase the reference here.
-    fn scan_callback(callback: &ConcreteHostCallback, found: &mut Option<String>) {
-        if let HostCallbackKind::Inline { body, .. } = &callback.kind {
-            scan_expr(body, found);
-        }
-    }
-
-    fn scan_expr(expr: &ConcreteHostExpr, found: &mut Option<String>) {
-        if found.is_some() {
-            return;
-        }
-        match &expr.kind {
-            ConcreteHostExprKind::Builtin { name, args, .. } => {
-                if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
-                    *found = Some(name.clone());
-                    return;
-                }
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::Call { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::TensorCall { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::If {
-                cond,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                scan_expr(cond, found);
-                scan_expr(then_expr, found);
-                scan_expr(else_expr, found);
-            }
-            ConcreteHostExprKind::Let { bindings, body, .. }
-            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
-                for binding in bindings {
-                    scan_expr(&binding.value, found);
-                }
-                scan_expr(body, found);
-            }
-            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
-                for item in items {
-                    scan_expr(item, found);
-                }
-            }
-            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
-                for field in fields {
-                    scan_expr(field, found);
-                }
-            }
-            ConcreteHostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
-            ConcreteHostExprKind::MatchOption {
-                scrutinee,
-                some_expr,
-                none_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                scan_expr(some_expr, found);
-                scan_expr(none_expr, found);
-            }
-            ConcreteHostExprKind::MatchAdt {
-                scrutinee,
-                arms,
-                default_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                for arm in arms {
-                    scan_expr(&arm.expr, found);
-                }
-                if let Some(d) = default_expr {
-                    scan_expr(d, found);
-                }
-            }
-            ConcreteHostExprKind::Map { callback, list, .. }
-            | ConcreteHostExprKind::Filter { callback, list, .. }
-            | ConcreteHostExprKind::Partition { callback, list, .. }
-            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
-                scan_callback(callback, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::Fold {
-                callback,
-                init,
-                list,
-                ..
-            }
-            | ConcreteHostExprKind::Scan {
-                callback,
-                init,
-                list,
-                ..
-            } => {
-                scan_callback(callback, found);
-                scan_expr(init, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
-            ConcreteHostExprKind::FormalIngress { value, .. }
-            | ConcreteHostExprKind::ExtentSites { value, .. } => scan_expr(value, found),
-            _ => {}
-        }
-    }
-
-    // This walk is deliberately whole-program (every global value AND
-    // every function body), NOT scoped to the build entry's reachable
-    // call graph. That asymmetry with the reachability-scoped AD guard
-    // in `runtime.rs::find_reachable_host_only_builtin_call` is
-    // intentional: `chelis_backend_c::host_emit` emits *every*
-    // `program.functions` entry unconditionally (no dead-code pruning),
-    // so a `tensor_scan` call inside an otherwise-unreferenced helper still
-    // reaches the C emitter's fallible builtin boundary. The gate walks the
-    // same emitted set to preserve the earlier, builtin-specific diagnostic;
-    // it is not the sole defense. The AD guard can scope to the transform
-    // target because AD lowers only that target's subgraph. If backend
-    // dead-function pruning lands later, this can be narrowed to the emitted
-    // set in lockstep.
-    let mut found: Option<String> = None;
-    for global in &program.globals {
-        scan_expr(&global.value, &mut found);
-        if found.is_some() {
-            break;
-        }
-    }
-    if found.is_none() {
-        for function in &program.functions {
-            scan_expr(&function.body, &mut found);
-            if found.is_some() {
-                break;
-            }
-        }
-    }
-
-    if let Some(name) = found {
-        return Err(host_only_builtin_error(&name, target));
-    }
-
     Ok(())
 }
 

@@ -8,6 +8,9 @@
 //! difference: `chelis eval` prefixes a failure with `error: `, while a
 //! compiled executable prints the message alone.
 
+// Each including test binary uses only the helpers its lane needs.
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -37,12 +40,12 @@ fn write_source(dir: &Path, name: &str, source: &str) -> std::path::PathBuf {
 }
 
 /// The failure body of eval's stderr: its last line, without the
-/// presentation prefix. A failure without the prefix is not an eval failure
-/// report and is kept whole, so a comparison against it fails.
+/// presentation prefix that eval adds to a runtime failure (a numeric trap
+/// is printed without it).
 pub fn eval_failure_body(stderr: &str) -> String {
     let last = stderr.lines().last().unwrap_or_default();
     last.strip_prefix(EVAL_FAILURE_PREFIX)
-        .unwrap_or(stderr)
+        .unwrap_or(last)
         .to_string()
 }
 
@@ -109,6 +112,23 @@ pub fn compiled_lane(source: &str, name: &str) -> LaneRun {
             compiled_failure_body(&stderr)
         },
     }
+}
+
+/// Runs both lanes and asserts that they agree on a numeric trap: the same
+/// stdout and failure message, and failure on both. The exit statuses are not
+/// compared: compiled C aborts on a numeric trap where eval exits 1, which
+/// [04-NUM-10] forbids (chelis#3107).
+pub fn assert_lanes_agree_on_numeric_trap(source: &str, name: &str) -> LaneRun {
+    let eval = eval_lane(source, name);
+    let compiled = compiled_lane(source, name);
+    assert_eq!(eval.status, Some(1), "{name}: {eval:?}");
+    assert_ne!(compiled.status, Some(0), "{name}: {compiled:?}");
+    assert_eq!(
+        (&eval.stdout, &eval.failure),
+        (&compiled.stdout, &compiled.failure),
+        "{name}: eval and compiled C disagree\nsource:\n{source}"
+    );
+    eval
 }
 
 /// Runs both lanes and asserts they agree; returns the agreed run.

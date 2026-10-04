@@ -320,3 +320,82 @@ fn an_uncalled_assertion_definition_compiles_without_a_stub() {
     );
     assert_eq!(run.stdout, "out = 7\n", "{run:?}");
 }
+
+// ---------------------------------------------------------------------------
+// [05-HOST-1] tensor_scan over scalar states
+// ---------------------------------------------------------------------------
+
+/// `tensor_scan` stacks the `n` states at the state's own dtype, runs the
+/// callback once per index in order with its effects, evaluates `initial`
+/// before `n`, and invokes nothing when `n` is zero.
+#[test]
+fn tensor_scan_matches_eval_for_scalar_states() {
+    let source = "def noisy(label: string, value: i64) -> i64 ! {IO} = {\n\
+                  _ = print(label)\n\
+                  value\n\
+                  }\n\
+                  def step(prev: i32, i: i64) -> i32 ! {IO} = {\n\
+                  _ = print(to_string(i))\n\
+                  add(prev, cast(i, i32))\n\
+                  }\n\
+                  ints = tensor_scan(1i64, fn (prev: i64, i: i64) -> add(prev, i), 4i64)\n\
+                  narrow = tensor_scan(10i32, step, noisy(\"n\", 3i64))\n\
+                  ordered = tensor_scan(noisy(\"init\", 5i64), fn (prev: i64, i: i64) -> mul(prev, 2i64), noisy(\"length\", 2i64))\n\
+                  halves = tensor_scan(1.0f32, fn (prev: f32, i: i64) -> mul(prev, 0.5f32), 3i64)\n\
+                  wide = tensor_scan(0.1f64, fn (prev: f64, i: i64) -> add(prev, 0.1f64), 2i64)\n\
+                  flips = tensor_scan(true, fn (prev: bool, i: i64) -> not(prev), 3i64)\n\
+                  halfs = tensor_scan(1.5f16, fn (prev: f16, i: i64) -> mul(prev, 2.0f16), 2i64)\n\
+                  brains = tensor_scan(1.5bf16, fn (prev: bf16, i: i64) -> add(prev, 1.0bf16), 2i64)\n\
+                  bytes = tensor_scan(-3i8, fn (prev: i8, i: i64) -> add(prev, 1i8), 2i64)\n\
+                  shorts = tensor_scan(1i16, fn (prev: i16, i: i64) -> mul(prev, 3i16), 2i64)\n\
+                  empty = tensor_scan(7i8, step8, 0i64)\n\
+                  def step8(prev: i8, i: i64) -> i8 ! {IO} = {\n\
+                  _ = print(\"never\")\n\
+                  prev\n\
+                  }\n";
+    let run = parity::assert_lanes_agree(source, "scans");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "ints = tensor(shape=[4], data=[1, 2, 4, 7])\n",
+        "n\n0\n1\n2\ninit\nlength\n",
+        "narrow = tensor(shape=[3], data=[10, 11, 13])\n",
+        "ordered = tensor(shape=[2], data=[10, 20])\n",
+        "halves = tensor(shape=[3], data=[0.5, 0.25, 0.125])\n",
+        "flips = tensor(shape=[3], data=[false, true, false])\n",
+        "empty = tensor(shape=[0], data=[])\n",
+        "halfs = tensor(shape=[2], data=[3.0, 6.0])\n",
+        "brains = tensor(shape=[2], data=[2.5, 3.5])\n",
+        "bytes = tensor(shape=[2], data=[-2, -1])\n",
+        "shorts = tensor(shape=[2], data=[3, 9])\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
+    }
+    assert!(!run.stdout.contains("never"), "{run:?}");
+}
+
+/// The failing twins: a negative length and an overflowing integer callback
+/// are the same trap on both lanes, after the iterations before it.
+#[test]
+fn tensor_scan_failures_match_eval() {
+    let run = parity::assert_lanes_agree(
+        "xs = tensor_scan(1i64, fn (prev: i64, i: i64) -> prev, -1i64)\n",
+        "negative",
+    );
+    assert_eq!(run.status, Some(1), "{run:?}");
+    assert_eq!(
+        run.failure, "tensor_scan requires a non-negative length, got -1",
+        "{run:?}"
+    );
+    let run = parity::assert_lanes_agree_on_numeric_trap(
+        "def step(prev: i32, i: i64) -> i32 ! {IO} = {\n_ = print(to_string(i))\nadd(prev, 1i32)\n}\nxs = tensor_scan(2147483646i32, step, 3i64)\n",
+        "overflow",
+    );
+    assert_eq!(run.stdout, "0\n1\n", "{run:?}");
+    assert_eq!(
+        run.failure, "numeric trap: overflow in add at i32",
+        "{run:?}"
+    );
+}

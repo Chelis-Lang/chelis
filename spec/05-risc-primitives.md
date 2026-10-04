@@ -1787,7 +1787,6 @@ exact ADT identity by [05-OP-34].
 > effect-boundary fact SHALL NOT be represented as a language-wide rejection,
 > inert stub, default value, or evaluator-only signature.
 
-*(Not fully implemented; chelis#1297 owns compiled host execution.)*
 
 #### Decimal rounding atom
 
