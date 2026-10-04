@@ -13,7 +13,8 @@ GitHub token even though the releases are public: it reads `GITHUB_TOKEN`, or
 `gh auth token` when that is unset. Prebuilt release assets are available for macOS arm64 and Linux x86-64.
 On Linux, `chelisup` and the toolchain it installs are static executables that
 need no system libraries, so they start on any x86-64 distribution, including
-NixOS without nix-ld. For
+NixOS without nix-ld. They resolve host names through `/etc/hosts` and the name
+servers in `/etc/resolv.conf` only, not through NSS plugins. For
 source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
 
 Run these commands in a terminal outside a Chelis project:
