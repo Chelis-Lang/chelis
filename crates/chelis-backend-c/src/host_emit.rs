@@ -6760,6 +6760,13 @@ impl<'a> HostEmitter<'a> {
             self.tensor_nan_finalization = CExpressionBuiltin::decode(name)
                 .ok()
                 .and_then(CExpressionBuiltin::nan_finalization);
+            // The loops below cover the dtypes their arms name. Host lowering
+            // runs every other checked tensor operation in the tensor lane, so
+            // a dtype outside the arms is refused here, before emission, and
+            // never reaches a loop that would abort at run time (chelis#2734).
+            if let Some(arms) = host_elementwise_arms(name, &arg_vars) {
+                admit_host_elementwise(name, &arg_vars, arms)?;
+            }
             match name {
                 "add"
                     if matches!(
@@ -8566,10 +8573,6 @@ impl<'a> HostEmitter<'a> {
         for arm in DtypeArm::f32_payload_func_arms() {
             self.emit_unary_func_elementwise_arm(target, input, func, *arm, &view);
         }
-        self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64, DtypeArm::Bool],
-            &format!("unary func elementwise ({func})"),
-        );
         self.emit_default_runtime_fail_arm_for(
             &format!("{view}.dtype"),
             &format!("unary func elementwise ({func})"),
@@ -8624,10 +8627,27 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
-        self.lines.push(format!(
-            "{ind}            __target_data[i] = {};",
-            self.finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]"))
-        ));
+        let element = match (arm, checked_integer_op(op)) {
+            // [04-NUM-3]: integer arithmetic traps on overflow at its width,
+            // as the tensor lane's kernels do, rather than wrapping.
+            (DtypeArm::I32 | DtypeArm::I64, Some((helper, name))) => {
+                let overflow = NumericTrap::Overflow {
+                    op: name,
+                    prim: arm.prim(),
+                }
+                .to_string();
+                // The checked helpers compute at the i64 width.
+                let wide = cast_prim_c_type(Prim::Int64);
+                format!(
+                    "({elem_t}){helper}(({wide})__lhs_data[idx_lhs], ({wide})__rhs_data[idx_rhs], {}, {overflow:?})",
+                    arm.integer_bits()
+                )
+            }
+            _ => self
+                .finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]")),
+        };
+        self.lines
+            .push(format!("{ind}            __target_data[i] = {element};"));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
@@ -8707,10 +8727,23 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
-        self.lines.push(format!(
-            "{ind}            __target_data[i] = {};",
-            self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]"))
-        ));
+        let element = match arm {
+            DtypeArm::I32 | DtypeArm::I64 if op == "-" => {
+                let overflow = NumericTrap::Overflow {
+                    op: "neg",
+                    prim: arm.prim(),
+                }
+                .to_string();
+                let wide = cast_prim_c_type(Prim::Int64);
+                format!(
+                    "({elem_t})chelis_int_checked_neg(({wide})__input_data[idx], {}, {overflow:?})",
+                    arm.integer_bits()
+                )
+            }
+            _ => self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]")),
+        };
+        self.lines
+            .push(format!("{ind}            __target_data[i] = {element};"));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
@@ -8748,21 +8781,6 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
-    }
-
-    /// Emit one or more `case CHELIS_*: { ... abort(); break; }` arms
-    /// for dtypes the surrounding switch cannot service.
-    fn emit_dtype_fail_arms(&mut self, arms: &[DtypeArm], site_name: &str) {
-        let ind = &self.indent;
-        for arm in arms {
-            let macro_name = arm.dtype_macro();
-            self.lines.push(format!("{ind}    case {macro_name}: {{"));
-            self.lines.push(format!(
-                "{ind}        fprintf(stderr, \"{site_name} unsupported for dtype {macro_name}\\n\");"
-            ));
-            self.lines.push(format!("{ind}        abort();"));
-            self.lines.push(format!("{ind}    }}"));
-        }
     }
 
     /// Emit the `default:` arm for an elementwise dtype switch.
@@ -11606,6 +11624,82 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
     }
 }
 
+/// The checked runtime helper and trap operation name of an integer
+/// binary operator that can overflow.
+fn checked_integer_op(op: &str) -> Option<(&'static str, &'static str)> {
+    match op {
+        "+" => Some(("chelis_int_checked_add", "add")),
+        "-" => Some(("chelis_int_checked_sub", "sub")),
+        "*" => Some(("chelis_int_checked_mul", "mul")),
+        _ => None,
+    }
+}
+
+/// The arms the host elementwise loop for `name` emits, when `name` over
+/// these operands is one of those loops.
+fn host_elementwise_arms(
+    name: &str,
+    arg_vars: &[(String, HostType)],
+) -> Option<&'static [DtypeArm]> {
+    let tensor = |index: usize| matches!(arg_vars.get(index), Some((_, HostType::Tensor(_))));
+    match name {
+        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "and" | "or"
+            if tensor(0) && tensor(1) =>
+        {
+            Some(DtypeArm::all_operator_arms())
+        }
+        "neg" | "not" if tensor(0) => Some(DtypeArm::all_operator_arms()),
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
+            if tensor(0) =>
+        {
+            Some(DtypeArm::f32_payload_func_arms())
+        }
+        _ => None,
+    }
+}
+
+/// Refuse a host elementwise loop over a dtype the shared host-loop table
+/// ([`chelis_ir::host::host_elementwise_loop_admits`]) does not admit. The
+/// loop's `arms` are that table's admitted dtypes, which
+/// `host_elementwise_arms_match_the_shared_table` checks.
+fn admit_host_elementwise(
+    name: &str,
+    arg_vars: &[(String, HostType)],
+    arms: &[DtypeArm],
+) -> Result<(), Unsupported> {
+    let Some((_, HostType::Tensor(operand))) = arg_vars.first() else {
+        return Ok(());
+    };
+    let admitted =
+        chelis_ir::host::host_elementwise_loop_admits(name, operand.precision) == Some(true);
+    if admitted {
+        if !arms.iter().any(|arm| arm.prim() == operand.precision) {
+            return Err(invalid_abi_shape(
+                format!(
+                    "the host loop for `{name}` has no arm for admitted `{}`",
+                    operand.precision.name()
+                ),
+                "C host elementwise emission",
+            ));
+        }
+        return Ok(());
+    }
+    Err(Unsupported::new(
+        UnsupportedKind::Builtin(name.to_string()),
+        format!(
+            "`{name}` over a `{}` tensor in `chelis build` host emission (the host \
+             elementwise loop has no arm for this dtype)",
+            operand.precision.name()
+        ),
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "a checked tensor operation must route through the typed DAG lane; the C \
+             host lane's elementwise loops are no fallback for a dtype they do not cover"
+        ),
+    ))
+}
+
 fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Construct(detail),
@@ -12281,6 +12375,27 @@ impl DtypeArm {
         }
     }
 
+    fn prim(self) -> Prim {
+        match self {
+            DtypeArm::F32 => Prim::F32,
+            DtypeArm::F64 => Prim::F64,
+            DtypeArm::I32 => Prim::Int32,
+            DtypeArm::I64 => Prim::Int64,
+            DtypeArm::Bool => Prim::Bool,
+        }
+    }
+
+    /// The width an integer arm's checked arithmetic traps at.
+    fn integer_bits(self) -> u32 {
+        match self {
+            DtypeArm::I32 => 32,
+            DtypeArm::I64 => 64,
+            DtypeArm::F32 | DtypeArm::F64 | DtypeArm::Bool => {
+                unreachable!("only an integer arm has checked arithmetic")
+            }
+        }
+    }
+
     fn elem_t(self) -> &'static str {
         match self {
             DtypeArm::F32 => "float",
@@ -12349,6 +12464,47 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    /// chelis#2734: host lowering keeps an operation on the host loop exactly
+    /// when the shared table admits its dtype, so each loop's arms must be
+    /// that table's admitted dtypes, no more and no fewer.
+    #[test]
+    fn host_elementwise_arms_match_the_shared_table() {
+        let prims = [
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ];
+        let tensor = |prim| {
+            (
+                "x".to_string(),
+                HostType::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: prim,
+                }),
+            )
+        };
+        for name in [
+            "add", "sub", "mul", "div", "max_elem", "min_elem", "and", "or", "neg", "not", "exp",
+            "log", "sin", "sqrt", "relu", "sigmoid", "tanh", "silu", "gelu",
+        ] {
+            for prim in prims {
+                let arms = host_elementwise_arms(name, &[tensor(prim), tensor(prim)])
+                    .unwrap_or_else(|| panic!("`{name}` has a host loop"));
+                assert_eq!(
+                    chelis_ir::host::host_elementwise_loop_admits(name, prim),
+                    Some(arms.iter().any(|arm| arm.prim() == prim)),
+                    "{name} at {prim:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn resolved_global_c_symbol_cannot_alias_authored_lookalikes() {

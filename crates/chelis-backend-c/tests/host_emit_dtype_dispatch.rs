@@ -622,21 +622,47 @@ fn unary_func_elementwise_emits_typed_pointer_access() {
     );
 }
 
+/// chelis#2734: a host elementwise loop over a dtype none of its arms covers
+/// is refused before emission with a typed diagnostic, never emitted with a
+/// default arm that aborts when the program runs. Host lowering runs these
+/// operations in the tensor lane, which covers every admitted dtype.
 #[test]
-fn unary_func_int32_arm_aborts_without_binary32_conversion() {
-    let program = make_unary_program("exp", Prim::Int32);
-    let src = emit_host_program(&program, "unfunc_i32_reject").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_I32");
+fn an_elementwise_loop_outside_its_arms_is_refused_before_emission() {
+    for (program, name) in [
+        (make_unary_program("exp", Prim::Int32), "exp"),
+        (make_unary_program("exp", Prim::F64), "exp"),
+        (make_unary_program("sin", Prim::F16), "sin"),
+        (make_unary_program("sqrt", Prim::Bf16), "sqrt"),
+        (make_binary_program("add", Prim::F16), "add"),
+        (make_binary_program("mul", Prim::Bf16), "mul"),
+        (make_binary_program("sub", Prim::Int8), "sub"),
+        (make_binary_program("add", Prim::Int16), "add"),
+    ] {
+        let error = emit_host_program(&program, &format!("{name}_refused"))
+            .expect_err("a dtype outside the loop's arms must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("`{name}` over a"))
+                && message.contains("has no arm for this dtype"),
+            "{name}: {message}"
+        );
+    }
+}
 
+/// The negative twin: every dtype an arm covers still emits its loop, with
+/// no run-time abort arm for a named dtype.
+#[test]
+fn an_elementwise_loop_inside_its_arms_still_emits() {
+    for prim in [Prim::F32, Prim::F64, Prim::Int32, Prim::Int64] {
+        let program = make_binary_program("add", prim);
+        let source = emit_host_program(&program, "add_admitted").unwrap();
+        assert!(source.contains("switch ("), "{prim:?}: {source}");
+    }
+    let program = make_unary_program("exp", Prim::F32);
+    let source = emit_host_program(&program, "exp_admitted").unwrap();
     assert!(
-        arm.contains("abort();"),
-        "the i32 arm must abort; arm:\n{arm}"
-    );
-    assert!(
-        !arm.contains("__target_data")
-            && !arm.contains("(float*)")
-            && !arm.contains("(const float*)"),
-        "the i32 arm must not convert through binary32; arm:\n{arm}"
+        source.contains("chelis_cr_expf") && !source.contains("unsupported for dtype"),
+        "{source}"
     );
 }
 
