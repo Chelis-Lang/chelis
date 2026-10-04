@@ -1140,7 +1140,11 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Quote(expr, _) => format!("quote({})", format_expr(expr)),
         Expr::Unquote(expr, _) => format!("unquote({})", format_expr(expr)),
         Expr::Splice(expr, _) => format!("splice({})", format_expr(expr)),
-        Expr::Annotate(expr, ty, _) => format!("({} : {})", format_expr(expr), format_type(ty)),
+        Expr::Annotate(expr, ty, _) => format!(
+            "({} : {})",
+            wrap_if_absorbs(expr, Trailer::Ascription),
+            format_type(ty)
+        ),
         Expr::Block(bindings, body, _) if bindings.is_empty() => format_expr(body),
         Expr::Block(bindings, body, _) => format_block(bindings, body),
     }
@@ -1420,19 +1424,98 @@ fn format_block(bindings: &[LetBinding], body: &Expr) -> String {
 }
 
 fn format_pipe_expr(seed: &Expr, stages: &[Expr]) -> String {
-    format_pipe_layout(
-        None,
-        format_expr(seed),
-        stages.iter().map(format_pipe_stage).collect(),
-    )
+    format_pipe_layout(None, format_pipe_seed(seed), format_pipe_stages(stages))
 }
 
 fn format_pipe_with_binding(head: &str, seed: &Expr, stages: &[Expr]) -> String {
     format_pipe_layout(
         Some(head),
-        format_expr(seed),
-        stages.iter().map(format_pipe_stage).collect(),
+        format_pipe_seed(seed),
+        format_pipe_stages(stages),
     )
+}
+
+/// A token that can follow an expression's printed text and attach to it on
+/// re-parse.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trailer {
+    /// A further pipe stage, `|> stage`.
+    Pipe,
+    /// A type ascription, `: T`.
+    Ascription,
+}
+
+/// Whether the printed form of `expr` ends in an open subexpression that the
+/// parser would extend over a following `trailer` (chelis#3128).
+///
+/// `if` and `fn` end in a full expression (the `else` branch, the body), so
+/// they absorb anything. A unary or borrow operand is parsed at the binding
+/// power just below postfix, so it absorbs an ascription but not a pipe. A
+/// pipe absorbs a further stage, which would flatten it into the outer pipe,
+/// and otherwise whatever its last stage absorbs. Every other printed form is
+/// closed: an atom, a call, a bracketed or braced form, or a binary operation
+/// or ascription, which print with their own parentheses.
+fn absorbs(expr: &Expr, trailer: Trailer) -> bool {
+    match expr {
+        Expr::If(..) | Expr::Lambda(..) => true,
+        Expr::Unary(..) | Expr::Borrow(..) => trailer == Trailer::Ascription,
+        Expr::Pipe(_, stages, _) => {
+            trailer == Trailer::Pipe
+                || stages
+                    .last()
+                    .is_some_and(|stage| pipe_stage_is_open(stage, true) && absorbs(stage, trailer))
+        }
+        Expr::Block(bindings, body, _) if bindings.is_empty() => absorbs(body, trailer),
+        _ => false,
+    }
+}
+
+fn wrap_if_absorbs(expr: &Expr, trailer: Trailer) -> String {
+    if absorbs(expr, trailer) {
+        format!("({})", format_expr(expr))
+    } else {
+        format_expr(expr)
+    }
+}
+
+/// Whether the parser reads `stage`'s printed form back as one whole pipe
+/// stage. A stage is parsed as a prefix expression, so a postfix `.field` or
+/// `.0`, a record update's `with`, or a nested pipe's `|>` after it attaches
+/// to the enclosing pipe instead; so does the `.` of a qualified callee such
+/// as `M.f(x)`.
+fn is_prefix_stage(stage: &Expr) -> bool {
+    match stage {
+        Expr::Pipe(..) | Expr::Access(..) | Expr::TupleGet(..) | Expr::RecordUpdate(..) => false,
+        Expr::Apply(function, _, _) => {
+            !matches!(function.as_ref(), Expr::Access(..) | Expr::TupleGet(..))
+        }
+        Expr::Block(bindings, body, _) if bindings.is_empty() => is_prefix_stage(body),
+        _ => true,
+    }
+}
+
+/// Whether `stage` prints bare, rather than compacted or parenthesized, and so
+/// can absorb what follows it.
+fn pipe_stage_is_open(stage: &Expr, is_last: bool) -> bool {
+    compact_bare_unary_builtin_stage(stage).is_none() && !pipe_stage_needs_parens(stage, is_last)
+}
+
+fn pipe_stage_needs_parens(stage: &Expr, is_last: bool) -> bool {
+    !is_prefix_stage(stage) || (!is_last && absorbs(stage, Trailer::Pipe))
+}
+
+/// The seed of a pipe is followed by `|>`, so it is parenthesized when its
+/// printed form would absorb that stage.
+fn format_pipe_seed(seed: &Expr) -> String {
+    wrap_if_absorbs(seed, Trailer::Pipe)
+}
+
+fn format_pipe_stages(stages: &[Expr]) -> Vec<String> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| format_pipe_stage(stage, index + 1 == stages.len()))
+        .collect()
 }
 
 /// Format a single pipe stage, compacting synthesized unary-builtin
@@ -1440,11 +1523,17 @@ fn format_pipe_with_binding(head: &str, seed: &Expr, stages: &[Expr]) -> String 
 /// bare keyword form. Mirrors spec `01-nomenclature.md` §3.6: the
 /// decompiler/formatter may compact a lambda stage to call-stage sugar
 /// when the carried value is the only argument. Item 2b round-trip.
-fn format_pipe_stage(stage: &Expr) -> String {
+/// Any other stage is parenthesized when the parser would not read its
+/// printed form back as this stage.
+fn format_pipe_stage(stage: &Expr, is_last: bool) -> String {
     if let Some(compacted) = compact_bare_unary_builtin_stage(stage) {
         return compacted;
     }
-    format_expr(stage)
+    if pipe_stage_needs_parens(stage, is_last) {
+        format!("({})", format_expr(stage))
+    } else {
+        format_expr(stage)
+    }
 }
 
 fn compact_bare_unary_builtin_stage(stage: &Expr) -> Option<String> {
