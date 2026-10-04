@@ -342,6 +342,7 @@ dependencies = [
  "miette",
  "ryu",
  "serde",
+ "stacker",
  "thiserror",
 ]
 

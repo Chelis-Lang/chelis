@@ -1,6 +1,6 @@
 {
   "schema": "chelis-prove-standard-contract-discharges-v1",
-  "std_graph_digest": "44c84d54a0c36db8c51cdaf9141f0216de93538ee4e3896c63127c15439b4582",
+  "std_graph_digest": "f74a5e4c28d3f7dc596b9ca6c61227180e43ffb362aa88ce4280c2f456dace1b",
   "rows": [
     {
       "contract": "std.normal_cdf.range",

@@ -196,10 +196,10 @@ map, calls use `app`, references use `var`, and literals carry a type.
   relu_then_softmax
   (fn {}
     (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
-    (pipe {}
-      (var {} x)
-      (var {} relu)
-      (fn {} (params {} __chelis_pipe) (app {} (var {} softmax) (var {} __chelis_pipe) (lit {type: (t-prim {} i32)} 0))))))
+    (app {}
+      (var {} softmax)
+      (app {} (var {} relu) (var {} x))
+      (lit {type: (t-prim {} i32)} 0))))
 ```
 
 ```chelis-deep
@@ -220,16 +220,20 @@ map, calls use `app`, references use `var`, and literals carry a type.
     (let {}
       (bind {}
         logits
-        (pipe {}
-          (var {} x)
-          (var {} relu)
-          (fn {} (params {} __chelis_pipe) (app {} (var {} add) (var {} __chelis_pipe) (var {} labels))))
+        (app {}
+          (var {} add)
+          (app {} (var {} relu) (var {} x))
+          (var {} labels))
         loss
-        (pipe {}
-          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} i32)} 0))
-          (var {} log)
-          (fn {} (params {} __chelis_pipe) (app {} (var {} mul) (var {} __chelis_pipe) (var {} labels)))
-          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} i32)} 0)))))
+        (app {}
+          (var {} sum)
+          (app {}
+            (var {} mul)
+            (app {}
+              (var {} log)
+              (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} i32)} 0)))
+            (var {} labels))
+          (lit {type: (t-prim {} i32)} 0)))
       (var {} loss))))
 ```
 
