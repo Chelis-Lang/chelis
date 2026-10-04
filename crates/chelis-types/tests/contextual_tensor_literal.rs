@@ -473,8 +473,8 @@ fn suggestions(result: &chelis_types::infer::InferResult) -> String {
 
 /// The value-preserving List hint is decided from the checked expected and
 /// actual types, a tensor expected and a bracket literal's List given, at a
-/// cast or a callee's parameter; never from a mismatch message, which does
-/// not record which side was expected.
+/// checked cast or a callee's parameter; never from a mismatch message, which
+/// does not record which side was expected.
 #[test]
 fn only_a_bracket_literal_where_a_tensor_is_expected_gets_the_list_hint() {
     for src in [
@@ -500,6 +500,8 @@ fn only_a_bracket_literal_where_a_tensor_is_expected_gets_the_list_hint() {
         "def g(x: tensor[2, f64]) -> i32 = 1\ndef h(xs: List[f32]) -> i32 = g(xs)",
         // A join, where neither side is expected.
         "def h(c: bool) -> i32 = {\n  v = if c then to_tensor([1.0, 2.0]) else [1.0, 2.0]\n  1\n}",
+        // The truncating rung, which a suffixed spelling would not keep.
+        "xs = cast_trunc([1.9, 2.7], i32)",
     ] {
         let (_, result) = pipeline(src);
         assert!(!result.errors.is_empty(), "{src}: expected a type error");

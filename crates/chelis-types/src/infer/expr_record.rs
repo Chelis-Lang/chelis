@@ -1399,8 +1399,10 @@ pub(super) fn cast_result_from_source(
         settled => {
             // A cast converts values and never makes a bracket literal a
             // tensor (chelis#3114), so a List operand spelled as one gets the
-            // value-preserving spelling.
-            let bracket_literal = matches!(&settled, Type::Adt(name, _) if name == "List")
+            // value-preserving spelling. The truncating rung takes no hint:
+            // the suffixed spelling would drop its truncation.
+            let bracket_literal = mode == CastMode::Checked
+                && matches!(&settled, Type::Adt(name, _) if name == "List")
                 && matches!(stamped_parts(site), Some((DeepTag::Cast, _, [operand, ..]))
                     if is_bracket_literal(operand));
             match cast_result_from_settled_source(settled, new_prec, mode, subst) {
