@@ -271,6 +271,8 @@ mod tests {
         for source in [
             "result = value |> cast(f32)\n",
             "result = value |> cast_trunc(f64)\n",
+            "result = value |> cast_saturate(i8)\n",
+            "result = value |> cast_wrap(i8)\n",
             "result = value |> cast(p)\n",
         ] {
             assert_surf_parser_parity(source, true);
@@ -278,8 +280,12 @@ mod tests {
         for source in [
             "result = value |> cast()\n",
             "result = value |> cast_trunc()\n",
+            "result = value |> cast_saturate()\n",
+            "result = value |> cast_wrap()\n",
             "result = cast(f32)\n",
             "result = cast_trunc(f64)\n",
+            "result = cast_saturate(i8)\n",
+            "result = cast_wrap(i8)\n",
         ] {
             assert_surf_parser_parity(source, false);
         }

@@ -157,7 +157,7 @@ fn validate_stage(expr: &Expr) -> Result<(), crate::desugar::DesugarError> {
                 (PipeStageSyntax::Callable, _) => true,
                 (PipeStageSyntax::CallFirst, Expr::Apply(..)) => true,
                 (PipeStageSyntax::Cast(mode), Expr::Apply(head, args, _)) => {
-                    matches!(head.as_ref(), Expr::Var(name, _) if name == if *mode == CastMode::Checked { "cast" } else { "cast_trunc" })
+                    matches!(head.as_ref(), Expr::Var(name, _) if name == mode.keyword())
                         && matches!(args.as_slice(), [Expr::Var(..)])
                 }
                 (PipeStageSyntax::Copy, Expr::Var(name, _)) => name == "copy",

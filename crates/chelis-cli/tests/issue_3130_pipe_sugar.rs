@@ -16,6 +16,62 @@ fn deep(path: &Path) -> String {
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
+
+#[test]
+fn named_cast_pipe_stages_preserve_values_and_rejected_dtype_pairs() {
+    use chelis_compiler_api::schema::ExecutionValue;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("named-cast.ch");
+    for (keyword, seed, expected) in [
+        ("cast_saturate", "128i32", 127.0),
+        ("cast_wrap", "128i32", -128.0),
+        ("cast_saturate", "(-129i32)", -128.0),
+        ("cast_wrap", "(-129i32)", 127.0),
+        ("cast_trunc", "1.9f32", 1.0),
+    ] {
+        fs::write(
+            &path,
+            format!("piped = {seed} |> {keyword}(i8)\ncalled = {keyword}({seed}, i8)\n"),
+        )
+        .unwrap();
+        let output = run(&["eval", "--json", "--file", path.to_str().unwrap()]);
+        assert!(output.status.success(), "{keyword}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let roots = report["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0]["value"], roots[1]["value"]);
+        let ExecutionValue::Scalar { value } =
+            serde_json::from_value(roots[0]["value"].clone()).unwrap()
+        else {
+            panic!("expected exact tagged scalar")
+        };
+        assert_eq!(value.get().prim().name(), "i8");
+        assert_eq!(value.get().as_f64_lossy(), expected);
+    }
+    for (keyword, seed, target) in [
+        ("cast_wrap", "1.5f32", "i8"),
+        ("cast_trunc", "1i32", "i8"),
+        ("cast_saturate", "1i32", "bool"),
+    ] {
+        for expression in [
+            format!("{seed} |> {keyword}({target})"),
+            format!("{keyword}({seed}, {target})"),
+        ] {
+            fs::write(&path, format!("out = {expression}\n")).unwrap();
+            let output = run(&["check", path.to_str().unwrap()]);
+            assert!(!output.status.success(), "{expression}: {output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                report["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| error["message"].as_str().unwrap().contains(keyword)),
+                "{expression}: {report}"
+            );
+        }
+    }
+}
 #[test]
 fn pipe_cast_and_call_cast_have_the_same_bits_and_canonical_source() {
     let dir = tempdir().unwrap();

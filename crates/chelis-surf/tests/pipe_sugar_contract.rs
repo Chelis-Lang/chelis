@@ -10,6 +10,39 @@ fn meaning(source: &str) -> String {
 }
 
 #[test]
+fn every_named_cast_stage_preserves_its_mode_and_rejects_a_mismatched_descriptor() {
+    use chelis_deep::{CastMode, NamedCastMode};
+    use chelis_surf::ast::{Decl, Expr, PipeStageSyntax};
+    for (index, mode) in NamedCastMode::ALL.iter().enumerate() {
+        let keyword = mode.keyword();
+        let source = format!("out = x |> {keyword}(i8)\n");
+        assert_eq!(
+            meaning(&source),
+            meaning(&format!("out = {keyword}(x, i8)\n"))
+        );
+        assert_eq!(format_source(&source).unwrap(), source);
+        let mut declarations = parse_str(&source).unwrap();
+        let Decl::LetDef {
+            value: Expr::Pipe(_, stages, _),
+            ..
+        } = &mut declarations[0]
+        else {
+            panic!("expected authored pipe")
+        };
+        stages[0].syntax = PipeStageSyntax::Cast(CastMode::Named(
+            NamedCastMode::ALL[(index + 1) % NamedCastMode::ALL.len()],
+        ));
+        assert!(
+            matches!(
+                desugar_program(&declarations),
+                Err(chelis_surf::desugar::DesugarError::InvalidPipeStage { .. })
+            ),
+            "{keyword}: mismatched rung must fail closed"
+        );
+    }
+}
+
+#[test]
 fn pipes_and_calls_have_identical_deep_before_checking() {
     for (pipe, call) in [
         ("x |> f", "f(x)"),

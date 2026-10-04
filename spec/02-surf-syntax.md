@@ -106,7 +106,8 @@ laws do not authorize dropping or reconstructing the operative child.
 
 > **[02-PIPE-1]** `|>` exists only in Surf. Desugaring SHALL normalize
 > `x |> f(y)` to `f(x, y)` before literal dtype selection, with bare `f`
-> meaning `f(x)`. `cast(T)`, `cast_trunc(T)`, bare `copy`, and bare `realize`
+> meaning `f(x)`. `cast(T)`, each named cast rung (`cast_trunc(T)`,
+> `cast_saturate(T)`, `cast_wrap(T)`), bare `copy`, and bare `realize`
 > stages normalize to their corresponding operand forms. General authored
 > lambdas remain function values applied to the carried expression; no
 > arbitrary beta reduction or capture-prone substitution is permitted.
