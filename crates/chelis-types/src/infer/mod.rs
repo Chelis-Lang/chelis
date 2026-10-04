@@ -114,6 +114,7 @@ mod binder_literal;
 mod checked;
 mod common;
 mod declaration_close;
+mod declaration_collect;
 mod declarations;
 mod declared_surface;
 mod declared_type;
@@ -162,6 +163,7 @@ use checked::*;
 use common::*;
 pub(crate) use common::{decide_shape_route, shape_route_result};
 use declaration_close::*;
+use declaration_collect::*;
 use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.

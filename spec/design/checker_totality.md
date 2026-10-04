@@ -2380,7 +2380,7 @@ is part of the design.
   `TypeUseSite::Defsig` the resolver mints a fresh variable for `_`
   (`crates/chelis-types/src/deep_type.rs`, `resolve_type_var`: `if name ==
   "_" { ... self.vg.fresh_tvar() }`), and `collect_declarations`
-  (`crates/chelis-types/src/infer/common.rs`, the `DeepTag::Defsig` arm)
+  (`crates/chelis-types/src/infer/declaration_collect.rs`, the `DeepTag::Defsig` arm)
   resolves the signature inside `subst.enter_level`, leaves the level, and
   calls `env.generalize(&ty, subst)`, which quantifies every variable minted
   above the current level, the hole included: the header becomes
