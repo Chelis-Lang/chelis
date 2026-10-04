@@ -518,3 +518,110 @@ decision.
 1. Whether the x86-64 target's declared CPU baseline should include hardware FMA
    (x86-64-v3), which would remove the software `fma` call from binary64 kernels at the
    cost of not running on older CPUs. Values do not depend on the answer.
+
+## 12. The error functions, `normal_cdf`, and `gelu`
+
+spec/05 makes `gelu` the exact Gaussian error linear unit `x * Phi(x)`, with `Phi` the
+standard normal CDF, and keeps the tanh approximation as a separate operation,
+`gelu_tanh`, for models trained with it (GPT-2 and its descendants). The same `Phi` graph
+(spec/05 §3.3) is the [05-OP-35] stdlib `normal_cdf`, replacing the
+Abramowitz-and-Stegun polynomial, so the language has one standard normal CDF. Both rest
+on two new [05-OP-46] correctly rounded primitives, `erf` and `erfc`.
+
+### 12.1 Why `erfc` and `erf` are primitives
+
+`Phi(x) = 0.5 * erfc(-x/sqrt(2))`. The left tail, where `Phi` is tiny, is where finance
+evaluates it (deep out-of-the-money options) and where `0.5 * (1 + erf(x/sqrt(2)))`
+cancels to zero, so `erfc` is the leaf. No graph over the existing primitives reproduces
+`erfc` to correct rounding, and the A&S-class polynomial it replaces breaks
+monotonicity at f16. `erf` is a primitive on the `tanh` precedent: `1 - erfc(x)` loses
+all relative accuracy near zero, so a library `erf` would be wrong exactly where `erf` is
+small. ONNX `Erf` (hydronnx) and `Nautilus.Special` need it.
+
+Making `Phi` itself the correctly rounded primitive was rejected. No correctly rounded
+binary64 `Phi` kernel exists, in CORE-MATH or elsewhere, so the rule could not be met at
+f64; a composition over `erfc` keeps the primitive set to functions with published
+kernels at both widths (tenets 2 and 7).
+
+### 12.2 Kernels and vendoring
+
+CORE-MATH provides all four at the commit already pinned in `VENDOR.toml`
+(`284b3b0e`), so the change adds files without moving the upstream pin:
+
+| function | binary32 | binary64 | binary64 worst-case corpus shipped |
+|---|---|---|---|
+| `erf` | `binary32/erf/erff.c` | `binary64/erf/erf.c` | `erf.wc` |
+| `erfc` | `binary32/erfc/erfcf.c` | `binary64/erfc/erfc.c` | `erfc.wc` |
+
+Each file includes only `<stdint.h>`, `<errno.h>`, and (binary64 `erfc`) `<fenv.h>`, and
+needs nothing outside what §3.3's reduction already handles: the `errno` blocks, the
+`FENV_ACCESS` pragma, and binary64 `erfc`'s inline-assembly `roundeven_finite` arms
+(the `__builtin_roundeven` arm stays). None uses `__int128`, `fegetround`, or an
+`FE_` constant. `scripts/vendor_core_math.py import` adds the four files, regenerates the
+amalgamation, and records their identifiers and hashes; the exhaustive binary32 gate and
+the binary64 worst-case corpora of §8 extend to both functions. The lanes gain `Erf` and
+`Erfc` wherever `Tanh` is wired (§4), each through the amalgamation's `chelis_cr_erf*`
+entries.
+
+### 12.3 The scaled argument and its error
+
+`-x/sqrt(2)` rounds before `erfc` sees it. A relative argument error `d` becomes a
+relative error of about `2 t^2 d` in `erfc(t)` for large `t = -x/sqrt(2)`, that is about
+`x^2 d` in `Phi`, so the plain graph `0.5 * erfc(mul(neg(x), c))` loses up to `x^2` ulps
+in the left tail. Measured against mpmath on 1,500 samples per band, the plain graph
+reaches 1,539 ulps at f64 (`x = -36.5`), 159 ulps at f32 (`x = -12.6`), and 13 ulps at
+f16.
+
+The §3.3 graph removes that error by composition. A Veltkamp split and Dekker's
+two-product give the exact rounding error `tl` of `th = RN(-x*c)`, and the first-order
+Taylor term `k * exp(-th^2) * tl` corrects `erfc(th)` toward `erfc(th + tl)`. The
+remaining error is the correctly rounded `erfc`, the final subtraction, and a second-order
+term of relative size about `(x^2 u)^2`. At an 8- or 11-bit significand that second-order
+term is not small, so f16 and bf16 evaluate the f32 graph and finalize once, which is the
+composition [05-OP-46] already uses for its own narrow-width leaves. The range bound
+`L = 64` exceeds every width's saturation point (f64 `Phi` underflows below
+`x = -38.5`) and keeps `65 * 64`, `4097 * 64`, and `th^2` finite.
+
+Measured with an mpmath model that evaluates the §3.3 text step by step, each
+primitive rounded to its width and each leaf correctly rounded:
+
+| width | inputs | max error (normal results) | adjacent-pair monotonicity violations |
+|---|---|---|---|
+| f64 | 8,006 sampled in `[-38, 8]` plus successors | 0.980 ulp | 0 |
+| f32 | 8,006 sampled in `[-13, 8]` plus successors | 0.984 ulp | 0 |
+| f16 | all 63,490 non-NaN values | 0.500 ulp | 0 |
+| bf16 | all 65,282 non-NaN values | 0.500 ulp | 0 |
+
+The spec states the graph, not a bound: the bits are pinned by construction, and these
+figures belong to the implementation oracle (§12.5). Monotonicity is measured, not
+structural; the plain graph is monotone by construction but fails the accuracy goal.
+
+Computing the f32 graph at f64 and rounding once was rejected. It is not a composition
+over f32 primitives, the Metal lane has no f64, and the f32 graph already holds under one
+ulp. The f32 normal_cdf reflection failure recorded in #3116 does not come from the graph:
+near `x = 0`, `1 - Phi(x)` lies on the `2^-24` grid while `Phi(-x)` lies on the `2^-25`
+grid, so even a correctly rounded `Phi` misses the fixed `1e-10` tolerance by one f32
+ulp, as the recorded `2^-25` counterexample shows. That property needs a per-width
+tolerance, not a new graph.
+
+### 12.4 Gradients
+
+`gelu` and `normal_cdf` differentiate the stated graph (spec/05 §3.3, [05-OP-35]), as
+`gelu_tanh` does today. The `erfc` adjoint `-g*k*exp(-(x*x))` supplies the density, so the
+gradient approximates `Phi(x) + x*phi(x)`, with relative error growing like `x^2 u`
+from the rounded square, as every `exp(-x*x)` density does. Through the split, the
+tangents of `ah` and `al` sum to the tangent of `a`, so `tl` contributes a derivative of
+order `u` and the correction's gradient stays at rounding level. Outside `|x| < L` the
+correction reads `z = 0`, so its gradient is exactly zero.
+
+### 12.5 Implementation surface
+
+The change set renames today's `gelu` to `gelu_tanh` everywhere the compiler names it
+(`chelis-types` builtins, activation graph, and dtype semantics; `chelis-ir` lowering and
+tier 2; the evaluator; C host emission; the Python bindings; the builtin semantic identity
+registry, whose rows the compiler derives), adds `erf`, `erfc`, and the new `gelu`, and
+respells `Std.Contracts.normal_cdf`. Bit-pinned tests of today's `gelu` move to
+`gelu_tanh` unchanged; new tests pin `gelu`, `erf`, `erfc`, and `normal_cdf` against
+mpmath at every width. The prove discharges in
+`crates/chelis-prove/data/standard_contract_discharges.json` and the standard graph digest
+regenerate.
