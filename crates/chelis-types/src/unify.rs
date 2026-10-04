@@ -721,7 +721,7 @@ impl DeferredOperandGate {
                 ref route,
                 ref result,
             } => {
-                match crate::infer::shape_route_result(route, resolved) {
+                match crate::infer::shape_route_result(route, resolved, subst) {
                     Ok((settled, updates)) => {
                         // The updates equation `scatter` imposes is part of the
                         // arm, not of the helper. Replaying only the helper

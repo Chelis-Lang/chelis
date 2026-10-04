@@ -2300,3 +2300,67 @@ fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
         );
     }
 }
+
+/// chelis#3009: a precision variable denotes every dtype its bound admits
+/// ([04-INF-6]), so `sum`, `cumsum`, `trace` and `einsum` over it type as
+/// `sum_result` only when that is one type across the bound: the variable
+/// itself for `Float` or `{i32, i64}`, one concrete dtype for `{i8, i16}`.
+/// `Int`, `Numeric` and an unbounded variable are rejected at the
+/// definition, where an i8 call would otherwise carry i32 data typed i8.
+#[test]
+fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
+    let bodies = [
+        ("tensor[3, p]", "tensor[3, R]", "cumsum(x, 0i32)"),
+        ("tensor[3, p]", "tensor[R]", "sum(x, 0i32)"),
+        ("tensor[2, 2, p]", "tensor[R]", "trace(x, 0, 1)"),
+        ("tensor[2, p]", "tensor[R]", "einsum(\"i,i->\", copy(x), x)"),
+    ];
+    for (operand, result, body) in bodies {
+        for (bound, result_dtype) in [
+            ("Float", "p"),
+            ("{i32, i64}", "p"),
+            ("{f32, i64}", "p"),
+            ("{i8, i16}", "i32"),
+            ("{i8, i32}", "i32"),
+        ] {
+            let source = format!(
+                "def f[p: {bound}](x: {operand}) -> {} = {body}\n",
+                result.replace('R', result_dtype)
+            );
+            let errors = surf_check_errors(&source);
+            assert!(errors.is_empty(), "{source}: {errors:?}");
+        }
+        for binder in ["p: Int", "p: Numeric", "p: {i8, i64}", "p"] {
+            let source = format!(
+                "def f[{binder}](x: {operand}) -> {} = {body}\n",
+                result.replace('R', "p")
+            );
+            let errors = surf_check_errors(&source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("has no single result dtype")
+                        && error.message.contains("sum_result")),
+                "{source} must be rejected at the definition: {errors:?}"
+            );
+        }
+    }
+    // The reviewer's witness: at i8 the call would hold i32 data typed i8.
+    let errors = surf_check_errors(
+        "def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         def g(x: tensor[3, i8]) -> tensor[3, i8] = add(f(copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8, 10i8]))\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("has no single result dtype")),
+        "the generic i8 cumsum witness must be rejected: {errors:?}"
+    );
+    // A `Float` generic instantiates at f16 and keeps the operand dtype.
+    let errors = surf_check_errors(
+        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         out = f(cast(to_tensor([1.0, 2.0, 3.0]), f16))\n",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}

@@ -813,6 +813,7 @@ pub(super) fn finish_unified_app(
                     &equation,
                     &type_for_readonly_check(&arg_tys[1], subst),
                     &type_for_readonly_check(&arg_tys[2], subst),
+                    subst,
                 ) {
                     Ok(Some(result)) => result,
                     Ok(None) => result_ty,
@@ -966,7 +967,7 @@ pub(super) fn finish_unified_app(
                 };
                 match cumsum_operand {
                     Type::Tensor(dims, precision) => {
-                        return match default_sum_result_precision("cumsum", &precision) {
+                        return match default_sum_result_precision("cumsum", &precision, subst) {
                             Ok(result) => Type::Tensor(dims, result),
                             Err(message) => report(
                                 errors,

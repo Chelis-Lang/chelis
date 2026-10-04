@@ -212,11 +212,7 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
         ("abs floor ceil round", "x", "tensor[3, p]"),
         ("max_elem min_elem", "x, x", "tensor[3, p]"),
         ("cmplt lt gt gte lte", "x, x", "tensor[3, bool]"),
-        (
-            "sum max_reduce min_reduce prod_reduce",
-            "x, 0i32",
-            "tensor[p]",
-        ),
+        ("max_reduce min_reduce prod_reduce", "x, 0i32", "tensor[p]"),
         ("argmax_reduce argmin_reduce", "x, 0i32", "tensor[i64]"),
     ] {
         for operation in operations.split_whitespace() {
@@ -237,6 +233,20 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
                 }
             }
         }
+    }
+    // [05-OP-30] with spec/04 §5.7.1: `sum` returns sum_result(p, default(p)),
+    // which is one type across `Float` but not across `Numeric`, whose i8
+    // member sums to i32 (#3009). Only the direct call is covered: an aliased
+    // reduction's result is not checked by its arm at all.
+    check(
+        "def g[p: Float](x: tensor[3, p]) -> tensor[p] = sum(x, 0i32)\n",
+        true,
+    );
+    for binder in ["p", "p: Numeric", "p: Int"] {
+        let source = format!("def g[{binder}](x: tensor[3, p]) -> tensor[p] = sum(x, 0i32)\n");
+        let program = desugar_program(&parse_str(&source).expect("valid source"))
+            .expect("Surf fixture must desugar");
+        assert!(check_typed_program(&program).is_err(), "{source}");
     }
     // [05-OP-64], [05-OP-47]. Scalar controls avoid claiming a repair of
     // the separate pre-existing bounded-tensor integer validator limitation.

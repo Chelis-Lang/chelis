@@ -974,11 +974,9 @@ pub(super) fn check_reduction_signature(
     // caveat documented on `RiscOp::Argmax`; the i64 label is the
     // declarative output type.)
     //
-    // WS-A5: the §5.7.1 widening rule is defined over a known operand
-    // precision. If the operand precision is still polymorphic
-    // (TensorPrec::Var), defer the decision until the precision is
-    // resolved by unification — return the canonical-but-still-poly
-    // result type and let the standard unify path proceed.
+    // WS-A5: the §5.7.1 widening rule over a precision variable is decided
+    // over every dtype its bound admits ([04-INF-6]); see
+    // `default_sum_result_precision`.
     let result_prec: TensorPrec = if name == "count" {
         TensorPrec::Concrete(Prim::Int64)
     } else if name == "sum" {
@@ -1002,7 +1000,16 @@ pub(super) fn check_reduction_signature(
                     );
                 }
             },
-            TensorPrec::Var(_) => prec.clone(),
+            TensorPrec::Var(_) => match default_sum_result_precision("sum", &prec, subst) {
+                Ok(result) => result,
+                Err(message) => {
+                    return report_at_check_site(
+                        errors,
+                        CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]),
+                        site,
+                    );
+                }
+            },
         }
     } else if name == "argmax_reduce" || name == "argmin_reduce" {
         TensorPrec::Concrete(Prim::Int64)
