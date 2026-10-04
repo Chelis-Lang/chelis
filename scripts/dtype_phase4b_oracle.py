@@ -596,6 +596,8 @@ EXPECTED_OP_MANIFESTS = {
 | `decimal::decimal_round` | `(Decimal,i64,Rounding)->Decimal` |
 | `decimal::decimal_scale` | `(Decimal)->i64` |
 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_to_bf16` | `(Decimal)->bf16` |
+| `decimal::decimal_to_f16` | `(Decimal)->f16` |
 | `decimal::decimal_to_f32` | `(Decimal)->f32` |
 | `decimal::decimal_to_f64` | `(Decimal)->f64` |
 | `decimal::decimal_to_fixed_string` | `(Decimal,i64)->string` |
@@ -967,10 +969,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 281 or len(set(identities)) != 281:
+    if len(identities) != 283 or len(set(identities)) != 283:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "eighty-one unique identities"
+            "eighty-three unique identities"
         )
 
 
@@ -2531,7 +2533,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred eighty-one final exported stdlib numeric definitions",
+            "exactly the two hundred eighty-three final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2875,6 +2877,7 @@ def validate_normative_contract(
             "so `decimal(decimal_to_string(x))` is `x`",
             "it never rounds",
             "correctly rounded once to the target format with ties to even",
+            "a magnitude of at least 65520 rounds to the infinity of `x`'s sign",
             "They are the named lossy boundary from decimal to binary float",
             "its result is always in the value set",
         ),

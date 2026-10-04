@@ -149,7 +149,10 @@ Chelis-specific variants.
   [05-OP-76]'s value set converts to that exact `Std.Decimal`; any other
   value is a `domain` failure and is never rounded; and a `Std.Decimal`
   value reaches a declared (precision, scale) only through an explicit
-  [05-OP-74] rounding mode.
+  [05-OP-74] rounding mode. When that rounded value needs more integer digits
+  than the declared precision leaves after the scale (`precision - scale`),
+  the export is a `domain` failure naming the `Std.Decimal` value and the
+  declared (precision, scale); it never saturates or truncates.
 
 **Not reserved, and deliberately so: scaled and block-scaled formats.**
 `qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling

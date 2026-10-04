@@ -2835,7 +2835,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred eighty-one final exported stdlib numeric definitions enumerated in the
+> the two hundred eighty-three final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -3556,11 +3556,15 @@ exact ADT identity by [05-OP-34].
 > an integer by `r` and fails `overflow` when that integer is outside i64.
 > `decimal_from_f64(x, n, r)` is the exact binary value of a finite `x` rounded to a
 > multiple of `10^-n` by `r`; it fails `domain` when `x` is NaN or infinite, `n` is outside
-> `0..38`, or the rounded value is outside the value set. `decimal_to_f64(x)` and
-> `decimal_to_f32(x)` are the exact value of `x` correctly rounded once to the target
+> `0..38`, or the rounded value is outside the value set. `decimal_to_f64(x)`,
+> `decimal_to_f32(x)`, `decimal_to_f16(x)`, and `decimal_to_bf16(x)` are the exact
+> value of `x` correctly rounded once to the target
 > format with ties to even (subnormal results included); each rounds directly, never
-> through another format, and neither fails, since the value set lies within both
-> formats' finite range. They are the named lossy boundary from decimal to binary float.
+> through another format, and none fails. The value set lies within the finite range of
+> f64, f32, and bf16. The largest finite f16 is 65504, so a magnitude of at least 65520
+> rounds to the infinity of `x`'s sign, as round-to-nearest overflows in a cast to f16
+> ([04-NUM-14]); a nonzero `x` that rounds to zero gives the zero of its sign. They are
+> the named lossy boundary from decimal to binary float.
 > `decimal_scale(x)` is the canonical scale.
 >
 > `decimal_add`, `decimal_sub`, and `decimal_mul` return the exact sum, difference, and
