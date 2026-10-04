@@ -93,6 +93,12 @@ enum KeyOperand {
 struct ConsumeSite {
     description: String,
     kind: ConsumeKind,
+    /// `true` when the consume ends the owner's lifetime: an explicit `drop`
+    /// ([05-OP-67]). No inserted copy can keep the owner usable after it, so
+    /// every later use of the owner, through any name bound to it, is
+    /// `UseAfterConsume` rather than consuming fan-out repaired by copy
+    /// insertion ([04-LIN-3], spec/04 section 8.3; chelis#3177).
+    terminal: bool,
 }
 
 /// What a single binding generation was introduced by.  One record per
@@ -795,6 +801,7 @@ impl Checker {
             ConsumeSite {
                 description: format!("the root observation of `{name}`"),
                 kind: ConsumeKind::Structural,
+                terminal: false,
             },
         );
     }
@@ -871,6 +878,7 @@ impl Checker {
                             ConsumeSite {
                                 description: format!("binding `{name}` {}", diag_site(body)),
                                 kind: ConsumeKind::Structural,
+                                terminal: false,
                             },
                         );
                     } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
@@ -889,6 +897,7 @@ impl Checker {
                             ConsumeSite {
                                 description: format!("binding `{name}` {}", diag_site(body)),
                                 kind: ConsumeKind::Aliasing,
+                                terminal: false,
                             },
                         );
                         if let Some((alias_id, source_id)) = alias_link {
@@ -1219,7 +1228,7 @@ impl Checker {
                 {
                     self.reject_key_read(arg, "borrowed by this call");
                 } else {
-                    self.consume_var_expr(arg, scope, app_site(expr, children));
+                    self.consume_var_expr(arg, scope, app_site(expr, children, builtin_callee));
                 }
             } else if self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 && is_var_expr(arg)
@@ -1227,7 +1236,7 @@ impl Checker {
             {
                 self.read_var_expr(arg, scope);
             } else if is_var_expr(arg) && self.expr_is_owned_linear(arg, scope) {
-                self.consume_var_expr(arg, scope, app_site(expr, children));
+                self.consume_var_expr(arg, scope, app_site(expr, children, builtin_callee));
             } else {
                 self.check_expr(arg, scope);
             }
@@ -1347,6 +1356,7 @@ impl Checker {
                         ConsumeSite {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Structural,
+                            terminal: false,
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
@@ -1357,6 +1367,7 @@ impl Checker {
                         ConsumeSite {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Aliasing,
+                            terminal: false,
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1518,6 +1529,7 @@ impl Checker {
                         ConsumeSite {
                             description: format!("closure capture {}", diag_site(expr)),
                             kind: ConsumeKind::Structural,
+                            terminal: false,
                         },
                     );
                 }
@@ -1605,6 +1617,7 @@ impl Checker {
                 ConsumeSite {
                     description: format!("match scrutinee {}", diag_site(&children[0])),
                     kind: ConsumeKind::Structural,
+                    terminal: false,
                 },
             );
         } else {
@@ -1695,6 +1708,7 @@ impl Checker {
                 site.description
             ),
             kind: ConsumeKind::Structural,
+            terminal: false,
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -1735,6 +1749,7 @@ impl Checker {
                             binding.name
                         ),
                         kind: ConsumeKind::Structural,
+                        terminal: false,
                     },
                 ));
             }
@@ -1861,16 +1876,23 @@ impl Checker {
             // value, so it is the one that must survive the join. Prefer it
             // over an `Aliasing` record from another branch: an alias bind
             // does not destroy anything, and letting it win would report the
-            // wrong site.
+            // wrong site. A terminal consume ends the owner on its path, so
+            // it outranks an ordinary one (chelis#3177).
             let consumed_site = branches
                 .iter()
                 .find_map(|branch| match branch.state(*id) {
-                    Some(BindingState::Consumed(site))
-                        if matches!(site.kind, ConsumeKind::Structural) =>
-                    {
-                        Some(site.clone())
-                    }
+                    Some(BindingState::Consumed(site)) if site.terminal => Some(site.clone()),
                     _ => None,
+                })
+                .or_else(|| {
+                    branches.iter().find_map(|branch| match branch.state(*id) {
+                        Some(BindingState::Consumed(site))
+                            if matches!(site.kind, ConsumeKind::Structural) =>
+                        {
+                            Some(site.clone())
+                        }
+                        _ => None,
+                    })
                 })
                 .or_else(|| {
                     branches.iter().find_map(|branch| match branch.state(*id) {
@@ -1904,6 +1926,10 @@ impl Checker {
             //   Consumed(Aliasing), and
             //     the name is an ordinary
             //     binding                 -> unchanged.
+            //   Consumed, not by a `drop`,
+            //     and a branch dropped
+            //     the owner               -> the `drop` wins, as in
+            //                                `consume_var_expr` (chelis#3177).
             //
             // The carve-out is deliberately narrow. The justification above
             // is entirely about carriers: a component's `Aliasing` record is
@@ -1919,9 +1945,10 @@ impl Checker {
             let replaces_outer = match scope.state(*id) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
-                    matches!(outer.kind, ConsumeKind::Aliasing)
-                        && matches!(site.kind, ConsumeKind::Structural)
-                        && scope.is_component_id(*id)
+                    (site.terminal && !outer.terminal)
+                        || (matches!(outer.kind, ConsumeKind::Aliasing)
+                            && matches!(site.kind, ConsumeKind::Structural)
+                            && scope.is_component_id(*id))
                 }
                 None => false,
             };
@@ -1987,6 +2014,41 @@ impl Checker {
             self.consume_key_holder(expr, name, target, scope, site);
             return;
         }
+        // A `drop` ends the owner, so every later use is refused, whatever
+        // this use's own kind (chelis#3177). The owner is checked through the
+        // alias chain as well as on the use's own binding: after `y = x;
+        // c = drop(x)`, binding `z = y` is an `Aliasing` consume whose target
+        // is `y`'s live record, but it names the dropped owner.
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        let ended_at = [use_id, owner]
+            .into_iter()
+            .find_map(|id| match scope.state(id) {
+                Some(BindingState::Consumed(consumed_at)) if consumed_at.terminal => {
+                    Some(consumed_at.description.clone())
+                }
+                _ => None,
+            });
+        if let Some(description) = ended_at {
+            // chelis#1200: report the name the user wrote, not
+            // `target`. `target` is the alias chain's terminal, which
+            // for a destructured component is the desugarer's
+            // `__chelis_tmpN` — a name that appears nowhere in the
+            // user's source and that they cannot act on.
+            self.push_diagnostic(CheckError::new(
+                CheckErrorKind::UseAfterConsume,
+                with_macro_provenance(
+                    expr,
+                    format!(
+                        "variable `{name}` was already consumed by {description}; later use {} is invalid",
+                        diag_site(expr)
+                    ),
+                ),
+                vec![format!(
+                    "Move the later use before the `drop`, or bind `copy({name})` before it"
+                )],
+            ));
+            return;
+        }
         match scope.state(target) {
             Some(BindingState::Live { .. }) => scope.consume_id(target, site),
             Some(BindingState::Consumed(consumed_at))
@@ -1995,11 +2057,6 @@ impl Checker {
                         || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
-                // chelis#1200: report the name the user wrote, not
-                // `target`. `target` is the alias chain's terminal, which
-                // for a destructured component is the desugarer's
-                // `__chelis_tmpN` — a name that appears nowhere in the
-                // user's source and that they cannot act on.
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
@@ -2077,6 +2134,10 @@ impl Checker {
                     )],
                 ));
             }
+            // A `drop` still ends the owner after an earlier consume: copy
+            // insertion gives the earlier use the copy, so a use after
+            // `a = eat(x); c = drop(x)` is refused.
+            Some(BindingState::Consumed(_)) if site.terminal => scope.consume_id(target, site),
             Some(BindingState::Consumed(_)) => {
                 // The implicit-linearity pass will insert a Copy for
                 // consuming fan-out.  Borrow-after-consume remains an
@@ -3971,7 +4032,9 @@ fn type_expr_eq(lhs: &Expr, rhs: &Expr) -> bool {
         == chelis_deep::printer::print_canonical(std::slice::from_ref(rhs))
 }
 
-fn app_site(expr: &Expr, children: &[Expr]) -> ConsumeSite {
+/// `builtin_callee` is the callee when it names a builtin rather than a
+/// lexical binding; only the builtin `drop` ends its argument's lifetime.
+fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> ConsumeSite {
     let name = children
         .first()
         .and_then(var_name)
@@ -3980,6 +4043,7 @@ fn app_site(expr: &Expr, children: &[Expr]) -> ConsumeSite {
     ConsumeSite {
         description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: builtin_callee == Some("drop"),
     }
 }
 
@@ -3987,6 +4051,7 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("use {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: false,
     }
 }
 
@@ -3994,6 +4059,7 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("realize {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: false,
     }
 }
 
