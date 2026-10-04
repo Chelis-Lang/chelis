@@ -651,8 +651,21 @@ impl<'program> HostLoweringSession<'program> {
 
     /// The authored `defsig` signature a reference spelled `name` resolves to.
     fn defsig_named(&self, name: &str) -> Option<&'program Expr> {
-        let path = self.names().defsigs.resolve(name)?;
+        let names = self.names();
+        let path = if self.declares_exactly(name) {
+            names.defsigs.exact.get(name)?
+        } else {
+            names.defsigs.resolve(name)?
+        };
         named_item(self.item_at(path)?, DeepTag::Defsig).map(|(_, signature)| signature)
+    }
+
+    /// Whether `name` is exactly a top-level `def`'s name. Such a name
+    /// denotes that declaration alone, so no lookup by its last `__` segment
+    /// may answer for it: a root named `period_text` is not a library's
+    /// `period_text` (chelis#2916).
+    fn declares_exactly(&self, name: &str) -> bool {
+        self.names().defs.exact.contains_key(name)
     }
 
     /// The checked subexpression-lowering context for this program.
@@ -16073,6 +16086,9 @@ fn checked_authored_function_signature<'a>(
                 .unwrap_or(&inference.checked_signature),
         );
     }
+    if program.declares_exactly(name) {
+        return None;
+    }
     let mut matches = program
         .signature_inference()
         .functions
@@ -18836,7 +18852,13 @@ fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &st
 fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
     lookup_authored_defsig_type_expr(program, name)
         .or_else(|| checked_authored_function_signature(program, name).map(type_to_deep_expr))
-        .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
+        .or_else(|| {
+            if program.declares_exactly(name) {
+                program.type_env().get(name).cloned()
+            } else {
+                lookup_type_expr(program.type_env(), name).cloned()
+            }
+        })
 }
 
 fn lookup_declared_host_type(
