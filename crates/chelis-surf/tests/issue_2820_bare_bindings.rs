@@ -97,4 +97,14 @@ fn a_shadowed_to_tensor_call_is_an_ordinary_call_that_adopts_nothing() {
     );
     assert!(shadowed.contains("(t-prim {} f32)} 1.5)"), "{shadowed}");
     assert!(!shadowed.contains("(t-prim {} f64)} 1.5)"), "{shadowed}");
+    // The resugarer sees the same binding: the call prints as authored, with
+    // no suffix forced onto the default literals.
+    let source = "def sample(to_tensor: List[f32] -> tensor[2, f32]) -> tensor[2, f64] = cast(to_tensor([1.5, 2.5]), f64)\n";
+    let resugared = chelis_surf::format::format_program(
+        &chelis_surf::resugar::resugar_program(
+            &desugar_program(&parse_str(source).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(resugared.contains("to_tensor([1.5, 2.5])"), "{resugared}");
 }

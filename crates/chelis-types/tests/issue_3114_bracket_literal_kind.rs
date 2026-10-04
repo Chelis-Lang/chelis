@@ -476,6 +476,11 @@ fn pipe_spellings_adopt_exactly_like_the_nested_call() {
             "def g[p: Float](w: p) -> tensor[2, p] = [1.1, -2.2] |> to_tensor |> cast(p)\n",
         ],
         &["values = cast(1.1, f64)\n", "values = 1.1 |> cast(f64)\n"],
+        &[
+            "values = cast(1.5f32, f64)\n",
+            "values = 1.5f32 |> cast(f64)\n",
+        ],
+        &["values = cast(7i32, i64)\n", "values = 7i32 |> cast(i64)\n"],
         &["values = cast(-1.1, f64)\n", "values = -1.1 |> cast(f64)\n"],
         &[
             "values = cast(3000000000, i64)\n",
@@ -589,6 +594,7 @@ fn a_tensor_literal_cast_to_a_dtype_binder_is_typed_at_the_binder_and_refused() 
         "def g[p: Float](w: p) -> tensor[2, p] = cast(to_tensor([1.1f64, 2.2f64]), p)\nr = g(0.0f64)\n",
         "def g[p: Float](w: p) -> p = cast(1.1, p)\nr = g(0.0f64)\n",
         "def g[p: Float](w: p) -> tensor[2, p] = to_tensor([cast(1.1, p), cast(2.2, p)])\nr = g(0.0f64)\n",
+        "def g[p: Float](w: p) -> p = 1.1 |> cast(p)\nr = g(0.0f64)\n",
     ] {
         let errors = infer_program(&deep(source)).errors;
         assert!(errors.is_empty(), "{source}{errors:?}");
