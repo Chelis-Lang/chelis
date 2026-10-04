@@ -6,11 +6,42 @@ use half::{bf16, f16};
 
 fn stored(dtype: &str, x: f64) -> f64 {
     match dtype {
-        "f16" => f16::from_f64(x).to_f64(),
-        "bf16" => bf16::from_f64(x).to_f64(),
+        "f16" => f16::from_bits(chelis_crmath::profile::storage_reference(
+            x.to_bits(),
+            64,
+            chelis_crmath::profile::Output::F16,
+        ))
+        .to_f64(),
+        "bf16" => bf16::from_bits(chelis_crmath::profile::storage_reference(
+            x.to_bits(),
+            64,
+            chelis_crmath::profile::Output::Bf16,
+        ))
+        .to_f64(),
         "f32" => f64::from(x as f32),
         "f64" => x,
         _ => panic!("unknown dtype"),
+    }
+}
+
+#[test]
+fn storage_reference_distinguishes_midpoints_from_adjacent_f64_values() {
+    for (dtype, fraction_bits, one_bits) in [("f16", 10, 0x3c00u16), ("bf16", 7, 0x3f80u16)] {
+        let midpoint = 1.0 + 2.0f64.powi(-fraction_bits - 1);
+        let below = f64::from_bits(midpoint.to_bits() - 1);
+        let above = f64::from_bits(midpoint.to_bits() + 1);
+        assert_eq!(stored(dtype, below), 1.0, "{dtype}: below midpoint");
+        assert_eq!(
+            stored(dtype, midpoint),
+            1.0,
+            "{dtype}: midpoint ties to even"
+        );
+        let next = if dtype == "f16" {
+            f16::from_bits(one_bits + 1).to_f64()
+        } else {
+            bf16::from_bits(one_bits + 1).to_f64()
+        };
+        assert_eq!(stored(dtype, above), next, "{dtype}: above midpoint");
     }
 }
 
