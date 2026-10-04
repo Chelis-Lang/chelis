@@ -656,10 +656,10 @@ fn a_constraint_survives_its_variable_being_aliased_to_another() {
 /// What this asserts, exactly: no message carries the slot's own
 /// "<name> expects" wording. It deliberately does NOT assert a clean report.
 /// The `f32` row still reports a precision conflict between `f32` and `f64`,
-/// because the eager arm hard-codes an `f64` result while `[05-OP-1]` makes the
-/// result follow the operand; that divergence is chelis#1295's, predates this
-/// change, and is unaffected by it. Asserting emptiness here would pin
-/// chelis#1295's bug instead of this one's.
+/// because the eager arm hard-codes an `f64` result for an unresolved operand
+/// while `[05-OP-1]` makes the result follow the operand; that divergence
+/// needs the set-carrying deferred gate this issue leaves open. Asserting
+/// emptiness here would pin that bug instead of this one's.
 #[test]
 fn an_accepted_host_slot_operand_draws_no_slot_rejection_when_deferred() {
     // (operand type, call, the builtin's own result type)

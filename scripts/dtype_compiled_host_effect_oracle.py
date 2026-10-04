@@ -62,7 +62,7 @@ SHARED_DEFINITIONS = (
     ("process_run", "host_process", "crates/chelis-compiler-api/src/runtime/eval.rs",
      "chelis_runtime::host_process::decode_process_output(", ("chelis_process_run(",)),
     ("round_to", "host_round", "crates/chelis-compiler-api/src/runtime/eval.rs",
-     "chelis_runtime::host_round::round_to_f64(", ("chelis_round_to(",)),
+     "use chelis_runtime::host_round::{FloatLayout, round_to_bits};", ("chelis_round_to(",)),
     ("CSV", "host_csv", "crates/chelis-compiler-api/src/runtime/csv.rs",
      "host_csv::parse_csv_text(text)", ("chelis_{name}({call_args})", "chelis_csv_nrows(")),
     ("assertions", "host_assert", "crates/chelis-compiler-api/src/runtime/eval.rs",

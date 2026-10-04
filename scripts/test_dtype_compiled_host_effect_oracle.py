@@ -93,8 +93,8 @@ class OracleMutationTests(unittest.TestCase):
     def test_evaluator_private_copy_fails(self):
         self.assert_mutation_fails(
             "crates/chelis-compiler-api/src/runtime/eval.rs",
-            "chelis_runtime::host_round::round_to_f64(",
-            "super::numeric_text::round_to_f64_impl(",
+            "use chelis_runtime::host_round::{FloatLayout, round_to_bits};",
+            "use super::numeric_text::{FloatLayout, round_to_bits};",
         )
 
     def test_lossy_process_decoding_fails(self):

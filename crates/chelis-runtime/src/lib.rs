@@ -8059,17 +8059,21 @@ pub extern "C" fn chelis_round_to(x: chelis_scalar, places: chelis_scalar) -> ch
             other.name()
         ),
     };
-    let rounded = match validate_scalar(x, "round_to operand") {
-        RuntimeDType::F64 => host_round::round_to_f64(f64::from_bits(x.bits), places_value)
-            .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits())),
-        RuntimeDType::F32 => host_round::round_to_f32(f32::from_bits(x.bits as u32), places_value)
-            .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(value.to_bits()))),
+    let dtype = validate_scalar(x, "round_to operand");
+    let layout = match dtype {
+        RuntimeDType::F64 => host_round::FloatLayout::F64,
+        RuntimeDType::F32 => host_round::FloatLayout::F32,
+        RuntimeDType::F16 => host_round::FloatLayout::F16,
+        RuntimeDType::Bf16 => host_round::FloatLayout::BF16,
         other => runtime_fail!(
-            "Domain: round_to operand must be f64 or f32, got {}",
+            "Domain: round_to operand must be a float, got {}",
             other.name()
         ),
     };
-    rounded.unwrap_or_else(|message| runtime_fail!("{message}"))
+    chelis_scalar_from_bits(
+        dtype.id() as chelis_dtype,
+        host_round::round_to_bits(x.bits, layout, places_value),
+    )
 }
 
 /// `process_run` in compiled host code: the `(exit_code, stdout, stderr)`

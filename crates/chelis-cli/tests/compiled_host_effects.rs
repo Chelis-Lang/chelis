@@ -76,28 +76,6 @@ fn round_to_matches_eval_at_each_width() {
     }
 }
 
-/// The failing twins: `places` outside the admitted domain is the same
-/// language trap on both lanes, after the effects that precede it.
-#[test]
-fn round_to_domain_failures_match_eval() {
-    for (name, source, failure) in [
-        (
-            "negative",
-            "a = print(\"before\")\nb = round_to(1.25, -1i64)\n",
-            "round_to: places must be in 0..=100, got -1",
-        ),
-        (
-            "toolarge",
-            "b = round_to(1.25f32, 101i32)\n",
-            "round_to: places must be in 0..=100, got 101",
-        ),
-    ] {
-        let run = parity::assert_lanes_agree(source, name);
-        assert_eq!(run.status, Some(1), "{name}: {run:?}");
-        assert!(run.failure.starts_with(failure), "{name}: {run:?}");
-    }
-}
-
 /// A dtype outside the admitted set is a type error at check time, which
 /// the build reports as a type error rather than a target gate.
 #[test]
@@ -550,5 +528,40 @@ fn tensor_scan_rejects_a_state_changing_callback_by_type() {
     ] {
         let stderr = build_rejection(body);
         assert!(stderr.contains("tensor_scan"), "{stderr}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [05-OP-1] round_to at every active float dtype and every places (#1295)
+// ---------------------------------------------------------------------------
+
+/// `round_to` admits f16 and bf16, rounds left of the point for negative
+/// `places`, is the identity once the quantum is finer than the value, and
+/// overflows to infinity, identically on both lanes.
+#[test]
+fn round_to_matches_eval_for_every_float_dtype_and_places() {
+    let source = "h = round_to(cast(2.675f32, f16), 2i64)\n\
+                  b = round_to(cast(2.675f32, bf16), 1i8)\n\
+                  left = round_to(1234.5f64, -2i64)\n\
+                  tie = round_to(1250.0f32, -2i16)\n\
+                  zero = round_to(-49.0f64, -2i32)\n\
+                  fine = round_to(0.1f64, 1000i64)\n\
+                  coarse = round_to(1.0f64, -400i64)\n\
+                  huge = round_to(cast(65504.0f32, f16), -5i64)\n";
+    let run = parity::assert_lanes_agree(source, "roundwide");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "h = 2.68\n",
+        "left = 1200.0\n",
+        "tie = 1200.0\n",
+        "zero = -0.0\n",
+        "fine = 0.1\n",
+        "coarse = 0.0\n",
+        "huge = inf\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
     }
 }

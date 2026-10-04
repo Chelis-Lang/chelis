@@ -1,4 +1,5 @@
 use chelis_deep::DeepTag;
+use chelis_runtime::host_round::{FloatLayout, round_to_bits};
 use chelis_unord::UnordMap;
 use std::path::Path;
 
@@ -4402,40 +4403,51 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::String(text))
             }
             "round_to" => {
-                // [05-OP-1]: per-dtype at declared widths, f64 and f32
-                // only, dispatched STRICTLY on the operand's own dtype --
-                // no widen/round/re-narrow lane exists ([04-NUM-8] has no
-                // exception vocabulary), and unsupported float widths fail
-                // loudly here exactly as they do at check time.
+                // [05-OP-1]: exact decimal rounding of the operand's stored
+                // value at its own float width, through the runtime's one
+                // definition shared with compiled host code. A non-finite
+                // operand passes through with its stored bits unchanged.
                 let places = expect_int_arg(args, 1)?;
-                match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
-                        let rounded = chelis_runtime::host_round::round_to_f64(
-                            payload.as_f64_lossy(),
-                            places,
-                        )?;
-                        Ok(RuntimeValue::float64(rounded))
-                    }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
-                        let rounded = chelis_runtime::host_round::round_to_f32(
-                            payload.as_f64_lossy() as f32,
-                            places,
-                        )?;
-                        RuntimeValue::scalar_like_float(Prim::F32, f64::from(rounded))
-                    }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                        Err(format!(
-                            "round_to: unsupported operand dtype {} ([05-OP-1] authors \
-                             decimal rounding for f64 and f32 only; cast the operand \
-                             explicitly)",
-                            payload.dtype().name()
-                        ))
-                    }
-                    other => Err(format!(
+                let Some(RuntimeValue::Scalar(payload)) = args.first() else {
+                    return Err(format!(
                         "expected float arg at index 0, got {}",
-                        describe_argument(other)
-                    )),
-                }
+                        describe_argument(args.first())
+                    ));
+                };
+                let value = payload.value();
+                let rounded =
+                    match value.element_ref() {
+                        ElementRef::F64(x) if x.is_finite() => {
+                            f64::from_bits(round_to_bits(x.to_bits(), FloatLayout::F64, places))
+                        }
+                        ElementRef::F32(x) if x.is_finite() => f64::from(f32::from_bits(
+                            round_to_bits(u64::from(x.to_bits()), FloatLayout::F32, places) as u32,
+                        )),
+                        ElementRef::F16(x) if x.is_finite() => half::f16::from_bits(round_to_bits(
+                            u64::from(x.to_bits()),
+                            FloatLayout::F16,
+                            places,
+                        )
+                            as u16)
+                        .to_f64(),
+                        ElementRef::Bf16(x) if x.is_finite() => half::bf16::from_bits(
+                            round_to_bits(u64::from(x.to_bits()), FloatLayout::BF16, places) as u16,
+                        )
+                        .to_f64(),
+                        ElementRef::F64(_)
+                        | ElementRef::F32(_)
+                        | ElementRef::F16(_)
+                        | ElementRef::Bf16(_) => return Ok(RuntimeValue::from_scalar_value(value)),
+                        _ => {
+                            return Err(format!(
+                                "expected float arg at index 0, got {}",
+                                describe_argument(args.first())
+                            ));
+                        }
+                    };
+                // Each rounded value is exact at its own width, so this
+                // construction performs no further rounding.
+                RuntimeValue::scalar_like_float(payload.dtype(), rounded)
             }
             // Host-lane CSV I/O (chelis#903) over the canonical
             // List[Dict[string,string]] text-table carrier.

@@ -364,15 +364,16 @@ until it can gate their checks. Shifts use declared-width
 two's-complement semantics; counts at or above the width fully shift out
 the value, while negative counts trap ([04-NUM-13]).
 
-### 3.8 Decimal rounding — Eval/test availability
+### 3.8 Decimal rounding
 
-The registered `round_to(x: f64|f32, places: int) -> f64|f32`
-performs ties-to-even decimal rounding on the operand's exact binary
-value ([05-OP-1], [04-NUM-8]). It preserves the operand dtype and accepts
-`places` in 0..=100 at any integer width; f16/bf16 calls currently reject.
-The controlling [05-OP-1] contract admits all four float dtypes and the
-complete signed-integer `places` domain, so those limits are implementation
-gaps.
+`round_to(x: f64|f32|f16|bf16, places: int) -> same dtype` rounds the
+operand's exact binary value to the nearest multiple of `10^(-places)`,
+ties to the even coefficient, and finalizes once at the operand's own width
+([05-OP-1], [04-NUM-8]). `places` is any signed integer: a negative count
+rounds left of the decimal point, a count finer than the value is the
+identity, a zero result keeps the operand's sign, and a result past the
+largest finite value is the signed infinity. Non-finite operands pass
+through unchanged. Eval and compiled C share one definition.
 Eval/test execute it; compiled builds reject it through the shared
 eval-only gate. [05-HOST-2] requires compiled-host support.
 

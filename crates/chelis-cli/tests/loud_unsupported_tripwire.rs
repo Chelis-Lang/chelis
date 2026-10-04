@@ -663,17 +663,9 @@ const BASELINE: &[Entry] = &[
          plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
          messages (round-4 F5 widening) - the sanctioned formatter's \
          implementation and its self-checks, not additional exits. \
-         [05-OP-1]'s decimal-place formatter moved to \
-         chelis-runtime's host_round with chelis#1297",
-    ),
-    (
-        Pat::RustFormatNarrowing,
-        "crates/chelis-runtime/src/host_round.rs",
-        1,
-        "[05-OP-1]'s one sealed decimal-place formatter, moved from \
-         chelis-types' observation.rs by chelis#1297 so the evaluator and \
-         compiled C share one rounding; the parse back to the operand's own \
-         width is the single finalization, not an additional exit",
+         [05-OP-1]'s decimal-place formatter left with chelis#1295: \
+         round_to rounds with exact integer arithmetic in chelis-runtime's \
+         host_round",
     ),
     (
         Pat::RustFormatNarrowing,

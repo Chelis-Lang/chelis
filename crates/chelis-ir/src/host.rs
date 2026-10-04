@@ -20637,14 +20637,17 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "csv_f64s" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Float64))),
         "csv_ints" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "csv_strs" | "csv_cols" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
-        // `round_to` preserves its operand's float dtype ([05-OP-1]: f64 or
-        // f32, decided by the checker); an unresolved operand stays an
-        // inference hole rather than advertising a width this table cannot
-        // know.
+        // `round_to` preserves its operand's float dtype ([05-OP-1]: every
+        // active float dtype, decided by the checker); an unresolved operand
+        // stays an inference hole rather than advertising a width this table
+        // cannot know.
         "round_to" => match arg_tys.first() {
             Some(
                 term @ HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
-                    chelis_types::types::Prim::F64 | chelis_types::types::Prim::F32,
+                    chelis_types::types::Prim::F64
+                    | chelis_types::types::Prim::F32
+                    | chelis_types::types::Prim::F16
+                    | chelis_types::types::Prim::Bf16,
                 )),
             ) => Some(term.clone()),
             _ => Some(fresh_host_inference()),
