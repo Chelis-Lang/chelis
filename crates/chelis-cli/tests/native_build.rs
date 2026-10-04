@@ -2216,9 +2216,9 @@ fn compound_activations_match_eval_on_libm_misrounding_inputs_through_the_static
 }
 
 /// spec/05 section 3.3's `Phi` witnesses: the signed zeros, the infinities,
-/// NaN, the deep left tail, the `|x| = 64` bound, and the largest finite
-/// magnitudes.
-const PHI_WITNESSES: [f64; 20] = [
+/// NaN, the deep left tail, the `|x| = 64` bound, the largest finite
+/// magnitudes, and the binade boundaries where the graph errs most.
+const PHI_WITNESSES: [f64; 22] = [
     0.0,
     -0.0,
     f64::INFINITY,
@@ -2239,6 +2239,9 @@ const PHI_WITNESSES: [f64; 20] = [
     1e-30,
     f64::MAX,
     f64::MIN,
+    // Binade boundaries of `Phi` at f32 and f64, its largest errors found.
+    -4.900_964_260_101_318,
+    -27.256_566_083_845_673,
 ];
 
 /// The witnesses as `width`'s storage bits, rounded once from f64.

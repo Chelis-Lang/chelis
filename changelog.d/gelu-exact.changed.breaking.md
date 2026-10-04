@@ -14,7 +14,8 @@ What else changes:
   shadows a builtin and is rejected.
 - `standard_normal_cdf` is a new builtin: the standard normal CDF `Phi`, built from
   `erfc` with a correction for the rounding of `-x/sqrt(2)`. It stays within
-  about one unit in the last place at f32 and f64, including the deep left tail.
+  about 1.5 units in the last place at f32 and f64, including the deep left
+  tail.
 - `Std.Contracts.normal_cdf` calls `standard_normal_cdf`. It replaces the
   Abramowitz-and-Stegun polynomial, so its values change at every width. Its
   `std.normal_cdf.monotonicity` contract now validates at f16 as well. The

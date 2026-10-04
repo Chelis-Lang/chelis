@@ -584,7 +584,10 @@ The §3.3 graph removes that error by composition. A Veltkamp split and Dekker's
 two-product give the exact rounding error `tl` of `th = RN(-x*c)`, and the first-order
 Taylor term `k * exp(-th^2) * tl` corrects `erfc(th)` toward `erfc(th + tl)`. The
 remaining error is the correctly rounded `erfc`, the final subtraction, and a second-order
-term of relative size about `(x^2 u)^2`. At an 8- or 11-bit significand that second-order
+term of relative size about `(x^2 u)^2`. In units of the result, the `erfc` rounding
+costs half a unit except where `Phi` sits just below a power of two: there `erfc(th)`
+lies one binade above the result and rounds on a grid twice as coarse, costing up to a
+full result unit, and the subtraction adds another half, so the bound is about 1.5 units. At an 8- or 11-bit significand that second-order
 term is not small, so f16 and bf16 evaluate the f32 graph and finalize once, which is the
 composition [05-OP-46] already uses for its own narrow-width leaves. The range bound
 `L = 64` exceeds every width's saturation point (f64 `Phi` underflows below
@@ -595,29 +598,38 @@ primitive rounded to its width and each leaf correctly rounded:
 
 | width | inputs | max error (normal results) | adjacent-pair monotonicity violations |
 |---|---|---|---|
-| f64 | 8,006 sampled in `[-38, 8]` plus successors | 0.980 ulp | 0 |
-| f32 | 8,006 sampled in `[-13, 8]` plus successors | 0.984 ulp | 0 |
+| f64 | 8,006 sampled in `[-38, 8]` plus successors, and every binade boundary of `Phi` | 1.326 ulp (`x = -27.256566083845673`) | 0 |
+| f32 | 8,006 sampled in `[-13, 8]` plus successors, and every binade boundary of `Phi` | 1.453 ulp (`x = -4.900964260101318`) | 0 |
 | f16 | all 63,490 non-NaN values | 0.500005 ulp | 0 |
-| bf16 | all 65,282 non-NaN values | 0.500003 ulp | 0 |
+| bf16 | all 65,282 non-NaN values | 0.5000026 ulp | 0 |
 
-At f16 and bf16 the single finalization of an f32 result that is within an f32 unit of
-the truth gives a bound of half a unit plus `2^-13` (f16) or `2^-16` (bf16) units, which
-the inputs nearest a rounding midpoint approach; `gelu` there is within half a unit of
-its result plus `|x|` times that `Phi` error, because its product reads the finalized
-`Phi`. The manual gate `half_dtype_phi_and_gelu_error_bounds_hold_on_every_input`
-checks both bounds and monotonicity over every f16 and bf16 input.
+Random sampling alone reported 0.98 ulp at f32 and f64: it never lands on the binade
+boundaries, which a search that solves `Phi(x) = 2^k` for every `k` and scans the
+neighbours finds. Every lane returns the same bits there, and the two boundary inputs
+are rows of the per-pull-request witness tests.
+
+At f16 and bf16 the f32 result is within about 1.5 f32 units of the truth, which is
+`1.5 * 2^-13` f16 units or `1.5 * 2^-16` bf16 units, so the single finalization stays
+within half a unit plus that margin; the exhaustive figures above sit far inside it.
+`gelu` there is within half a unit of its result plus `|x|` times that `Phi` error,
+because its product reads the finalized `Phi`. The manual gate
+`half_dtype_phi_and_gelu_error_bounds_hold_on_every_input` checks both bounds and
+monotonicity over every f16 and bf16 input.
 
 The spec states the graph, not a bound: the bits are pinned by construction, and these
 figures belong to the implementation oracle (§12.6). Monotonicity is measured, not
 structural; the plain graph is monotone by construction but fails the accuracy goal.
 
 Computing the f32 graph at f64 and rounding once was rejected. It is not a composition
-over f32 primitives, the Metal lane has no f64, and the f32 graph already holds under one
-ulp. The f32 normal_cdf reflection failure recorded in #3116 does not come from the graph:
-near `x = 0`, `1 - Phi(x)` lies on the `2^-24` grid while `Phi(-x)` lies on the `2^-25`
-grid, so even a correctly rounded `Phi` misses the fixed `1e-10` tolerance by one f32
-ulp, as the recorded `2^-25` counterexample shows. That property needs a per-width
-tolerance, not a new graph.
+over f32 primitives, the Metal lane has no f64, and the f32 graph already holds within
+about 1.5 ulp. The narrow-width normal_cdf reflection failures recorded in #3116 and in
+the regenerated discharge table do not come from the graph's accuracy. Reflection compares
+two separately rounded values, `Phi(-x)` and `1 - Phi(x)`; where they lie in `[0.5, 1)`
+they share that binade's grid (`2^-24` at f32), so two results each within a unit or so
+of the truth differ by a whole unit there, far above the fixed `1e-10` tolerance. The
+recorded counterexamples are exactly one such unit: `2^-24` at `x = -3.62` (f32),
+`2^-11` at `x = -3.18` (f16), and `2^-8` at `x = -1.95` (bf16). That property needs a
+per-width tolerance, not a new graph.
 
 ### 12.4 Infinite inputs of the gated activations
 

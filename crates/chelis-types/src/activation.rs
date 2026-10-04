@@ -781,6 +781,19 @@ mod tests {
         ("erfc", "f64", 0xc050400000000000, 0x4000000000000000), // -65.0
         ("erfc", "f64", 0x39b4484bfeebc2a0, 0x3ff0000000000000), // 1e-30
         ("erfc", "f64", 0xb9b4484bfeebc2a0, 0x3ff0000000000000), // -1e-30
+        // At a binade boundary of `Phi`, `erfc(th)` lies one binade above the
+        // result and rounds on a grid twice as coarse; with the final `sub`
+        // these are the largest graph errors found, about 1.45 ulp at f32
+        // and 1.33 ulp at f64.
+        ("standard_normal_cdf", "f32", 0xc09cd4b3, 0x34fffffd), // -4.900964260101318
+        ("gelu", "f32", 0xc09cd4b3, 0xb61cd4b1),                // -4.900964260101318
+        (
+            "standard_normal_cdf",
+            "f64",
+            0xc03b41ae509b6145,
+            0x1e0ffffffffffff8,
+        ), // -27.256566083845673
+        ("gelu", "f64", 0xc03b41ae509b6145, 0x9e5b41ae509b613e), // -27.256566083845673
     ];
 
     fn decode(prim: Prim, bits: u64) -> f64 {
@@ -906,8 +919,9 @@ mod tests {
 
     /// Manual gate (`docs/manual_gates.md`): over every finite f16 and bf16
     /// input, `standard_normal_cdf` is monotone and within half a unit in the last
-    /// place of the standard normal CDF plus one f32 unit (the f32 graph's
-    /// error before the single finalization to storage), and `gelu` is within
+    /// place of the standard normal CDF plus 1.5 f32 units (the f32 graph's
+    /// largest measured error before the single finalization to storage),
+    /// and `gelu` is within
     /// half a unit of its own result plus `|x|` times that `Phi` error. The
     /// reference `0.5 * erfc(-x/sqrt(2))` is evaluated at f64 with the
     /// correctly rounded f64 `erfc`; its own error, about `x^2 * 2^-53`
@@ -917,7 +931,7 @@ mod tests {
     fn half_dtype_phi_and_gelu_error_bounds_hold_on_every_input() {
         let mut failures = Vec::new();
         for (prim, precision) in [(Prim::F16, 11), (Prim::Bf16, 8)] {
-            let phi_bound = 0.5 + power_of_two(-(24 - precision));
+            let phi_bound = 0.5 + 1.5 * power_of_two(-(24 - precision));
             let mut inputs: Vec<f64> = (0..=u16::MAX)
                 .map(|bits| decode(prim, u64::from(bits)))
                 .filter(|x| x.is_finite())
