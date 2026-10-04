@@ -267,7 +267,7 @@ fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
 
 #[test]
 fn non_root_heap_value_drops_at_its_verified_last_use() {
-    let mut front = front("kept = [1i64]\nout = len(kept)\n");
+    let mut front = front("kept: List[i64] = [1i64]\nout = len(kept)\n");
     front
         .manifest
         .entries
@@ -289,7 +289,8 @@ fn non_root_heap_value_a_function_captures_drops_when_the_roots_unit_exits() {
     // function may read (chelis#2624). The function reads it through
     // file-scope storage, so the roots unit releases it only at exit, after
     // every root sink, rather than at its last use in this unit.
-    let mut front = front("kept = [1i64]\ndef kept_len() -> i64 = len(kept)\nout = kept_len()\n");
+    let mut front =
+        front("kept: List[i64] = [1i64]\ndef kept_len() -> i64 = len(kept)\nout = kept_len()\n");
     front
         .manifest
         .entries
@@ -864,17 +865,19 @@ fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
 
 #[test]
 fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
-    let verified = verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[i64]) -> v, xs)\n");
+    let verified = verified_source(
+        "xs: List[List[i64]] = [[1i64], [2i64]]\nys = map(fn (v: List[i64]) -> v, xs)\n",
+    );
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("empty_list"), "{roots}");
     assert!(roots.contains("list_push"), "{roots}");
     assert!(roots.contains("loop borrow"), "{roots}");
 
     for source in [
-        "xs = [1i64, 2i64]\nys = filter(fn (v: i64) -> gte(v, 2i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
-        "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
+        "xs: List[i64] = [1i64, 2i64]\nys = filter(fn (v: i64) -> gte(v, 2i64), xs)\n",
+        "xs: List[i64] = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
+        "xs: List[i64] = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
+        "xs: List[i64] = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
     }
@@ -891,12 +894,12 @@ fn assert_front_rejects(source: &str) {
 
 #[test]
 fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
-    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: i64) -> missing(v), xs)\n");
+    assert_front_rejects("xs: List[i64] = [1i64]\nys = filter(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects(
-        "xs = [1i64]\nys = scan(fn (acc: i64, v: i64) -> missing(acc, v), 0i64, xs)\n",
+        "xs: List[i64] = [1i64]\nys = scan(fn (acc: i64, v: i64) -> missing(acc, v), 0i64, xs)\n",
     );
-    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
+    assert_front_rejects("xs: List[i64] = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
+    assert_front_rejects("xs: List[i64] = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
 }
 
 #[test]
