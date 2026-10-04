@@ -44,8 +44,9 @@ lengths.
   supply a tensor's dimensions. A tensor parameter or a `cast` never converts
   a bracket literal, so write `f(to_tensor([1.0, 2.0]))` and
   `cast(to_tensor([1.1, 2.2]), f64)`; there the unsuffixed elements adopt the
-  parameter's or the target's dtype. Explicit suffixes remain exact; mixed
-  dtypes and ragged tensor literals are rejected.
+  parameter's or the target's dtype, in the pipe spellings too
+  (`[1.1, 2.2] |> to_tensor |> cast(f64)`). Explicit suffixes remain exact;
+  mixed dtypes and ragged tensor literals are rejected.
 
 An empty list supplies no element values from which to determine a tensor's
 dtype. Give the list an element type before converting it:
