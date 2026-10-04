@@ -3464,13 +3464,69 @@ impl DesugarCtx {
         adoption: Adoption<'_>,
         local_fn_params: &[String],
     ) -> deep::Expr {
-        let items: Vec<deep::Expr> = items
-            .iter()
-            .map(|item| {
-                self.desugar_tensor_literal_item(item, adoption.precision(), local_fn_params)
-            })
-            .collect();
+        let items: Vec<deep::Expr> = match adoption {
+            // A cast to a declared dtype binder: each element adopts the binder
+            // as a scalar `cast(literal, p)` operand does.
+            Adoption::Cast(binder) if let Some(bound) = self.current_type_binder(binder) => items
+                .iter()
+                .map(|item| {
+                    self.desugar_binder_tensor_literal_item(item, binder, &bound, local_fn_params)
+                })
+                .collect(),
+            _ => items
+                .iter()
+                .map(|item| {
+                    self.desugar_tensor_literal_item(item, adoption.precision(), local_fn_params)
+                })
+                .collect(),
+        };
         attach_span_metadata(desugar_list_literal(&items), list_span)
+    }
+
+    /// An element of a tensor literal cast to the declared dtype binder
+    /// `binder` (§5.6 position 4). An unsuffixed literal the bound admits is
+    /// typed at the binder, the representation a scalar binder cast's operand
+    /// has; nested brackets recurse.
+    fn desugar_binder_tensor_literal_item(
+        &self,
+        item: &Expr,
+        binder: &str,
+        bound: &Option<chelis_deep::DtypeBound>,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let desugared = match item {
+            Expr::List(nested, _) => desugar_list_literal(
+                &nested
+                    .iter()
+                    .map(|item| {
+                        self.desugar_binder_tensor_literal_item(
+                            item,
+                            binder,
+                            bound,
+                            local_fn_params,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            other => {
+                let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
+                let ordinary = unsuffixed
+                    .then(|| canonical_signed_cast_literal(other))
+                    .flatten()
+                    .unwrap_or_else(|| self.desugar_expr_with_scope(other, local_fn_params));
+                classify_literal_source(&ordinary)
+                    .filter(|source| {
+                        scalar_literal_source_adopts_binder_target(
+                            *source,
+                            bound.clone(),
+                            unsuffixed,
+                        )
+                    })
+                    .and_then(|source| adopted_scalar_literal_source(source, binder, DeepTag::TVar))
+                    .unwrap_or(ordinary)
+            }
+        };
+        attach_span_metadata(desugared, expr_span(item))
     }
 
     /// Desugar the operand of `cast(operand, prec)`, a §5.6 position 4

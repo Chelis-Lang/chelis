@@ -2734,8 +2734,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             {
                 resugar_literal_with_default_suffix(literal)?
             } else if mode == CastMode::Checked
-                && let Some(precision) = precision_target
-                && let Some(tensor) = resugar_adopting_tensor_call(&node.children[0], precision)?
+                && let Some(tensor) = resugar_adopting_tensor_call(&node.children[0], target)?
             {
                 tensor
             } else {
@@ -4232,12 +4231,16 @@ fn resugar_adopting_literal(node: NodeRef<'_>, precision: &str) -> Result<Expr, 
     if literal_precision != Some(precision) {
         let integer = matches!(node.children, [DeepExpr::Atom(Atom::Int(_), _)]);
         // A literal that cannot bind at `precision` re-derives its default,
-        // exactly as outside an adopting position.
-        let spelling = if crate::desugar::literal_adopts_tensor_element(integer, precision) {
-            SuffixSpelling::Every
-        } else {
-            SuffixSpelling::Authored
-        };
+        // exactly as outside an adopting position. Under a dtype binder,
+        // whose bound the printer does not consult, every literal keeps its
+        // suffix, which re-derives the same type whether or not it adopts.
+        let binder = crate::dtype_name::canonical_primitive_name(precision).is_none();
+        let spelling =
+            if binder || crate::desugar::literal_adopts_tensor_element(integer, precision) {
+                SuffixSpelling::Every
+            } else {
+                SuffixSpelling::Authored
+            };
         return resugar_literal_impl(node, spelling);
     }
     let literal = resugar_literal(node)?;
@@ -4358,7 +4361,7 @@ fn pipe_stage_operand_precision(stage: &DeepExpr) -> Option<String> {
         {
             body.children
                 .get(1)
-                .and_then(primitive_type_name)
+                .and_then(cast_target_name)
                 .map(str::to_string)
         }
         DeepTag::App if body.children.get(1).is_some_and(is_param) => {

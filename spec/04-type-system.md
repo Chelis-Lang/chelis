@@ -2184,7 +2184,8 @@ decimals at `f64` and does not round them through the `f32` default. The kind
 is fixed in positions 2 and 4: a callee's tensor parameter or a `cast` never
 converts a bare bracket literal, which stays a `List` there. A call through a
 lexical binding that shadows `to_tensor` is an ordinary call and adopts
-nothing.
+nothing. (A tensor literal's elements adopting a dtype-binder cast target is
+not fully implemented; see chelis#3148.)
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
 tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`

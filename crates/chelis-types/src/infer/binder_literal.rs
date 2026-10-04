@@ -1,6 +1,7 @@
 //! Structural ownership for dtype-binder cast targets and literal adoption.
 
 use super::*;
+use crate::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_deep::{Atom, BinderLiteralUse, LiteralFamilyFit, visit_binder_literal_uses};
 
 /// P10b / spec/04 §5.6 permits binder adoption only at the direct
@@ -122,6 +123,36 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                         ));
                     }
                 }
+            // spec/04 §5.6 position 4 adopts a tensor literal's elements at a
+            // dtype binder, which the checker and the lanes do not yet type and
+            // finalize. Refuse it loudly rather than let an element round
+            // through the f32 default.
+            BinderLiteralUse::TensorLiteral { binder, element }
+                if sig.is_some_and(|sig| sig.binders.contains(binder)) =>
+            {
+                let literal = element
+                    .numeric_atom()
+                    .map(super::literal_width::render_numeric_atom)
+                    .unwrap_or_else(|| "1.0".to_string());
+                errors.push(CheckError::from_unsupported(
+                    Unsupported::new(
+                        UnsupportedKind::Construct(format!(
+                            "a `to_tensor` literal whose elements adopt dtype binder `{binder}` in `{name}`"
+                        )),
+                        format!(
+                            "`cast` to `{binder}`, where `to_tensor([cast({literal}, {binder}), ...])` adopts the binder element by element"
+                        ),
+                        Stage::Checker,
+                        crate::unimplemented_rejection!(
+                            3148,
+                            "a tensor literal's elements do not yet adopt a dtype-binder cast target; cast each element to the binder instead"
+                        ),
+                    )
+                    .with_supported_alternative(format!(
+                        "write `to_tensor([cast({literal}, {binder}), ...])`"
+                    )),
+                ));
+            }
             _ => {}
         }
         });

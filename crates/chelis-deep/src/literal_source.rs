@@ -148,6 +148,12 @@ pub enum BinderLiteralUse<'a> {
         source: Option<LiteralSource<'a>>,
         adopting_binder: Option<&'a str>,
     },
+    /// A tensor literal cast to `binder` whose `element` is stamped with
+    /// exactly `(t-var {} <binder>)`, reported once per literal.
+    TensorLiteral {
+        binder: &'a str,
+        element: LiteralSource<'a>,
+    },
 }
 
 /// Classify one direct `lit`; callable applications carry no syntax provenance.
@@ -170,17 +176,23 @@ pub fn visit_binder_literal_uses<'a>(
         if let Some((tag, meta, children)) = node_parts(expr) {
             // `x |> cast(p)` is `cast(x, p)`: a pipe's head is the operand of
             // a cast stage, and adopts its binder exactly as the call does.
+            // In `[...] |> to_tensor |> cast(p)` the head and the constructor
+            // stage form the tensor literal the cast stage receives.
             if tag == DeepTag::Pipe
-                && let [head, stage, rest @ ..] = children
-                && let Some(binder) = pipe_cast_stage_binder(stage)
+                && let Some((operand, stage_index, binder)) = pipe_cast_operand(children)
             {
-                let source = classify_literal_source(head);
-                stack.extend(rest.iter().rev().map(|child| (child, None)));
-                stack.push((stage, None));
-                stack.push((
-                    source.map_or(head, |source| source.literal),
-                    source.map(|_| binder),
-                ));
+                stack.extend(
+                    children[stage_index..]
+                        .iter()
+                        .rev()
+                        .map(|child| (child, None)),
+                );
+                if stage_index == 2 {
+                    stack.push((&children[1], None));
+                    push_tensor_literal_chain(operand, binder, &mut stack, visitor);
+                } else {
+                    push_cast_operand(operand, binder, &mut stack, visitor);
+                }
                 meta.visit_expressions(&mut |value, _| stack.push((value, None)));
                 continue;
             }
@@ -188,14 +200,13 @@ pub fn visit_binder_literal_uses<'a>(
                 && let [operand, target, rest @ ..] = children
                 && let Some(binder) = exact_type_variable_name(target)
             {
-                let source = classify_literal_source(operand);
-                visitor(BinderLiteralUse::CastTarget { binder, source });
+                visitor(BinderLiteralUse::CastTarget {
+                    binder,
+                    source: classify_literal_source(operand),
+                });
                 stack.extend(rest.iter().rev().map(|child| (child, None)));
                 stack.push((target, None));
-                stack.push((
-                    source.map_or(operand, |source| source.literal),
-                    source.map(|_| binder),
-                ));
+                push_cast_operand(operand, binder, &mut stack, visitor);
             } else {
                 if tag == DeepTag::Lit
                     && let Some(binder) = meta
@@ -262,6 +273,126 @@ fn pipe_cast_stage_binder(stage: &Expr) -> Option<&str> {
     (name == param)
         .then(|| exact_type_variable_name(target))
         .flatten()
+}
+
+/// Push the operand of a cast to `binder`. A direct literal is the cast's
+/// adopting literal; so is every literal element, at any nesting depth, of a
+/// `to_tensor` call of a finite `Cons`/`Nil` chain (spec/04-type-system.md
+/// §5.6 position 4). Anything else is traversed without an adopting binder.
+fn push_cast_operand<'a>(
+    operand: &'a Expr,
+    binder: &'a str,
+    stack: &mut Vec<(&'a Expr, Option<&'a str>)>,
+    visitor: &mut impl FnMut(BinderLiteralUse<'a>),
+) {
+    if let Some(source) = classify_literal_source(operand) {
+        stack.push((source.literal, Some(binder)));
+        return;
+    }
+    if let Some((DeepTag::App, meta, [function, chain])) = node_parts(operand)
+        && is_name(function, "to_tensor")
+        && finite_chain(chain)
+    {
+        meta.visit_expressions(&mut |value, _| stack.push((value, None)));
+        stack.push((function, None));
+        push_tensor_literal_chain(chain, binder, stack, visitor);
+        return;
+    }
+    stack.push((operand, None));
+}
+
+/// Push a tensor literal's element chain whose literals adopt `binder`, and
+/// report the literal once when an element is typed at the binder.
+fn push_tensor_literal_chain<'a>(
+    chain: &'a Expr,
+    binder: &'a str,
+    stack: &mut Vec<(&'a Expr, Option<&'a str>)>,
+    visitor: &mut impl FnMut(BinderLiteralUse<'a>),
+) {
+    let mut elements = Vec::new();
+    chain_literal_elements(chain, &mut elements);
+    if let Some(element) = elements.iter().copied().find_map(|element| {
+        let source = classify_literal_source(element)?;
+        source
+            .metadata
+            .ty()
+            .and_then(|ty| exact_type_variable_name(ty.expression()))
+            .is_some_and(|name| name == binder)
+            .then_some(source)
+    }) {
+        visitor(BinderLiteralUse::TensorLiteral { binder, element });
+    }
+    push_chain(chain, binder, stack);
+}
+
+/// The cast operand inside a pipe: the head before a cast stage to a binder,
+/// or the head chain of `[...] |> to_tensor |> cast(p)`. Returns the operand,
+/// the index of the first stage to traverse normally, and the binder.
+fn pipe_cast_operand(children: &[Expr]) -> Option<(&Expr, usize, &str)> {
+    match children {
+        [head, constructor, stage, ..]
+            if is_name(constructor, "to_tensor") && finite_chain(head) =>
+        {
+            pipe_cast_stage_binder(stage).map(|binder| (head, 2, binder))
+        }
+        [head, stage, ..] => pipe_cast_stage_binder(stage).map(|binder| (head, 1, binder)),
+        _ => None,
+    }
+}
+
+fn is_name(expr: &Expr, expected: &str) -> bool {
+    matches!(
+        node_parts(expr),
+        Some((DeepTag::Var, _, [Expr::Atom(Atom::Name(name), _)])) if name == expected
+    )
+}
+
+/// Whether `expr` is a finite `Cons`/`Nil` chain.
+fn finite_chain(expr: &Expr) -> bool {
+    let mut tail = expr;
+    loop {
+        if is_name(tail, "Nil") {
+            return true;
+        }
+        match node_parts(tail) {
+            Some((DeepTag::App, _, [cons, _, rest])) if is_name(cons, "Cons") => tail = rest,
+            _ => return false,
+        }
+    }
+}
+
+/// The literal elements of a finite chain, nested chains included.
+fn chain_literal_elements<'a>(chain: &'a Expr, out: &mut Vec<&'a Expr>) {
+    let mut tail = chain;
+    while let Some((DeepTag::App, _, [_, element, rest])) = node_parts(tail) {
+        if direct_literal(element).is_some() {
+            out.push(element);
+        } else if finite_chain(element) {
+            chain_literal_elements(element, out);
+        }
+        tail = rest;
+    }
+}
+
+fn push_chain<'a>(chain: &'a Expr, binder: &'a str, stack: &mut Vec<(&'a Expr, Option<&'a str>)>) {
+    let Some((tag, meta, children)) = node_parts(chain) else {
+        return;
+    };
+    meta.visit_expressions(&mut |value, _| stack.push((value, None)));
+    match (tag, children) {
+        (DeepTag::App, [cons, element, rest]) => {
+            stack.push((cons, None));
+            if direct_literal(element).is_some() {
+                stack.push((element, Some(binder)));
+            } else if finite_chain(element) && !is_name(element, "Nil") {
+                push_chain(element, binder, stack);
+            } else {
+                stack.push((element, None));
+            }
+            push_chain(rest, binder, stack);
+        }
+        _ => stack.push((chain, None)),
+    }
 }
 
 fn direct_literal(expr: &Expr) -> Option<(&Expr, &Metadata, Option<&Atom>)> {
