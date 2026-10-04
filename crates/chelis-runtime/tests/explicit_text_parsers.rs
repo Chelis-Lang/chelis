@@ -24,6 +24,11 @@ const OVERFLOW_MIDPOINT: &str = "17976931348623158079372897140530341507993413271
 /// One below [`OVERFLOW_MIDPOINT`], which rounds down to f64::MAX.
 const BELOW_OVERFLOW_MIDPOINT: &str = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791";
 
+/// 2^-1075, the midpoint between zero and the least subnormal, written
+/// exactly. Its 752 significant digits are close to the most any binary64
+/// midpoint needs.
+const SUBNORMAL_MIDPOINT: &str = "2.4703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328125e-324";
+
 #[derive(Clone, Copy, PartialEq)]
 enum Float {
     Bits(u64),
@@ -154,6 +159,44 @@ fn underflow_rounds_to_a_signed_zero_or_subnormal() {
         ("1e-99999999999999999999", Bits(0)),
         ("-1e-99999999999999999999", Bits(NEGATIVE_ZERO)),
     ]);
+}
+
+/// Spellings longer than any fixed digit budget still round exactly: a large
+/// exponent offset by many digits is not saturated, and digits past the ones
+/// that can decide the rounding still count as a nonzero tail.
+#[test]
+fn long_spellings_round_exactly() {
+    use Float::Bits;
+    let one = Bits(0x3ff0_0000_0000_0000);
+    let midpoint_after_one = "1.00000000000000011102230246251565404236316680908203125";
+    let (mantissa, exponent) = SUBNORMAL_MIDPOINT
+        .split_once('e')
+        .expect("scientific midpoint");
+    let cases = [
+        (format!("1{}e-700000", "0".repeat(700_000)), one),
+        (format!("0.{}1e700000", "0".repeat(699_999)), one),
+        (format!("1{}e-655360", "0".repeat(655_360)), one),
+        // The midpoint between 1 and its successor: an exact tie rounds to
+        // even, and a nonzero digit 2,000 places later rounds up.
+        (format!("{midpoint_after_one}{}", "0".repeat(2_000)), one),
+        (
+            format!("{midpoint_after_one}{}1", "0".repeat(2_000)),
+            Bits(0x3ff0_0000_0000_0001),
+        ),
+        (SUBNORMAL_MIDPOINT.to_string(), Bits(0)),
+        (
+            format!("{mantissa}{}1e{exponent}", "0".repeat(1_000)),
+            Bits(1),
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(
+            to_float(&text),
+            expected,
+            "to_float of a {}-character spelling",
+            text.len()
+        );
+    }
 }
 
 #[test]

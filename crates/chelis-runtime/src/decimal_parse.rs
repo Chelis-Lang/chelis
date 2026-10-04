@@ -2,9 +2,39 @@
 //!
 //! Parsing through `f64` before narrowing can round twice. This module keeps
 //! the decimal as an exact integer ratio and performs one round-to-nearest,
-//! ties-to-even operation at the requested storage width.
+//! ties-to-even operation at the requested storage width. It uses only integer
+//! arithmetic, so the caller's floating-point environment cannot change a
+//! result.
 
 use num_bigint::BigUint;
+
+/// Significant digits kept before the rest collapse into one sticky digit. A
+/// binary64 rounding midpoint, the widest case here, is `m * 2^e` with `m`
+/// odd, `m < 2^54` and `e >= -1075`, so it has at most 768 significant
+/// decimal digits. Two values that share their first 800 digits
+/// and both continue with a nonzero tail therefore lie on the same side of
+/// every midpoint and round identically.
+const DECIDING_DIGITS: usize = 800;
+
+/// A validated finite decimal spelling as an exact ratio, or a magnitude
+/// beyond every supported width's largest finite value.
+enum DecimalValue {
+    Ratio {
+        negative: bool,
+        numerator: BigUint,
+        denominator: BigUint,
+    },
+    Overflow {
+        negative: bool,
+    },
+}
+
+/// One correctly rounded conversion: the stored bits, or overflow past the
+/// largest finite value. Each caller's contract decides what overflow means.
+pub(crate) enum Rounded {
+    Bits(u64),
+    Overflow { negative: bool },
+}
 
 fn rounded_quotient(numerator: BigUint, denominator: BigUint) -> BigUint {
     let quotient = &numerator / &denominator;
@@ -46,7 +76,8 @@ fn scaled_round(numerator: &BigUint, denominator: &BigUint, binary_shift: i32) -
     }
 }
 
-fn finite_decimal_ratio(text: &str) -> Option<(bool, BigUint, BigUint)> {
+/// `None` only for text outside the finite decimal grammar.
+fn finite_decimal_ratio(text: &str) -> Option<DecimalValue> {
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
@@ -57,11 +88,21 @@ fn finite_decimal_ratio(text: &str) -> Option<(bool, BigUint, BigUint)> {
             (mantissa, Some(exponent))
         });
     let explicit_exponent = match exponent_text {
-        Some(exponent) => match exponent.parse::<i64>() {
-            Ok(exponent) => exponent,
-            Err(_) if exponent.starts_with('-') => i64::MIN,
-            Err(_) => i64::MAX,
-        },
+        Some(exponent) => {
+            let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            // An exponent beyond i64 saturates: no digit count that fits in
+            // memory can bring such a value back into range.
+            exponent
+                .parse::<i64>()
+                .unwrap_or(if exponent.starts_with('-') {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                })
+        }
         None => 0,
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
@@ -74,44 +115,89 @@ fn finite_decimal_ratio(text: &str) -> Option<(bool, BigUint, BigUint)> {
     let mut digits = format!("{whole}{fraction}");
     let leading = digits.bytes().take_while(|byte| *byte == b'0').count();
     digits.drain(..leading);
+    let zero = DecimalValue::Ratio {
+        negative,
+        numerator: BigUint::from(0u8),
+        denominator: BigUint::from(1u8),
+    };
     if digits.is_empty() {
-        return Some((negative, BigUint::from(0u8), BigUint::from(1u8)));
+        return Some(zero);
     }
     let mut decimal_exponent = explicit_exponent.saturating_sub(fraction.len() as i64);
     while digits.ends_with('0') {
         digits.pop();
         decimal_exponent = decimal_exponent.saturating_add(1);
     }
+    if digits.len() > DECIDING_DIGITS {
+        // The last digit is nonzero, so the dropped tail is nonzero and one
+        // sticky `1` after the kept digits stands for it exactly enough.
+        let dropped = digits.len() - DECIDING_DIGITS;
+        digits.truncate(DECIDING_DIGITS);
+        digits.push('1');
+        decimal_exponent = decimal_exponent.saturating_add(dropped as i64 - 1);
+    }
     let adjusted_exponent = decimal_exponent.saturating_add(digits.len() as i64 - 1);
     if adjusted_exponent > 400 {
-        return None;
+        return Some(DecimalValue::Overflow { negative });
     }
     if adjusted_exponent < -400 {
-        return Some((negative, BigUint::from(0u8), BigUint::from(1u8)));
+        return Some(zero);
     }
     let coefficient = BigUint::parse_bytes(digits.as_bytes(), 10)?;
-    let power = u32::try_from(decimal_exponent.unsigned_abs()).ok()?;
-    if decimal_exponent >= 0 {
-        Some((
+    // At most `DECIDING_DIGITS + 1` significant digits, with the leading one
+    // within 400 places of the decimal point, bound the scale by 1,201.
+    let power = u32::try_from(decimal_exponent.unsigned_abs())
+        .expect("the significant-digit cap bounds the decimal scale");
+    let ten_to_power = BigUint::from(10u8).pow(power);
+    Some(if decimal_exponent >= 0 {
+        DecimalValue::Ratio {
             negative,
-            coefficient * BigUint::from(10u8).pow(power),
-            BigUint::from(1u8),
-        ))
+            numerator: coefficient * ten_to_power,
+            denominator: BigUint::from(1u8),
+        }
     } else {
-        Some((negative, coefficient, BigUint::from(10u8).pow(power)))
-    }
+        DecimalValue::Ratio {
+            negative,
+            numerator: coefficient,
+            denominator: ten_to_power,
+        }
+    })
 }
 
+/// [05-OP-31]'s scalar-carrier conversion, under which finite overflow is
+/// `None`, like malformed text.
 pub(crate) fn parse_ieee_bits(
     text: &str,
     exponent_bits: u32,
     mantissa_bits: u32,
     bias: i32,
 ) -> Option<u64> {
-    let (negative, numerator, denominator) = finite_decimal_ratio(text)?;
+    match round_decimal(text, exponent_bits, mantissa_bits, bias)? {
+        Rounded::Bits(bits) => Some(bits),
+        Rounded::Overflow { .. } => None,
+    }
+}
+
+/// The correctly rounded image of a finite decimal spelling at one IEEE
+/// width, with overflow reported as such. `None` only for text outside the
+/// finite decimal grammar.
+pub(crate) fn round_decimal(
+    text: &str,
+    exponent_bits: u32,
+    mantissa_bits: u32,
+    bias: i32,
+) -> Option<Rounded> {
+    let (negative, numerator, denominator) = match finite_decimal_ratio(text)? {
+        DecimalValue::Ratio {
+            negative,
+            numerator,
+            denominator,
+        } => (negative, numerator, denominator),
+        DecimalValue::Overflow { negative } => return Some(Rounded::Overflow { negative }),
+    };
     let sign = u64::from(negative) << (exponent_bits + mantissa_bits);
     if numerator == BigUint::from(0u8) {
-        return Some(sign);
+        return Some(Rounded::Bits(sign));
     }
 
     let minimum_exponent = 1 - bias;
@@ -128,11 +214,13 @@ pub(crate) fn parse_ieee_bits(
             exponent += 1;
         }
         if exponent > maximum_exponent {
-            return None;
+            return Some(Rounded::Overflow { negative });
         }
         let exponent_field = (exponent + bias) as u64;
         let fraction = significand - (1u64 << mantissa_bits);
-        return Some(sign | (exponent_field << mantissa_bits) | fraction);
+        return Some(Rounded::Bits(
+            sign | (exponent_field << mantissa_bits) | fraction,
+        ));
     }
 
     let subnormal = to_u64(&scaled_round(
@@ -140,11 +228,11 @@ pub(crate) fn parse_ieee_bits(
         &denominator,
         mantissa_bits as i32 - minimum_exponent,
     ));
-    if subnormal == 1u64 << mantissa_bits {
-        Some(sign | (1u64 << mantissa_bits))
+    Some(Rounded::Bits(if subnormal == 1u64 << mantissa_bits {
+        sign | (1u64 << mantissa_bits)
     } else {
-        Some(sign | subnormal)
-    }
+        sign | subnormal
+    }))
 }
 
 #[cfg(test)]
@@ -210,6 +298,58 @@ mod tests {
                 Some(upper)
             );
         }
+    }
+
+    fn rounded_f64(text: &str) -> Option<Result<u64, bool>> {
+        round_decimal(text, 11, 52, 1023).map(|rounded| match rounded {
+            Rounded::Bits(bits) => Ok(bits),
+            Rounded::Overflow { negative } => Err(negative),
+        })
+    }
+
+    #[test]
+    fn overflow_is_reported_with_its_sign_and_malformed_text_is_not_overflow() {
+        assert_eq!(rounded_f64("1e1000"), Some(Err(false)));
+        assert_eq!(rounded_f64("-1e1000"), Some(Err(true)));
+        assert_eq!(rounded_f64("1.7976931348623159e308"), Some(Err(false)));
+        assert_eq!(
+            rounded_f64("-99999999999999999999e99999999999999999999"),
+            Some(Err(true))
+        );
+        assert_eq!(
+            rounded_f64("1.7976931348623157e308"),
+            Some(Ok(0x7fef_ffff_ffff_ffff))
+        );
+        for malformed in [
+            "1e", "1e+", "1e-", "1e5e5", "1ex", "e5", ".", "1.2.3", "+-1",
+        ] {
+            assert_eq!(
+                rounded_f64(malformed),
+                None,
+                "malformed spelling `{malformed}`"
+            );
+        }
+    }
+
+    #[test]
+    fn digits_past_the_deciding_prefix_keep_their_rounding_effect() {
+        let tie = "1.000000059604644775390625";
+        let zeros = "0".repeat(2_000);
+        assert_eq!(
+            parse_ieee_bits(&format!("{tie}{zeros}"), 8, 23, 127),
+            Some(0x3f80_0000)
+        );
+        assert_eq!(
+            parse_ieee_bits(&format!("{tie}{zeros}1"), 8, 23, 127),
+            Some(0x3f80_0001)
+        );
+        let below = format!("1.000000059604644775390624{}", "9".repeat(2_000));
+        assert_eq!(parse_ieee_bits(&below, 8, 23, 127), Some(0x3f80_0000));
+        assert_eq!(
+            rounded_f64(&format!("{}e-1000000", "1".repeat(1_000_000))),
+            Some(Ok(0x3fbc_71c7_1c71_c71c)),
+            "a million-digit spelling of nearly 1/9 rounds like 1/9"
+        );
     }
 
     #[test]

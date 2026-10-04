@@ -41,7 +41,7 @@ const IEEE_DEFAULT: u64 = 0;
 const IEEE_DEFAULT: u64 = 0x1f80;
 
 #[cfg(target_arch = "aarch64")]
-fn read_control() -> u64 {
+pub(crate) fn read_control() -> u64 {
     let fpcr: u64;
     // SAFETY: reading FPCR has no side effect.
     unsafe { std::arch::asm!("mrs {}, fpcr", out(reg) fpcr, options(nomem, nostack)) };
@@ -49,14 +49,14 @@ fn read_control() -> u64 {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn write_control(fpcr: u64) {
+pub(crate) fn write_control(fpcr: u64) {
     // SAFETY: FPCR holds only floating-point control bits; every value
     // written is either the IEEE default or a value read from FPCR.
     unsafe { std::arch::asm!("msr fpcr, {}", in(reg) fpcr, options(nostack)) };
 }
 
 #[cfg(target_arch = "x86_64")]
-fn read_control() -> u64 {
+pub(crate) fn read_control() -> u64 {
     let mut mxcsr: u32 = 0;
     // SAFETY: `stmxcsr` stores four bytes to the given live local.
     unsafe {
@@ -66,7 +66,7 @@ fn read_control() -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn write_control(mxcsr: u64) {
+pub(crate) fn write_control(mxcsr: u64) {
     let mxcsr = mxcsr as u32;
     // SAFETY: `ldmxcsr` loads four bytes from the given live local; every
     // value written is the IEEE default or a value read from MXCSR, so no
