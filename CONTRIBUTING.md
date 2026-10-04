@@ -138,8 +138,6 @@ For lint triage, distinguish **allow** from **keep**. Allow means the
 form is accepted project style and should not be reported. Keep means
 existing checked-in source may remain for compatibility or baseline
 evidence, while new human-facing source should use the preferred form.
-`redundant-linearity-call` is a keep-style advisory warning for explicit
-`copy()` and `drop()` calls.
 
 The style guide that the gate enforces lives in
 `spec/01-nomenclature.md`. The lint rules that codify it live under

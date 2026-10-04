@@ -7718,28 +7718,6 @@ fn check_directory_walks_ch_files_and_aggregates_json() {
 }
 
 #[test]
-fn lint_reports_redundant_linearity_call_as_warning_only() {
-    let dir = tempdir().expect("tempdir");
-    write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = drop(keep(to_tensor([1.0, 2.0])))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("redundant-linearity-call"))
-                .and(predicate::str::contains("`copy()`"))
-                .and(predicate::str::contains("`drop()`")),
-        );
-}
-
-#[test]
 fn lint_list_reports_registered_rule_severities() {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -7747,20 +7725,89 @@ fn lint_list_reports_registered_rule_severities() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("redundant-linearity-call\twarning")
-                .and(predicate::str::contains("prefer-pipe-operator\twarning"))
-                .and(predicate::str::contains(
-                    "no-em-dash-in-public-strings\terror",
-                )),
+            predicate::str::contains("opaque-without-invariant\tadvisory").and(
+                predicate::str::contains("no-em-dash-in-public-strings\terror"),
+            ),
         );
+}
+
+/// chelis#3130: no lint rule converts between Surf spellings. A file that
+/// `prefer-pipe-operator`, `redundant-linearity-call` and
+/// `prefer-typed-literal` each reported, with a `[fix]`, draws none of them
+/// from `lint`, `lint --fix` or `check`, and none of the ids is selectable.
+#[test]
+fn lint_has_no_spelling_conversion_rules() {
+    const REMOVED: [&str; 3] = [
+        "prefer-pipe-operator",
+        "redundant-linearity-call",
+        "prefer-typed-literal",
+    ];
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("spellings.ch");
+    let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n\
+                    def g(x: tensor[2, f32]) -> tensor[2, f32] = realize(copy(x))\n\
+                    y = cast(1.0, f64)\n";
+    write_file(&path, original);
+
+    let listed = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--list"])
+        .output()
+        .expect("run lint --list");
+    assert!(listed.status.success(), "lint --list failed: {listed:?}");
+    let listed = String::from_utf8(listed.stdout).expect("utf-8 stdout");
+
+    let linted = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", path.to_str().unwrap()])
+        .output()
+        .expect("run lint --check");
+    assert!(linted.status.success(), "lint --check failed: {linted:?}");
+    let linted = String::from_utf8(linted.stdout).expect("utf-8 stdout");
+    assert!(!linted.contains("[fix]"), "no fix is offered: {linted}");
+
+    let fixed = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .output()
+        .expect("run lint --fix");
+    assert!(fixed.status.success(), "lint --fix failed: {fixed:?}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read fixture"),
+        original,
+        "lint --fix leaves every spelling as written"
+    );
+
+    let checked = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert!(checked.status.success(), "check failed: {checked:?}");
+    let checked = String::from_utf8(checked.stderr).expect("utf-8 stderr");
+
+    for id in REMOVED {
+        assert!(!listed.contains(id), "`{id}` is not registered: {listed}");
+        assert!(!linted.contains(id), "`{id}` reports nothing: {linted}");
+        assert!(
+            !checked.contains(id),
+            "`check` prints no `{id}` warning: {checked}"
+        );
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["lint", "--rule", id, path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!("no rule with id '{id}'")));
+    }
 }
 
 #[test]
 fn lint_rules_filter_runs_selected_rules_only() {
     let dir = tempdir().expect("tempdir");
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
 
     Command::cargo_bin("chelis")
@@ -7768,486 +7815,24 @@ fn lint_rules_filter_runs_selected_rules_only() {
         .args([
             "lint",
             "--rules",
-            "prefer-pipe-operator",
+            "recursive-list-cursor",
             dir.path().to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("redundant-linearity-call").not());
-}
+        .stdout(predicate::str::contains("opaque-without-invariant").not());
 
-#[test]
-fn lint_fix_redundant_linearity_call_strips_when_typed_pipeline_accepts() {
-    // After Item 5 of the 0.7.6 toolchain hygiene workstream re-enabled
-    // the autofix, `chelis lint --fix` strips a redundant `copy()` from a
-    // valid program. The CLI fix driver verifies the post-strip candidate
-    // against the typed pipeline before writing (see
-    // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`).
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rewrite_valid.ch");
-    write_file(
-        &path,
-        "def f(w: tensor[2, f32]) -> tensor[2, f32] = realize(copy(w))\n\n\
-         result = f(to_tensor([1.0, 2.0]))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        !rewritten.contains("copy(w)"),
-        "autofix should have stripped `copy(w)`; got:\n{rewritten}",
-    );
-}
-
-#[test]
-fn lint_fix_redundant_linearity_call_keeps_when_typed_pipeline_rejects() {
-    // The typed-pipeline gate is the safety bar for the
-    // `redundant-linearity-call` autofix. Programs that don't type-check
-    // before the fix can't have their post-fix candidate verified, so the
-    // gate drops the strip and the source is left unchanged.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rewrite_invalid.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(copy(x)), scale)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(copy(x)), scale)"));
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
-    // The `prefer-pipe-operator` autofix is re-enabled (Agent 2 / F),
-    // gated on the typed-pipeline accepting the post-rewrite source
-    // (Path 1B per
-    // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`).
-    // This program references undefined `outer`, `inner`, `scale`, so the
-    // pre-rewrite source already fails the typed pipeline. The candidate
-    // post-rewrite source fails for the same reason. The Path 1B gate
-    // therefore silently drops the rewrite and the source is preserved.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_warn.ch");
-    let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), scale)"));
-    assert!(!rewritten.contains("|>"));
-}
-
-/// chelis#3108: `chelis lint --stats` reports the typed rewrite gate's
-/// per-file work on stderr as JSON lines.
-fn lint_stats_lines(args: &[&str]) -> Vec<serde_json::Value> {
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(args)
-        .output()
-        .expect("run chelis lint");
-    assert!(output.status.success(), "lint failed: {output:?}");
-    String::from_utf8(output.stderr)
-        .expect("utf-8 stderr")
-        .lines()
-        .filter(|line| line.contains("\"lint_stats\""))
-        .map(|line| serde_json::from_str(line).expect("stats line is JSON"))
-        .collect()
-}
-
-#[test]
-fn lint_stats_reports_one_run_for_a_rejected_original() {
-    // `outer`, `inner`, and `scale` are undefined, so the pipeline rejects
-    // the original once and declines all three candidates without
-    // checking them.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_stats_rejected.ch");
-    let body = "(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
-    write_file(&path, &format!("def f{body}\ndef g{body}\ndef h{body}"));
-
-    let stats = lint_stats_lines(&["lint", "--stats", path.to_str().unwrap()]);
-    assert_eq!(stats.len(), 1, "one stats line per gated file: {stats:?}");
-    assert_eq!(stats[0]["lint_stats"], "typed_rewrite_gate");
-    assert!(
-        stats[0]["path"]
-            .as_str()
-            .unwrap()
-            .ends_with("pipe_stats_rejected.ch")
-    );
-    assert_eq!(stats[0]["candidates"], 3);
-    assert_eq!(stats[0]["pipeline_runs"], 1);
-    assert_eq!(stats[0]["original_accepted"], false);
-}
-
-#[test]
-fn lint_stats_reports_a_run_per_candidate_for_an_accepted_original() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_stats_accepted.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    let stats = lint_stats_lines(&["lint", "--stats", path.to_str().unwrap()]);
-    assert_eq!(stats.len(), 1, "one stats line per gated file: {stats:?}");
-    assert_eq!(stats[0]["candidates"], 1);
-    assert_eq!(stats[0]["pipeline_runs"], 2);
-    assert_eq!(stats[0]["original_accepted"], true);
-}
-
-#[test]
-fn lint_without_stats_prints_no_stats_lines() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_no_stats.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    assert!(lint_stats_lines(&["lint", path.to_str().unwrap()]).is_empty());
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
-    // Positive case: a nested first-argument call chain over stdlib
-    // unary builtins `neg` and `relu`. Both nested and piped forms
-    // type-check (verified with `chelis check`), so the Path 1B gate
-    // accepts the rewrite.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_rewrite.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        rewritten.contains("|>"),
-        "expected autofix to introduce `|>`, got:\n{rewritten}"
-    );
-    assert!(
-        !rewritten.contains("relu(neg(x))"),
-        "expected the nested call to be rewritten, got:\n{rewritten}"
-    );
-    // The canonical first-argument-insertion rewrite of `relu(neg(x))`
-    // is `x |> neg |> relu` per spec §3.6.
-    assert!(
-        rewritten.contains("x |> neg |> relu"),
-        "expected `x |> neg |> relu`, got:\n{rewritten}"
-    );
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_rewrites_multi_arg_outer_stage() {
-    // Second positive case: outer call carries extra arguments that
-    // must survive the rewrite as `f(...)` call-stage form.
-    // `add(neg(x), bias)` ≡ `x |> neg |> add(bias)` per spec §3.6.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_rewrite_multi.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32], bias: tensor[2, f32]) -> tensor[2, f32] = add(neg(x), bias)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        rewritten.contains("x |> neg |> add(bias)"),
-        "expected `x |> neg |> add(bias)`, got:\n{rewritten}"
-    );
-}
-
-// --- Finding 3b (PR #51 red-team): the `prefer-pipe-operator` autofix
-// re-enabled in PR #42 emits replacement text that is not fmt-clean,
-// so `chelis lint --fix` followed by `chelis fmt --check` fails.
-//
-// The three fixtures below pin the invariant: for any input where the
-// autofix accepts the rewrite, the post-fix file must also pass
-// `chelis fmt --check`. Gated `#[ignore]` until the fix lands.
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_two_stage() {
-    // Two-stage pipe rewrite (`relu(neg(x))` -> `x |> neg |> relu`).
-    // Formatter emits the flat single-line form for total_stages <= 3,
-    // so the autofix text must match. This case is already fmt-clean
-    // today; it serves as a regression guard so the fix for the
-    // three-stage / mixed cases does not break the two-stage path.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_two.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_three_stage() {
-    // Three-stage pipe rewrite (`sigmoid(relu(neg(x)))` ->
-    // `x |> neg |> relu |> sigmoid`). The formatter emits a multi-line
-    // brace-wrapped form here because total_stages > 3. The autofix
-    // must either match that exact output OR skip the fix; either way,
-    // the post-fix file must pass `fmt --check`.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_three.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
-    // Pipe rewrite mixed with a non-rewritable outer-call argument:
-    // `add(sigmoid(relu(neg(x))), y)` rewrites to a four-stage pipe
-    // ending in `add(y)`, which the formatter again emits multi-line.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_mixed.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = \
-         add(sigmoid(relu(neg(x))), y)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-// --- V2-F3 (PR #58 red-team): the `prefer-pipe-operator` trigger
-// fires on shapes the autofix declines to rewrite. PR #55 added the
-// fmt-clean bail-out inside `fix()`; the typed-pipeline gate in
-// `apply_lint_fixes` adds a second bail-out. The trigger does not
-// mirror either bail-out, so `chelis lint --fix` produces an
-// infinite-warning loop: the warning fires, the autofix declines,
-// the file is unchanged, and the next `lint --check` fires the same
-// warning again.
-//
-// The invariant the three fixtures below pin is convergence of
-// `lint --fix` for this rule: after one pass of `--fix`, running
-// `--check` again on the resulting file must not re-fire the same
-// `prefer-pipe-operator` warning. The rewrite is allowed to happen
-// (warning is moot), or the trigger is allowed to be tightened so
-// the warning never fires; either path satisfies the invariant.
-//
-// Gated `#[ignore]` until the fix lands.
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_fanout_seed_reuse() {
-    // Minimal V2-F3 reproducer: `add(mul(x, x), x)`. The autofix's
-    // syntactic rewrite would be `x |> mul(x) |> add(x)`, which the
-    // typed-pipeline gate rejects because the pipe seed consumes `x`
-    // and the trailing `add(x)` reuses it (linearity violation).
-    // `apply_lint_fixes` therefore silently drops the rewrite, but
-    // `check()` keeps firing on every subsequent invocation.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fanout_seed.ch");
-    let original = "def h(x: tensor[3, f32]) -> tensor[3, f32] = add(mul(x, x), x)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_multi_line_emit() {
-    // The PR #55 bail-out drops `fix()` when the rewrite would render
-    // multi-line (`total_stages > 3` or flat > 80 chars). `check()`
-    // keeps firing on the unchanged source, so repeat `--fix`
-    // invocations spin without progress. `sigmoid(relu(neg(x)))`
-    // rewrites to a four-part pipe that the formatter emits
-    // multi-line; the bail-out fires and the warning loops.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_multi_line.ch");
-    let original = "def s(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_outer_arg_fanout() {
-    // V2-F3 secondary shape from the red-team report:
-    // `w = mul(relu(add(x, a)), a)`. The proposed rewrite is
-    // `x |> add(a) |> relu |> mul(a)`, which reuses `a` after it has
-    // been moved into the seed-consuming `add(a)` stage. The
-    // typed-pipeline gate rejects it the same way as the minimal
-    // fan-out case above. The warning still fires; `--fix` is
-    // non-convergent on this shape today.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_outer_arg_fanout.ch");
-    let original = "def w(x: tensor[3, f32], a: tensor[3, f32]) -> tensor[3, f32] = \
-                    mul(relu(add(x, a)), a)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("keep.ch");
-    write_file(
-        &path,
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x) // chelis-lint: keep redundant-linearity-call\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("redundant-linearity-call"))
-                .and(predicate::str::contains("[fix]").not()),
-        );
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("copy(x)"));
-}
-
-#[test]
-fn lint_fix_does_not_rewrite_sibling_argument_pipe_candidates() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("sibling_args.ch");
-    let original = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
-    write_file(&path, original);
-
-    // The casts are the sibling calls under test, so `prefer-typed-literal`,
-    // which would rewrite them to suffixed literals, is not selected.
     Command::cargo_bin("chelis")
         .expect("binary")
         .args([
             "lint",
-            "--fix",
-            "--rule",
-            "prefer-pipe-operator",
-            path.to_str().unwrap(),
+            "--rules",
+            "opaque-without-invariant",
+            dir.path().to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("[fix]").not());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_keep_preserves_pipe_fix_but_still_warns() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("keep_pipe.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale) // chelis-lint: keep prefer-pipe-operator\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("prefer-pipe-operator"))
-                .and(predicate::str::contains("[fix]").not()),
-        );
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), scale)"));
-    assert!(!rewritten.contains("|>"));
+        .stdout(predicate::str::contains("opaque-without-invariant"));
 }
 
 #[test]
@@ -8269,50 +7854,6 @@ fn lint_keep_preserves_no_em_dash_fix_but_still_reports_error() {
             predicate::str::contains("no-em-dash-in-public-strings")
                 .and(predicate::str::contains("[fix]").not()),
         );
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_allow_suppresses_diagnostic_and_fix() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("allow.ch");
-    write_file(
-        &path,
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x) // chelis-lint: allow redundant-linearity-call\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("redundant-linearity-call").not());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("copy(x)"));
-}
-
-#[test]
-fn lint_fix_does_not_rewrite_list_drop_builtin() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("list_drop.ch");
-    let original = "def f(ys: list[i64]) -> list[i64] = skip(ys, cast(1, i64))\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "lint",
-            "--fix",
-            "--rule",
-            "redundant-linearity-call",
-            path.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty());
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
     assert_eq!(rewritten, original);
@@ -8356,14 +7897,12 @@ fn lint_no_em_dash_blocks_check_and_can_fix_clause_case() {
 fn lint_check_surfaces_blocking_error_below_advisory_noise() {
     let dir = tempdir().expect("tempdir");
     let dash = '\u{2014}';
-    // A Surf file that triggers an advisory warning
-    // (`redundant-linearity-call` is a warning, but path-glob and
-    // unfixable suppression aside it still prints). Pair it with a
-    // Rust file carrying a blocking em-dash error.
+    // A Surf file that triggers a non-blocking advisory
+    // (`opaque-without-invariant`). Pair it with a Rust file carrying a
+    // blocking em-dash error.
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = drop(keep(to_tensor([1.0, 2.0])))\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
     write_file(
         &dir.path().join("message.rs"),
@@ -8397,15 +7936,16 @@ fn lint_check_surfaces_blocking_error_below_advisory_noise() {
         error_pos > header_pos,
         "the blocking em-dash error must print after the section header, got:\n{stdout}"
     );
-    // The warning line, if printed, must come before the header (the
-    // buckets print advisory/warning first, errors last).
-    if let Some(warning_pos) = stdout.find("warning:") {
-        assert!(
-            warning_pos < header_pos,
-            "advisory/warning lines must print before the blocking-error \
-             section, got:\n{stdout}"
-        );
-    }
+    // The advisory line must come before the header (the buckets print
+    // advisory/warning first, errors last).
+    let advisory_pos = stdout
+        .find("advisory:")
+        .expect("opaque-without-invariant advisory present");
+    assert!(
+        advisory_pos < header_pos,
+        "advisory/warning lines must print before the blocking-error \
+         section, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -8432,53 +7972,6 @@ fn lint_no_em_dash_does_not_corrupt_unspaced_dash() {
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
     assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_fix_ignores_surf_string_literals() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("strings.ch");
-    let original = "def message() -> string = \"copy(x) and outer(inner(x), scale)\"\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "lint",
-            "--fix",
-            "--rules",
-            "redundant-linearity-call,prefer-pipe-operator",
-            path.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_pipe_warning_does_not_rewrite_string_argument_contents() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("string_arg.ch");
-    write_file(&path, "def f(x: f32) -> f32 = outer(inner(x), \"a,b\")\n");
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "lint",
-            "--fix",
-            "--rule",
-            "prefer-pipe-operator",
-            path.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), \"a,b\")"));
-    assert!(!rewritten.contains("\"a, b\""));
 }
 
 #[test]
@@ -8606,18 +8099,17 @@ fn lint_no_em_dash_flags_python_single_quoted_strings() {
 fn check_relative_file_emits_non_blocking_lint_warning() {
     let dir = tempdir().expect("tempdir");
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = keep(to_tensor([1.0, 2.0]))\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .current_dir(dir.path())
-        .args(["check", "redundant.ch"])
+        .args(["check", "meters.ch"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("redundant-linearity-call"));
+        .stderr(predicate::str::contains("opaque-without-invariant"));
 }
 
 /// chelis#1678 [04-FIT-24]: an empty corpus is an error, not the success

@@ -5431,9 +5431,8 @@ fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
 //
 // Both issues are one question asked twice: does a `shape(...)` read reach
 // the size slot when it is SPELLED differently. A record field and a pipe
-// stage are both spellings a person and a tool actually produce -- every
-// hydronnx model with more than one input takes its arguments as a record,
-// and `chelis lint --fix` rewrites a nested call chain into a pipe -- and
+// stage are both spellings an author actually writes -- every hydronnx
+// model with more than one input takes its arguments as a record -- and
 // `spec/04-type-system.md` section 4.7.2 admits an extent by what supplies
 // it, never by how it is written: "no stage may reject an extent because of
 // its provenance".
@@ -5517,20 +5516,6 @@ const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
      { a_dim = x |> shape(cast(0, i32)) |> cast(i64)\n\
      expand(b, cast(0, i32), a_dim) }\n\
      out = broadcast_rows(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
-
-/// chelis#569's `with_direct_cast`: the form that builds, and the one
-/// `prefer-pipe-operator` rewrites. The inputs are bound to names so the only
-/// replacement the fix makes is the shape read under test; a call written
-/// inline would also be piped, and a bare-name pipe stage at a call site
-/// still loses its shape source at lowering (chelis#1791, out of scope here).
-const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
-     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-     a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
-     expand(b, cast(0, i32), a_dim)\n\
-     }\n\
-     xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
-     bias = to_tensor([0.25f32])\n\
-     out = broadcast_rows(xs, bias)\n";
 
 /// A piped cast of a runtime scalar parameter used as the size, with a call
 /// whose scalar agrees with the declared extent `a` of `x`.
@@ -5768,104 +5753,6 @@ fn the_canonical_piped_shape_read_checks_evaluates_and_builds() {
     );
 }
 
-/// The row's own name: what `chelis lint --fix` produces must still work.
-///
-/// This runs the real style path -- no `--allow-style-violations`, no
-/// `CHELIS_STYLE_GATE_DISABLE` -- because the defect chelis#569 reports is
-/// that following the style tool breaks a building program.
-///
-/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
-/// fixture evaluates before the fix, `chelis lint --fix` rewrites the shape
-/// read into the pipe form, and `chelis check` then rejects it.
-#[test]
-fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
-    if !gcc_available() {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = fixture(&dir, "lint_fix.ch", DIRECT_SHAPE_READ_FOR_LINT_FIX);
-    let styled = |args: &[&str]| {
-        Command::cargo_bin("chelis")
-            .expect("chelis")
-            .args(args)
-            .output()
-            .expect("styled chelis invocation")
-    };
-    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&before.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "the direct spelling works before the fix: {}",
-        String::from_utf8_lossy(&before.stderr)
-    );
-
-    // Only the pipe rule is under test; `prefer-typed-literal` would also
-    // rewrite the fixture's `cast(0, i32)` literals.
-    let fixed = styled(&[
-        "lint",
-        "--fix",
-        "--rule",
-        "prefer-pipe-operator",
-        path.to_str().unwrap(),
-    ]);
-    assert!(
-        String::from_utf8_lossy(&fixed.stdout).contains("fixed 1 replacement"),
-        "the fix rewrites exactly the shape read: {}{}",
-        String::from_utf8_lossy(&fixed.stdout),
-        String::from_utf8_lossy(&fixed.stderr)
-    );
-    let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
-    assert!(formatted.status.success(), "fmt must succeed");
-    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
-    assert!(
-        rewritten.contains("a_dim = x |> shape(cast(0, i32)) |> cast(i64)"),
-        "the pipe form is what the tools produce: {rewritten}"
-    );
-
-    let relinted = styled(&["lint", "--check", path.to_str().unwrap()]);
-    assert!(
-        relinted.status.success(),
-        "and the fixed program is lint-clean: {}",
-        String::from_utf8_lossy(&relinted.stderr)
-    );
-    let checked = styled(&["check", path.to_str().unwrap()]);
-    assert!(
-        checked.status.success(),
-        "the fixed program must still check: {}",
-        String::from_utf8_lossy(&checked.stdout)
-    );
-    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&evaluated.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "and evaluate to the same tensor: {}",
-        String::from_utf8_lossy(&evaluated.stderr)
-    );
-    let out_dir = dir.path().join("lint_fix-out");
-    let built = styled(&[
-        "build",
-        "--emit-c",
-        path.to_str().unwrap(),
-        "--target",
-        "c",
-        "-o",
-        out_dir.to_str().unwrap(),
-    ]);
-    assert!(
-        built.status.success(),
-        "and build: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    let status = link_generated(&out_dir, "lint_fix.c", "lint_fix");
-    assert!(status.success(), "link failed: {status}");
-    let run = StdCommand::new(out_dir.join("lint_fix"))
-        .output()
-        .expect("run compiled binary");
-    assert!(
-        String::from_utf8_lossy(&run.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "and run: {}",
-        String::from_utf8_lossy(&run.stdout)
-    );
-}
-
 /// The pipe arm with a runtime scalar in place of a shape read: the piped
 /// cast of an `i32` parameter is an admissible size (chelis#469) and both
 /// lanes print the same `[3]` tensor.
@@ -5910,7 +5797,7 @@ const LET_BOUND_RECORD_SHAPE_READ: &str = "module Repro.LetBoundRecordRead\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 
-/// The same read piped, which is what `chelis lint --fix` makes of it.
+/// The same read piped.
 const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecordRead\n\
      type Inputs = | Inputs { q: tensor[batch, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
@@ -8375,15 +8262,6 @@ expand(b, cast(0, i32), a_dim)\n\
 }\n\
 out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
 
-/// The direct spelling `chelis lint --fix` rewrites INTO the pipe form.
-const DIRECT_CALL_FOR_LINT_FIX: &str = "module Repro.LintFixCallSite\n\
-sig g[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
-def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
-expand(b, cast(0, i32), a_dim)\n\
-}\n\
-out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
-
 /// pipe.bare_name_stage.expand_source.{eval,c}
 ///
 /// EVIDENTIARY STATUS: regression test on the C lane, disposition lock on
@@ -8433,25 +8311,23 @@ fn the_applied_stage_at_the_same_call_site_is_unchanged() {
     assert!(eval_ok && eval_out.contains(expected), "{eval_out}");
 }
 
-/// pipe.bare_name_stage.lint_fix.c: the row's own name. Following the style
-/// tool must not break a building program.
+/// pipe.bare_name_stage.lint_fix.c: the bare-name stage spelling of a
+/// building direct call, taken through the real style path.
 ///
-/// This runs the real style path, with no `--allow-style-violations` and no
-/// `CHELIS_STYLE_GATE_DISABLE`, because that is the defect: `lint --fix`'s
-/// `prefer-pipe-operator` rewrites the direct call into the bare-name stage
-/// spelling.
+/// This runs with no `--allow-style-violations` and no
+/// `CHELIS_STYLE_GATE_DISABLE`: the canonically formatted pipe spelling must
+/// check, evaluate, build, and print what the direct call prints.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured on `08e46ebe6`: the direct
-/// program builds and runs, `chelis lint --fix` makes two replacements, the
-/// rewritten program still checks at score 1 and still evaluates, and
-/// `chelis build --target c` then exits 1 with chelis#469's lowering error.
+/// EVIDENTIARY STATUS: regression test. Measured on `08e46ebe6`: this
+/// spelling checked at score 1 and evaluated, and `chelis build --target c`
+/// exited 1 with chelis#469's lowering error.
 #[test]
 fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
     if !gcc_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = fixture(&dir, "lint_fix_call.ch", DIRECT_CALL_FOR_LINT_FIX);
+    let path = fixture(&dir, "lint_fix_call.ch", BARE_STAGE_AT_A_CALL_SITE);
     let styled = |args: &[&str]| {
         Command::cargo_bin("chelis")
             .expect("chelis")
@@ -8460,33 +8336,25 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
             .expect("styled chelis invocation")
     };
     let expected = "data=[0.25, 0.25, 0.25]";
-    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&before.stdout).contains(expected),
-        "the direct spelling works before the fix: {}",
-        String::from_utf8_lossy(&before.stderr)
-    );
-
     let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
     assert!(formatted.status.success(), "fmt must succeed");
-    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    let formatted_source = fs::read_to_string(&path).expect("formatted fixture");
     assert!(
-        String::from_utf8_lossy(&fixed.stdout).contains("replacement"),
-        "the fix rewrites the call into the pipe form: {}{}",
-        String::from_utf8_lossy(&fixed.stdout),
-        String::from_utf8_lossy(&fixed.stderr)
-    );
-    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
-    assert!(
-        rewritten.contains("|> to_tensor |> g(to_tensor([0.25f32]))"),
-        "the bare-name stage is what the tool produces: {rewritten}"
+        formatted_source.contains("|> to_tensor |> g(to_tensor([0.25f32]))"),
+        "the bare-name stage survives canonical formatting: {formatted_source}"
     );
 
     let checked = styled(&["check", path.to_str().unwrap()]);
     assert!(
         checked.status.success(),
-        "the fixed program must still check: {}",
+        "the pipe spelling must check: {}",
         String::from_utf8_lossy(&checked.stdout)
+    );
+    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains(expected),
+        "and evaluate: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
     );
     let out_dir = dir.path().join("lint_fix_call-out");
     let built = styled(&[
