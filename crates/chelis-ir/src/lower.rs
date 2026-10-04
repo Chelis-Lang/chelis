@@ -83,6 +83,7 @@ pub struct LowerDiagnostic {
     pub fatal: bool,
     unsupported: Option<Box<Unsupported>>,
     host_control: bool,
+    dimension_mismatch: bool,
 }
 
 impl LowerDiagnostic {
@@ -94,7 +95,23 @@ impl LowerDiagnostic {
             fatal: false,
             unsupported: None,
             host_control: false,
+            dimension_mismatch: false,
         }
+    }
+
+    /// A dimension mismatch the lowered graph proves from literals before
+    /// any execution (spec/04-type-system.md section 4.7): a type error the
+    /// checker could not see, reported with the checker's kind.
+    fn dimension_mismatch(message: impl Into<String>, span_id: Option<String>) -> Self {
+        Self {
+            dimension_mismatch: true,
+            ..Self::new(message, None, span_id).fatal()
+        }
+    }
+
+    /// Whether this diagnostic is a `DimensionMismatch` proven from literals.
+    pub fn is_dimension_mismatch(&self) -> bool {
+        self.dimension_mismatch
     }
 
     pub(crate) fn from_unsupported(
@@ -116,6 +133,7 @@ impl LowerDiagnostic {
             fatal: false,
             unsupported: Some(Box::new(unsupported)),
             host_control: false,
+            dimension_mismatch: false,
         }
     }
 
@@ -151,6 +169,9 @@ impl LowerDiagnostic {
 
 impl fmt::Display for LowerDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.dimension_mismatch {
+            write!(f, "DimensionMismatch: ")?;
+        }
         write!(f, "{}", self.message)?;
         if let Some(span_id) = &self.span_id {
             write!(f, " at source span `{span_id}`")?;
@@ -488,6 +509,70 @@ fn raise_fatal_lowering_error(
     span_id: Option<String>,
 ) -> ! {
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+}
+
+/// The extent `dag` fixes for `axis` of `id`, or `None` when only run time
+/// has it ([`LowerCtx::graph_fixed_axis_extent`] documents the two origins).
+fn graph_fixed_axis_extent(dag: &Dag, id: NodeId, axis: usize) -> Option<usize> {
+    use crate::axis_sources::ExtentOrigin;
+    match crate::axis_sources::resolve_axis_extent(dag, id, axis)? {
+        ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+        ExtentOrigin::OpComputed { op, axis } => {
+            crate::axis_sources::static_op_computed_axis_extent(dag, op, axis)
+        }
+        ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
+    }
+}
+
+/// spec/04-type-system.md section 4.7: "A violation proven from literals is a
+/// type error. Literals that become visible only when a call is inlined prove
+/// it just the same when the lowered graph fixes the claimed axis to a
+/// different extent: the program is rejected before any execution, on every
+/// lane". A same-shape operation whose operands' extents the graph fixes to
+/// different values at one axis, typically literal Lists that reach
+/// `to_tensor` through an inlined call, is that violation. It is reported as
+/// the checker reports the direct spelling, naming the operation, the
+/// operand and both extents.
+fn reject_literal_operand_disagreement(dag: &Dag) {
+    let fixed = |id: NodeId, axis: usize| graph_fixed_axis_extent(dag, id, axis);
+    for node in dag.nodes() {
+        // A malformed relation is the IR verifier's to report; only a
+        // well-formed one can prove a disagreement.
+        let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        else {
+            continue;
+        };
+        for axis in 0..node.output_type.dims.len() {
+            let mut expected: Option<usize> = None;
+            // Operands in input order, so the reported argument is the
+            // first one disagreeing with an earlier fixed operand.
+            let members = node
+                .inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, input)| agreement.members().contains(input));
+            for (index, &member) in members {
+                let Some(extent) = fixed(member, axis) else {
+                    continue;
+                };
+                match expected {
+                    None => expected = Some(extent),
+                    Some(required) if required != extent => {
+                        let argument = index + 1;
+                        raise_lowering_diagnostic(LowerDiagnostic::dimension_mismatch(
+                            format!(
+                                "`{}` argument {argument}, axis {axis}: expected {required}, \
+                                 got {extent} (extents fixed by literals after inlining)",
+                                crate::grad::risc_op_name(&node.op)
+                            ),
+                            node.span_id.clone(),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
 }
 
 fn raise_fatal_unsupported(
@@ -2519,6 +2604,7 @@ fn lower_subexpr_program_inner_impl(
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    reject_literal_operand_disagreement(&dce_dag);
     let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     #[cfg(not(feature = "lowering-trace"))]
     let _ = (&dce_remap, &copy_remap);
@@ -19981,14 +20067,7 @@ impl<'program> LowerCtx<'program> {
     /// because a DECLARING witness observes a parameter axis rather than an
     /// operation's result.
     fn graph_fixed_axis_extent(&self, id: NodeId, axis: usize) -> Option<usize> {
-        use crate::axis_sources::ExtentOrigin;
-        match crate::axis_sources::resolve_axis_extent(&self.dag, id, axis)? {
-            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
-            ExtentOrigin::OpComputed { op, axis } => {
-                crate::axis_sources::static_op_computed_axis_extent(&self.dag, op, axis)
-            }
-            ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
-        }
+        graph_fixed_axis_extent(&self.dag, id, axis)
     }
 
     /// A checked call type refines a produced result only when this exact

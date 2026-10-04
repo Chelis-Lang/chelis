@@ -1773,6 +1773,10 @@ fn compiled_host_lowering_error_for_cli(diagnostic: chelis_ir::lower::LowerDiagn
     });
     if is_cross_lane_nonliteral_window {
         diagnostic.to_string()
+    } else if diagnostic.is_dimension_mismatch() {
+        // spec/04-type-system.md section 4.7: a type error proven from
+        // literals after inlining; its rendering names the checker's kind.
+        diagnostic.to_string()
     } else {
         format!("Lowering error: {diagnostic}")
     }

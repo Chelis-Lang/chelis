@@ -988,3 +988,74 @@ fn dropout_rejects_a_rate_of_another_dtype_by_type() {
     );
     assert!(stderr.contains("PrecisionMismatch"), "{stderr}");
 }
+
+// ---------------------------------------------------------------------------
+// spec/04 section 4.7: operand extents fixed by literals after inlining
+// ---------------------------------------------------------------------------
+
+/// `g` adds two `List` arguments through `to_tensor`, so their lengths are
+/// visible only once a call with literal Lists is inlined. chelis#3115's two
+/// root forms: a `def main` root and a top-level binding after an effect.
+fn inlined_operand_lengths(lhs: &str, rhs: &str) -> [String; 2] {
+    [
+        format!(
+            "def g(a: List[f32], b: List[f32]) -> tensor[*, f32] = add(to_tensor(a), to_tensor(b))\n\
+             def main() -> tensor[*, f32] = g({lhs}, {rhs})\n"
+        ),
+        format!(
+            "def g(a: List[f32], b: List[f32]) = add(to_tensor(a), to_tensor(b))\n\
+             before = print(\"before\")\n\
+             out = g({lhs}, {rhs})\n"
+        ),
+    ]
+}
+
+/// spec/04-type-system.md section 4.7: "Literals that become visible only
+/// when a call is inlined prove it just the same when the lowered graph fixes
+/// the claimed axis to a different extent: the program is rejected before
+/// any execution". The compiled lane rejects at build with the checker's
+/// `DimensionMismatch`, naming `add`, the operand and both extents, never an
+/// internal invariant. (`chelis eval` still executes and traps; its
+/// pre-execution rejection is chelis#3115's open half.)
+#[test]
+fn literal_operand_extents_fixed_after_inlining_are_rejected_at_build() {
+    for source in inlined_operand_lengths("[1.0f32, 2.0f32]", "[1.0f32, 2.0f32, 3.0f32]") {
+        let stderr = build_rejection(&source);
+        assert!(
+            stderr.contains(
+                "DimensionMismatch: `add` argument 2, axis 0: expected 2, got 3 \
+                 (extents fixed by literals after inlining)"
+            ),
+            "{source}: {stderr}"
+        );
+        assert!(!stderr.contains("invariant"), "{source}: {stderr}");
+    }
+}
+
+/// The negative twins. Agreeing literal lengths build and compute on both
+/// lanes, and a length the graph does not fix keeps section 4.7's run-time
+/// `Domain` trap in `add` on both lanes.
+#[test]
+fn agreeing_or_runtime_operand_lengths_are_not_refuted_at_build() {
+    for (index, source) in inlined_operand_lengths("[1.0f32, 2.0f32]", "[3.0f32, 4.0f32]")
+        .iter()
+        .enumerate()
+    {
+        let run = parity::assert_lanes_agree(source, &format!("agreeing{index}"));
+        assert_eq!(run.status, Some(0), "{run:?}");
+        assert!(run.stdout.contains("data=[4.0, 6.0]"), "{run:?}");
+    }
+    let runtime = "map(fn (i: i64) -> 1.0f32, range(0i64, tensor_to_scalar(sum(to_tensor([1i64, 1i64]), 0))))";
+    for (index, source) in inlined_operand_lengths(runtime, "[1.0f32, 2.0f32, 3.0f32]")
+        .iter()
+        .enumerate()
+    {
+        let run = parity::assert_lanes_agree(source, &format!("runtimelen{index}"));
+        assert_eq!(run.status, Some(1), "{run:?}");
+        assert_eq!(run.failure, "numeric trap: domain in add at i64", "{run:?}");
+        assert_eq!(
+            run.context, "add operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
+            "{run:?}"
+        );
+    }
+}

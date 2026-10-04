@@ -3484,10 +3484,17 @@ fn lower_diagnostic_to_compiler_error(
         error.errors[0].message = diagnostic.to_string();
         return error;
     }
+    // spec/04-type-system.md section 4.7: a mismatch the lowered graph
+    // proves from literals is a type error, reported with the checker's kind.
+    let kind = if diagnostic.is_dimension_mismatch() {
+        GeneralKind::DimensionMismatch
+    } else {
+        GeneralKind::LowerError
+    };
     stage_error_with_span(
         "lower",
         diagnostic.to_string(),
-        GeneralKind::LowerError,
+        kind,
         deep_span_to_diagnostic(diagnostic.span),
     )
 }
