@@ -13777,7 +13777,22 @@ fn lower_retained_host_invocation(
                 ));
             }
         };
-        let ty = host_expr_type(&value);
+        // chelis#3153: the staged actual is typed from the lowered value's own
+        // type, but a context-fixed nullary actual such as a bare `[]` carries
+        // only an inference hole there, while the formal's declared type fixes
+        // it. Prefer the formal's resolved type and carry it into the value, so
+        // the staging bindings reach the code-generation boundary typed.
+        //
+        // Nothing is invented when the formal is itself unresolved - a
+        // monomorphized generic whose dimension no argument fixes keeps its
+        // hole, and the typed [05-UNS-1] rejection still fires.
+        let own_ty = host_expr_type(&value);
+        let (ty, value) = if own_ty.is_unresolved() && !formal.ty.is_unresolved() {
+            let fixed = formal.ty.clone();
+            (fixed.clone(), force_host_expr_type(value, fixed))
+        } else {
+            (own_ty, value)
+        };
         let mut serial = index;
         let actual_local = loop {
             let candidate = format!("__chelis_entry_actual_{serial}");
