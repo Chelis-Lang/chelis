@@ -106,6 +106,7 @@ fn an_open_tailed_ascription_operand_is_parenthesized() {
             "((fn (v: f32) -> v) : f32 -> f32)(x)",
         ),
         ("((-x) : f32)", "((-x) : f32)"),
+        ("((&x) : f32)", "((&x) : f32)"),
         (
             "((x |> fn (v: f32) -> v) : f32)",
             "((x |> fn (v: f32) -> v) : f32)",
@@ -126,6 +127,9 @@ fn closed_operands_stay_bare() {
         "x |> if (x > 0.0) then f else g",
         "x |> f(y) |> g",
         "(x |> f : f32)",
+        // A pipe whose last stage is grouped is closed, so it needs no
+        // further grouping as an ascription operand.
+        "(x |> (y |> fn (v: f32) -> v) : f32)",
         "(x : f32) |> f",
         "x |> realize |> f",
         "x |> cast(f64) |> f",
