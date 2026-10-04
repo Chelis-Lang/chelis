@@ -48,7 +48,11 @@ BASE = (
         ],
     ),
     ("chelis-cli", [test_target("issue_1314_json_bigint_ledger", LEDGER)]),
-    ("chelis-runtime", [test_target("runtime_unit")]),
+    (
+        "chelis-runtime",
+        [test_target("runtime_unit"), test_target("sort_tuple_ownership", LEDGER)],
+    ),
+    ("chelis-ir", [test_target("ir_unit")]),
 )
 
 
@@ -85,6 +89,14 @@ class DerivationTests(unittest.TestCase):
                 "--test", "issue_1314_json_bigint_ledger",
             ],
         )
+        self.assertEqual(
+            ledger.ledger_command("chelis-runtime", source),
+            [
+                "cargo", "nextest", "run", "-p", "chelis-runtime",
+                "--features", "ownership-ledger",
+                "--test", "sort_tuple_ownership",
+            ],
+        )
 
     def test_a_new_ledger_target_joins_its_command_without_a_list_edit(self) -> None:
         packages = [list(row) for row in BASE]
@@ -109,8 +121,8 @@ class DerivationTests(unittest.TestCase):
                 "not an integration test",
             ),
             "unplaced package": (
-                "chelis-runtime",
-                test_target("runtime_ledger", LEDGER),
+                "chelis-ir",
+                test_target("ir_ledger", LEDGER),
                 "no ledger command runs",
             ),
         }
@@ -132,7 +144,7 @@ class DerivationTests(unittest.TestCase):
         with self.assertRaisesRegex(ledger.LedgerTargetError, "no ownership-ledger"):
             ledger.ledger_targets(metadata(*packages))
         with self.assertRaisesRegex(ledger.LedgerTargetError, "not a ledger package"):
-            ledger.ledger_command("chelis-runtime", metadata(*BASE))
+            ledger.ledger_command("chelis-ir", metadata(*BASE))
 
     def test_packages_outside_the_workspace_are_ignored(self) -> None:
         packages = [*BASE, ("vendored", [test_target("vendored_ledger", LEDGER)])]
@@ -167,7 +179,7 @@ class DerivationTests(unittest.TestCase):
         # Exiting zero here would let the gate and the macOS job pass having
         # run no ledger target at all.
         unplaced = metadata(
-            *BASE, ("chelis-runtime", [test_target("runtime_ledger", LEDGER)])
+            *BASE, ("chelis-python", [test_target("python_ledger", LEDGER)])
         )
         failure = subprocess.CalledProcessError(101, ["cargo", "metadata"])
         for label, behavior, message in (
@@ -220,7 +232,11 @@ class WorkspaceReconciliationTests(unittest.TestCase):
         self.assertEqual(tuple(derived), ledger.LEDGER_PACKAGES)
 
     def test_gate_runs_every_ledger_package_in_order(self) -> None:
-        commands = (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS)
+        commands = (
+            gate.OWNERSHIP_LEDGER_RUNTIME_TESTS,
+            gate.OWNERSHIP_LEDGER_API_TESTS,
+            gate.OWNERSHIP_LEDGER_CLI_TESTS,
+        )
         for command in commands:
             self.assertEqual(
                 command[:2], [gate.MANAGED_PYTHON, "scripts/ownership_ledger_tests.py"]
@@ -229,6 +245,10 @@ class WorkspaceReconciliationTests(unittest.TestCase):
             tuple(command[2] for command in commands), ledger.LEDGER_PACKAGES
         )
         integration = gate.STAGES["integration"]
+        self.assertLess(
+            integration.index(gate.OWNERSHIP_LEDGER_RUNTIME_TESTS),
+            integration.index(gate.OWNERSHIP_LEDGER_API_TESTS),
+        )
         self.assertLess(
             integration.index(gate.OWNERSHIP_LEDGER_API_TESTS),
             integration.index(gate.OWNERSHIP_LEDGER_CLI_TESTS),

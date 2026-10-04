@@ -557,6 +557,10 @@ EMISSION_OBSERVER_TESTS: list[str] = [
 # a target edits no list here or in the macOS nightly job. The CLI command
 # rebuilds <target>/debug/chelis against the instrumented runtime, so it runs
 # after every command that trusts the binary the producers above built.
+OWNERSHIP_LEDGER_RUNTIME_TESTS: list[str] = [
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-runtime",
+]
+
 OWNERSHIP_LEDGER_API_TESTS: list[str] = [
     MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-compiler-api",
 ]
@@ -592,6 +596,7 @@ STAGES: dict[str, list[list[str]]] = {
         NEXTEST_WORKSPACE_CI,
         LOWERING_TRACE_TESTS,
         EMISSION_OBSERVER_TESTS,
+        OWNERSHIP_LEDGER_RUNTIME_TESTS,
         OWNERSHIP_LEDGER_API_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
@@ -659,6 +664,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
     EMISSION_OBSERVER_TESTS,
+    OWNERSHIP_LEDGER_RUNTIME_TESTS,
     OWNERSHIP_LEDGER_API_TESTS,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]

@@ -897,6 +897,7 @@ class StageUnionTests(unittest.TestCase):
         )
         metadata = ledger.cargo_metadata(REPO_ROOT)
         for command, package in (
+            (gate.OWNERSHIP_LEDGER_RUNTIME_TESTS, "chelis-runtime"),
             (gate.OWNERSHIP_LEDGER_API_TESTS, "chelis-compiler-api"),
             (gate.OWNERSHIP_LEDGER_CLI_TESTS, "chelis-cli"),
         ):
@@ -939,7 +940,9 @@ class StageUnionTests(unittest.TestCase):
         )
         selected = []
         for gate_command in (
-            gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS
+            gate.OWNERSHIP_LEDGER_RUNTIME_TESTS,
+            gate.OWNERSHIP_LEDGER_API_TESTS,
+            gate.OWNERSHIP_LEDGER_CLI_TESTS,
         ):
             command = ledger.ledger_command(gate_command[-1], metadata)
             package = command[command.index("-p") + 1]

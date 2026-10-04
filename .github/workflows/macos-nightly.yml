@@ -276,6 +276,9 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
 
+      - name: Ownership-ledger runtime tests
+        run: python3 scripts/ownership_ledger_tests.py chelis-runtime
+
       - name: Ownership-ledger compiler-api tests
         run: python3 scripts/ownership_ledger_tests.py chelis-compiler-api
 
