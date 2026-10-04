@@ -113,11 +113,16 @@ pkgs.testers.runNixOSTest {
             timeout=1800,
         )
         machine.succeed("rm -f /tmp/github-token")
-        print(machine.succeed("cat /tmp/console.log"))
+        print(machine.succeed("cat /tmp/console.log"), flush=True)
+        # Only the report and the logs leave the VM. The installed toolchains
+        # under /tmp/evidence run to hundreds of megabytes, and writing that
+        # through the 9p shared directory has filled the host disk and
+        # crashed the guest kernel (netfs).
         machine.succeed(
             f"mkdir -p /tmp/evidence && echo {status} > /tmp/evidence/exit-status"
             " && cp /tmp/console.log /tmp/evidence/console.log"
-            " && tar -C /tmp -czf /tmp/evidence.tar.gz evidence"
+            " && tar -C /tmp --ignore-failed-read -czf /tmp/evidence.tar.gz"
+            " evidence/report.json evidence/logs evidence/exit-status evidence/console.log"
         )
         machine.copy_from_vm("/tmp/evidence.tar.gz", machine.name)
   '';
