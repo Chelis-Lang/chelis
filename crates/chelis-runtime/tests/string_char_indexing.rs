@@ -180,23 +180,23 @@ fn invalid_unicode_string_boundaries_fail_closed_with_domain_diagnostics() {
         ),
         (
             "char-code-empty",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 0 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char-code-multiple",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 2 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char-from-code-negative",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code -1 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char-from-code-surrogate",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 55296 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char-from-code-too-large",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 1114112 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
     ] {
         let output = Command::new(&test_binary)

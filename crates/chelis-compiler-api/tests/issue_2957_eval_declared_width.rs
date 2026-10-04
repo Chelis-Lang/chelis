@@ -156,6 +156,9 @@ fn assert_lanes_trap_lines(source: &str, entry: &str, lines: &[&str]) {
     );
     let program = ownership_support::emit(source, entry);
     let stderr = ownership_support::run_failure_stderr(&program, "");
+    // `line` may span a context line and its trap line; each must be a
+    // whole line of stderr, in order.
+    let expected = line.lines().collect::<Vec<_>>();
     assert!(
         stderr
             .lines()
@@ -352,8 +355,8 @@ fn float_clamp_with_valid_bounds_selects_in_both_lanes() {
 
 /// Evidentiary status: REGRESSION TEST. At 08939bc0e eval panics in Rust
 /// `f64::clamp` (exit 101) on every row below. chelis#3010: both lanes print
-/// the [04-NUM-9] line at the operand dtype, then the position on its own
-/// line; neither used to print the canonical line.
+/// the position on its own line, then the [04-NUM-9] line at the operand
+/// dtype; neither used to print the canonical line.
 #[test]
 fn clamp_lower_above_upper_traps_domain_at_its_position_in_both_lanes() {
     let detail = "clamp lower bound exceeds upper bound at row-major position 2";
@@ -364,7 +367,7 @@ fn clamp_lower_above_upper_traps_domain_at_its_position_in_both_lanes() {
             float_tensor(prim, &[0.0, 0.0, 5.0, 6.0]),
             float_tensor(prim, &[1.0, 1.0, 1.0, 1.0]),
         );
-        assert_lanes_trap_lines(&source, prim.name(), &[&clamp_trap(prim.name()), detail]);
+        assert_lanes_trap_lines(&source, prim.name(), &[detail, &clamp_trap(prim.name())]);
     }
     for suffix in ["i64", "i32"] {
         let source = format!(
@@ -373,7 +376,7 @@ fn clamp_lower_above_upper_traps_domain_at_its_position_in_both_lanes() {
             int_tensor(suffix, &[0, 0, 5, 6]),
             int_tensor(suffix, &[1, 1, 1, 1]),
         );
-        assert_lanes_trap_lines(&source, suffix, &[&clamp_trap(suffix), detail]);
+        assert_lanes_trap_lines(&source, suffix, &[detail, &clamp_trap(suffix)]);
     }
 }
 
@@ -389,8 +392,8 @@ fn clamp_rank_zero_bounds_trap_at_the_first_position_in_both_lanes() {
         &source,
         "clamp-rank-zero",
         &[
-            &clamp_trap("i64"),
             "clamp lower bound exceeds upper bound at row-major position 0",
+            &clamp_trap("i64"),
         ],
     );
 }
@@ -409,8 +412,8 @@ fn clamp_nan_bound_traps_domain_at_its_position_in_both_lanes() {
             &source,
             prim.name(),
             &[
-                &clamp_trap(prim.name()),
                 "clamp bound is NaN at row-major position 1",
+                &clamp_trap(prim.name()),
             ],
         );
     }

@@ -203,3 +203,55 @@ fn a_runtime_window_wider_than_its_axis_traps_in_reduce_window() {
         "out = tensor(shape=[2], data=[2.0, 3.0])\n"
     );
 }
+
+/// [05-OP-58] and [05-OP-33]: `char_code`, `char_from_code` and `clamp` trap
+/// `Domain` in the operation, rendered in [04-NUM-9]'s form with no C ABI
+/// function name in the text.
+#[test]
+fn value_domain_failures_trap_in_the_operation() {
+    for guard in [
+        Guard {
+            name: "char_code",
+            source: "def f(s: string) -> i64 = char_code(s)\nout = f({value})\n",
+            failing: "\"ab\"",
+            passing: "\"a\"",
+            context: "char_code operand has 2 Unicode scalar values, expected exactly one",
+            trap: "numeric trap: domain in char_code at i64",
+            passing_out: "out = 97\n",
+        },
+        Guard {
+            name: "char_from_code",
+            source: "def f(c: i64) -> string = char_from_code(c)\nout = f({value})\n",
+            failing: "55296i64",
+            passing: "65i64",
+            context: "char_from_code code 55296 is not a Unicode scalar value",
+            trap: "numeric trap: domain in char_from_code at i64",
+            passing_out: "out = A\n",
+        },
+        Guard {
+            name: "clamp_inverted",
+            source: "def f(x: tensor[2, f64], h: tensor[2, f64]) -> tensor[2, f64] = \
+                     clamp(x, to_tensor([0.0f64, 3.0f64]), h)\n\
+                     out = f(to_tensor([1.0f64, 2.0f64]), to_tensor([5.0f64, {value}]))\n",
+            failing: "1.0f64",
+            passing: "4.0f64",
+            context: "clamp lower bound exceeds upper bound at row-major position 1",
+            trap: "numeric trap: domain in clamp at f64",
+            passing_out: "out = tensor(shape=[2], data=[1.0, 3.0])\n",
+        },
+        Guard {
+            name: "clamp_shape",
+            source: "def f(x: tensor[*, f32], k: i64) -> tensor[*, f32] = \
+                     clamp(x, to_tensor(map(fn (i: i64) -> 0.0f32, range(0i64, k))), \
+                     scalar_to_tensor(5.0f32))\n\
+                     out = f(to_tensor([1.0f32, 2.0f32]), {value})\n",
+            failing: "3i64",
+            passing: "2i64",
+            context: "clamp lower bound has shape [3] but the operand has [2]",
+            trap: "numeric trap: domain in clamp at i64",
+            passing_out: "out = tensor(shape=[2], data=[1.0, 2.0])\n",
+        },
+    ] {
+        assert_guard(&guard);
+    }
+}

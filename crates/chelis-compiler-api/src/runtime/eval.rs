@@ -1862,7 +1862,7 @@ impl<'a> EvalContext<'a> {
                 // These run no callback and render every failure from their
                 // numeric arguments alone, never from an authored string, so
                 // a trap line in their failure is the runtime's own.
-                || matches!(name, "to_tensor" | "split");
+                || matches!(name, "to_tensor" | "split" | "char_code" | "char_from_code");
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
             } else {
@@ -3639,27 +3639,21 @@ impl<'a> EvalContext<'a> {
             "char_code" => {
                 let value = expect_string_arg(args, 0)?;
                 let mut chars = value.chars();
-                let character = chars.next().ok_or_else(|| {
-                    "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]"
-                        .to_string()
-                })?;
-                if chars.next().is_some() {
-                    return Err(
-                        "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]"
-                            .to_string(),
-                    );
+                match (chars.next(), chars.next()) {
+                    (Some(character), None) => {
+                        Ok(RuntimeValue::int64(i64::from(u32::from(character))))
+                    }
+                    _ => Err(chelis_abi::failure::char_code_not_one_scalar(
+                        value.chars().count(),
+                    )),
                 }
-                Ok(RuntimeValue::int64(i64::from(u32::from(character))))
             }
             "char_from_code" => {
                 let code = expect_int_arg(args, 0)?;
                 let character = u32::try_from(code)
                     .ok()
                     .and_then(char::from_u32)
-                    .ok_or_else(|| {
-                        "Domain: char_from_code requires a Unicode scalar value [05-OP-58]"
-                            .to_string()
-                    })?;
+                    .ok_or_else(|| chelis_abi::failure::char_from_code_invalid(code))?;
                 Ok(RuntimeValue::String(character.to_string()))
             }
             "string_concat" => Ok(RuntimeValue::String(format!(

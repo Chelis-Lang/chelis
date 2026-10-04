@@ -2949,21 +2949,28 @@ pub(super) fn tensor_clamp_value(
     if tensor.precision != lo.precision || tensor.precision != hi.precision {
         return Err("clamp expects matching tensor precision".to_string());
     }
-    if !scalar_or_match(lo) || !scalar_or_match(hi) {
-        return Err(
-            "clamp expects scalar tensor bounds or matching-shape tensor bounds".to_string(),
-        );
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|extent| i64::try_from(*extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    for (bound, name) in [(lo, "lower"), (hi, "upper")] {
+        if !scalar_or_match(bound) {
+            return Err(chelis_abi::failure::clamp_bound_shape(
+                name,
+                &exact(&bound.value.shape),
+                &exact(&tensor.value.shape),
+            ));
+        }
     }
     // [05-OP-33]: per row-major position, a NaN bound or `lower > upper`
     // fails at the first offending position before any selection there;
     // otherwise the result is the bound the stored input crosses, or the
     // exact stored input. Comparisons run at the stored dtype, as in
-    // `chelis_tensor_clamp`, whose failure lines these are: the [04-NUM-9]
-    // domain trap at the operand dtype, then the position detail.
-    let clamp_domain = NumericTrap::Domain {
-        op: "clamp",
-        prim: tensor.precision,
-    };
+    // `chelis_tensor_clamp`, and both lanes render the failure through
+    // `chelis_abi::failure`: the position, then the [04-NUM-9] domain trap
+    // at the operand dtype.
     let bound = |bound: &RuntimeTensorValue, linear: usize| {
         let index = if bound.value.shape.is_empty() {
             0
@@ -2983,15 +2990,15 @@ pub(super) fn tensor_clamp_value(
         if !compare(CompareOp::Eq, lo_value, lo_value)?
             || !compare(CompareOp::Eq, hi_value, hi_value)?
         {
-            return Err(format!(
-                "{}\nclamp bound is NaN at row-major position {linear}",
-                clamp_domain
+            return Err(chelis_abi::failure::clamp_bound_nan(
+                linear,
+                tensor.precision.name(),
             ));
         }
         if compare(CompareOp::Gt, lo_value, hi_value)? {
-            return Err(format!(
-                "{}\nclamp lower bound exceeds upper bound at row-major position {linear}",
-                clamp_domain
+            return Err(chelis_abi::failure::clamp_bounds_inverted(
+                linear,
+                tensor.precision.name(),
             ));
         }
         let value = tensor.value.storage().scalar_at(linear);

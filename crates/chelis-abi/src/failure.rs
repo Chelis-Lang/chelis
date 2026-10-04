@@ -207,6 +207,62 @@ pub fn domain_guard(op: &str, context: &str) -> String {
     format!("{context}\n{}", domain_trap_line_at_i64(op))
 }
 
+/// The [04-NUM-9] line of a `Domain` trap in `op` at the dtype `prim`, the
+/// dtype of the quantity its guard finalizes, spelled canonically (`f32`,
+/// `i64`, ...).
+pub fn domain_trap_line(op: &str, prim: &str) -> String {
+    format!("numeric trap: domain in {op} at {prim}")
+}
+
+/// `char_code` received a string that is not exactly one Unicode scalar
+/// value ([05-OP-58]): a `Domain` trap in `char_code` at its `i64` result,
+/// after a context line naming how many scalar values the string has.
+pub fn char_code_not_one_scalar(count: usize) -> String {
+    format!(
+        "char_code operand has {count} Unicode scalar values, expected exactly one\n{}",
+        domain_trap_line_at_i64("char_code")
+    )
+}
+
+/// `char_from_code` received a negative value, a surrogate code point, or a
+/// value above U+10FFFF ([05-OP-58]): a `Domain` trap in `char_from_code` at
+/// the `i64` code it reads.
+pub fn char_from_code_invalid(code: i64) -> String {
+    format!(
+        "char_from_code code {code} is not a Unicode scalar value\n{}",
+        domain_trap_line_at_i64("char_from_code")
+    )
+}
+
+/// A `clamp` bound is NaN at a row-major position ([05-OP-33]): a `Domain`
+/// trap in `clamp` at the operand dtype `prim`.
+pub fn clamp_bound_nan(position: usize, prim: &str) -> String {
+    format!(
+        "clamp bound is NaN at row-major position {position}\n{}",
+        domain_trap_line("clamp", prim)
+    )
+}
+
+/// A `clamp` lower bound exceeds its upper bound at a row-major position
+/// ([05-OP-33]): a `Domain` trap in `clamp` at the operand dtype `prim`.
+pub fn clamp_bounds_inverted(position: usize, prim: &str) -> String {
+    format!(
+        "clamp lower bound exceeds upper bound at row-major position {position}\n{}",
+        domain_trap_line("clamp", prim)
+    )
+}
+
+/// A `clamp` bound is neither a scalar nor shaped like the operand at run
+/// time: an extent disagreement under spec/04-type-system.md section 4.7.
+pub fn clamp_bound_shape(bound: &str, shape: &[i64], operand: &[i64]) -> String {
+    format!(
+        "clamp {bound} bound has shape {} but the operand has {}\n{}",
+        render_shape(shape),
+        render_shape(operand),
+        domain_trap_line_at_i64("clamp")
+    )
+}
+
 /// A runtime window of `op` (a `reduce_window_*` builtin) is wider than the
 /// input axis it slides over ([05-RWIN-1..2]): a `Domain` trap in `op`.
 pub fn window_exceeds_extent(op: &str, axis: usize, window: i64, extent: i64) -> String {

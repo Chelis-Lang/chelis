@@ -4166,14 +4166,15 @@ pub unsafe extern "C" fn chelis_string_data(value: chelis_string) -> *const c_ch
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_char_code(value: chelis_string) -> i64 {
-    let mut chars = string_value(value).value.chars();
-    let character = chars.next().unwrap_or_else(|| {
-        runtime_fail!("Domain: char_code requires exactly one Unicode scalar value [05-OP-58]")
-    });
-    if chars.next().is_some() {
-        runtime_fail!("Domain: char_code requires exactly one Unicode scalar value [05-OP-58]");
+    let text = &string_value(value).value;
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(character), None) => i64::from(u32::from(character)),
+        _ => runtime_fail!(
+            "{}",
+            chelis_abi::failure::char_code_not_one_scalar(text.chars().count())
+        ),
     }
-    i64::from(u32::from(character))
 }
 
 #[no_mangle]
@@ -4181,9 +4182,7 @@ pub unsafe extern "C" fn chelis_char_from_code(value: i64) -> chelis_string {
     let character = u32::try_from(value)
         .ok()
         .and_then(char::from_u32)
-        .unwrap_or_else(|| {
-            runtime_fail!("Domain: char_from_code requires a Unicode scalar value [05-OP-58]")
-        });
+        .unwrap_or_else(|| runtime_fail!("{}", chelis_abi::failure::char_from_code_invalid(value)));
     new_runtime_string(character.to_string())
 }
 
@@ -6924,10 +6923,13 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         (hi, "clamp upper bound"),
     ]);
     let dtype = require_signed_integer_or_float_dtype(dtype, "clamp input");
-    if !tensor_scalar_or_same_shape_validated(lo, tensor)
-        || !tensor_scalar_or_same_shape_validated(hi, tensor)
-    {
-        runtime_fail!("Domain: clamp expects scalar bounds or matching-shape tensor bounds");
+    for (bound, name) in [(lo, "lower"), (hi, "upper")] {
+        if !tensor_scalar_or_same_shape_validated(bound, tensor) {
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::clamp_bound_shape(name, (*bound).shape(), (*tensor).shape())
+            );
+        }
     }
     if lo_dtype != dtype || hi_dtype != dtype {
         runtime_fail!(
@@ -6942,7 +6944,6 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         (*tensor).shape().as_ptr(),
         dtype.id() as chelis_dtype,
     );
-    let size = (*out).count();
     let lo_scalar = (*lo).rank() == 0;
     let hi_scalar = (*hi).rank() == 0;
     // Clamp is numeric only; dispatch on dtype outside the loop so
@@ -6953,13 +6954,13 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         lo: *const chelis_tensor,
         hi: *const chelis_tensor,
         out: *mut chelis_tensor,
-        size: usize,
         lo_scalar: bool,
         hi_scalar: bool,
-    ) -> Result<(), (&'static str, usize)>
-    where
+        prim: &str,
+    ) where
         T: RuntimeOrdered,
     {
+        let size = (*out).count();
         let tp = T::data_ptr_unchecked(tensor as *mut chelis_tensor);
         let lp = T::data_ptr_unchecked(lo as *mut chelis_tensor);
         let hp = T::data_ptr_unchecked(hi as *mut chelis_tensor);
@@ -6969,10 +6970,10 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
             let high = if hi_scalar { *hp } else { *hp.add(i) };
             let mut value = *tp.add(i);
             if low.is_nan() || high.is_nan() {
-                return Err(("clamp bound is NaN", i));
+                runtime_fail!("{}", chelis_abi::failure::clamp_bound_nan(i, prim));
             }
             if low.greater_than(high) {
-                return Err(("clamp lower bound exceeds upper bound", i));
+                runtime_fail!("{}", chelis_abi::failure::clamp_bounds_inverted(i, prim));
             }
             if value.less_than(low) {
                 value = low;
@@ -6982,31 +6983,23 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
             }
             *op.add(i) = value;
         }
-        Ok(())
     }
-    let clamped = match dtype {
-        RuntimeDType::F32 => clamp_loop::<f32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::F64 => clamp_loop::<f64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I64 => clamp_loop::<i64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I32 => clamp_loop::<i32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I16 => clamp_loop::<i16>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I8 => clamp_loop::<i8>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
+    let prim = diagnostic_dtype_name(dtype);
+    match dtype {
+        RuntimeDType::F32 => clamp_loop::<f32>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
+        RuntimeDType::F64 => clamp_loop::<f64>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
+        RuntimeDType::I64 => clamp_loop::<i64>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
+        RuntimeDType::I32 => clamp_loop::<i32>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
+        RuntimeDType::I16 => clamp_loop::<i16>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
+        RuntimeDType::I8 => clamp_loop::<i8>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim),
         RuntimeDType::F16 => {
-            clamp_loop::<half::f16>(tensor, lo, hi, out, size, lo_scalar, hi_scalar)
+            clamp_loop::<half::f16>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim)
         }
         RuntimeDType::Bf16 => {
-            clamp_loop::<half::bf16>(tensor, lo, hi, out, size, lo_scalar, hi_scalar)
+            clamp_loop::<half::bf16>(tensor, lo, hi, out, lo_scalar, hi_scalar, prim)
         }
         RuntimeDType::Bool => runtime_fail!("clamp is undefined for bool tensors"),
         RuntimeDType::Key => runtime_fail!("clamp is undefined for key tensors"),
-    };
-    if let Err((reason, position)) = clamped {
-        numeric_trap!(
-            Domain,
-            "clamp",
-            diagnostic_dtype_name(dtype),
-            "{reason} at row-major position {position}"
-        );
     }
     out
 }
