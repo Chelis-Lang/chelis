@@ -121,7 +121,10 @@ b = mh() |> cast(f64)
 
 `chelis surf` printed `b = -1.1 |> cast(f64)`, which re-desugars as adopting:
 `bff19999a0000000` became `bff199999999999a`. Repair: one printer for a cast operand in
-both spellings (5ab1a0b78).
+both spellings (5ab1a0b78). The call spelling's half predates #3145 and is still live on
+main, where `cast(mh(), f64)` prints as `cast(-1.1, f64)` with the same bit change; it is
+tracked as [#3165](https://github.com/Chelis-Lang/chelis/issues/3165), and the archived
+printer fixes it.
 
 ### Round 2
 
@@ -167,9 +170,9 @@ the rule had more than one owner.
 **Where it runs.** One module exposes `adopt_program`, which sets each literal's dtype,
 and `analyze`, which tells the printer how to spell it. It runs at the end of every
 `desugar_*` entry point and after `chelis_macros::expand_program`. chelis-macros depends
-only on chelis-deep, so the pass lives in `crates/chelis-deep/src/adopt.rs`. Each run
-recomputes every marked literal, so it is idempotent; the unfinished code splits it into
-a provisional run and a final one.
+on chelis-deep but not chelis-surf, so the pass lives in `crates/chelis-deep/src/adopt.rs`.
+Each run recomputes every marked literal, so it is idempotent; the unfinished code
+splits it into a provisional run and a final one.
 
 **What it reads.** Deep only, with every binder visible (`fn` parameters, `bind` pairs,
 match patterns, top-level `def`s). P2 is `(app (var f) ..)` where `f` is not locally
@@ -185,7 +188,10 @@ retyped, so the desugarer marks every unsuffixed numeric literal
 literals). `-lit` stays `(app neg lit)`; the pass folds the sign in when it adopts and
 back out when it no longer does. spec/03 §6.4 would say that the marker means §5.6
 decides the dtype on the expanded program and that only round-trip normalization erases
-it. `chelis deep` output gains the marker; the round-trip law already strips it.
+it. The design note has `chelis deep` output gain the marker; the unfinished code's final
+run would instead drop it from literals no position adopted, so expanded Deep would keep
+main's marking and only Deep printed before expansion would carry it on every unsuffixed
+literal. The round-trip law already strips it.
 
 **The resugarer.** `analyze` maps each marked literal, and each `neg` of one, to the
 dtype an unsuffixed literal re-derives at its printed position. The printer prints a
@@ -215,12 +221,15 @@ give the direct text's literal types and the round-trip law; fold equivalence,
 unmarked `(lit {f64} 1.1)` prints `1.1f64`.
 
 **Size and risks.** About 3,000 diff lines: `adopt.rs` 1,000 to 1,300, the desugarer
-about -600/+80, the resugarer about -700/+150, tests about 600. Risks: churn from the
-marker in exact-Deep-text tests and golden Deep; porting the scalar pipe-cast and binder paths; the
-pass's pipe reading drifting from `fold_pipes`; a second linear traversal; and the
+about -600/+80, the resugarer about -700/+150, tests about 600. The estimate is low:
+the unfinished `adopt.rs` is already 1,394 lines. Risks: churn from the marker in
+exact-Deep-text tests and golden Deep; porting the scalar pipe-cast and binder paths;
+the pass's pipe reading drifting from `fold_pipes`; a second linear traversal; and the
 capture refusal still not applying through macros, which predates #3145.
 
 ## Evidence and tools
+
+The scan and probe scripts are not in the repository.
 
 - **Eval differential.** Extracts Surf programs from both trees (test strings, Markdown
   blocks, tracked `.ch`), desugars each with the base and the head binary, and where
@@ -234,7 +243,8 @@ capture refusal still not applying through macros, which predates #3145.
 - **Macro matrix.** Round 2's ten bodies; the archive's `issue_3114_macro_adoption.rs`
   widens it to 13 bodies at four sites, plus macro arguments.
 - **Mutation checks.** Each mechanism disabled in turn: ten at the first head, twelve for
-  round 1's repairs, two for N1. All were caught.
+  round 1's repairs, two for N1. All were caught; one of round 1's survived until it
+  gained a killing test.
 
 ## Where the code is
 
@@ -253,7 +263,9 @@ onto main `b892f20c9`, plus one unfinished commit.
 
 A revival would reuse the four test commits and the unfinished commit's tests,
 632ee8fa2's refusal, 387bca449's text and `adopt.rs`. The pass replaces db576ceea,
-87a5fa3d8, c791a3368, 5ab1a0b78 and bcc2bcaf2's inline adoption.
+87a5fa3d8, c791a3368, 5ab1a0b78 and bcc2bcaf2's inline adoption. Two round-2 items are
+still open at 0052f656a: the fragment omits R2-2's three changes, and 387bca449's §P10b
+position 4 lacks the #3148 parenthetical that §5.6 carries.
 
 ## Status
 
