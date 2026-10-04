@@ -5950,38 +5950,9 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
     } else {
         GeneralKind::EvalError
     };
-    // A declared literal result guard attributes its trap to the producing
-    // cast, but it did not reject an element conversion. Recognize the exact
-    // extent context and canonical line before attaching conversion advice.
-    let extent_cast = (|| {
-        let mut lines = message.lines();
-        let context = lines.next()?.strip_prefix("extent `")?;
-        let (claim, comparison) = context.split_once("`: claimed = ")?;
-        let (required, observation) = comparison.split_once(", cast axis ")?;
-        let (axis, observed) = observation.split_once(" = ")?;
-        required.parse::<u64>().ok()?;
-        axis.parse::<usize>().ok()?;
-        observed.parse::<usize>().ok()?;
-        Some(
-            claim == required
-                && lines.next() == Some("numeric trap: domain in cast at i64")
-                && lines.next().is_none(),
-        )
-    })()
-    .unwrap_or(false);
-    let cast_domain =
-        trusted_numeric_trap && !extent_cast && message.contains("numeric trap: domain in cast at");
-    let mut error = stage_error("eval", message, kind);
-    if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
-        diagnostic.suggestions.push(
-            "fractional float-to-int conversion must state its rounding explicitly: \
-             use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
-             `floor` or `round` before `cast`; the remaining named lossy cast \
-             forms are tracked by chelis#759"
-                .to_string(),
-        );
-    }
-    error
+    // [04-NUM-9]: a numeric trap renders byte-identically in every lane, so
+    // eval attaches no lane-only advice after the trap line.
+    stage_error("eval", message, kind)
 }
 
 #[cfg(test)]

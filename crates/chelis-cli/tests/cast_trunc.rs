@@ -156,11 +156,16 @@ fn agrees_with_the_checked_default_on_integral_values() {
 /// migration target, not call it future work.
 #[test]
 fn the_checked_default_teaches_cast_trunc_as_the_named_form() {
+    // The book's type reference names `cast_trunc` as the truncating form.
+    // A trap ends on its [04-NUM-9] line in every lane, so eval prints no
+    // hint after it, as compiled C prints none.
     let stderr = eval_expr("cast(1.9, i32)").expect_err("the checked default traps");
-    assert!(
-        stderr.contains("cast_trunc"),
-        "the fractional-cast hint must name `cast_trunc` now that it ships: {stderr}"
+    assert_eq!(
+        stderr.trim_end().lines().last(),
+        Some("numeric trap: domain in cast at i32"),
+        "the checked default must end on its trap line: {stderr}"
     );
+    assert!(!stderr.contains("cast_trunc"), "{stderr}");
 }
 
 // ===========================================================================
