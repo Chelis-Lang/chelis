@@ -131,10 +131,19 @@ pub fn assert_lanes_agree_on_numeric_trap(source: &str, name: &str) -> LaneRun {
     eval
 }
 
+/// The parity rule: the same stdout, exit status, and failure body.
+pub fn lanes_agree(eval: &LaneRun, compiled: &LaneRun) -> bool {
+    eval == compiled
+}
+
 /// Runs both lanes and asserts they agree; returns the agreed run.
 pub fn assert_lanes_agree(source: &str, name: &str) -> LaneRun {
     let eval = eval_lane(source, name);
     let compiled = compiled_lane(source, name);
+    assert!(
+        lanes_agree(&eval, &compiled),
+        "{name}: eval and compiled C disagree\neval: {eval:?}\ncompiled: {compiled:?}\nsource:\n{source}"
+    );
     assert_eq!(
         eval, compiled,
         "{name}: eval and compiled C disagree\nsource:\n{source}"

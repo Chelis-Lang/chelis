@@ -399,3 +399,61 @@ fn tensor_scan_failures_match_eval() {
         "{run:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The comparator rejects every divergence #1297 names
+// ---------------------------------------------------------------------------
+
+fn run(status: i32, stdout: &str, failure: &str) -> parity::LaneRun {
+    parity::LaneRun {
+        status: Some(status),
+        stdout: stdout.to_string(),
+        failure: failure.to_string(),
+    }
+}
+
+/// A compiled lane that reorders effects, reads a default clock, erases a
+/// dtype, makes an assertion inert, or changes a failure's text disagrees
+/// with eval; only eval's `error: ` presentation prefix is ignored.
+#[test]
+fn the_comparator_rejects_each_named_divergence() {
+    let eval = run(0, "first\nsecond\nw.0 = 1791074996\nd = 2.67\n", "");
+    for (divergence, compiled) in [
+        (
+            "reordered effects",
+            run(0, "second\nfirst\nw.0 = 1791074996\nd = 2.67\n", ""),
+        ),
+        (
+            "default clock reading",
+            run(0, "first\nsecond\nw.0 = 0\nd = 2.67\n", ""),
+        ),
+        (
+            "dtype erasure",
+            run(
+                0,
+                "first\nsecond\nw.0 = 1791074996\nd = 2.6700000762939453\n",
+                "",
+            ),
+        ),
+        (
+            "dropped effect",
+            run(0, "first\nw.0 = 1791074996\nd = 2.67\n", ""),
+        ),
+    ] {
+        assert!(!parity::lanes_agree(&eval, &compiled), "{divergence}");
+    }
+    let failing = run(1, "before\n", "assert failed: flag");
+    assert!(
+        !parity::lanes_agree(&failing, &run(0, "before\nafter\n", "")),
+        "an inert assertion"
+    );
+    assert!(
+        !parity::lanes_agree(&failing, &run(1, "before\n", "assert failed")),
+        "a changed failure message"
+    );
+    assert_eq!(
+        parity::eval_failure_body("before\nerror: assert failed: flag\n"),
+        parity::compiled_failure_body("assert failed: flag\n"),
+        "the presentation prefix alone is not a divergence"
+    );
+}
