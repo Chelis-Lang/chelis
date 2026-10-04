@@ -593,7 +593,7 @@ primitive rounded to its width and each leaf correctly rounded:
 | bf16 | all 65,282 non-NaN values | 0.500 ulp | 0 |
 
 The spec states the graph, not a bound: the bits are pinned by construction, and these
-figures belong to the implementation oracle (§12.5). Monotonicity is measured, not
+figures belong to the implementation oracle (§12.6). Monotonicity is measured, not
 structural; the plain graph is monotone by construction but fails the accuracy goal.
 
 Computing the f32 graph at f64 and rounding once was rejected. It is not a composition
@@ -604,7 +604,25 @@ grid, so even a correctly rounded `Phi` misses the fixed `1e-10` tolerance by on
 ulp, as the recorded `2^-25` counterexample shows. That property needs a per-width
 tolerance, not a new graph.
 
-### 12.4 Gradients
+### 12.4 Infinite inputs of the gated activations
+
+`silu`, `gelu`, and `gelu_tanh` multiply `x` by a gate that is `+0` at `-inf`, so the
+plain product is `-inf * 0`, a NaN where the limit is zero. The §3.3 multiplicand guard
+`m(x)` replaces `-inf` by `-0.0` before the product and changes nothing else. `-0.0`
+rather than `+0` because the functions approach zero from below, and every
+sufficiently negative finite input already returns `-0.0` (`x * +0`); IEEE 754 likewise
+signs a zero limit by its side. The guard is a `where`, not an outer select of a
+constant, so the result stays one graph and the product node never sees `-inf`.
+Checked with the same model, old graph against guarded graph: every finite f16 and bf16
+value and 4,004 sampled f32 and f64 values are bit-identical, `-inf` gives `-0.0`,
+`+inf` gives `+inf`, and NaN stays NaN for all three. `sigmoid` and `normal_cdf` give
+`+0` and `1` at the infinities without a guard.
+
+Gradients at an infinite input remain the derivative of the graph and can be NaN, for
+example through `exp`'s adjoint `0 * inf` inside `sigmoid` at `-inf`. That is
+unchanged by the guard and outside this change.
+
+### 12.5 Gradients
 
 `gelu` and `normal_cdf` differentiate the stated graph (spec/05 §3.3, [05-OP-35]), as
 `gelu_tanh` does today. The `erfc` adjoint `-g*k*exp(-(x*x))` supplies the density, so the
@@ -614,7 +632,7 @@ tangents of `ah` and `al` sum to the tangent of `a`, so `tl` contributes a deriv
 order `u` and the correction's gradient stays at rounding level. Outside `|x| < L` the
 correction reads `z = 0`, so its gradient is exactly zero.
 
-### 12.5 Implementation surface
+### 12.6 Implementation surface
 
 The change set renames today's `gelu` to `gelu_tanh` everywhere the compiler names it
 (`chelis-types` builtins, activation graph, and dtype semantics; `chelis-ir` lowering and

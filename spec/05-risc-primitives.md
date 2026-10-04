@@ -1267,9 +1267,19 @@ three atoms above and never admits `bool` to a numeric capability or kernel.
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
 | `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
 | `tanh(x)` | The Tier 1 primitive `tanh` of §2.2 and [05-OP-46]; it has no lowering |
-| `silu(x)` | `mul(x, sigmoid(x))` |
-| `gelu(x)` | `mul(x, Phi(x))`, with `Phi` the standard normal CDF graph below |
-| `gelu_tanh(x)` | `mul(x, sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
+| `silu(x)` | `mul(m(x), sigmoid(x))` |
+| `gelu(x)` | `mul(m(x), Phi(x))`, with `Phi` the standard normal CDF graph below |
+| `gelu_tanh(x)` | `mul(m(x), sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
+
+`m(x)` is the multiplicand guard
+`where(is_infinite(x), where(cmplt(x, const(0.0)), neg(const(0.0)), x), x)`:
+it is `x` at every finite input and at NaN and `+inf`, and `-0.0` at `-inf`.
+Each gated function `x * f(x)` has `f(-inf) = +0` and limit zero from below as
+`x` goes to `-inf`, so the unguarded `mul(x, f(x))` would give `-inf * 0`, a NaN
+for an input whose limit is defined. With the guard, `silu`, `gelu`, and
+`gelu_tanh` give `-0.0` at `-inf`, the signed zero every sufficiently negative
+finite input already produces as `x * +0`, and `+inf` at `+inf`. `sigmoid`
+and `Phi` need no guard: their graphs give `+0` at `-inf` and `1` at `+inf`.
 
 `Phi(x)` is the standard normal cumulative distribution function
 `0.5 * erfc(-x / sqrt(2))`. For an f32 or f64 operand it is the graph below,
@@ -3887,9 +3897,11 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: The pointwise lowerings are section 3.3's primitive graphs:
 > sigmoid is `recip(add(const(1.0), exp(neg(x))))`, silu is
-> `mul(x, sigmoid(x))`, gelu is `mul(x, Phi(x))` with section 3.3's exact
-> graph for `Phi`, and gelu_tanh is `mul(x, sigmoid(mul(const(2.0), u)))`
-> with section 3.3's exact spelling of `u`. Softmax uses section 4.2's max-shifted
+> `mul(m(x), sigmoid(x))`, gelu is `mul(m(x), Phi(x))` with section 3.3's
+> exact graph for `Phi`, and gelu_tanh is
+> `mul(m(x), sigmoid(mul(const(2.0), u)))` with section 3.3's exact spelling
+> of `u`, where `m` is section 3.3's multiplicand guard: silu, gelu, and
+> gelu_tanh return `-0.0` at `-inf` and `+inf` at `+inf`. Softmax uses section 4.2's max-shifted
 > exponentials divided by their axis sum. Every exponential and complementary
 > error function in these graphs is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
 > operation without contraction, so each composition denotes exactly one
