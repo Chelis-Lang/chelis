@@ -132,14 +132,22 @@ const POSITIVE: &[Case] = &[
         name: "concat_and_dict_merge_nested_empty_literals",
         source: "def c(xs: List[List[i32]]) -> List[List[i32]] = concat(xs, [[]])\ndef d(m: Dict[string, List[i64]]) -> Dict[string, List[i64]] = dict_merge(m, dict_of([(\"k\", [])]))\na = c([[1i32]])\nb = d(dict_of([(\"x\", [1i64])]))\n",
     },
-    // chelis#3153: the empty accumulator's element type is a DIMENSION-generic
+    // chelis#3153: the empty accumulator's element type is a dimension-generic
     // ADT, so only the callee's parameter type carries the dimension into it.
-    // A type-generic ADT (`Box[a]`), a non-generic ADT, and a bare
-    // `tensor[n, f32]` element each already compiled, so the dimension beneath
-    // the ADT is the whole trigger.
+    // This is the shape Coral reported; it is not the boundary of the defect --
+    // a staged nullary actual kept its hole whatever the element type, so a
+    // non-recursive callee and an element with no ADT at all were affected too.
     Case {
         name: "empty_accumulator_dimension_generic_adt",
         source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([FCol(to_tensor([cast(1.0, f32), cast(2.0, f32)]))], []))\n",
+    },
+    // chelis#3153: the same staged-actual hole with NO ADT and no recursion --
+    // an immediately-applied lambda whose parameter fixes the element type.
+    // Pins that the fix is not specific to a dimension-generic ADT, which the
+    // first draft of this change wrongly claimed.
+    Case {
+        name: "empty_actual_at_immediately_applied_lambda",
+        source: "def f[n](t: tensor[n, f32]) -> i64 = (fn (acc: List[tensor[n, f32]]) -> len(to_list(index(append(acc, t), 0i64))))([])\na = [f(to_tensor([cast(1.0, f32)])), f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))]\n",
     },
     // chelis#3153, Coral's actual shape: the element is a tuple whose second
     // component is the dimension-generic ADT, threaded through a named
