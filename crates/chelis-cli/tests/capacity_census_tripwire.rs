@@ -1316,6 +1316,20 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
+        "decimal::decimal_to_bf16: (t-fn {} (t-adt {} Decimal) (t-prim {} bf16))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_f16: (t-fn {} (t-adt {} Decimal) (t-prim {} f16))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
         "decimal::decimal_to_f32: (t-fn {} (t-adt {} Decimal) (t-prim {} f32))",
         &["float-carrier"],
         "[05-OP-35]",
