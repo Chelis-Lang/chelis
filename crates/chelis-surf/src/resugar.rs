@@ -2724,22 +2724,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            // Binder adoption re-applies on re-desugaring; only concrete
-            // targets can require an explicit default suffix.
-            let precision_target = primitive_type_name(&node.children[1]);
-            let operand = if let Ok(literal) = node_ref(&node.children[0])
-                && literal.tag == DeepTag::Lit
-                && let Some(precision) = precision_target
-                && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
-            {
-                resugar_literal_with_default_suffix(literal)?
-            } else if mode == CastMode::Checked
-                && let Some(tensor) = resugar_adopting_tensor_call(&node.children[0], target)?
-            {
-                tensor
-            } else {
-                resugar_expression_inner(&node.children[0])?
-            };
+            let operand = resugar_cast_operand(&node.children[0], target, mode)?;
             Ok(Expr::Cast(
                 Box::new(operand),
                 target.to_string(),
@@ -2954,9 +2939,6 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
 enum SuffixSpelling {
     /// The literal's own `surf_literal_style` decides.
     Authored,
-    /// The position re-derives a non-default dtype, so a default `i32` or
-    /// `f32` suffix is semantic and prints.
-    DefaultSemantic,
     /// The position re-derives a dtype the literal does not have, so every
     /// suffix prints, even on a literal authored unsuffixed elsewhere.
     Every,
@@ -2964,10 +2946,6 @@ enum SuffixSpelling {
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     resugar_literal_impl(node, SuffixSpelling::Authored)
-}
-
-fn resugar_literal_with_default_suffix(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, SuffixSpelling::DefaultSemantic)
 }
 
 fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<Expr, ResugarError> {
@@ -3090,26 +3068,6 @@ fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
         Some(LiteralSuffix::I64) => Some(i64::MIN),
         Some(_) => None,
     }
-}
-
-fn default_literal_suffix_is_semantic_in_cast(
-    node: &NodeRef<'_>,
-    precision: &str,
-) -> Result<bool, ResugarError> {
-    let suffix = literal_suffix(node.meta)?;
-    let numeric_target = matches!(
-        precision,
-        "f32" | "f64" | "bf16" | "f16" | "i8" | "i16" | "i32" | "i64"
-    );
-    Ok(match (&node.children[0], suffix) {
-        (DeepExpr::Atom(Atom::Float(_), _), Some(LiteralSuffix::F32)) => {
-            matches!(precision, "f64" | "bf16" | "f16")
-        }
-        (DeepExpr::Atom(Atom::Int(_), _), Some(LiteralSuffix::I32)) => {
-            numeric_target && precision != "i32"
-        }
-        _ => false,
-    })
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
@@ -4200,30 +4158,63 @@ fn resugar_adopting_items(
 }
 
 fn resugar_adopting_item(item: &DeepExpr, precision: &str) -> Result<Expr, ResugarError> {
+    if let Some(items) = resugar_adopting_items(item, precision)? {
+        return Ok(Expr::List(items, node_ref(item)?.span));
+    }
+    resugar_adopting_scalar(item, precision)?.map_or_else(|| resugar_expression_inner(item), Ok)
+}
+
+/// Resugars a literal, or the negation of a non-negative literal, that stands
+/// where an unsuffixed literal adopts `precision`: a tensor literal's element
+/// or a checked cast's operand. `None` for any other expression.
+fn resugar_adopting_scalar(item: &DeepExpr, precision: &str) -> Result<Option<Expr>, ResugarError> {
     let node = node_ref(item)?;
     if node.tag == DeepTag::Lit {
-        return resugar_adopting_literal(node, precision);
+        return resugar_adopting_literal(node, precision).map(Some);
     }
-    if node.tag == DeepTag::App {
-        if let Some(items) = resugar_adopting_items(item, precision)? {
-            return Ok(Expr::List(items, node.span));
+    if node.tag == DeepTag::App
+        && node.meta.ty().is_none()
+        && let [function, operand] = node.children
+        && variable_name(function) == Some("neg")
+        && let Ok(operand) = node_ref(operand)
+        && operand.tag == DeepTag::Lit
+        && match operand.children {
+            [DeepExpr::Atom(Atom::Int(value), _)] => *value >= 0,
+            [DeepExpr::Atom(Atom::Float(value), _)] => !value.is_sign_negative(),
+            _ => false,
         }
-        if node.meta.ty().is_none()
-            && let [function, operand] = node.children
-            && variable_name(function) == Some("neg")
-            && let Ok(operand) = node_ref(operand)
-            && operand.tag == DeepTag::Lit
-            && match operand.children {
-                [DeepExpr::Atom(Atom::Int(value), _)] => *value >= 0,
-                [DeepExpr::Atom(Atom::Float(value), _)] => !value.is_sign_negative(),
-                _ => false,
-            }
-        {
-            let operand = resugar_adopting_literal(operand, precision)?;
-            return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), node.span));
+    {
+        let operand = resugar_adopting_literal(operand, precision)?;
+        return Ok(Some(Expr::Unary(
+            UnaryOp::Neg,
+            Box::new(operand),
+            node.span,
+        )));
+    }
+    Ok(None)
+}
+
+/// Resugars the operand of a cast to `target`, a primitive or a dtype binder,
+/// for both spellings: the call `cast(x, target)` and the pipe
+/// `x |> cast(target)`. A checked cast adopts an operand printed as an
+/// unsuffixed literal, a negated one, or a tensor literal (spec/04 §5.6
+/// position 4), so such an operand prints for the dtype its re-desugaring
+/// derives, by the rule tensor elements use. The truncating rung adopts
+/// nothing.
+fn resugar_cast_operand(
+    operand: &DeepExpr,
+    target: &str,
+    mode: CastMode,
+) -> Result<Expr, ResugarError> {
+    if mode == CastMode::Checked {
+        if let Some(tensor) = resugar_adopting_tensor_call(operand, target)? {
+            return Ok(tensor);
+        }
+        if let Some(scalar) = resugar_adopting_scalar(operand, target)? {
+            return Ok(scalar);
         }
     }
-    resugar_expression_inner(item)
+    resugar_expression_inner(operand)
 }
 
 fn resugar_adopting_literal(node: NodeRef<'_>, precision: &str) -> Result<Expr, ResugarError> {
@@ -4371,9 +4362,9 @@ fn pipe_stage_operand_precision(stage: &DeepExpr) -> Option<String> {
     }
 }
 
-/// The cast target of a pipe's cast stage, the call-first lambda
+/// The target and mode of a pipe's cast stage, the call-first lambda
 /// `fn (x) -> cast(x, p)` the parser builds for `|> cast(p)`.
-fn pipe_cast_stage_target(stage: &DeepExpr) -> Option<&DeepExpr> {
+fn pipe_cast_stage(stage: &DeepExpr) -> Option<(&str, CastMode)> {
     let node = node_ref(stage).ok()?;
     if node.tag != DeepTag::Fn || node.meta.surf_pipe_stage().is_none() {
         return None;
@@ -4386,13 +4377,16 @@ fn pipe_cast_stage_target(stage: &DeepExpr) -> Option<&DeepExpr> {
         .filter(|params| params.tag == DeepTag::Params && params.children.len() == 1)
         .and_then(|params| parameter_name(&params.children[0]))?;
     let body = node_ref(body).ok()?;
-    (body.tag == DeepTag::Cast
-        && body
+    if body.tag != DeepTag::Cast
+        || !body
             .children
             .first()
-            .is_some_and(|operand| variable_name(operand) == Some(param.as_str())))
-    .then(|| body.children.get(1))
-    .flatten()
+            .is_some_and(|operand| variable_name(operand) == Some(param.as_str()))
+    {
+        return None;
+    }
+    let target = body.children.get(1).and_then(cast_target_name)?;
+    Some((target, cast_mode_of(body.children).ok()?))
 }
 
 fn first_parameter_precision(callee: &DeepExpr) -> Option<String> {
@@ -4416,15 +4410,9 @@ fn first_parameter_precision(callee: &DeepExpr) -> Option<String> {
 /// whose head and constructor stage form the literal.
 fn resugar_pipe_head(node: &NodeRef<'_>) -> Result<Expr, ResugarError> {
     let head = &node.children[0];
-    // `x |> cast(p)` is `cast(x, p)`, so a scalar literal head prints by the
-    // cast operand's rule.
-    if let Some(target) = node.children.get(1).and_then(pipe_cast_stage_target)
-        && let Some(precision) = primitive_type_name(target)
-        && let Ok(literal) = node_ref(head)
-        && literal.tag == DeepTag::Lit
-        && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
-    {
-        return resugar_literal_with_default_suffix(literal);
+    // `x |> cast(p)` is `cast(x, p)`, so the head prints as the cast's operand.
+    if let Some((target, mode)) = node.children.get(1).and_then(pipe_cast_stage) {
+        return resugar_cast_operand(head, target, mode);
     }
     if let Some(constructor) = node.children.get(1)
         && is_intrinsic_constructor(constructor)
