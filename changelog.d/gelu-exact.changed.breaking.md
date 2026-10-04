@@ -23,5 +23,5 @@ What else changes:
   and `N(-x)` round to different grids at those widths.
 - `silu`, `gelu`, and `gelu_tanh` return `-0.0` at `-inf` instead of NaN, and
   `+inf` at `+inf`. Every finite input keeps its result.
-- The wire DAG schema version is 25. A version-24 reader rejects a graph, which
+- The wire DAG schema version is 27. A version-26 reader rejects a graph, which
   may now contain `Erf` or `Erfc`.

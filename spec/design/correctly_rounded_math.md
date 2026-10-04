@@ -669,7 +669,7 @@ kernels, and the C host helpers (built from the `tier2` graph) all run it, so `g
 steps are `neg`, `abs`, `exp`, `erfc`, `recip`, `add`, `sub`, `mul`, `cmplt`, `where`,
 and the f16/bf16 `cast`s. `erf` and `erfc` are wired wherever `tanh` is: the
 evaluator, IR evaluation and fusion, the adjoint, C kernel and host emission, the wire
-schema (version 25), and the device fences. Tests pin the evaluator against an
+schema (version 27), and the device fences. Tests pin the evaluator against an
 independent MPFR model of the graphs on the witness set at every width, the IR and the
 C host helpers against the evaluator (every finite f16 input and the witnesses at the
 other widths), and the f16/bf16 bounds above as a manual gate. The prove discharges in
