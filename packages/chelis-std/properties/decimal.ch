@@ -4,7 +4,7 @@ import Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTo
 -- [05-OP-76]'s laws as `chelis prove` properties at the fuzz tier. A property
 -- binds only scalars, so each one builds its decimals inside the property from
 -- number text assembled out of `i64` and `string` binders, or from an `f64`
--- binder. A `where` guard keeps exactly the inputs a law speaks about, so the
+-- binder. A `where` guard keeps only the inputs a law speaks about, so the
 -- harness counts every other sample as rejected rather than as a pass.
 -- The fuzz generator draws an `i64` binder from [-1000, 1000], a `string`
 -- binder as `s` followed by an integer in 0..999, and an `f64` binder from

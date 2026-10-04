@@ -2,7 +2,7 @@
 //!
 //! `packages/chelis-std/properties/decimal.ch` states [05-OP-76]'s laws over
 //! `string`, `i64` and `f64` binders, building each decimal inside the
-//! property, with a `where` guard that keeps exactly the inputs a law speaks
+//! property, with a `where` guard that keeps only the inputs a law speaks
 //! about. This test stages the standard library, runs `chelis prove` at the
 //! fuzz tier over that file, and requires every property to pass on fuzz
 //! evidence with the requested number of accepted samples. It then negates
