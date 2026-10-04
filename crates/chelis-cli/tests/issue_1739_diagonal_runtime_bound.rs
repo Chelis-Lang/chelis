@@ -1222,9 +1222,32 @@ fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
     use chelis_compiler_api::pipeline::{
         PipelineGoal, PipelineOutcome, PipelineRequest, run_source,
     };
+    // Check resolved source declarations independently of C emission. The
+    // single-file resolver retains local names and links only explicit imports;
+    // it never substitutes types inferred from the emitted artifact.
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse census source");
+    let prepared = chelis_reef::prepare_single_file_program(
+        "guard-census",
+        &declarations,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("resolve every census import");
+    let _linked = prepared
+        .as_ref()
+        .map(|_| chelis_types::install_linked_program_guard());
+    let resolved_deep = prepared.map(|program| {
+        chelis_deep::printer::print_canonical(
+            &chelis_surf::desugar::desugar_program(&program.decls)
+                .expect("desugar resolved census declarations"),
+        )
+    });
+    let (source_kind, checked_source) = match resolved_deep.as_deref() {
+        Some(deep) => (chelis_compiler_api::schema::SourceKind::Deep, deep),
+        None => (chelis_compiler_api::schema::SourceKind::Surf, source),
+    };
     let outcome = run_source(PipelineRequest {
-        source_kind: chelis_compiler_api::schema::SourceKind::Surf,
-        source,
+        source_kind,
+        source: checked_source,
         entry: None,
         goal: PipelineGoal::FullCheck,
     })
@@ -1895,4 +1918,28 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         "these shipped defs changed their host-lane result guards; each change \
          needs positive and negative both-lane checks before it lands"
     );
+}
+
+#[test]
+fn the_census_resolves_stdlib_imports_before_independent_signature_checks() {
+    let source = "module Census.Imported\nimport Std.Tensor.Construct (linspace)\ndef sample() -> f32 = index(to_list(linspace(0.0f32, 1.0f32, 3i64)), 1i64)\n";
+    let checked = census_checked_program(source);
+    assert!(
+        checked
+            .signature_inference()
+            .functions
+            .contains_key("sample")
+    );
+}
+
+#[test]
+fn the_census_rejects_an_unresolved_import_instead_of_skipping_it() {
+    let source = "module Census.Invalid\nimport Std.NoSuchModule (missing)\ndef sample() -> f32 = missing(0.0f32)\n";
+    assert!(std::panic::catch_unwind(|| census_checked_program(source)).is_err());
+}
+
+#[test]
+fn resolving_imports_does_not_authorize_an_authored_linker_name() {
+    let source = "module Census.Invalid\nimport Std.Tensor.Construct (linspace)\ndef pkg__fake__Module__sample() -> f32 = 0.0f32\n";
+    assert!(std::panic::catch_unwind(|| census_checked_program(source)).is_err());
 }
