@@ -795,6 +795,63 @@ class WarmLaneTests(unittest.TestCase):
                 assert_one_warm_lane(self, nightly)
 
 
+# chelis#3070: the warm broker admits a job only by a reviewed member route,
+# and these jobs have none, so on main the hosts refuse them with no steps
+# and no log. They run GitHub-hosted on every ref; the module-oracles shard
+# limit stays inside the hosted six-hour job limit.
+HOSTED_ONLY_JOBS = ("module-oracles-plan", "module-oracles")
+HOSTED_RUNNER = "ubuntu-latest"
+HOSTED_JOB_MINUTES = 360
+
+
+def assert_hosted_on_every_ref(test, nightly, name):
+    job = nightly["jobs"][name]
+    for leg in matrix_legs(job):
+        for ref in (MAIN_REF, "refs/heads/candidate"):
+            test.assertEqual(
+                resolve_ref_switch(test, job["runs-on"], ref, leg),
+                HOSTED_RUNNER,
+                f"{name} {leg} must run GitHub-hosted on {ref} (chelis#3070)",
+            )
+    test.assertLessEqual(
+        int(job["timeout-minutes"]),
+        HOSTED_JOB_MINUTES,
+        f"{name} must fit the GitHub-hosted job limit",
+    )
+
+
+class HostedModuleOraclesTests(unittest.TestCase):
+    """chelis#3070: module oracles never wait on a warm route they lack."""
+
+    def setUp(self):
+        self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
+
+    def test_module_oracle_jobs_run_github_hosted_on_every_ref(self):
+        for name in HOSTED_ONLY_JOBS:
+            with self.subTest(job=name):
+                assert_hosted_on_every_ref(self, self.nightly, name)
+
+    def test_a_warm_route_or_an_over_long_shard_is_rejected(self):
+        # The negative twin: #3005's nightly-wide expression, which picked
+        # the warm pool on main, and a shard budget past the hosted limit.
+        warm = (
+            "${{ github.ref == 'refs/heads/main' && "
+            f"'{WARM_LABEL}' || 'ubuntu-latest' }}}}"
+        )
+        for name in HOSTED_ONLY_JOBS:
+            for mutation in ("warm", "timeout"):
+                nightly = copy.deepcopy(self.nightly)
+                job = nightly["jobs"][name]
+                if mutation == "warm":
+                    job["runs-on"] = warm
+                else:
+                    job["timeout-minutes"] = HOSTED_JOB_MINUTES + 1
+                with self.subTest(job=name, mutation=mutation), self.assertRaises(
+                    AssertionError
+                ):
+                    assert_hosted_on_every_ref(self, nightly, name)
+
+
 class UnattendedBackstopTests(unittest.TestCase):
     """chelis#1831: an unattended profile without `terminate-after` lets one
     pathological row consume the whole hosted budget and report nothing."""
