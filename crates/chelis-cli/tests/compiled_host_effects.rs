@@ -924,3 +924,67 @@ fn uniform_like_rejects_a_bound_of_another_dtype_by_type() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// [05-OP-37] dropout through an alias, at bf16, and its pathwise adjoint
+// ---------------------------------------------------------------------------
+
+/// chelis#1295's dropout residue, under explicit keys:
+/// - a function reached through a local alias dispatches `dropout` as a direct
+///   call does (the evaluator once failed with `unknown runtime name dropout`);
+/// - bf16 draws at its own dtype;
+/// - the pathwise adjoint of `sum(dropout(k, x, r))` is the forward's scaled
+///   mask, so it equals the draw over ones under the same key.
+///
+/// Both lanes print the same values.
+#[test]
+fn dropout_alias_bf16_and_adjoint_match_eval() {
+    let source = "def thin(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n\
+                  def aliased(k: key, x: tensor[4, f32]) -> tensor[4, f32] = {\n\
+                  f = thin\n\
+                  f(k, x, 0.25f32)\n\
+                  }\n\
+                  def loss(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(dropout(key_from_seed(7i64), x, 0.25f32), 0))\n\
+                  def loss16(x: tensor[4, bf16]) -> bf16 = tensor_to_scalar(sum(dropout(key_from_seed(7i64), x, cast(0.25f32, bf16)), 0))\n\
+                  ones = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+                  ones16 = cast(ones, bf16)\n\
+                  a = aliased(key_from_seed(7i64), ones)\n\
+                  b = thin(key_from_seed(7i64), ones, 0.25f32)\n\
+                  c = dropout(key_from_seed(7i64), cast(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), bf16), cast(0.25f32, bf16))\n\
+                  d = dropout(key_from_seed(7i64), ones16, cast(0.25f32, bf16))\n\
+                  g = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n\
+                  gb = grad(loss16)(cast(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), bf16))\n";
+    let run = parity::assert_lanes_agree(source, "dropoutwide");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    let line = |name: &str| {
+        run.stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} = ")))
+            .unwrap_or_else(|| panic!("no `{name}` line: {run:?}"))
+            .to_string()
+    };
+    // Non-vacuity: the key drops some elements and keeps others.
+    assert_eq!(
+        line("a"),
+        "tensor(shape=[4], data=[0.0, 1.3333334, 1.3333334, 1.3333334])",
+        "{run:?}"
+    );
+    assert_eq!(line("a"), line("b"), "{run:?}");
+    assert_eq!(
+        line("c"),
+        "tensor(shape=[4], data=[0.0, 2.67, 4.0, 5.34])",
+        "{run:?}"
+    );
+    assert_eq!(line("g"), line("a"), "{run:?}");
+    assert_eq!(line("gb"), line("d"), "{run:?}");
+}
+
+/// A rate of another dtype than the input's is a type error, as [05-OP-37]
+/// requires a same-dtype rate.
+#[test]
+fn dropout_rejects_a_rate_of_another_dtype_by_type() {
+    let stderr = build_rejection(
+        "d = dropout(key_from_seed(7i64), cast(to_tensor([1.0f32, 2.0f32]), bf16), 0.25f32)\n",
+    );
+    assert!(stderr.contains("PrecisionMismatch"), "{stderr}");
+}
