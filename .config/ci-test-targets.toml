@@ -4545,3 +4545,8 @@ job = "secret-scan"
 cadence = "pull_request and push"
 reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
 tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = "examples/linspace.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]

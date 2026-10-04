@@ -94,8 +94,13 @@ the same key cannot be consumed twice.
 - `Std.Tensor.Construct` provides `arange(start, stop)` for signed-integer
   endpoints and `linspace(start, stop, count)` for float endpoints and an
   `i64` count. These functions run for supported inputs in evaluation and
-  generated C. Imported calls do not enforce every endpoint dtype family
-  restriction, so use the stated types. Its `stack`, `squeeze`, and
+  generated C. `linspace` requires finite endpoints and a positive count;
+  count one returns the start value. For larger counts it preserves both
+  endpoints and rounds each exact `idx / (count - 1)` weight once to the
+  endpoint dtype before the declared-width subtraction, multiplication,
+  and addition. The index and denominator retain exact `i64` values,
+  including counts beyond the float dtype's exact-integer range.
+  Its `stack`, `squeeze`, and
   `unsqueeze` names are exported, but concrete tensor calls do not
   type-check; see [known issues and supported concrete alternatives](known-issues.md#tensor-construction-helpers).
 - `Std.Tensor.Mask.where_indices(mask)` returns the increasing flat `i64`
