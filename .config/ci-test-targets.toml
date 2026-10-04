@@ -738,6 +738,18 @@ name = "issue_1906_concat_admission"
 package = "chelis-ir"
 name = "issue_2491_eval_extent_admission"
 
+# chelis#3120: these targets type-check Surf programs (the compiled-value
+# ownership fixtures and inline sources), so a Surf desugarer change that
+# alters a literal's kind breaks them. No path rule routes them, and both run
+# in milliseconds.
+[[standing_target]]
+package = "chelis-ir"
+name = "ownership_lowering"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1277_kernel_decision"
+
 # chelis#2413 / chelis#2440: a local tensor ascription checks only under its
 # carrier's owner activation (grad/vmap bodies in arms, per-row vmap arms).
 [[standing_target]]

@@ -1034,7 +1034,21 @@ names nor the retired names may be rebound as type variables under
 
 ### P10b: Contextual Tensor-Literal Inference
 
-When a tensor literal `[e1, e2, ...]` appears in a position with a **known
+A bracket literal `[e1, e2, ...]` is a `List`: it desugars to the `Cons`/`Nil`
+chain of its elements (`spec/03-deep-syntax.md` §6). Neither the spelling of its
+elements nor the position it stands in selects another kind. A **tensor
+literal** is a bracket literal converted by `to_tensor`, which is spelled in
+exactly one of two ways:
+
+- as the bracket-literal argument of a `to_tensor` call,
+  `to_tensor([1.0, 2.0, 3.0])`, in any position;
+- as a bare bracket literal whose own declaration states a tensor type: the
+  right-hand side of a binding whose declared type, by inline annotation or
+  standalone `sig`, is a tensor type, or the body of a function whose declared
+  result type, inline or in its `sig`, is a tensor type. The desugarer emits
+  the `to_tensor` call.
+
+When a tensor literal appears in a position with a **known
 element type**, the unsuffixed numeric literals in the tensor body adopt that
 element type instead of the §P10 default. The closed set of "known-element-type"
 positions is exactly:
@@ -1046,10 +1060,21 @@ positions is exactly:
    declared signature whose parameter at that position is a tensor type
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is itself a tensor literal
-4. the first argument of an explicit `cast(literal, p)` expression — the
+4. the first argument of an explicit `cast(literal, p)` expression, where the
+   literal is a scalar numeric literal or a tensor literal — the
    literals bind at `p`, which may also be a dtype-bounded type binder;
    the literal then binds at each admissible instantiation
    (`spec/04-type-system.md` §5.6)
+
+A tensor literal adopts identically in both spellings: the bracket-literal
+argument of a `to_tensor` call that stands in one of these positions takes the
+position's element type, exactly as a bare bracket literal in position 1 or 3
+does. In positions 2 and 4 the kind is fixed: a bare bracket literal there is
+a `List` and is never converted, so a tensor argument is written
+`f(to_tensor([1.0, 2.0]))` and a tensor cast is written
+`cast(to_tensor([1.1, 2.2]), f64)`, which binds both decimals at `f64`. A call
+through a lexical binding that shadows `to_tensor` is an ordinary call: its
+argument is a `List` and adopts nothing.
 
 Position 4 applies to a bare scalar numeric literal as well as to a
 tensor-literal body: `cast(1.1, f64)` binds the decimal at
@@ -1063,8 +1088,9 @@ and [04-NUM-14] for the full statement.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §P10 literal defaults: integer literals to `i32`, float literals to `f32`.
-A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
-`tensor[3, i32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
+In an unannotated binding, `to_tensor([1, 2, 3])` evaluates to
+`tensor[3, i32]` and `to_tensor([1.0, 2.0, 3.0])` to `tensor[3, f32]`, while
+a bare `[1, 2, 3]` is a `List i32`.
 
 **Mixed suffixes inside a contextual literal.** A suffixed entry inside a
 contextual tensor literal is well-formed only if its suffix matches the
