@@ -6423,7 +6423,8 @@ name = {json.dumps(name)}
             "filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles)\n", heavy
         )
         self.assertNotIn('echo "filterset=$(', heavy)
-        self.assertEqual(heavy.count("${{ needs.module-oracles-plan.outputs.filterset }}"), 2)
+        # module-oracles runs it; full-workspace and the generalization lane negate it.
+        self.assertEqual(heavy.count("${{ needs.module-oracles-plan.outputs.filterset }}"), 3)
 
     @staticmethod
     def missing_tests(root: Path, tests: list[owned.TestIdentity]) -> list[str]:
