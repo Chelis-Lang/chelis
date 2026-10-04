@@ -1630,6 +1630,12 @@ impl CEmitter {
             RiscOp::Tanh => {
                 self.emit_unary_func(id, "chelis_cr_tanhf", &node.inputs, &node.output_type)
             }
+            RiscOp::Erf => {
+                self.emit_unary_func(id, "chelis_cr_erff", &node.inputs, &node.output_type)
+            }
+            RiscOp::Erfc => {
+                self.emit_unary_func(id, "chelis_cr_erfcf", &node.inputs, &node.output_type)
+            }
             RiscOp::Abs if node.output_type.precision.is_integer() => {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
             }
@@ -2972,6 +2978,8 @@ impl CEmitter {
             "chelis_cr_tanf" => "chelis_cr_tan",
             "chelis_cr_atanf" => "chelis_cr_atan",
             "chelis_cr_tanhf" => "chelis_cr_tanh",
+            "chelis_cr_erff" => "chelis_cr_erf",
+            "chelis_cr_erfcf" => "chelis_cr_erfc",
             "fabsf" => "fabs",
             "floorf" => "floor",
             "ceilf" => "ceil",
@@ -5731,6 +5739,16 @@ impl CEmitter {
                 let f = mf("chelis_cr_tanhf");
                 format!("{f}({a})")
             }
+            FusedStepOp::Erf => {
+                let a = resolve(&inputs[0]);
+                let f = mf("chelis_cr_erff");
+                format!("{f}({a})")
+            }
+            FusedStepOp::Erfc => {
+                let a = resolve(&inputs[0]);
+                let f = mf("chelis_cr_erfcf");
+                format!("{f}({a})")
+            }
             FusedStepOp::Abs => {
                 let a = resolve(&inputs[0]);
                 let f = mf("fabsf");
@@ -8019,6 +8037,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 FusedStepOp::Tanh => {
                     let a = resolve(&step.input_indices[0]);
                     format!("chelis_cr_tanhf({a})")
+                }
+                FusedStepOp::Erf => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("chelis_cr_erff({a})")
+                }
+                FusedStepOp::Erfc => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("chelis_cr_erfcf({a})")
                 }
                 FusedStepOp::Abs => {
                     let a = resolve(&step.input_indices[0]);

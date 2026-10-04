@@ -1261,6 +1261,8 @@ enum ElementwiseUnOp {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1280,6 +1282,8 @@ impl ElementwiseUnOp {
             Self::Tan => "tan",
             Self::Atan => "atan",
             Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1302,7 +1306,9 @@ impl ElementwiseUnOp {
             | Self::Cos
             | Self::Tan
             | Self::Atan
-            | Self::Tanh => None,
+            | Self::Tanh
+            | Self::Erf
+            | Self::Erfc => None,
         }
     }
 
@@ -1318,6 +1324,8 @@ impl ElementwiseUnOp {
             Self::Tan => FloatUnOp::Tan,
             Self::Atan => FloatUnOp::Atan,
             Self::Tanh => FloatUnOp::Tanh,
+            Self::Erf => FloatUnOp::Erf,
+            Self::Erfc => FloatUnOp::Erfc,
             Self::Abs => FloatUnOp::Abs,
             Self::Floor => FloatUnOp::Floor,
             Self::Ceil => FloatUnOp::Ceil,
@@ -4161,6 +4169,8 @@ where
             RiscOp::Tan => unary_elementwise(ElementwiseUnOp::Tan, &values[&node.inputs[0]])?,
             RiscOp::Atan => unary_elementwise(ElementwiseUnOp::Atan, &values[&node.inputs[0]])?,
             RiscOp::Tanh => unary_elementwise(ElementwiseUnOp::Tanh, &values[&node.inputs[0]])?,
+            RiscOp::Erf => unary_elementwise(ElementwiseUnOp::Erf, &values[&node.inputs[0]])?,
+            RiscOp::Erfc => unary_elementwise(ElementwiseUnOp::Erfc, &values[&node.inputs[0]])?,
             RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
             RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
             RiscOp::Ceil => unary_elementwise(ElementwiseUnOp::Ceil, &values[&node.inputs[0]])?,
@@ -4757,6 +4767,14 @@ where
                         )?,
                         FusedStepOp::Tanh => unary_elementwise(
                             ElementwiseUnOp::Tanh,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Erf => unary_elementwise(
+                            ElementwiseUnOp::Erf,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Erfc => unary_elementwise(
+                            ElementwiseUnOp::Erfc,
                             resolve(&step.input_indices[0]),
                         )?,
                         FusedStepOp::Abs => unary_elementwise(

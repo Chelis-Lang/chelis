@@ -1275,6 +1275,8 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Tan
         | RiscOp::Atan
         | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -2772,6 +2774,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -3566,6 +3570,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round => {

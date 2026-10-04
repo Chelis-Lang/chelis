@@ -4653,8 +4653,12 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "relu"
                         | "sigmoid"
                         | "tanh"
+                        | "erf"
+                        | "erfc"
                         | "silu"
                         | "gelu"
+                        | "gelu_tanh"
+                        | "standard_normal_cdf"
                         | "cmplt"
                         | "gt"
                         | "gte"
@@ -15295,12 +15299,22 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            // `tanh` is the [05-OP-46] Tier 1 primitive; `silu` and `gelu`
-            // route through their §3.3 tier2 lowerings, mirroring the
-            // relu/sigmoid pattern above.
+            // `tanh`, `erf`, and `erfc` are [05-OP-46] Tier 1 primitives; `silu`,
+            // `gelu`, `gelu_tanh`, and `standard_normal_cdf` route through their §3.3
+            // tier2 lowerings, mirroring the relu/sigmoid pattern above.
             "tanh" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "tanh input");
                 let node = self.lower_transcendental(RiscOp::Tanh, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erf input");
+                let node = self.lower_transcendental(RiscOp::Erf, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erfc" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erfc input");
+                let node = self.lower_transcendental(RiscOp::Erfc, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {
@@ -15329,6 +15343,40 @@ impl<'program> LowerCtx<'program> {
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_gelu(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "gelu_tanh" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "gelu_tanh input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_gelu_tanh(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "standard_normal_cdf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "standard_normal_cdf input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_standard_normal_cdf(
                     self.owner(),
                     &mut self.dag,
                     x,

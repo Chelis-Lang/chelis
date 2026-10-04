@@ -57,8 +57,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "relu",
     "sigmoid",
     "tanh",
+    "erf",
+    "erfc",
     "silu",
     "gelu",
+    "gelu_tanh",
+    "standard_normal_cdf",
     "softmax",
     "mean",
     "matmul",
@@ -847,8 +851,12 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "relu",
     "sigmoid",
     "tanh",
+    "erf",
+    "erfc",
     "silu",
     "gelu",
+    "gelu_tanh",
+    "standard_normal_cdf",
     "softmax",
     "min_elem",
     "reduce_window_max",
@@ -1237,6 +1245,22 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
+        name: "erf",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "erfc",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
         name: "silu",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
@@ -1246,6 +1270,22 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "gelu",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gelu_tanh",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "standard_normal_cdf",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
@@ -2456,11 +2496,54 @@ pub fn shape_class(name: &str) -> ShapeClass {
         "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
-        "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
-        | "min_elem" | "neg" | "recip" | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan"
-        | "atan" | "abs" | "floor" | "ceil" | "round" | "relu" | "sigmoid" | "tanh" | "silu"
-        | "gelu" | "not" | "clamp" | "uniform_like" | "where" | "eq" | "neq" | "lt" | "gt"
-        | "lte" | "gte" | "cmplt" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "and"
+        "add"
+        | "mul"
+        | "sub"
+        | "div"
+        | "floor_div"
+        | "trunc_div"
+        | "mod"
+        | "max_elem"
+        | "min_elem"
+        | "neg"
+        | "recip"
+        | "exp"
+        | "log"
+        | "sin"
+        | "sqrt"
+        | "cos"
+        | "tan"
+        | "atan"
+        | "abs"
+        | "floor"
+        | "ceil"
+        | "round"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "not"
+        | "clamp"
+        | "uniform_like"
+        | "where"
+        | "eq"
+        | "neq"
+        | "lt"
+        | "gt"
+        | "lte"
+        | "gte"
+        | "cmplt"
+        | "bitand"
+        | "bitor"
+        | "bitxor"
+        | "shl"
+        | "shr"
+        | "and"
         | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
@@ -2498,8 +2581,28 @@ pub fn shape_class(name: &str) -> ShapeClass {
 pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
     use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
     match name {
-        "mean" | "softmax" | "div" | "matmul" | "layer_norm" | "exp" | "log" | "sin" | "cos"
-        | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+        "mean"
+        | "softmax"
+        | "div"
+        | "matmul"
+        | "layer_norm"
+        | "exp"
+        | "log"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "atan"
+        | "sqrt"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "recip"
         | "reduce_window_mean" => Some(ActiveFloat),
         // [05-OP-64], [05-OP-47] and truncating division.
         "trunc_div" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
@@ -3268,8 +3371,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     // C-backend lowerings live in `chelis-compiler-api/src/runtime/host_ops.rs`
     // and `chelis-backend-c/src/host_emit.rs` respectively.
     tensor_unop("tanh", &mut env, &mut vg);
+    tensor_unop("erf", &mut env, &mut vg);
+    tensor_unop("erfc", &mut env, &mut vg);
     tensor_unop("silu", &mut env, &mut vg);
     tensor_unop("gelu", &mut env, &mut vg);
+    tensor_unop("gelu_tanh", &mut env, &mut vg);
+    tensor_unop("standard_normal_cdf", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
@@ -3918,8 +4025,12 @@ mod tests {
             "relu",
             "sigmoid",
             "tanh",
+            "erf",
+            "erfc",
             "silu",
             "gelu",
+            "gelu_tanh",
+            "standard_normal_cdf",
             "not",
             "clamp",
             "uniform_like",

@@ -65,15 +65,19 @@ enum Function {
     Cos,
     Tan,
     Atan,
+    Erf,
+    Erfc,
 }
 
-const FUNCTIONS: [Function; 6] = [
+const FUNCTIONS: [Function; 8] = [
     Function::Exp,
     Function::Log,
     Function::Sin,
     Function::Cos,
     Function::Tan,
     Function::Atan,
+    Function::Erf,
+    Function::Erfc,
 ];
 
 impl Function {
@@ -85,6 +89,8 @@ impl Function {
             Function::Cos => "cos",
             Function::Tan => "tan",
             Function::Atan => "atan",
+            Function::Erf => "erf",
+            Function::Erfc => "erfc",
         }
     }
 
@@ -96,6 +102,8 @@ impl Function {
             Function::Cos => RiscOp::Cos,
             Function::Tan => RiscOp::Tan,
             Function::Atan => RiscOp::Atan,
+            Function::Erf => RiscOp::Erf,
+            Function::Erfc => RiscOp::Erfc,
         }
     }
 
@@ -107,6 +115,8 @@ impl Function {
             Function::Cos => chelis_crmath::cos_f32(x),
             Function::Tan => chelis_crmath::tan_f32(x),
             Function::Atan => chelis_crmath::atan_f32(x),
+            Function::Erf => chelis_crmath::erf_f32(x),
+            Function::Erfc => chelis_crmath::erfc_f32(x),
         }
     }
 
@@ -118,6 +128,8 @@ impl Function {
             Function::Cos => chelis_crmath::cos_f64(x),
             Function::Tan => chelis_crmath::tan_f64(x),
             Function::Atan => chelis_crmath::atan_f64(x),
+            Function::Erf => chelis_crmath::erf_f64(x),
+            Function::Erfc => chelis_crmath::erfc_f64(x),
         }
     }
 }
@@ -723,11 +735,7 @@ fn host_math_findings(source: &str) -> Vec<String> {
     for kernel in chelis_crmath::c_source::Kernel::ALL {
         let entry = kernel.entry();
         if words.contains(&entry) {
-            let float = if entry.ends_with('f') {
-                "float"
-            } else {
-                "double"
-            };
+            let float = kernel.c_type();
             let definition = format!("static {float} {entry}({float} x)");
             if source.matches(&definition).count() != 1 {
                 findings.push(format!(

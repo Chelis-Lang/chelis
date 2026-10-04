@@ -311,6 +311,8 @@ fn vectorize_axis0_impl(
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil

@@ -7139,6 +7139,8 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Tan => WireRiscOp::Tan,
         RiscOp::Atan => WireRiscOp::Atan,
         RiscOp::Tanh => WireRiscOp::Tanh,
+        RiscOp::Erf => WireRiscOp::Erf,
+        RiscOp::Erfc => WireRiscOp::Erfc,
         RiscOp::Abs => WireRiscOp::Abs,
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
@@ -7391,6 +7393,8 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                         FusedStepOp::Tan => WireFusedStepOp::Tan,
                         FusedStepOp::Atan => WireFusedStepOp::Atan,
                         FusedStepOp::Tanh => WireFusedStepOp::Tanh,
+                        FusedStepOp::Erf => WireFusedStepOp::Erf,
+                        FusedStepOp::Erfc => WireFusedStepOp::Erfc,
                         FusedStepOp::Abs => WireFusedStepOp::Abs,
                         FusedStepOp::Floor => WireFusedStepOp::Floor,
                         FusedStepOp::Ceil => WireFusedStepOp::Ceil,
@@ -7484,7 +7488,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 26);
+        assert_eq!(wire.schema_version, 27);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7797,7 +7801,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 26);
+        assert_eq!(json["schema_version"], 27);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

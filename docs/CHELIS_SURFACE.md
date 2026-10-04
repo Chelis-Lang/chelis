@@ -101,6 +101,8 @@ separately named modular operation applies (`spec/04` [04-NUM-3/7]).
 | `cos` | `-g*sin(x)` |
 | `tan` | `g/cos²(x)` |
 | `atan` | `g/(1+x²)` |
+| `erf` | `g*(2/sqrt(pi))*exp(-x²)` |
+| `erfc` | `-g*(2/sqrt(pi))*exp(-x²)` |
 | `sqrt` | `g/(2*sqrt(x))` |
 | `abs` | `g*sign(x)` (0 at x=0) for floats; integer form is forward-only |
 | `floor` | float path: `grad` rejects (`PiecewiseConstant`); integer form is identity |
@@ -224,7 +226,7 @@ its own zero rule.
 | `and`,`or`,`not` | bool-only operations ([05-OP-26..28]); direct `Logical` nodes exist | structural `grad` rejection |
 | `relu` | dedicated `RiscOp::Relu`; forward equals stored-bit `max_elem(x, 0)` | `g` only where `0 < x`; exact +0 at both zeros and NaN |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
-| `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
+| `tanh`,`silu`,`gelu`,`gelu_tanh`,`standard_normal_cdf` | `tier2.rs` decompositions; `standard_normal_cdf` is the standard normal CDF `Phi` over `erfc`, `gelu` is exact (`x*Phi(x)`), `gelu_tanh` the tanh approximation | differentiable |
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | float-only `sum` followed by division by the selected axis extent, in canonical multi-axis order | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
@@ -424,13 +426,14 @@ and `load` are `RiscOp` memory nodes produced during lowering, and
 `cast_saturate`, `cast_wrap`, `copy`, `grad`, `vmap`, `jit`, and `realize`.
 
 ```
-Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
+Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan erf erfc sqrt
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
               key_from_seed split_key split_keys fold_in
-Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
+Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu gelu_tanh
+              standard_normal_cdf
               softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan

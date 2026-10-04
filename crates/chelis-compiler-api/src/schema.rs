@@ -2168,7 +2168,9 @@ pub struct WireRecordPatternField {
 ///   whose `mode` names the rung (chelis#759): `trunc` for `cast_trunc`,
 ///   `saturate` for `cast_saturate` and `wrap` for `cast_wrap`. A version-25
 ///   reader does not know that operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;
+/// - `27`: `Erf` and `Erfc` and their fused steps are [05-OP-46] Tier 1
+///   primitives; a version-26 reader does not know the operations.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3520,6 +3522,8 @@ fn wire_axis_origin(
         | WireRiscOp::Tan
         | WireRiscOp::Atan
         | WireRiscOp::Tanh
+        | WireRiscOp::Erf
+        | WireRiscOp::Erfc
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -3912,6 +3916,8 @@ pub enum WireFusedStepOp {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -4090,6 +4096,8 @@ pub enum WireRiscOp {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,

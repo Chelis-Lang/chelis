@@ -17267,6 +17267,8 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Tan
             | crate::dag::RiscOp::Atan
             | crate::dag::RiscOp::Tanh
+            | crate::dag::RiscOp::Erf
+            | crate::dag::RiscOp::Erfc
             | crate::dag::RiscOp::Abs
             | crate::dag::RiscOp::Floor
             | crate::dag::RiscOp::Ceil
@@ -19886,6 +19888,8 @@ fn conform_builtin_arguments(
             | "sin"
             | "cos"
             | "tanh"
+            | "erf"
+            | "erfc"
             | "pow"
             | "abs"
             | "min"
@@ -20210,9 +20214,30 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "uniform_like" | "dropout" => {
             Some(arg_tys.get(1).cloned().unwrap_or_else(fresh_host_inference))
         }
-        "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "neg" | "exp" | "log"
-        | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
-        | "min_elem" | "copy" | "softmax" => {
+        "add"
+        | "sub"
+        | "mul"
+        | "div"
+        | "floor_div"
+        | "trunc_div"
+        | "neg"
+        | "exp"
+        | "log"
+        | "sin"
+        | "sqrt"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "max_elem"
+        | "min_elem"
+        | "copy"
+        | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostTypeTerm::Tensor(tensor_ty))
             } else if arg_tys

@@ -639,8 +639,12 @@ pub enum FloatUnOp {
     Relu,
     Sigmoid,
     Tanh,
+    Erf,
+    Erfc,
     Silu,
     Gelu,
+    GeluTanh,
+    StandardNormalCdf,
 }
 
 impl FloatUnOp {
@@ -662,13 +666,25 @@ impl FloatUnOp {
             Self::Relu => "relu",
             Self::Sigmoid => "sigmoid",
             Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Silu => "silu",
             Self::Gelu => "gelu",
+            Self::GeluTanh => "gelu_tanh",
+            Self::StandardNormalCdf => "standard_normal_cdf",
         }
     }
 
     const fn is_activation(self) -> bool {
-        matches!(self, Self::Relu | Self::Sigmoid | Self::Silu | Self::Gelu)
+        matches!(
+            self,
+            Self::Relu
+                | Self::Sigmoid
+                | Self::Silu
+                | Self::Gelu
+                | Self::GeluTanh
+                | Self::StandardNormalCdf
+        )
     }
 }
 
@@ -1151,11 +1167,18 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         FloatUnOp::Tan => chelis_crmath::tan_f32(value),
         FloatUnOp::Atan => chelis_crmath::atan_f32(value),
         FloatUnOp::Tanh => chelis_crmath::tanh_f32(value),
+        FloatUnOp::Erf => chelis_crmath::erf_f32(value),
+        FloatUnOp::Erfc => chelis_crmath::erfc_f32(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
     })
@@ -1173,11 +1196,18 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         FloatUnOp::Tan => chelis_crmath::tan_f64(value),
         FloatUnOp::Atan => chelis_crmath::atan_f64(value),
         FloatUnOp::Tanh => chelis_crmath::tanh_f64(value),
+        FloatUnOp::Erf => chelis_crmath::erf_f64(value),
+        FloatUnOp::Erfc => chelis_crmath::erfc_f64(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
     })
@@ -1219,10 +1249,15 @@ struct ScalarActivationGraph {
 
 impl ActivationGraph for ScalarActivationGraph {
     type Value = ScalarValue;
+    type Predicate = bool;
     type Error = NumericKernelError;
 
-    fn constant(&mut self, value: f64) -> Result<ScalarValue, NumericKernelError> {
-        activation_constant(self.op, self.prim, value)
+    fn operand_prim(&self) -> Prim {
+        self.prim
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<ScalarValue, NumericKernelError> {
+        activation_constant(self.op, prim, value)
     }
 
     fn unary(&mut self, op: FloatUnOp, x: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
@@ -1236,6 +1271,27 @@ impl ActivationGraph for ScalarActivationGraph {
         rhs: ScalarValue,
     ) -> Result<ScalarValue, NumericKernelError> {
         float_binop(op, lhs, rhs)
+    }
+
+    fn less_than(
+        &mut self,
+        lhs: ScalarValue,
+        rhs: ScalarValue,
+    ) -> Result<bool, NumericKernelError> {
+        compare_scalars(CompareOp::Lt, lhs, rhs)
+    }
+
+    fn select(
+        &mut self,
+        condition: bool,
+        then: ScalarValue,
+        otherwise: ScalarValue,
+    ) -> Result<ScalarValue, NumericKernelError> {
+        Ok(if condition { then } else { otherwise })
+    }
+
+    fn convert(&mut self, x: ScalarValue, prim: Prim) -> Result<ScalarValue, NumericKernelError> {
+        cast_scalar(self.op.name(), x, prim).map_err(Into::into)
     }
 }
 
@@ -2166,11 +2222,18 @@ fn float_vec_unop_f32<T: Copy>(
         FloatUnOp::Tan => map!(chelis_crmath::tan_f32),
         FloatUnOp::Atan => map!(chelis_crmath::atan_f32),
         FloatUnOp::Tanh => map!(chelis_crmath::tanh_f32),
+        FloatUnOp::Erf => map!(chelis_crmath::erf_f32),
+        FloatUnOp::Erfc => map!(chelis_crmath::erfc_f32),
         FloatUnOp::Abs => map!(f32::abs),
         FloatUnOp::Floor => map!(f32::floor),
         FloatUnOp::Ceil => map!(f32::ceil),
         FloatUnOp::Round => map!(f32::round_ties_even),
-        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
@@ -2197,28 +2260,41 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         FloatUnOp::Tan => map!(chelis_crmath::tan_f64),
         FloatUnOp::Atan => map!(chelis_crmath::atan_f64),
         FloatUnOp::Tanh => map!(chelis_crmath::tanh_f64),
+        FloatUnOp::Erf => map!(chelis_crmath::erf_f64),
+        FloatUnOp::Erfc => map!(chelis_crmath::erfc_f64),
         FloatUnOp::Abs => map!(f64::abs),
         FloatUnOp::Floor => map!(f64::floor),
         FloatUnOp::Ceil => map!(f64::ceil),
         FloatUnOp::Round => map!(f64::round_ties_even),
-        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
 }
 
 trait ActivationElement: Copy {
+    const PRIM: Prim;
     fn constant(value: f64) -> Self;
     fn unary(self, op: FloatUnOp) -> Self;
     fn binary(self, op: FloatBinOp, rhs: Self) -> Self;
+    fn less_than(self, rhs: Self) -> bool;
 }
 
 // Each activation step is the same primitive kernel the scalar lane uses, so
 // the tensor lane cannot drift from it, including [04-NUM-2]'s NaN
-// finalization.
+// finalization. Only f32 and f64 elements run natively: a section 3.3 graph
+// never changes their dtype, while `Phi` at f16 and bf16 widens to f32, so
+// those elements run the scalar lane's graph.
 macro_rules! impl_native_activation_element {
-    ($ty:ty, $unop:ident, $binop:ident) => {
+    ($ty:ty, $prim:expr, $unop:ident, $binop:ident) => {
         impl ActivationElement for $ty {
+            const PRIM: Prim = $prim;
+
             fn constant(value: f64) -> Self {
                 value as Self
             }
@@ -2230,42 +2306,36 @@ macro_rules! impl_native_activation_element {
             fn binary(self, op: FloatBinOp, rhs: Self) -> Self {
                 $binop(op, self, rhs)
             }
-        }
-    };
-}
 
-impl_native_activation_element!(f32, apply_float_unop_f32, apply_float_binop_f32);
-impl_native_activation_element!(f64, apply_float_unop_f64, apply_float_binop_f64);
-
-macro_rules! impl_reduced_activation_element {
-    ($ty:ty, $from_f64:ident) => {
-        impl ActivationElement for $ty {
-            fn constant(value: f64) -> Self {
-                $from_f64(value)
-            }
-
-            fn unary(self, op: FloatUnOp) -> Self {
-                Self::from_f32(apply_float_unop_f32(op, self.to_f32()))
-            }
-
-            fn binary(self, op: FloatBinOp, rhs: Self) -> Self {
-                Self::from_f32(apply_float_binop_f32(op, self.to_f32(), rhs.to_f32()))
+            fn less_than(self, rhs: Self) -> bool {
+                self < rhs
             }
         }
     };
 }
 
-impl_reduced_activation_element!(half::f16, f16_from_f64_rne);
-impl_reduced_activation_element!(half::bf16, bf16_from_f64_rne);
+impl_native_activation_element!(f32, Prim::F32, apply_float_unop_f32, apply_float_binop_f32);
+impl_native_activation_element!(f64, Prim::F64, apply_float_unop_f64, apply_float_binop_f64);
 
-/// Evaluates each section 3.3 primitive on one tensor element as it is reached.
+/// Evaluates each section 3.3 primitive on one f32 or f64 tensor element as
+/// it is reached.
 struct ElementActivationGraph<T>(std::marker::PhantomData<T>);
 
 impl<T: ActivationElement> ActivationGraph for ElementActivationGraph<T> {
     type Value = T;
+    type Predicate = bool;
     type Error = std::convert::Infallible;
 
-    fn constant(&mut self, value: f64) -> Result<T, Self::Error> {
+    fn operand_prim(&self) -> Prim {
+        T::PRIM
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<T, Self::Error> {
+        assert_eq!(
+            prim,
+            T::PRIM,
+            "an f32 or f64 activation graph keeps its dtype"
+        );
         Ok(T::constant(value))
     }
 
@@ -2275,6 +2345,21 @@ impl<T: ActivationElement> ActivationGraph for ElementActivationGraph<T> {
 
     fn binary(&mut self, op: FloatBinOp, lhs: T, rhs: T) -> Result<T, Self::Error> {
         Ok(lhs.binary(op, rhs))
+    }
+
+    fn less_than(&mut self, lhs: T, rhs: T) -> Result<bool, Self::Error> {
+        Ok(lhs.less_than(rhs))
+    }
+
+    fn select(&mut self, condition: bool, then: T, otherwise: T) -> Result<T, Self::Error> {
+        Ok(if condition { then } else { otherwise })
+    }
+
+    fn convert(&mut self, _x: T, prim: Prim) -> Result<T, Self::Error> {
+        unreachable!(
+            "an f32 or f64 activation graph never converts, here to {}",
+            prim.name()
+        )
     }
 }
 
@@ -2290,6 +2375,19 @@ fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Ve
                 Err(never) => match never {},
             },
         )
+        .collect()
+}
+
+/// An f16 or bf16 activation, one element at a time through the scalar lane.
+fn half_vec_activation<T: Copy>(
+    op: FloatUnOp,
+    values: &[T],
+    to_scalar: impl Fn(T) -> ScalarValue,
+    from_scalar: impl Fn(ScalarValue) -> T,
+) -> Result<Vec<T>, NumericKernelError> {
+    values
+        .iter()
+        .map(|&value| float_activation(op, to_scalar(value)).map(&from_scalar))
         .collect()
 }
 
@@ -2312,8 +2410,28 @@ pub fn float_tensor_unop(
         let buf = match &value.buf {
             Buf::F64(values) => Buf::F64(float_vec_activation(op, values)),
             Buf::F32(values) => Buf::F32(float_vec_activation(op, values)),
-            Buf::F16(values) => Buf::F16(float_vec_activation(op, values)),
-            Buf::Bf16(values) => Buf::Bf16(float_vec_activation(op, values)),
+            Buf::F16(values) => Buf::F16(half_vec_activation(
+                op,
+                values,
+                |value| ScalarValue {
+                    bits: Bits::F16(value),
+                },
+                |value| match value.bits {
+                    Bits::F16(value) => value,
+                    _ => unreachable!("an f16 activation finalizes to f16"),
+                },
+            )?),
+            Buf::Bf16(values) => Buf::Bf16(half_vec_activation(
+                op,
+                values,
+                |value| ScalarValue {
+                    bits: Bits::Bf16(value),
+                },
+                |value| match value.bits {
+                    Bits::Bf16(value) => value,
+                    _ => unreachable!("a bf16 activation finalizes to bf16"),
+                },
+            )?),
             _ => unreachable!("family check makes the float buffer exhaustive"),
         };
         return Ok(TensorStorage { buf });
@@ -7200,8 +7318,12 @@ mod tests {
             FloatUnOp::Round,
             FloatUnOp::Sigmoid,
             FloatUnOp::Tanh,
+            FloatUnOp::Erf,
+            FloatUnOp::Erfc,
             FloatUnOp::Silu,
             FloatUnOp::Gelu,
+            FloatUnOp::GeluTanh,
+            FloatUnOp::StandardNormalCdf,
         ];
         for (prim, canonical, nans, one, inf, neg_inf, zero, minus_one) in widths {
             let name = prim.name();

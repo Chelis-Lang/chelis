@@ -76,9 +76,10 @@ pub fn lower_relu(
     add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
 }
 
-/// Builds a section 3.3 activation graph as Tier 1 DAG nodes at `ty`. The
-/// graph itself is defined once, in [`chelis_types::activation`], which the
-/// evaluator's activation kernels also run, so the two lanes cannot drift.
+/// Builds a section 3.3 activation graph as Tier 1 DAG nodes with `ty`'s
+/// dimensions. The graph itself is defined once, in
+/// [`chelis_types::activation`], which the evaluator's activation kernels
+/// also run, so the two lanes cannot drift.
 struct DagActivationGraph<'a> {
     owner: Owner,
     dag: &'a mut Dag,
@@ -88,20 +89,39 @@ struct DagActivationGraph<'a> {
     input: NodeId,
 }
 
+impl DagActivationGraph<'_> {
+    fn at(&self, precision: Prim) -> TensorType {
+        TensorType {
+            dims: self.ty.dims.clone(),
+            precision,
+        }
+    }
+
+    fn node(&mut self, op: RiscOp, inputs: Vec<NodeId>, precision: Prim) -> NodeId {
+        let ty = self.at(precision);
+        add_synth(self.owner, self.dag, op, inputs, ty, self.parent_span)
+    }
+
+    fn precision(&self, id: NodeId) -> Prim {
+        self.dag
+            .get(id)
+            .expect("an activation step reads a node the graph built")
+            .output_type
+            .precision
+    }
+}
+
 impl ActivationGraph for DagActivationGraph<'_> {
     type Value = NodeId;
+    type Predicate = NodeId;
     type Error = std::convert::Infallible;
 
-    fn constant(&mut self, value: f64) -> Result<NodeId, Self::Error> {
-        let op = RiscOp::synth_const(self.ty.precision, value);
-        let constant = add_synth(
-            self.owner,
-            self.dag,
-            op,
-            vec![],
-            self.ty.clone(),
-            self.parent_span,
-        );
+    fn operand_prim(&self) -> Prim {
+        self.ty.precision
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<NodeId, Self::Error> {
+        let constant = self.node(RiscOp::synth_const(prim, value), vec![], prim);
         // An input-less constant has no extent of its own. Recording the
         // input as its shape source sizes an axis known only at run time
         // from the input (chelis#1482).
@@ -114,31 +134,50 @@ impl ActivationGraph for DagActivationGraph<'_> {
             FloatUnOp::Neg => RiscOp::Neg,
             FloatUnOp::Exp => RiscOp::Exp,
             FloatUnOp::Recip => RiscOp::Recip,
+            FloatUnOp::Abs => RiscOp::Abs,
+            FloatUnOp::Erfc => RiscOp::Erfc,
             other => unreachable!("section 3.3 activations use no `{}` step", other.name()),
         };
-        Ok(add_synth(
-            self.owner,
-            self.dag,
-            op,
-            vec![x],
-            self.ty.clone(),
-            self.parent_span,
-        ))
+        let precision = self.precision(x);
+        Ok(self.node(op, vec![x], precision))
     }
 
     fn binary(&mut self, op: FloatBinOp, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
         let op = match op {
             FloatBinOp::Add => RiscOp::Add,
+            FloatBinOp::Sub => RiscOp::Sub,
             FloatBinOp::Mul => RiscOp::Mul,
             other => unreachable!("section 3.3 activations use no `{other:?}` step"),
         };
-        Ok(add_synth(
-            self.owner,
-            self.dag,
-            op,
+        let precision = self.precision(lhs);
+        Ok(self.node(op, vec![lhs, rhs], precision))
+    }
+
+    fn less_than(&mut self, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![lhs, rhs],
-            self.ty.clone(),
-            self.parent_span,
+            Prim::Bool,
+        ))
+    }
+
+    fn select(
+        &mut self,
+        condition: NodeId,
+        then: NodeId,
+        otherwise: NodeId,
+    ) -> Result<NodeId, Self::Error> {
+        let precision = self.precision(then);
+        Ok(self.node(RiscOp::Where, vec![condition, then, otherwise], precision))
+    }
+
+    fn convert(&mut self, x: NodeId, prim: Prim) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Cast {
+                new_precision: prim,
+            },
+            vec![x],
+            prim,
         ))
     }
 }
@@ -179,7 +218,8 @@ pub fn lower_sigmoid(
     lower_derived_activation(DerivedActivation::Sigmoid, owner, dag, x, ty, parent_span)
 }
 
-/// `silu(x)` = `mul(x, sigmoid(x))` (section 3.3; a.k.a. swish).
+/// `silu(x)` = `mul(m(x), sigmoid(x))` (section 3.3; a.k.a. swish), with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_silu(
     owner: Owner,
     dag: &mut Dag,
@@ -190,11 +230,9 @@ pub fn lower_silu(
     lower_derived_activation(DerivedActivation::Silu, owner, dag, x, ty, parent_span)
 }
 
-/// `gelu(x)` = `mul(x, sigmoid(mul(const(2.0), u)))` with
-/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
-/// `c = sqrt(2/pi)` (section 3.3): the tanh approximation spelled through
-/// `0.5*(1+tanh(u)) = sigmoid(2u)`, which neither cancels for negative `x`
-/// nor overflows at the largest finite inputs.
+/// `gelu(x)` = `mul(m(x), Phi(x))` (section 3.3): the exact Gaussian error
+/// linear unit over section 3.3's standard normal CDF graph `Phi`, with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_gelu(
     owner: Owner,
     dag: &mut Dag,
@@ -203,6 +241,41 @@ pub fn lower_gelu(
     parent_span: Option<&str>,
 ) -> NodeId {
     lower_derived_activation(DerivedActivation::Gelu, owner, dag, x, ty, parent_span)
+}
+
+/// `gelu_tanh(x)` = `mul(m(x), sigmoid(mul(const(2.0), u)))` with
+/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
+/// `c = sqrt(2/pi)` (section 3.3): the tanh approximation spelled through
+/// `0.5*(1+tanh(u)) = sigmoid(2u)`, which neither cancels for negative `x`
+/// nor overflows at the largest finite inputs.
+pub fn lower_gelu_tanh(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(DerivedActivation::GeluTanh, owner, dag, x, ty, parent_span)
+}
+
+/// `standard_normal_cdf(x)` = `Phi(x)` (section 3.3): the standard normal CDF over
+/// the correctly rounded `erfc`, with the two-product correction of its
+/// scaled argument.
+pub fn lower_standard_normal_cdf(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(
+        DerivedActivation::StandardNormalCdf,
+        owner,
+        dag,
+        x,
+        ty,
+        parent_span,
+    )
 }
 
 /// `div(a, b)` — IEEE-754 elementwise division.

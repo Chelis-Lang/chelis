@@ -258,6 +258,8 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 | RiscOp::Tan
                 | RiscOp::Atan
                 | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Abs
                 | RiscOp::Floor
                 | RiscOp::Ceil
@@ -1027,6 +1029,8 @@ impl<'plan> Emitter<'plan> {
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -1484,6 +1488,8 @@ impl<'plan> Emitter<'plan> {
                 | RiscOp::Tan
                 | RiscOp::Atan
                 | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Sqrt
                 | RiscOp::Relu
         );
