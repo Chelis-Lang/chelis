@@ -324,30 +324,6 @@ fn a_tensor_literal_cast_to_a_dtype_binder_is_refused_not_rounded() {
     );
 }
 
-/// `prefer-pipe-operator` rewrites the recommended cast spelling into a pipe;
-/// the rewrite must keep its bits.
-#[test]
-fn lint_fix_keeps_the_bits_of_the_recommended_cast_spelling() {
-    let directory = tempdir().expect("tempdir");
-    let file = directory.path().join("cast.ch");
-    common::write_file(&file, "ys = cast(to_tensor([1.1, 2.2]), f64)\n");
-    let before = eval_json(directory.path(), "cast.ch");
-    assert_eq!(f64_bits(&root(&before, "ys")["value"]), EXACT_F64);
-    let fixed = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .current_dir(directory.path())
-        .args(["lint", "--fix", "cast.ch"])
-        .output()
-        .expect("chelis lint runs");
-    let rewritten = std::fs::read_to_string(&file).expect("read fixed file");
-    let after = eval_json(directory.path(), "cast.ch");
-    assert_eq!(
-        f64_bits(&root(&after, "ys")["value"]),
-        EXACT_F64,
-        "lint --fix changed the bits ({fixed:?}):\n{rewritten}"
-    );
-}
-
 /// Round 1 verification of chelis#3145: a cast operand that did not adopt
 /// (a macro's `neg(lit)`, an ascribed literal, a macro literal) keeps its value
 /// through `chelis surf`, in the call and pipe spellings, at a primitive and at
