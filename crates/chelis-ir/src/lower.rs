@@ -1387,10 +1387,20 @@ fn lower_program_with_context_inner(
         );
     }
 
+    // The new program's own classification, derived at most once: deriving
+    // it again for each unnamed item made lowering a file cost the square of
+    // its size (chelis#3144).
+    let mut new_program_lowering = None;
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
-                && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env))
+                && top_level_expr_is_lowered_with_names(
+                    expr,
+                    new_type_env,
+                    new_program_lowering.get_or_insert_with(|| {
+                        top_level_lowering_map(new_program.exprs(), new_type_env)
+                    }),
+                ))
         {
             ctx.lower_top_level(expr);
         }
@@ -4029,11 +4039,12 @@ pub fn top_level_lowering_map(
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
     let dtype_bound_names = collect_top_level_dtype_bound_names(exprs);
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(exprs),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(exprs),
+        type_env,
+    );
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -4077,11 +4088,12 @@ pub fn top_level_lowering_map_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty_expr_to_deep(ty_expr));
     }
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(new_exprs),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(new_exprs),
+        new_type_env,
+    );
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -4157,11 +4169,12 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let top_level_defs = collect_top_level_defs(program.exprs());
     let top_level_sigs = collect_top_level_sigs(program.exprs());
     let dtype_bound_names = collect_top_level_dtype_bound_names(program.exprs());
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(program.exprs()),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(program.exprs()),
+        program.type_env(),
+    );
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
@@ -4922,6 +4935,76 @@ struct LowerabilityTypes<'a> {
     signatures: &'a BTreeMap<String, Expr>,
     dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
     function_typed_defs: UnordSet<String>,
+    /// The checked type environment the classification reads, with both maps'
+    /// terminal-name indexes, built once per classification. A short name's
+    /// declared type was found by scanning every key of both maps, once per
+    /// definition, so classifying a program cost the square of its size
+    /// (chelis#3144).
+    type_env: &'a BTreeMap<String, Expr>,
+    signature_terminals: TerminalIndex<'a>,
+    type_env_terminals: TerminalIndex<'a>,
+}
+
+impl<'a> LowerabilityTypes<'a> {
+    fn new(
+        signatures: &'a BTreeMap<String, Expr>,
+        dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+        function_typed_defs: UnordSet<String>,
+        type_env: &'a BTreeMap<String, Expr>,
+    ) -> Self {
+        Self {
+            signatures,
+            dtype_bound_names,
+            function_typed_defs,
+            type_env,
+            signature_terminals: TerminalIndex::new(signatures),
+            type_env_terminals: TerminalIndex::new(type_env),
+        }
+    }
+
+    /// [`lookup_declared_type_expr`] over this classification's maps, through
+    /// their indexes.
+    fn declared_type(&self, name: &str) -> Option<&'a Expr> {
+        self.signatures
+            .get(name)
+            .or_else(|| self.signature_terminals.unique(self.signatures, name))
+            .or_else(|| self.type_env.get(name))
+            .or_else(|| self.type_env_terminals.unique(self.type_env, name))
+    }
+}
+
+/// The keys of one map grouped by every terminal name [`terminal_name_matches`]
+/// accepts for them, so a unique terminal match is a lookup rather than a scan.
+struct TerminalIndex<'a> {
+    keys_by_terminal: BTreeMap<&'a str, BTreeSet<&'a str>>,
+}
+
+impl<'a> TerminalIndex<'a> {
+    fn new(map: &'a BTreeMap<String, Expr>) -> Self {
+        let mut keys_by_terminal = BTreeMap::<&'a str, BTreeSet<&'a str>>::new();
+        for key in map.keys() {
+            let key = key.as_str();
+            let terminals = [
+                Some(key),
+                key.rsplit_once("__").map(|(_, tail)| tail),
+                key.rsplit_once('.').map(|(_, tail)| tail),
+            ];
+            for terminal in terminals.into_iter().flatten() {
+                keys_by_terminal.entry(terminal).or_default().insert(key);
+            }
+        }
+        Self { keys_by_terminal }
+    }
+
+    /// [`unique_terminal_match`] of `name` in `map`, the map this index was
+    /// built from.
+    fn unique(&self, map: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+        let keys = self.keys_by_terminal.get(name)?;
+        if keys.len() != 1 {
+            return None;
+        }
+        keys.iter().next().and_then(|key| map.get(*key))
+    }
 }
 
 fn def_is_lowered(
@@ -4936,7 +5019,8 @@ fn def_is_lowered(
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !lookup_declared_type_expr(types.signatures, type_env, name)
+        return !types
+            .declared_type(name)
             .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
     }
 
@@ -4945,11 +5029,7 @@ fn def_is_lowered(
         // not only a function literal. Its initializer needs the same callable
         // identity as a lexical binding; a projected closure is host-served.
         if (types.function_typed_defs.contains(name)
-            || LowerCtx::type_expr_is_fn(lookup_declared_type_expr(
-                types.signatures,
-                type_env,
-                name,
-            )))
+            || LowerCtx::type_expr_is_fn(types.declared_type(name)))
             && !LowerabilityBindings::default().static_callable(body, top_level_defs)
         {
             return false;
@@ -4970,7 +5050,8 @@ fn def_is_lowered(
                 visiting,
                 &LowerabilityBindings::default(),
             )
-            && !lookup_declared_type_expr(types.signatures, type_env, name)
+            && !types
+                .declared_type(name)
                 .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
@@ -5101,7 +5182,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.names.contains(&name)
             && let Some(body) = top_level_defs.get(&name)
             && body.tag() == Some(DeepTag::Fn)
-            && (lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
+            && (types.declared_type(&name).is_some_and(|ty| {
                 type_expr_has_precision_var(ty)
                     || type_expr_has_rank_var(ty)
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
@@ -24282,11 +24363,9 @@ mod tests {
         let top_level_defs = BTreeMap::from([("bad".into(), Expr::Atom(Atom::Int(0), span))]);
         let signatures = BTreeMap::new();
         let dtype_bound_names = BTreeMap::new();
-        let types = LowerabilityTypes {
-            signatures: &signatures,
-            dtype_bound_names: &dtype_bound_names,
-            function_typed_defs: UnordSet::new(),
-        };
+        let type_env = BTreeMap::new();
+        let types =
+            LowerabilityTypes::new(&signatures, &dtype_bound_names, UnordSet::new(), &type_env);
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(
             &match_expr,
