@@ -2000,7 +2000,7 @@ fn cmd_eval_inner(
             // RFC v5 (RT-1 F2 bypass): a `--file` resolving into a reef
             // package evaluates reef-linker output (mangled), through the
             // fast path AND the `load_eval_decls` fallback below (which
-            // re-formats + re-evaluates the linked decls). Accept the
+            // checks and evaluates the linked decls). Accept the
             // linker name format for the rest of this arm. The raw `.dp`
             // case returned above, so it keeps the flag FALSE and rejects
             // mangled names as a forge.
@@ -2027,29 +2027,28 @@ fn cmd_eval_inner(
             } = load_eval_decls(path)?;
             let _single_file_linked_guard = linked.then(chelis_types::install_linked_program_guard);
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-            let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
-            let source = chelis_surf::format::format_program(&decls);
+            let checked =
+                checked_compilation_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             // [05-OBS-7..11]: selection consumes the same target-aware
             // manifest as evaluation and build. The former source-derived
             // list excluded pure nullary defs whenever the file also had a
             // value root, so eval and C disagreed about owed output. Filter
             // by entry-file declaration identity, but take names/topology
             // exclusively from the manifest.
-            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target)?;
+            let selected_roots =
+                manifest_root_names_from_decls(&entry_decls, checked.program(), target)?;
+            // The checked compilation itself is lowered and run, so the
+            // program checked is exactly the program evaluated; it is never
+            // printed back to Surf and parsed again (chelis#3129).
+            let outcome = chelis_compiler_api::compiler::eval_checked_selected_for_target(
+                checked,
+                &selected_roots,
+                target,
+            );
             if json {
-                prepare_eval_json(try_eval_result_for_target(
-                    SourceKind::Surf,
-                    &source,
-                    Some(&selected_roots),
-                    target,
-                ))
+                prepare_eval_json(outcome)
             } else {
-                prepare_eval_text(try_eval_for_target(
-                    SourceKind::Surf,
-                    &source,
-                    Some(&selected_roots),
-                    target,
-                ))
+                prepare_eval_text(outcome.map(|result| format_eval_result(&result)))
             }
         }
         (None, Some(e)) => {
@@ -10678,16 +10677,15 @@ fn prepare_eval_in_exec_context(
     synth_decls: &[Decl],
 ) -> Result<PreparedTestEval, String> {
     // RFC v5 (RT-1 F2 bypass): both branches feed reef-linked decls to
-    // the checker -- the Context branch through `prepare_eval_in_context`
-    // (which rewrites + checks internally) and the ReefGraph branch by
-    // formatting linked decls to Surf text and re-evaluating via
-    // `prepare_eval`, which loses the in-process provenance across the
-    // text round-trip. Re-assert the linked flag for both so the
-    // linker's internal names are accepted.
+    // the checker -- the Context branch through
+    // `prepare_eval_decls_in_context` (which rewrites + checks internally)
+    // and the ReefGraph branch through `prepare_eval_decls` on the linked
+    // decls. Re-assert the linked flag for both so the linker's internal
+    // names are accepted.
     let _linked = chelis_types::install_linked_program_guard();
     match exec_context {
         TestExecutionContext::Context(ctx) => {
-            // `prepare_eval_in_context` runs the reef rewriter
+            // `prepare_eval_decls_in_context` runs the reef rewriter
             // (rewrite_entry_decls_with_reef_graph) and the
             // _with_context type/effect/linearity stages internally
             // against the cached library snapshot. Per-file work is
@@ -10695,8 +10693,7 @@ fn prepare_eval_in_exec_context(
             // graph's ~50 modules. Avoid the legacy
             // compile_with_reef_graph call here — it would re-check
             // the entire library and defeat the cache.
-            let source_text = chelis_surf::format::format_program(synth_decls);
-            chelis_compiler_api::compiler::prepare_eval_in_context(ctx, &source_text)
+            chelis_compiler_api::compiler::prepare_eval_decls_in_context(ctx, synth_decls)
                 .map(PreparedTestEval::InContext)
                 .map_err(|err| {
                     err.errors
@@ -10713,15 +10710,10 @@ fn prepare_eval_in_exec_context(
                 &EMBEDDED_RUNTIME,
             )
             .map_err(|e| e.to_string())?;
-            let source_text = chelis_surf::format::format_program(&prepared.decls);
-            // `prepare_eval` is deprecated externally but retained for a
+            // `prepare_eval_decls` is deprecated externally but retained for a
             // directly-invoked worker that was not handed a compiled context.
             #[allow(deprecated)]
-            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            });
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
                 err.errors
                     .iter()
@@ -10756,13 +10748,8 @@ fn prepare_rewritten_batch_in_exec_context(
         TestExecutionContext::ReefGraph(graph) => {
             let prepared =
                 chelis_reef::compile_rewritten_entry_batch_with_reef_graph(graph, batch)?;
-            let source_text = chelis_surf::format::format_program(&prepared.decls);
             #[allow(deprecated)]
-            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            });
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
                 err.errors
                     .iter()
@@ -10936,22 +10923,22 @@ fn eval_module_init(
         Ok(p) => p,
         Err(err) => return Some(format!("compile: {err}")),
     };
-    let source_text = chelis_surf::format::format_program(&prepared.decls);
+    let linked_decls = prepared.decls;
     let outcome = run_test_with_timeout(
         move || {
-            // RFC v5 (RT-1 F2 bypass): `source_text` is the reef-linked
-            // module formatted back to Surf (internal-name mangled);
-            // `eval_selected` re-parses + re-checks it. This closure
-            // runs on a SPAWNED worker thread, so the main-thread
-            // linked-program guard does not apply -- install it here so
-            // the linker's own names are accepted in this thread.
+            // RFC v5 (RT-1 F2 bypass): `linked_decls` is the reef-linked
+            // module (internal-name mangled), which `eval_decls_selected`
+            // checks and runs as it is. This closure runs on a SPAWNED
+            // worker thread, so the main-thread linked-program guard does
+            // not apply -- install it here so the linker's own names are
+            // accepted in this thread.
             let _linked = chelis_types::install_linked_program_guard();
-            let request = EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            };
-            Ok(chelis_compiler_api::compiler::eval_selected(request, &module_roots).map(|_| ()))
+            Ok(chelis_compiler_api::compiler::eval_decls_selected(
+                &linked_decls,
+                BTreeMap::new(),
+                &module_roots,
+            )
+            .map(|_| ()))
         },
         timeout,
         &format!("module-init timeout after {}s", timeout.as_secs()),

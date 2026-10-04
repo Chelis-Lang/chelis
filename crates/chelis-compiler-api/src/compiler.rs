@@ -2496,6 +2496,34 @@ pub fn eval_selected_for_target(
     eval_compiled(&compiled, request.bindings, Some(selected_root_names))
 }
 
+/// Evaluate the selected roots of a program the caller has already checked,
+/// through a manifest computed for `target`. The checked compilation is
+/// lowered and run as it is: a caller that checks a program and then
+/// evaluates it never re-checks a re-printed copy (chelis#3129). Selection
+/// follows [`eval_selected`] with no tensor bindings.
+pub fn eval_checked_selected_for_target(
+    checked: crate::pipeline::CheckedCompilation,
+    selected_root_names: &[String],
+    target: Target,
+) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_checked_for_eval(checked, target)?;
+    eval_compiled(&compiled, BTreeMap::new(), Some(selected_root_names))
+}
+
+/// [`eval_selected`] over Surf declarations the caller has already parsed or
+/// assembled. The declarations are the program checked and run; they are
+/// never printed and parsed again (chelis#3129).
+pub fn eval_decls_selected(
+    decls: &[Decl],
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: &[String],
+) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    eval_compiled(&compiled, bindings, Some(selected_root_names))
+}
+
 /// Compile the source once, then evaluate it once per entry in `test_roots`,
 /// returning a parallel Vec of per-root `(name, Result<EvalResult>)` pairs.
 ///
@@ -2590,6 +2618,21 @@ pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
     })
 }
 
+/// [`prepare_eval`] over Surf declarations the caller has already parsed or
+/// assembled. The declarations are the program checked and run; they are
+/// never printed and parsed again (chelis#3129).
+#[deprecated(
+    since = "0.3.0",
+    note = "use prepare_eval_decls_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::prepare_eval_decls_in_context"
+)]
+pub fn prepare_eval_decls(decls: &[Decl]) -> Result<PreparedEval> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    Ok(PreparedEval {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
 // ---- Phase G: in-context eval / check ----------------------------------
 //
 // `eval_in_context` / `check_in_context` / `eval_many_in_context` accept a
@@ -2636,13 +2679,25 @@ fn compile_new_source_in_context(
     // the library-heavy workloads in chelis#828.
     bail_if_cancelled("parse")?;
     let raw_new_decls = parse_surf(new_source)?;
+    compile_new_decls_in_context(context, &raw_new_decls, target)
+}
+
+/// [`compile_new_source_in_context`] over declarations the caller has already
+/// parsed, so a caller holding declarations never prints and re-parses them
+/// (chelis#3129).
+fn compile_new_decls_in_context(
+    context: &crate::context::CompiledContext,
+    raw_new_decls: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    let _linked = chelis_types::install_linked_program_guard();
     // Strip module wrappers and route through the reef name resolver so
     // bare references like `add` get rewritten to their internal-name
     // form (`mylib.math.add`) — matching what
     // `compile_with_reef_graph` does for the monolithic eval path. This
     // is what makes the new code's references resolve against the
     // library state stored in the `CompiledContext`.
-    let flat_decls = flatten_module_decls(&raw_new_decls);
+    let flat_decls = flatten_module_decls(raw_new_decls);
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
@@ -2879,6 +2934,20 @@ pub fn prepare_eval_in_context(
 ) -> Result<PreparedEvalInContext> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
+/// [`prepare_eval_in_context`] over declarations the caller has already
+/// parsed or assembled. They are the program checked and run; they are never
+/// printed and parsed again (chelis#3129).
+pub fn prepare_eval_decls_in_context(
+    context: &crate::context::CompiledContext,
+    new_decls: &[Decl],
+) -> Result<PreparedEvalInContext> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_new_decls_in_context(context, new_decls, Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -3903,6 +3972,69 @@ fn compile_source_scoped_mode(
     })
     .map_err(pipeline_rejection_to_compiler_error)
     .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        outcome,
+        target,
+        planned_c,
+        #[cfg(feature = "compilation-trace")]
+        collect_trace,
+    )
+}
+
+/// Compile Surf declarations the caller has already parsed or assembled, for
+/// evaluation. The declarations are the program that is checked, lowered, and
+/// run; no source text is printed or parsed again (chelis#3129).
+fn compile_decls_for_eval(decls: &[Decl], target: Target) -> Result<CompiledSource> {
+    bail_if_cancelled("parse")?;
+    let prepared = crate::pipeline::prepare_surf_decls(decls, None)
+        .map_err(|error| {
+            pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(
+                error,
+            ))
+        })
+        .map_err(|error| cancelled_or("check", error))?;
+    bail_if_cancelled("check")?;
+    let outcome = crate::pipeline::run_prepared(
+        prepared,
+        crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
+    )
+    .map_err(pipeline_rejection_to_compiler_error)
+    .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        outcome,
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
+/// Compile a program the caller has already checked, for evaluation. The
+/// checked compilation is lowered and run as it is, so the program the caller
+/// checked is exactly the program evaluated (chelis#3129).
+fn compile_checked_for_eval(
+    checked: crate::pipeline::CheckedCompilation,
+    target: Target,
+) -> Result<CompiledSource> {
+    let lowered =
+        crate::pipeline::lower_checked(checked, crate::pipeline::LoweringMode::AllowHostOnly)
+            .map_err(pipeline_rejection_to_compiler_error)
+            .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        crate::pipeline::PipelineOutcome::Lowered(lowered),
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
+fn compiled_from_pipeline_outcome(
+    outcome: crate::pipeline::PipelineOutcome,
+    target: Target,
+    planned_c: bool,
+    #[cfg(feature = "compilation-trace")] collect_trace: bool,
+) -> Result<CompiledSource> {
     let (lowered, host_ordinary, host_execution) = match outcome {
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
         crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {

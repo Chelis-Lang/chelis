@@ -1274,8 +1274,13 @@ fn eval_surf_sample(
         value: sample_block_expr(property, sample, precondition),
         span: chelis_deep::Span::new(0, 0),
     });
-    let source = chelis_surf::format::format_program(&source_decls);
-    eval_bool_with_bindings(SourceKind::Surf, source, root, sample_bindings(sample))
+    // The assembled declarations are checked and run as they are, never
+    // printed and parsed again (chelis#3129).
+    bool_property_root(chelis_compiler_api::compiler::eval_decls_selected(
+        &source_decls,
+        sample_bindings(sample),
+        &[root.to_string()],
+    ))
 }
 
 #[cfg(not(feature = "chelis-prove"))]
@@ -1322,15 +1327,23 @@ fn eval_bool_with_bindings(
     root: &str,
     bindings: BTreeMap<String, TensorValue>,
 ) -> Result<bool, String> {
-    let result = chelis_compiler_api::compiler::eval_selected(
+    bool_property_root(chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
             source_kind,
             source,
             bindings,
         },
         &[root.to_string()],
-    )
-    .map_err(|err| {
+    ))
+}
+
+fn bool_property_root(
+    result: Result<
+        chelis_compiler_api::schema::EvalResult,
+        chelis_compiler_api::compiler::CompilerError,
+    >,
+) -> Result<bool, String> {
+    let result = result.map_err(|err| {
         err.errors
             .iter()
             .map(|diag| diag.message.clone())
