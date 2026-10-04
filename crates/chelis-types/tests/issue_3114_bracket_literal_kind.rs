@@ -53,6 +53,8 @@ enum Declared {
 enum Spelling {
     Bare,
     ToTensor,
+    /// `[...] |> to_tensor`, the pipe spelling of the same call.
+    PipeToTensor,
 }
 
 struct Position {
@@ -170,6 +172,39 @@ const POSITIONS: &[Position] = &[
         occurrences: 1,
         render: |literal, ty| Some(format!("values{} = cast({literal}, f64)\n", annotation(ty))),
     },
+    Position {
+        name: "pipe cast stage",
+        declares_kind: false,
+        occurrences: 1,
+        render: |literal, ty| {
+            Some(format!(
+                "values{} = {literal} |> cast(f64)\n",
+                annotation(ty)
+            ))
+        },
+    },
+    Position {
+        name: "pipe callee stage",
+        declares_kind: false,
+        occurrences: 1,
+        render: |literal, ty| {
+            Some(format!(
+                "def take(x{}) -> i32 = 1\nvalues = {literal} |> take\n",
+                annotation(ty)
+            ))
+        },
+    },
+    Position {
+        name: "pipe call stage",
+        declares_kind: false,
+        occurrences: 1,
+        render: |literal, ty| {
+            Some(format!(
+                "def take(x{}, n: i32) -> i32 = n\nvalues = {literal} |> take(1)\n",
+                annotation(ty)
+            ))
+        },
+    },
 ];
 
 fn deep(source: &str) -> Vec<Expr> {
@@ -270,17 +305,18 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
                 Declared::TensorAlias,
                 Declared::ListAlias,
             ] {
-                for spelling in [Spelling::Bare, Spelling::ToTensor] {
+                for spelling in [Spelling::Bare, Spelling::ToTensor, Spelling::PipeToTensor] {
                     let written = match spelling {
                         Spelling::Bare => literal.to_string(),
                         Spelling::ToTensor => format!("to_tensor({literal})"),
+                        Spelling::PipeToTensor => format!("{literal} |> to_tensor"),
                     };
                     let Some(body) = (position.render)(&written, declared_type(declared, nested))
                     else {
                         continue;
                     };
                     let source = format!("{PRELUDE}{alias}{body}");
-                    let tensor = spelling == Spelling::ToTensor
+                    let tensor = spelling != Spelling::Bare
                         || (position.declares_kind && declared == Declared::Tensor);
                     // The desugarer reads a declaration's spelling, so a bare
                     // literal under a tensor alias stays a List, which the
@@ -308,7 +344,7 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
             }
         }
     }
-    assert!(cases > 1000, "the matrix shrank to {cases} cases");
+    assert!(cases > 2000, "the matrix shrank to {cases} cases");
     assert!(
         failures.is_empty(),
         "{} of {cases} cases failed:\n\n{}",
@@ -365,5 +401,196 @@ fn an_adopted_signed_minimum_round_trips_inside_a_tensor_literal() {
         let resugared = format_program(&resugar_program(&original).expect("Deep resugars"));
         assert_eq!(resugared, expected);
         assert_eq!(normalized(&deep(&resugared)), normalized(&original));
+    }
+}
+
+/// The literal metadata of every `lit` node, spans removed, in source order.
+fn literal_types(exprs: &[Expr]) -> Vec<String> {
+    let text = normalized(exprs);
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("(lit {") {
+        let tail = &rest[start..];
+        // Metadata maps nest parentheses (type syntax); take through the
+        // literal's closing parenthesis by balancing.
+        let mut depth = 0usize;
+        let mut close = tail.len();
+        for (index, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(tail[..close].to_string());
+        rest = &tail[close..];
+    }
+    out
+}
+
+/// spec/02-surf-syntax.md: `x |> f(y)` is the call `f(x, y)` and `x |> cast(p)`
+/// is `cast(x, p)`. Every pipe spelling of an adopting position therefore
+/// types its literals exactly as the nested call does (§5.6), for a tensor
+/// literal and for a scalar, at a primitive and at a dtype binder.
+#[test]
+fn pipe_spellings_adopt_exactly_like_the_nested_call() {
+    let groups: &[&[&str]] = &[
+        &[
+            "values = cast(to_tensor([1.1, -2.2]), f64)\n",
+            "values = to_tensor([1.1, -2.2]) |> cast(f64)\n",
+            "values = [1.1, -2.2] |> to_tensor |> cast(f64)\n",
+            "values = cast([1.1, -2.2] |> to_tensor, f64)\n",
+        ],
+        &[
+            "values = cast(to_tensor([1, -2]), i8)\n",
+            "values = [1, -2] |> to_tensor |> cast(i8)\n",
+        ],
+        &[
+            "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = take(to_tensor([1.1, -2.2]))\n",
+            "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = to_tensor([1.1, -2.2]) |> take\n",
+            "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = [1.1, -2.2] |> to_tensor |> take\n",
+            "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = take([1.1, -2.2] |> to_tensor)\n",
+        ],
+        &[
+            "def take(x: tensor[2, f64], n: i32) -> tensor[2, f64] = x\nvalues = take(to_tensor([1.1, -2.2]), 1)\n",
+            "def take(x: tensor[2, f64], n: i32) -> tensor[2, f64] = x\nvalues = to_tensor([1.1, -2.2]) |> take(1)\n",
+            "def take(x: tensor[2, f64], n: i32) -> tensor[2, f64] = x\nvalues = [1.1, -2.2] |> to_tensor |> take(1)\n",
+        ],
+        &[
+            "values: tensor[2, f64] = to_tensor([1.1, -2.2])\n",
+            "values: tensor[2, f64] = [1.1, -2.2] |> to_tensor\n",
+        ],
+        &[
+            "def make() -> tensor[2, f64] = to_tensor([1.1, -2.2])\n",
+            "def make() -> tensor[2, f64] = [1.1, -2.2] |> to_tensor\n",
+        ],
+        &[
+            "def g[p: Float](w: p) -> tensor[2, p] = cast(to_tensor([1.1, -2.2]), p)\n",
+            "def g[p: Float](w: p) -> tensor[2, p] = to_tensor([1.1, -2.2]) |> cast(p)\n",
+            "def g[p: Float](w: p) -> tensor[2, p] = [1.1, -2.2] |> to_tensor |> cast(p)\n",
+        ],
+        &["values = cast(1.1, f64)\n", "values = 1.1 |> cast(f64)\n"],
+        &["values = cast(-1.1, f64)\n", "values = -1.1 |> cast(f64)\n"],
+        &[
+            "values = cast(3000000000, i64)\n",
+            "values = 3000000000 |> cast(i64)\n",
+        ],
+        &[
+            "def g[p: Float](w: p) -> p = cast(1.1, p)\n",
+            "def g[p: Float](w: p) -> p = 1.1 |> cast(p)\n",
+        ],
+    ];
+    let mut failures = Vec::new();
+    for group in groups {
+        let expected = literal_types(&deep(group[0]));
+        for source in &group[1..] {
+            let actual = literal_types(&deep(source));
+            if actual != expected {
+                failures.push(format!(
+                    "{source}literals {actual:?}\nbut the call spelling {}gives {expected:?}",
+                    group[0]
+                ));
+            }
+            if let Some(failure) = check(
+                source,
+                Expected::Conversions(source.matches("to_tensor").count()),
+            ) {
+                failures.push(failure);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Position 2 reads a callee's declared signature only when the call names the
+/// top-level function. A local binding of the name, under any binder kind, is
+/// another callable, so its argument adopts nothing (spec/04 §5.6).
+#[test]
+fn a_lexically_rebound_callee_adopts_nothing() {
+    const DECLARED: &str = "def f(x: tensor[2, f64]) -> tensor[2, f64] = x\n";
+    let shadowed = [
+        "def g() = {\n  f = fn (y) -> cast(y, f64)\n  f(to_tensor([1.1, 2.2]))\n}\n",
+        "def g(f: tensor[2, f32] -> tensor[2, f32]) -> tensor[2, f32] = f(to_tensor([1.1, 2.2]))\n",
+        "h = fn (f: tensor[2, f32] -> tensor[2, f32]) -> f(to_tensor([1.1, 2.2]))\n",
+        "def g(o: Option[tensor[2, f32] -> tensor[2, f32]]) = match o with {\n  | Some(f) => f(to_tensor([1.1, 2.2]))\n  | None => to_tensor([0.0, 0.0])\n}\n",
+        "def g() = {\n  (f, k) = (fn (y: tensor[2, f32]) -> y, 1)\n  f(to_tensor([1.1, 2.2]))\n}\n",
+        "def g(f: tensor[2, f32] -> tensor[2, f32]) -> tensor[2, f32] = to_tensor([1.1, 2.2]) |> f\n",
+        "def g(f: tensor[2, f32] -> tensor[2, f32]) -> tensor[2, f32] = [1.1, 2.2] |> to_tensor |> f\n",
+    ];
+    for body in shadowed {
+        let source = format!("{DECLARED}{body}");
+        let types = literal_types(&deep(&source));
+        assert!(
+            types.iter().any(|ty| ty.contains("1.1"))
+                && !types.iter().any(|ty| ty.contains("f64)} 1.1")),
+            "a rebound `f` must not adopt the top-level signature:\n{source}{types:?}"
+        );
+        if let Some(failure) = check(
+            &source,
+            Expected::Conversions(source.matches("to_tensor").count()),
+        ) {
+            panic!("{failure}");
+        }
+        let resugared = format_program(&resugar_program(&deep(&source)).expect("Deep resugars"));
+        assert!(
+            !resugared.contains("1.1f32"),
+            "the resugarer must not force suffixes under a rebound callee:\n{resugared}"
+        );
+    }
+    // Control: the top-level function itself adopts.
+    let types = literal_types(&deep(&format!("{DECLARED}r = f(to_tensor([1.1, 2.2]))\n")));
+    assert!(types.iter().any(|ty| ty.contains("f64)} 1.1")), "{types:?}");
+}
+
+/// §5.6 position 4 admits a dtype-bounded binder target for a tensor literal
+/// too. Its elements are typed at the binder in Deep, which the checker
+/// refuses until it adopts them at each instantiation, rather than rounding
+/// them through the f32 default.
+#[test]
+fn a_tensor_literal_cast_to_a_dtype_binder_is_typed_at_the_binder_and_refused() {
+    for body in [
+        "cast(to_tensor([1.1, 2.2]), p)",
+        "to_tensor([1.1, 2.2]) |> cast(p)",
+        "[1.1, 2.2] |> to_tensor |> cast(p)",
+    ] {
+        let source = format!("def g[p: Float](w: p) -> tensor[2, p] = {body}\nr = g(0.0f64)\n");
+        let exprs = deep(&source);
+        let types = literal_types(&exprs);
+        assert!(
+            types
+                .iter()
+                .filter(|ty| ty.contains("(t-var {} p)"))
+                .count()
+                == 2,
+            "{source}{types:?}"
+        );
+        if let Some(failure) = check(&source, Expected::Conversions(1)) {
+            panic!("{failure}");
+        }
+        let errors = infer_program(&exprs).errors;
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("to_tensor")
+                    && error.message.contains("`p`")
+                    && error.message.contains("cast(1.1, p)")),
+            "{source}{errors:?}"
+        );
+    }
+    // Negative parity: suffixed elements do not adopt, and a scalar binder
+    // cast adopts as before.
+    for source in [
+        "def g[p: Float](w: p) -> tensor[2, p] = cast(to_tensor([1.1f64, 2.2f64]), p)\nr = g(0.0f64)\n",
+        "def g[p: Float](w: p) -> p = cast(1.1, p)\nr = g(0.0f64)\n",
+        "def g[p: Float](w: p) -> tensor[2, p] = to_tensor([cast(1.1, p), cast(2.2, p)])\nr = g(0.0f64)\n",
+    ] {
+        let errors = infer_program(&deep(source)).errors;
+        assert!(errors.is_empty(), "{source}{errors:?}");
     }
 }
