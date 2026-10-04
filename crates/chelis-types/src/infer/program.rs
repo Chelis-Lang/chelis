@@ -1,4 +1,4 @@
-//! Public check entry points and inference schedules.
+//! Public check entry points and the inference drivers that run the schedule.
 //!
 //! This module contains code moved from the former inference monolith.
 //! The extraction preserves control flow and diagnostic order.
