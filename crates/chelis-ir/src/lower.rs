@@ -1542,6 +1542,11 @@ pub struct LocalAscriptionNamedSite {
     /// Whether `binder` is output-inferred ([`DimBinderRoles::return_only`]),
     /// so this site may bind it; otherwise the site is only ever a claim.
     pub output_inferred: bool,
+    /// Whether `binder` is named by a `List` parameter's elements
+    /// ([`DimBinderRoles::list_element`]), so the site is a claim against the
+    /// extent the activation recorded from them, or a refusal when it
+    /// recorded none.
+    pub list_element: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1568,8 +1573,25 @@ pub struct SubexprLoweringContext {
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     tensor_specialization: TensorCallsiteSpecialization,
-    /// See [`LowerCtx::activation_claims_parameter_binders`].
-    activation_claims_parameter_binders: bool,
+    /// See [`LowerCtx::activation_record`].
+    activation_record: ActivationRecord,
+}
+
+/// Which dimension binders the host lane executing a graph's ascription
+/// regions records when an activation starts, and so claims a site naming
+/// one against ([`LowerCtx::activation_record`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ActivationRecord {
+    /// None: a site naming a binder no region input witnesses is refused.
+    #[default]
+    Nothing,
+    /// The binders a `List` parameter's element tensors name
+    /// ([`DimBinderRoles::list_element`]). The C host lane records them in
+    /// its entry contract's named states.
+    ListElements,
+    /// Every parameter-carried binder ([`DimBinderRoles::parameter_carried`]).
+    /// `chelis eval` records them all in its activation.
+    Parameters,
 }
 
 impl SubexprLoweringContext {
@@ -1577,7 +1599,18 @@ impl SubexprLoweringContext {
     /// parameter-carried binder against its own activation record.
     pub fn claiming_parameter_binders_at_activation(&self) -> Self {
         Self {
-            activation_claims_parameter_binders: true,
+            activation_record: ActivationRecord::Parameters,
+            ..self.clone()
+        }
+    }
+
+    /// This context for a host lane that records the binders a `List`
+    /// parameter's elements name when an activation starts, and claims a
+    /// site naming one against that record. A lane that already records
+    /// every parameter-carried binder keeps doing so.
+    pub fn claiming_list_element_binders_at_activation(&self) -> Self {
+        Self {
+            activation_record: self.activation_record.max(ActivationRecord::ListElements),
             ..self.clone()
         }
     }
@@ -1894,15 +1927,17 @@ impl SubexprLoweringContext {
                             claim,
                         ),
                         output_inferred: false,
+                        list_element: false,
                     })
-                    .map(|site| LocalAscriptionNamedSite {
-                        output_inferred: DimBinderRoles::of_ascription(
-                            &self.program_signatures,
-                            ascription,
-                        )
-                        .return_only
-                        .contains(&extent_binder_label(&site.binder)),
-                        ..site
+                    .map(|site| {
+                        let roles =
+                            DimBinderRoles::of_ascription(&self.program_signatures, ascription);
+                        let binder = extent_binder_label(&site.binder);
+                        LocalAscriptionNamedSite {
+                            output_inferred: roles.return_only.contains(&binder),
+                            list_element: roles.list_element.contains(&binder),
+                            ..site
+                        }
                     })
             })
             .collect()
@@ -1991,7 +2026,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
         tensor_specialization: TensorCallsiteSpecialization::default(),
-        activation_claims_parameter_binders: false,
+        activation_record: ActivationRecord::Nothing,
     }
 }
 
@@ -2212,7 +2247,7 @@ pub(crate) fn try_lower_staged_host_region(
         // The staged region is this graph's only declaration.
         ctx.decl = Some(ctx.dag.declare(""));
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
-        ctx.activation_claims_parameter_binders = context.activation_claims_parameter_binders;
+        ctx.activation_record = context.activation_record;
         ctx.prec_substitutions = context
             .tensor_specialization
             .precision_substitutions
@@ -2346,7 +2381,7 @@ fn lower_subexpr_program_inner_impl(
     // The lowered expression is this graph's only declaration.
     ctx.decl = Some(ctx.dag.declare(""));
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
-    ctx.activation_claims_parameter_binders = context.activation_claims_parameter_binders;
+    ctx.activation_record = context.activation_record;
     ctx.prec_substitutions = context
         .tensor_specialization
         .precision_substitutions
@@ -4733,6 +4768,10 @@ pub struct DimBinderRoles {
     /// Named by any parameter type at any depth, `tensor_parameter`
     /// included: a site naming one is a claim against that parameter.
     pub parameter_carried: BTreeSet<String>,
+    /// Named by the axes of a `List` parameter's element tensors, through
+    /// nested Lists and references: recorded from the elements when the
+    /// activation starts, and absent when the List holds no tensor.
+    pub list_element: BTreeSet<String>,
 }
 
 impl DimBinderRoles {
@@ -4768,11 +4807,31 @@ impl DimBinderRoles {
         let Some((result, params)) = kids.split_last() else {
             return Self::default();
         };
+        fn list_element_axes(expr: &Expr, in_list: bool, out: &mut BTreeSet<String>) {
+            match stamped_parts(expr) {
+                Some((DeepTag::TRef, _, kids)) => {
+                    if let Some(inner) = kids.first() {
+                        list_element_axes(inner, in_list, out);
+                    }
+                }
+                Some((DeepTag::TAdt, _, kids))
+                    if kids.first().and_then(symbol_name) == Some("List") =>
+                {
+                    if let Some(element) = kids.get(1) {
+                        list_element_axes(element, true, out);
+                    }
+                }
+                Some((DeepTag::TTensor, _, _)) if in_list => collect(expr, out),
+                _ => {}
+            }
+        }
         let mut carried = BTreeSet::new();
         let mut tensor_parameter = BTreeSet::new();
+        let mut list_element = BTreeSet::new();
         for param in params {
             collect(param, &mut carried);
             tensor_axes(param, &mut tensor_parameter);
+            list_element_axes(param, false, &mut list_element);
         }
         let mut return_only = BTreeSet::new();
         collect(result, &mut return_only);
@@ -4781,6 +4840,7 @@ impl DimBinderRoles {
             return_only,
             tensor_parameter,
             parameter_carried: carried,
+            list_element,
         }
     }
 
@@ -7856,14 +7916,14 @@ struct LowerCtx<'program> {
     /// Checker-owned authored local tensor ascriptions. This is intentionally
     /// separate from ordinary inferred expression `type` metadata.
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
-    /// Whether the host lane executing this graph's ascription regions holds
-    /// a record of every parameter-carried binder
-    /// ([`DimBinderRoles::parameter_carried`]) and claims a site naming one
-    /// against it. `chelis eval` does: an activation records the binders of
-    /// its tensor parameters, List elements included, when it starts. The C
-    /// host lane reads such a binder only through a region input whose type
-    /// names it, so there a site with no witness keeps the refusal.
-    activation_claims_parameter_binders: bool,
+    /// Which binders the host lane executing this graph's ascription regions
+    /// records when an activation starts, and so claims a site naming one
+    /// against. `chelis eval` records every parameter-carried binder, List
+    /// elements included. The C host lane records the binders a `List`
+    /// parameter's elements name in its entry contract's named states, and
+    /// reads any other binder only through a region input whose type names
+    /// it, so there a site with no witness keeps the refusal.
+    activation_record: ActivationRecord,
     /// Activation-local lowering tokens allocated before its body executes.
     /// `None` marks a claim on a binder no witness declares yet; it is
     /// resolved where the ascription's initializer lowers, as a claim if an
@@ -8095,7 +8155,7 @@ impl<'program> LowerCtx<'program> {
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_tensor_ascriptions: Arc::new(Vec::new()),
-            activation_claims_parameter_binders: false,
+            activation_record: ActivationRecord::Nothing,
             local_ascription_tokens: Vec::new(),
             branch_path_condition: None,
             reshape_targets: BTreeMap::new(),
@@ -8691,7 +8751,7 @@ impl<'program> LowerCtx<'program> {
         shadowed: &[String],
     ) -> UnordMap<String, NodeId> {
         subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
-        subctx.activation_claims_parameter_binders = self.activation_claims_parameter_binders;
+        subctx.activation_record = self.activation_record;
         // A free `Load` the transformed body keeps is spliced into this graph
         // unchanged, so it must not take one of this graph's input names.
         subctx
@@ -9528,7 +9588,7 @@ impl<'program> LowerCtx<'program> {
         );
         scratch.decl = Some(scratch.dag.declare(name));
         scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
-        scratch.activation_claims_parameter_binders = self.activation_claims_parameter_binders;
+        scratch.activation_record = self.activation_record;
         scratch.program_value_verdicts = self.program_value_verdicts.clone();
         // `catch_lowering` clears the panic-output suppression on exit; an
         // enclosing lowering that set it keeps it.
@@ -11295,8 +11355,11 @@ impl<'program> LowerCtx<'program> {
         let binder = extent_binder_label(&label);
         roles.return_only.contains(&binder)
             || roles.tensor_parameter.contains(&binder)
-            || (self.activation_claims_parameter_binders
-                && roles.parameter_carried.contains(&binder))
+            || match self.activation_record {
+                ActivationRecord::Parameters => roles.parameter_carried.contains(&binder),
+                ActivationRecord::ListElements => roles.list_element.contains(&binder),
+                ActivationRecord::Nothing => false,
+            }
     }
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
@@ -24100,7 +24163,7 @@ mod tests {
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
             tensor_specialization: TensorCallsiteSpecialization::default(),
-            activation_claims_parameter_binders: false,
+            activation_record: ActivationRecord::Nothing,
         };
         let (dag, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,
@@ -24465,7 +24528,7 @@ mod tests {
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
             tensor_specialization: TensorCallsiteSpecialization::default(),
-            activation_claims_parameter_binders: false,
+            activation_record: ActivationRecord::Nothing,
         };
 
         let regions =

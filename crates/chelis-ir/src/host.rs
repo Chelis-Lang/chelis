@@ -17678,11 +17678,15 @@ fn derive_program_subexpr_lowering_context(
             .map(deep_expr_nodes)
             .sum::<usize>();
     });
+    // A host lane records the binders a `List` parameter's elements name
+    // when an activation starts: the C host lane in its entry contract's
+    // named states, `chelis eval` in its activation (chelis#3039).
     crate::lower::prepare_checked_subexpr_lowering_context(
         program,
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     )
+    .claiming_list_element_binders_at_activation()
 }
 
 fn definition_declares_list_entry(

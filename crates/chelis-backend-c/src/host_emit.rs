@@ -3398,7 +3398,14 @@ fn emit_function(
     // binders a site names is known once the body is emitted, so the frames
     // are placed here afterwards.
     let claims_at = emitter.lines.len();
-    emitter.first_site_frames = Some(FirstSiteFrames::of(function));
+    emitter.first_site_frames = Some(FirstSiteFrames::of(
+        function,
+        if entry_work.extent_at_body {
+            entry_work.body.named_list_binders.clone()
+        } else {
+            Vec::new()
+        },
+    ));
     // Entry guards and the frame still read parameters the body does not
     // use. Their verified entry drops run only after those reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
@@ -4083,16 +4090,22 @@ struct FirstSiteFrames {
     /// The declared result's dimensions when the result is a tensor.
     result_dims: Option<Vec<DimInfo>>,
     frames: Vec<FirstSiteFrame>,
+    /// The binders a `List` parameter's elements name, in the order of the
+    /// body's `__chelis_entry_named_states`, which recorded each one from
+    /// the elements when the invocation started; empty when the body holds
+    /// no such states.
+    list_states: Vec<String>,
 }
 
 impl FirstSiteFrames {
-    fn of(function: &HostFunction) -> Self {
+    fn of(function: &HostFunction, list_states: Vec<String>) -> Self {
         Self {
             result_dims: match &function.ret_ty {
                 HostAbiType::Tensor(ty) => Some(ty.dims.clone()),
                 _ => None,
             },
             frames: Vec::new(),
+            list_states,
         }
     }
 
@@ -6350,6 +6363,7 @@ impl<'a> HostEmitter<'a> {
         sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
     ) -> Result<(), Unsupported> {
         let origin = result_origin_name(target);
+        self.emit_list_element_sites(target, ty, sites)?;
         // Only an output-inferred binder's site binds or claims a frame, and
         // each such binder gets its frame at its first site, whatever the
         // declared result's shape.
@@ -6405,6 +6419,81 @@ impl<'a> HostEmitter<'a> {
                 "{indent}        chelis_numeric_trap({origin}->trap);"
             ));
             self.lines.push(format!("{indent}    }}"));
+            self.lines.push(format!("{indent}}}"));
+        }
+        Ok(())
+    }
+
+    /// Claim each site naming a binder a `List` parameter's elements name
+    /// against the extent the invocation recorded from those elements
+    /// (spec/04-type-system.md section 4.7), as `chelis eval` claims it
+    /// against its activation. A List that held no tensor recorded none, so
+    /// the site cannot resolve its extent and the program stops with the
+    /// evaluator's refusal (chelis#3039).
+    fn emit_list_element_sites(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
+    ) -> Result<(), Unsupported> {
+        let origin = result_origin_name(target);
+        for site in sites
+            .iter()
+            .filter(|site| site.list_element && !site.output_inferred)
+        {
+            if !matches!(ty, HostType::Tensor(_)) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "local ascription `{}` names List element binder `{}` on a non-tensor value",
+                        site.binding, site.binder
+                    ),
+                    "verified C host List element site emission",
+                ));
+            }
+            let binder = chelis_ir::lower::extent_binder_label(&site.binder);
+            let state = self
+                .first_site_frames
+                .as_ref()
+                .and_then(|frames| {
+                    frames
+                        .list_states
+                        .iter()
+                        .position(|name| chelis_ir::lower::extent_binder_label(name) == binder)
+                })
+                .ok_or_else(|| {
+                    invalid_abi_shape(
+                        format!(
+                            "local ascription `{}` names List element binder `{}`, which the \
+                             invocation records no extent for",
+                            site.binding, site.binder
+                        ),
+                        "verified C host List element site emission",
+                    )
+                })?;
+            let indent = self.indent.clone();
+            let axis = site.axis;
+            let recorded = format!("__chelis_entry_named_states[{state}]");
+            let extent = format!("chelis_tensor_shape({target}, {axis})");
+            self.lines.push(format!("{indent}if (!{recorded}.seen) {{"));
+            self.lines.push(format!(
+                "{indent}    fprintf(stderr, \"local tensor ascription `%s` cannot resolve authored extent `%s` in this activation\\n\", {}, {});",
+                c_string_literal(&site.binding),
+                c_string_literal(&binder)
+            ));
+            self.lines
+                .push(format!("{indent}    chelis_flush_and_abort();"));
+            self.lines.push(format!(
+                "{indent}}} else if ({recorded}.value != {extent}) {{"
+            ));
+            self.lines.push(format!(
+                "{indent}    if ({origin} == NULL || {origin}->child_count != -1 || {origin}->op == NULL || {origin}->trap == NULL) {{ fprintf(stderr, \"host runtime: an extent claim reached a tensor without producer provenance\\n\"); abort(); }}"
+            ));
+            self.lines.push(format!(
+                "{indent}    fprintf(stderr, \"extent `%s`: claimed = %lld, %s axis %lld = %lld\\n\", {}, (long long){recorded}.value, {origin}->op, (long long){axis}, (long long){extent});",
+                c_string_literal(&binder)
+            ));
+            self.lines
+                .push(format!("{indent}    chelis_numeric_trap({origin}->trap);"));
             self.lines.push(format!("{indent}}}"));
         }
         Ok(())

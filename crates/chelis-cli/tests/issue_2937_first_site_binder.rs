@@ -857,43 +857,75 @@ fn an_agreeing_list_parameter_binder_site_executes() {
     );
 }
 
-/// With no local whose type names `n` in scope, compiled C has no witness
-/// for a `List` parameter's binder inside the region and keeps the refusal,
-/// while `chelis eval` claims the site against its activation record and
-/// traps. Neither lane binds `n` at the site. When C claims it, this row
-/// must become an identical-trap row.
+/// A `List` parameter's binder with no local whose type names `n` in scope.
+/// Both lanes claim the site against the extent the invocation recorded from
+/// the list's elements (chelis#3039): `chelis eval` in its activation, the C
+/// host lane in its entry contract's named states. Neither lane binds `n` at
+/// the site.
+fn list_binder_no_witness_source(elements: &str, k: &str) -> String {
+    format!(
+        "def f[n](xs: List[tensor[n, f32]], k: i64) -> i64 = {{\n\
+         \x20 b: tensor[n, f32] = insert(sum(to_tensor([1.0f32]), 0i32), 0i32, k)\n\
+         \x20 shape(b, 0i32)\n\
+         }}\n\
+         out = f([{elements}], {k})\n"
+    )
+}
+
+// REGRESSION TEST. On `4bb166024` compiled C refused every program below at
+// build with "cannot resolve authored extent `n`", while `chelis eval` ran
+// or trapped as each row expects.
 #[test]
-fn a_list_parameter_binder_site_without_a_witness_is_claimed_only_by_eval() {
-    let stem = "list_binder_no_witness";
+fn a_list_parameter_binder_site_without_a_witness_is_claimed_by_both_lanes() {
+    let two = "to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])";
+    assert_lanes_agree(
+        "list_binder_no_witness_agrees",
+        &list_binder_no_witness_source(two, "tensor_to_scalar(sum(to_tensor([1i64, 1i64]), 0i32))"),
+        "out = 2",
+    );
+    assert_lanes_trap_identically(
+        "list_binder_no_witness",
+        &list_binder_no_witness_source("to_tensor([1.0f32, 2.0f32])", RUNTIME_THREE),
+        &["extent `n`: claimed = 2, insert axis 0 = 3", INSERT_TRAP],
+    );
+    assert_lanes_trap_identically(
+        "list_binder_no_witness_two_elements",
+        &list_binder_no_witness_source(two, RUNTIME_THREE),
+        &["extent `n`: claimed = 2, insert axis 0 = 3", INSERT_TRAP],
+    );
+}
+
+/// The negative twin: a List that holds no tensor records no extent for `n`,
+/// so neither lane can resolve the site. Both refuse with the evaluator's
+/// message and neither prints a value or binds `n` at the site.
+#[test]
+fn an_empty_list_parameter_leaves_its_binder_unresolved_on_both_lanes() {
+    let stem = "list_binder_empty";
     let dir = tempdir().expect("tempdir");
     let path = write_fixture(
         &dir,
         stem,
-        &format!(
-            "def f[n](xs: List[tensor[n, f32]], k: i64) -> i64 = {{\n\
-             \x20 b: tensor[n, f32] = insert(sum(to_tensor([1.0f32]), 0i32), 0i32, k)\n\
-             \x20 shape(b, 0i32)\n\
-             }}\n\
-             out = f([to_tensor([1.0f32, 2.0f32])], {RUNTIME_THREE})\n"
-        ),
+        &list_binder_no_witness_source("", "tensor_to_scalar(sum(to_tensor([1i64, 1i64]), 0i32))"),
     );
     assert!(check(&path).status.success(), "{stem}: check accepts");
-    let evaluated = eval(&path);
-    let eval_out = combined(&evaluated);
+    let refusal =
+        "local tensor ascription `b` cannot resolve authored extent `n` in this activation";
+    for (lane, output) in [
+        ("eval", eval(&path)),
+        ("c", build_and_run(&dir, stem, &path)),
+    ] {
+        let text = combined(&output);
+        assert!(
+            !output.status.success()
+                && text.contains(refusal)
+                && !text.contains("out = ")
+                && !text.contains("numeric trap"),
+            "{stem}: {lane} must refuse the unresolved binder: {text}"
+        );
+    }
     assert!(
-        !evaluated.status.success()
-            && eval_out.contains("extent `n`: claimed = 2, insert axis 0 = 3")
-            && eval_out.contains(INSERT_TRAP)
-            && !eval_out.contains("out = "),
-        "{stem}: eval must claim `n` against the list: {eval_out}"
-    );
-    let compiled = build_and_run(&dir, stem, &path);
-    let c_out = combined(&compiled);
-    assert!(
-        !compiled.status.success()
-            && c_out.contains("cannot resolve authored extent `n`")
-            && !c_out.contains("numeric trap"),
-        "{stem}: C must refuse rather than bind `n`: {c_out}"
+        dir.path().join(format!("{stem}-out")).join(stem).exists(),
+        "{stem}: C builds the program and refuses when it runs, as eval does"
     );
 }
 
