@@ -576,31 +576,6 @@ pub fn enrich_type_mismatch_suggestions(message: &str, suggestions: &mut Vec<Str
     if let Some(hint) = opaque_accessor_hint(message) {
         suggestions.push(hint);
     }
-    // Detect a List where a tensor is expected
-    if let Some(hint) = list_for_tensor_hint(message) {
-        suggestions.push(hint);
-    }
-}
-
-/// If the mismatch is a tensor against a `List`, name a conversion that keeps
-/// each element's value: a bracket literal is a `List` unless its own
-/// declaration states a tensor type (spec/02-surf-syntax.md §P10b).
-fn list_for_tensor_hint(message: &str) -> Option<String> {
-    let (_, type_part) = message.split_once(": ")?;
-    let (left, right) = type_part.split_once(" vs ")?;
-    let (left, right) = (left.trim(), right.trim());
-    let tensor = match (left.starts_with("List"), right.starts_with("List")) {
-        (false, true) => left,
-        (true, false) => right,
-        _ => return None,
-    };
-    let element = tensor
-        .strip_prefix("tensor[")?
-        .strip_suffix(']')?
-        .rsplit(", ")
-        .next()
-        .map(str::trim);
-    Some(list_to_tensor_hint(element))
 }
 
 /// The value-preserving ways to write a tensor whose elements have dtype

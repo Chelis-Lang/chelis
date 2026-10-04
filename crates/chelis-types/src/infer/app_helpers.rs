@@ -104,6 +104,11 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
+            if let Some(hint) =
+                bracket_literal_for_tensor_hint(site, func_ty, &unify_arg_tys, subst)
+            {
+                error.suggestions.push(hint);
+            }
             let (callee, returned) = callee
                 .map(|name| (name, 0))
                 .or_else(|| returned_call_source(site))
@@ -135,6 +140,42 @@ pub(super) fn unify_checked_call_contract(
             Err(rejected)
         }
     }
+}
+
+/// A bracket literal passed where the callee's parameter is a tensor gets the
+/// value-preserving spelling (chelis#3114). The checked parameter and argument
+/// types decide, with the argument's own syntax; the unifier's message, which
+/// does not record which side was expected, never does.
+fn bracket_literal_for_tensor_hint(
+    site: &deep::Expr,
+    func_ty: &Type,
+    arguments: &[Type],
+    subst: &Subst,
+) -> Option<String> {
+    let Type::Fn(params, _) = subst.apply(func_ty) else {
+        return None;
+    };
+    let (DeepTag::App, _, children) = stamped_parts(site)? else {
+        return None;
+    };
+    params
+        .iter()
+        .zip(arguments)
+        .zip(children.get(1..).unwrap_or_default())
+        .find_map(|((parameter, argument), source)| {
+            let Type::Tensor(_, precision) = subst.apply(parameter) else {
+                return None;
+            };
+            let Type::Adt(name, _) = subst.apply(argument) else {
+                return None;
+            };
+            (name == "List" && is_bracket_literal(source)).then(|| {
+                crate::errors::list_to_tensor_hint(match precision {
+                    TensorPrec::Concrete(element) => Some(element.name()),
+                    TensorPrec::Var(_) => None,
+                })
+            })
+        })
 }
 
 /// A unifier error has no source-level argument path. At an application we

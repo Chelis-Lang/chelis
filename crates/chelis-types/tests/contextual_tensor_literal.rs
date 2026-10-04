@@ -461,3 +461,52 @@ fn an_inline_result_type_decides_over_a_standalone_sig() {
         );
     }
 }
+
+fn suggestions(result: &chelis_types::infer::InferResult) -> String {
+    result
+        .errors
+        .iter()
+        .flat_map(|error| error.suggestions.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The value-preserving List hint is decided from the checked expected and
+/// actual types, a tensor expected and a bracket literal's List given, at a
+/// cast or a callee's parameter; never from a mismatch message, which does
+/// not record which side was expected.
+#[test]
+fn only_a_bracket_literal_where_a_tensor_is_expected_gets_the_list_hint() {
+    for src in [
+        "xs = cast([1.1, 2.2], f64)",
+        "def g(x: tensor[2, f64]) -> tensor[2, f64] = x\nys = g([1.1, 2.2])",
+    ] {
+        let (_, result) = pipeline(src);
+        assert!(
+            suggestions(&result).contains("to_tensor([1.1f64, 2.2f64])"),
+            "{src}: {}",
+            errors_summary(&result)
+        );
+    }
+    for src in [
+        // A tensor where a List is expected.
+        "def g(l: List[f64]) -> i32 = 1\nr = g(to_tensor([1.5f64, 2.5f64]))",
+        "def g(l: List[f64]) -> i32 = 1\nt = to_tensor([1.5f64, 2.5f64])\nr = g(t)",
+        // A tensor against a tensor.
+        "def g(x: tensor[2, f64]) -> i32 = 1\nr = g(to_tensor([1.5f32, 2.5f32]))",
+        // A List against a List, whose elements mismatch.
+        "def g(l: List[tensor[2, f64]]) -> i32 = 1\nr = g([[1.1, 2.2]])",
+        // A List value that is not a bracket literal.
+        "def g(x: tensor[2, f64]) -> i32 = 1\ndef h(xs: List[f32]) -> i32 = g(xs)",
+        // A join, where neither side is expected.
+        "def h(c: bool) -> i32 = {\n  v = if c then to_tensor([1.0, 2.0]) else [1.0, 2.0]\n  1\n}",
+    ] {
+        let (_, result) = pipeline(src);
+        assert!(!result.errors.is_empty(), "{src}: expected a type error");
+        assert!(
+            !suggestions(&result).contains("a bracket literal is a List"),
+            "{src}: the List hint must not fire: {}",
+            errors_summary(&result)
+        );
+    }
+}

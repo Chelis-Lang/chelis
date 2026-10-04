@@ -1306,22 +1306,13 @@ pub(crate) fn cast_result_from_settled_source(
             Ok(Type::Prim(new_prec))
         }
         Type::Error(w) => Ok(propagate(&w)),
-        other => {
-            // A cast converts values and never makes a List a tensor.
-            let suggestions = match &other {
-                Type::Adt(name, _) if name == "List" => {
-                    vec![crate::errors::list_to_tensor_hint(Some(new_prec.name()))]
-                }
-                _ => vec![],
-            };
-            Err(Box::new(CheckError::with_types(
-                CheckErrorKind::CastNonTensor,
-                format!("cast argument 1: expected tensor or numeric/bool scalar, got {other}"),
-                "tensor or numeric/bool scalar".to_string(),
-                other.to_string(),
-                suggestions,
-            )))
-        }
+        other => Err(Box::new(CheckError::with_types(
+            CheckErrorKind::CastNonTensor,
+            format!("cast argument 1: expected tensor or numeric/bool scalar, got {other}"),
+            "tensor or numeric/bool scalar".to_string(),
+            other.to_string(),
+            vec![],
+        ))),
     }
 }
 
@@ -1405,10 +1396,25 @@ pub(super) fn cast_result_from_source(
         // Every settled source, accepted or rejected, is decided by the one
         // function discharge also calls. There is no second copy of this
         // decision to disagree with.
-        settled => match cast_result_from_settled_source(settled, new_prec, mode, subst) {
-            Ok(result) => result,
-            Err(error) => report(errors, at_check_site(site, *error)),
-        },
+        settled => {
+            // A cast converts values and never makes a bracket literal a
+            // tensor (chelis#3114), so a List operand spelled as one gets the
+            // value-preserving spelling.
+            let bracket_literal = matches!(&settled, Type::Adt(name, _) if name == "List")
+                && matches!(stamped_parts(site), Some((DeepTag::Cast, _, [operand, ..]))
+                    if is_bracket_literal(operand));
+            match cast_result_from_settled_source(settled, new_prec, mode, subst) {
+                Ok(result) => result,
+                Err(mut error) => {
+                    if bracket_literal {
+                        error
+                            .suggestions
+                            .push(crate::errors::list_to_tensor_hint(Some(new_prec.name())));
+                    }
+                    report(errors, at_check_site(site, *error))
+                }
+            }
+        }
     }
 }
 
