@@ -1065,6 +1065,87 @@ fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
     );
 }
 
+/// chelis#2335: a read-only list builtin reads its list argument in place.
+///
+/// `expect_list_arg` copied the whole list for every list builtin, so a
+/// `fold` that reads one element of an `n`-element list with `index` on each
+/// of `n` steps copied `n * (n + 1)` elements: `n` per `index` and `n` for
+/// the fold's own list. Counted receipt in the shape of chelis#2204's:
+/// `element_copies` counts container elements copied out of a shared
+/// sequence, and the bound is the fold's own `n`, at two list lengths.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the
+/// counter and this test in place and `expect_list_arg` still copying, the
+/// receipt read 10100 copies at 100 elements and 160400 at 400. After the
+/// fix it reads 100 and 400.
+///
+/// The companion keeps the receipt honest: `append` to a list another binding
+/// still holds must copy it, so a counter that stopped measuring fails there
+/// rather than passing vacuously here.
+#[test]
+fn issue_2335_read_only_list_builtins_do_not_copy_the_list() {
+    fn evaluate(source: &str) -> (u64, String) {
+        let checked = checked_surf(source);
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let inputs = HostEvaluationInputs {
+            roots: &empty_tensors,
+            bindings: None,
+        };
+        super::shared_values::reset_element_copies();
+        let outcome =
+            evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+                .expect("#2335 fixture evaluates");
+        let copies = super::shared_values::element_copies();
+        let value = outcome
+            .host_bindings
+            .get("result")
+            .map(render_value)
+            .expect("#2335 fixture binds `result`");
+        (copies, value)
+    }
+    fn index_fixture(length: usize) -> String {
+        format!(
+            "result = {{\n  xs = range(0i64, {length}i64)\n  \
+             fold(fn (acc: i64, i: i64) -> add(acc, index(xs, i)), 0i64, range(0i64, {length}i64))\n}}\n"
+        )
+    }
+    fn append_fixture(length: usize) -> String {
+        format!(
+            "result = {{\n  xs = range(0i64, {length}i64)\n  ys = append(xs, 7i64)\n  \
+             add(len(xs), len(ys))\n}}\n"
+        )
+    }
+
+    let (small, small_result) = evaluate(&index_fixture(100));
+    let (large, large_result) = evaluate(&index_fixture(400));
+    eprintln!("#2335 receipt: index over 100 elements copied {small}, over 400 copied {large}");
+    assert_eq!(
+        small_result, "4950",
+        "#2335: the 100-element sum is unchanged"
+    );
+    assert_eq!(
+        large_result, "79800",
+        "#2335: the 400-element sum is unchanged"
+    );
+    // The fold hands each element of its own list to the callback, one copy
+    // per element; every `index` beyond that must copy nothing.
+    assert!(
+        small <= 100 && large <= 400,
+        "#2335: `index` must not copy the list it reads; 100 elements copied {small}, \
+         400 copied {large}"
+    );
+
+    let (shared_small, small_len) = evaluate(&append_fixture(100));
+    let (shared_large, large_len) = evaluate(&append_fixture(400));
+    assert_eq!(small_len, "201", "#2335: append companion computes");
+    assert_eq!(large_len, "801", "#2335: append companion computes");
+    assert!(
+        shared_small >= 100 && shared_large >= 400,
+        "#2335: appending to a list another binding holds must copy it, or this receipt \
+         would pass without measuring anything; copied {shared_small} and {shared_large}"
+    );
+}
+
 /// chelis#2204: a closure parameter shadows a captured binding of the same
 /// name at the interpreter level, not only inside `Frame`'s own unit tests.
 /// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the

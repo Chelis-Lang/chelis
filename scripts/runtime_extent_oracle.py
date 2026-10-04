@@ -727,14 +727,14 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         ),
-        # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
-        # retains the same sourceless-Const class and therefore keeps #1482's
-        # typed receipt live rather than falsely closing the broader issue.
+        # Chelis#1313 removed the synthesized zero from ReLU; #1482 gives
+        # sigmoid's, silu's and gelu's synthesized constants the activation's
+        # input as their shape source, so the composite executes.
         _row(
             "shrink.elementwise_const.build",
             "ice",
-            "typed_unsupported(#1482)",
-            "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+            EXECUTES,
+            "cli_slice_b.runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval",
         ),
         _row(
             "guard.local.numeric_carriers.eval_c",

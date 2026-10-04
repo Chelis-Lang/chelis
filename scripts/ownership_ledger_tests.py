@@ -8,6 +8,7 @@ and the macOS nightly job both run this script, so neither repeats the list.
 
 Usage::
 
+    python3 scripts/ownership_ledger_tests.py chelis-runtime
     python3 scripts/ownership_ledger_tests.py chelis-compiler-api
     python3 scripts/ownership_ledger_tests.py chelis-cli --print
 
@@ -33,7 +34,7 @@ LEDGER_FEATURE = "ownership-ledger"
 # rebuilds <target>/debug/chelis against the instrumented runtime, so it runs
 # after every command that trusts the binary built before it. A ledger target
 # in any other package fails until it is placed here and in the gate.
-LEDGER_PACKAGES = ("chelis-compiler-api", "chelis-cli")
+LEDGER_PACKAGES = ("chelis-runtime", "chelis-compiler-api", "chelis-cli")
 
 
 class LedgerTargetError(ValueError):

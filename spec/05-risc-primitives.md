@@ -31,8 +31,11 @@ lowering first records explicit borrow, move, clone, and terminal `Drop` obligat
 in the verified ownership representation consumed by every backend. Consuming
 operations such as `realize` and explicit `drop` keep owned parameters.
 
-The comparison family [05-OP-36] and `max_elem` / `min_elem` borrow both
-tensor operands. The unary activations `sigmoid`, `tanh`, `silu`, and `gelu`
+The comparison family [05-OP-36], `max_elem` / `min_elem`, the exact
+arithmetic family [05-OP-64] including `mod`, and the bitwise and shift family
+[05-OP-47] borrow both tensor operands, and the casts `cast` [05-OP-63],
+`cast_trunc` [05-OP-6], `cast_saturate` [05-OP-23], and `cast_wrap`
+[05-OP-24] borrow their tensor source. The unary activations `sigmoid`, `tanh`, `silu`, and `gelu`
 borrow their tensor operand, as do the read-only unary primitives composing
 them. Operator and function-call spellings have the same ownership disposition.
 A genuine consuming use still makes a later call in any of these families a
@@ -3606,7 +3609,8 @@ not a mode parameter to `cast`.
 > (`NaN`, `±inf`) traps `Domain` — truncation of a non-finite value has no integer
 > meaning. On any source/target pair that is not float→integer, `cast_trunc` is a type
 > error (use `cast` / [04-NUM-14]); it never widens, never rounds, and never applies to
-> `bool`. Semantics are identical on scalar and tensor surfaces and identical across the
+> `bool`. A tensor source is a read-only `&tensor[D,p]` parameter under section 1.3.1:
+> an owned argument auto-borrows and an explicitly borrowed one is admitted unchanged. Semantics are identical on scalar and tensor surfaces and identical across the
 > eval and compiled lanes at the declared widths of [04-NUM-8]. `cast_trunc` is
 > **non-differentiable**: its adjoint is zero almost everywhere (the map is piecewise
 > constant), so it carries the `no_grad` rule — a gradient goal through it is a clean
@@ -3620,8 +3624,10 @@ only by *defining* the fractional case as truncation where `cast` traps
 > **[05-OP-23]** `cast_saturate(source, target) -> result` admits an active
 > signed-integer or float source dtype and a signed-integer target dtype on a
 > scalar or tensor surface. It preserves the source surface and tensor
-> dimensions and returns the target dtype. It reads the source exactly at its
-> stored dtype. A finite float is truncated toward zero, then the resulting
+> dimensions and returns the target dtype. A tensor source is a read-only
+> `&tensor[D,p]` parameter under section 1.3.1: an owned argument
+> auto-borrows and an explicitly borrowed one is admitted unchanged. It reads
+> the source exactly at its stored dtype. A finite float is truncated toward zero, then the resulting
 > mathematical integer is clamped to the target's inclusive range; an integer
 > source is clamped directly. Negative infinity returns the target minimum,
 > positive infinity the target maximum, and NaN traps `Domain` as operation
@@ -3633,7 +3639,10 @@ only by *defining* the fractional case as truncation where `cast` traps
 > **[05-OP-24]** `cast_wrap(source, target) -> result` admits an active
 > signed-integer source and signed-integer target on a scalar or tensor
 > surface. It preserves the source surface and tensor dimensions and returns
-> the unique signed target-width representative congruent to the exact stored
+> the target dtype; a tensor source is a read-only `&tensor[D,p]` parameter
+> under section 1.3.1, so an owned argument auto-borrows and an explicitly
+> borrowed one is admitted unchanged. Each element is the unique signed
+> target-width representative congruent to the exact stored
 > source modulo `2^target_width`. It never traps for overflow, saturates, or
 > converts through a float dtype. Float, `bool`, `string`, reserved dtype spellings, and
 > non-integer targets are type errors. It has no accumulator and is
@@ -3684,10 +3693,13 @@ path even though bare `round` under `grad` remains a structural
 > **[05-OP-64]** Signature: `add(x,y)`, `mul(x,y)`, `div(x,y)`, `floor_div(x,y)`,
 > `trunc_div(x,y)`, and `mod(x,y)` take two same-dtype numeric scalars or
 > two same-shaped, same-dtype tensors and return that surface and dtype.
+> Both tensor operands are read-only `&tensor[D,p]` parameters under section
+> 1.3.1: an owned argument auto-borrows and an explicitly borrowed one is
+> admitted unchanged.
 >
 > Domain: `add` and `mul` admit all active signed integers and floats; `div`
-> admits floats only; `floor_div` admits signed integers and floats;
-> `trunc_div` and `mod` admit signed integers only. Bool, string, mixed
+> admits floats only; `floor_div` and `mod` admit signed integers and
+> floats; `trunc_div` admits signed integers only. Bool, string, mixed
 > dtypes, implicit broadcasting, and reserved dtypes are type errors.
 > Arithmetic and storage finalization use [04-NUM-8]'s declared widths.
 >
@@ -3697,20 +3709,30 @@ path even though bare `round` under `grad` remains a structural
 > toward negative infinity; truncating division rounds toward zero. Integer
 > `mod` has the dividend's sign and equals `x - trunc_div(x,y)*y`
 > mathematically, without introducing intermediate overflow. Float floor
-> division is the own-width IEEE quotient followed by floor.
+> division is the own-width IEEE quotient followed by floor. Float `mod` is
+> the truncated remainder of C `fmod`, which is IEEE 754's remainder with
+> the quotient rounded toward zero, not the round-to-nearest-even
+> `remainder` operation: for finite `x` and nonzero finite `y` it is the
+> exact value `x - n*y` with `n` the integer part of `x/y`, so it has the
+> dividend's sign (a zero result keeps the dividend's signed zero), its
+> magnitude is less than `|y|`, and it is exactly representable at the
+> operand dtype with no rounding. `mod(x, y)` is NaN when `x` is infinite,
+> when `y` is zero, or when either operand is NaN, and is `x` when `x` is
+> finite and `y` is infinite. `f16` and `bf16` operands are computed at
+> `f32` and finalized once at the operand dtype, which is exact.
 >
 > Failure: Integer zero divisors trap DivZero under [04-NUM-9].
 > Unrepresentable signed arithmetic traps Overflow, including signed minimum
 > divided by -1 for `floor_div` and `trunc_div`. Remainder of signed minimum
 > by -1 is zero; the intermediate quotient need not be representable. Float
-> exceptional results follow [04-NUM-2]; no integer computation passes
-> through a float. Static failures are diagnosed when concrete, and runtime
+> exceptional results follow [04-NUM-2], and float `mod` never traps; no
+> integer computation passes through a float. Static failures are diagnosed when concrete, and runtime
 > failures use [04-NUM-9].
 >
 > Adjoint: For floats, add sends `(g,g)`, multiply sends `(g*y,g*x)`, and
 > divide sends `(g/y,-g*(x/y)/y)`, evaluated at the declared width. Integer
-> operations and the piecewise-constant floor, truncation, and remainder
-> operations structurally reject differentiation.
+> operations, the piecewise-constant floor and truncation operations, and
+> `mod` at every dtype structurally reject differentiation.
 >
 > Accumulator: None. Each primitive finalizes its own result; an algebraic
 > rewrite may not introduce another trap or change a float operation order.
@@ -3776,7 +3798,9 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-47]** Signature: `bitand(x,y)`, `bitor(x,y)`, `bitxor(x,y)`, `shl(x,y)`, and
 > `shr(x,y)` take two same-dtype signed-integer scalars or same-shaped
-> tensors.
+> tensors. Both tensor operands are read-only `&tensor[D,p]` parameters
+> under section 1.3.1: an owned argument auto-borrows and an explicitly
+> borrowed one is admitted unchanged.
 >
 > Domain: Only the active signed-integer widths are admitted. Bool, float,
 > string, mixed precision, and shape broadcasting are type errors. Shifts
@@ -4450,7 +4474,9 @@ path even though bare `round` under `grad` remains a structural
 #### Checked cast identity
 
 > **[05-OP-63]** Signature: `cast(value,target_dtype)` returns the same scalar or tensor
-> shape with the explicitly named target dtype.
+> shape with the explicitly named target dtype. A tensor `value` is a
+> read-only `&tensor[D,p]` parameter under section 1.3.1: an owned argument
+> auto-borrows and an explicitly borrowed one is admitted unchanged.
 >
 > Domain: The source/target product is exactly [04-NUM-14]'s checked cast
 > domain over active dtypes, with the type/literal spelling and admission

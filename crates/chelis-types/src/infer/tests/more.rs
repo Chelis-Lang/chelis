@@ -2195,7 +2195,10 @@ def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cas
 fn a_tensor_cast_to_a_key_is_rejected() {
     assert!(Prim::Key.is_valid_tensor_precision());
     let source = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::F32));
-    for mode in [chelis_deep::CastMode::Checked, chelis_deep::CastMode::Trunc] {
+    for mode in [
+        chelis_deep::CastMode::Checked,
+        chelis_deep::CastMode::Named(chelis_deep::NamedCastMode::Trunc),
+    ] {
         let error = crate::infer::expr_record::cast_result_from_settled_source(
             source.clone(),
             Prim::Key,
@@ -2286,16 +2289,34 @@ fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
         !errors.is_empty(),
         "einsum output extents must follow the equation"
     );
-    for source in [
-        "def f(x: tensor[3, bool]) -> tensor[3, bool] = cumsum(x, 0)\n",
-        "def f(x: tensor[2, 2, bool]) -> tensor[bool] = trace(x, 0, 1)\n",
+    let errors = surf_check_errors(
         "def f(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[bool] = einsum(\"i,i->\", a, b)\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("default sum accumulator")),
+        "a bool einsum must be rejected for its dtype: {errors:?}"
+    );
+    // [05-OP-53] (chelis#3044): `cumsum` and `trace` carry the arithmetic
+    // operand family, as `sum` does, so a bool operand is refused at the
+    // operand before its result dtype is considered.
+    for (op, source) in [
+        (
+            "cumsum",
+            "def f(x: tensor[3, bool]) -> tensor[3, bool] = cumsum(x, 0)\n",
+        ),
+        (
+            "trace",
+            "def f(x: tensor[2, 2, bool]) -> tensor[bool] = trace(x, 0, 1)\n",
+        ),
     ] {
         let errors = surf_check_errors(source);
         assert!(
             errors
                 .iter()
-                .any(|error| error.message.contains("default sum accumulator")),
+                .any(|error| error.message.contains(&format!("`{op}`"))
+                    && error.message.contains("bool")),
             "{source} must be rejected for its dtype: {errors:?}"
         );
     }

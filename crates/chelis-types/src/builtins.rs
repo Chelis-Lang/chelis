@@ -2502,13 +2502,15 @@ pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
         | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
         | "reduce_window_mean" => Some(ActiveFloat),
         // [05-OP-64], [05-OP-47] and truncating division.
-        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        "trunc_div" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
         // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
         // and the arithmetic rows of spec/04 section 5.4.
-        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "mod" | "abs" | "floor" | "ceil" | "round"
         | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
         | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
-        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min" => Some(ActiveNumeric),
+        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min"
+        // [05-OP-53]'s arithmetic domain, chelis#3044.
+        | "cumsum" | "sort" | "trace" | "clamp" => Some(ActiveNumeric),
         _ => None,
     }
 }
@@ -2924,6 +2926,29 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    // [05-OP-47] and [05-OP-64] (chelis#3101): two read-only operands, each
+    // a scalar or a `&tensor[D, p]` (spec/05 section 1.3.1). The operands
+    // stay independent variables so the integer rule decides their
+    // agreement and names the cause of a refusal.
+    fn integer_binop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let lhs = vg.fresh_tvar();
+        let rhs = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            result_origin: None,
+            constraints: vec![],
+            tvars: vec![lhs, rhs, output],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(lhs)), borrowed(Type::Var(rhs))],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_triop(name: &str, env: &mut Env, vg: &mut VarGen) {
         let a = vg.fresh_tvar();
         let b = vg.fresh_tvar();
@@ -2953,7 +2978,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2993,7 +3018,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a, b, c]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -3117,7 +3142,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -3218,18 +3243,18 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    generic_binop("mod", &mut env, &mut vg);
+    integer_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
     cmplt_sig("lt", &mut env, &mut vg);
     cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
-    generic_binop("bitand", &mut env, &mut vg);
-    generic_binop("bitor", &mut env, &mut vg);
-    generic_binop("bitxor", &mut env, &mut vg);
-    generic_binop("shl", &mut env, &mut vg);
-    generic_binop("shr", &mut env, &mut vg);
+    integer_binop("bitand", &mut env, &mut vg);
+    integer_binop("bitor", &mut env, &mut vg);
+    integer_binop("bitxor", &mut env, &mut vg);
+    integer_binop("shl", &mut env, &mut vg);
+    integer_binop("shr", &mut env, &mut vg);
 
     logical_binop("and", &mut env, &mut vg);
     logical_binop("or", &mut env, &mut vg);

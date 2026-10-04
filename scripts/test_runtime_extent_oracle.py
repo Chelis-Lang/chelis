@@ -236,9 +236,10 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         by_id = {row.id: row for row in rows}
         # The rows PR B1 moves, and the two states it moves them to.
         self.assertEqual(by_id["ir.axis_source.cardinality"].exit_state, "executes_exactly")
+        # chelis#1482 later moved the composite's row to execution.
         self.assertEqual(
             by_id["shrink.elementwise_const.build"].exit_state,
-            "typed_unsupported(#1482)",
+            "executes_exactly",
         )
         # chelis#665's pair reaches exit in B2b-2, and the two lanes carry
         # DIFFERENT baselines, which is the point of the row rather than an

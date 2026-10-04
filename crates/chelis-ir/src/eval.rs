@@ -22,8 +22,8 @@ use std::collections::BTreeSet;
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
-    SHRINK_TO_END, TensorType, bind_symbolic_dims,
+    FusedStepOp, LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
+    RuntimeCheck, SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -431,19 +431,26 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
-/// Public entry point for the [05-OP-6] tensor rung, mirroring
-/// [`cast_tensor`] so the host runtime and the DAG evaluator share one
-/// kernel.
-pub fn cast_trunc_tensor(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
-    cast_trunc_value(input, dst)
+/// Public entry point for the named cast rungs of the chelis#759 ladder,
+/// mirroring [`cast_tensor`] so the host runtime and the DAG evaluator
+/// share one kernel per rung.
+pub fn named_cast_tensor(
+    mode: NamedCastMode,
+    input: &TensorValue,
+    dst: Prim,
+) -> Result<TensorValue, String> {
+    named_cast_value(mode, input, dst)
 }
 
-/// Tensor `cast_trunc` ([05-OP-6]): truncate every float element toward
-/// zero, then finalize at the integer target. The source is float and the
-/// target an integer width by the checker's contract, so the sealed
-/// kernel is reached with exactly the shape it accepts.
-fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
-    let storage = chelis_types::cast_trunc_tensor("cast_trunc", input.storage().to_raw(), dst)
+/// Tensor named cast: the rung's sealed kernel over every element, in
+/// order. The checker admits only the rung's source and target pairs, so
+/// the kernel is reached with exactly the shapes it accepts.
+fn named_cast_value(
+    mode: NamedCastMode,
+    input: &TensorValue,
+    dst: Prim,
+) -> Result<TensorValue, String> {
+    let storage = chelis_types::named_cast_tensor(mode, input.storage().to_raw(), dst)
         .map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
@@ -1088,7 +1095,8 @@ impl ElementwiseBinOp {
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
-            Self::TruncDiv | Self::Mod => None,
+            Self::Mod => Some(FloatBinOp::Rem),
+            Self::TruncDiv => None,
         }
     }
 }
@@ -4785,9 +4793,12 @@ where
                     TensorValue::from_storage(last.shape.clone(), storage)
                 }
             }
-            RiscOp::CastTrunc { new_precision } => {
+            RiscOp::NamedCast {
+                mode,
+                new_precision,
+            } => {
                 let input = &values[&node.inputs[0]];
-                cast_trunc_value(input, *new_precision)?
+                named_cast_value(*mode, input, *new_precision)?
             }
             RiscOp::Cast { new_precision } => {
                 // #380: a `cast` must apply the dtype conversion, not pass the

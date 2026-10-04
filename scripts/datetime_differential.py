@@ -40,9 +40,9 @@ Profiles:
   over seeded columns that include the range edges, under every `TimeUnit`,
   `Rounding` mode and `DayOverflow` policy; column bindings run in programs of
   their own, and each column failure is a named program of its own.
-- `canary`: four unchanged `ci` programs on both lanes (`CANARY_PROGRAMS`):
-  the first and last 400 days of the range, a domain failure and an
-  overflow failure. It runs on every pull request; `ci` runs nightly.
+- `canary`: five unchanged `ci` programs on both lanes (`CANARY_PROGRAMS`):
+  the first and last 400 days of the range, one column value per family of
+  `COLUMN_FAMILIES`, a domain failure and an overflow failure. It runs on every pull request; `ci` runs nightly.
 - `exhaustive`: the manual gate of `docs/manual_gates.md`. Every one of the
   7 304 484 days in compiled C (field round trip, weekday, day of year, ISO
   week and its inverse, text round trip), `date_period_until`'s defining
@@ -99,6 +99,20 @@ COLUMN_FUNCTIONS = (
     "instants_round_to", "instants_to_dates_at", "instants_seconds_since_f64",
     "instants_lt", "instants_lte", "instants_gt", "instants_gte",
 )
+# `COLUMN_FUNCTIONS` by family: the canary's column program calls at least
+# one callable of each.
+COLUMN_FAMILIES = {
+    "durations": ("durations", "try_durations", "durations_seconds", "durations_nanoseconds"),
+    "date fields": ("dates_year", "dates_month", "dates_day", "dates_weekday_iso_number", "dates_day_of_year"),
+    "date construction and text": ("dates_from_ymd", "try_dates_from_ymd", "try_parse_dates", "dates_to_strings"),
+    "date arithmetic": ("dates_add_days", "dates_add_months", "dates_days_until"),
+    "date order": ("dates_lt", "dates_lte", "dates_gt", "dates_gte"),
+    "instant counts": ("instants_from_unix_count", "instants_to_unix_count"),
+    "instant arithmetic": ("instants_add_duration", "instants_until"),
+    "instant rounding": ("instants_round_to",),
+    "instant conversion": ("instants_to_dates_at", "instants_seconds_since_f64"),
+    "instant order": ("instants_lt", "instants_lte", "instants_gt", "instants_gte"),
+}
 FUNCTIONS = (
     "is_leap_year", "days_in_year", "days_in_month", "weekday_iso_number",
     "weekday_from_iso_number", "try_weekday_from_iso_number", "weekday_name",
@@ -1582,6 +1596,26 @@ def representative_failures(failures: list[Failure], per_path: int) -> list[Fail
     return sorted(chosen, key=lambda f: f.name)
 
 
+def calls(expr: str, functions: Sequence[str]) -> bool:
+    return any(re.search(rf"\b{function}\(", expr) for function in functions)
+
+
+def column_family_values(columns: list[Value]) -> list[Value]:
+    """The first column value that calls each family of `COLUMN_FAMILIES` no
+    earlier choice calls, in corpus order."""
+    chosen: list[Value] = []
+    covered: set[str] = set()
+    for value in columns:
+        new = {family for family, functions in COLUMN_FAMILIES.items() if family not in covered and calls(value.expr, functions)}
+        if new:
+            chosen.append(value)
+            covered |= {family for family, functions in COLUMN_FAMILIES.items() if calls(value.expr, functions)}
+    missing = set(COLUMN_FAMILIES) - covered
+    if missing:
+        raise AssertionError(f"no column value calls the families {sorted(missing)}")
+    return chosen
+
+
 def make_programs(corpus: Corpus, chunk: int) -> list[Program]:
     programs = []
     for value in corpus.bulk:
@@ -1590,9 +1624,13 @@ def make_programs(corpus: Corpus, chunk: int) -> list[Program]:
         group = tuple(corpus.values[start:start + chunk])
         body = [f"{v.name} = [{v.expr}]" for v in group]
         programs.append(Program(f"values_{start:05d}", program_source(body), group))
-    # Column literals are long, so their bindings get smaller programs.
-    for start in range(0, len(corpus.columns), COLUMN_CHUNK):
-        group = tuple(corpus.columns[start:start + COLUMN_CHUNK])
+    # Column literals are long, so their bindings get smaller programs. One
+    # value per column family comes first, in a program the canary keeps.
+    families = column_family_values(corpus.columns) if corpus.columns else []
+    programs.append(Program("columns_families", program_source([f"{v.name} = [{v.expr}]" for v in families]), tuple(families)))
+    rest = [value for value in corpus.columns if value not in families]
+    for start in range(0, len(rest), COLUMN_CHUNK):
+        group = tuple(rest[start:start + COLUMN_CHUNK])
         programs.append(Program(f"columns_{start:05d}", program_source([f"{v.name} = [{v.expr}]" for v in group]), group))
     for failure in representative_failures(corpus.failures, FAILURES_PER_PATH):
         programs.append(Program(failure.name, program_source([f"{failure.name} = [{failure.expr}]"]), failure=failure))
@@ -1600,12 +1638,13 @@ def make_programs(corpus: Corpus, chunk: int) -> list[Program]:
 
 
 # The `ci` programs the canary keeps: the first and last 400 days of the
-# range, a domain failure, and an overflow failure. Each compiled C program
-# builds the standard library, so the canary keeps to one program per
-# harness job.
+# range, one value per `Std.Datetime.Columns` family, a domain failure, and
+# an overflow failure. Each compiled C program builds the standard library,
+# so the canary keeps to about one program per harness job.
 CANARY_PROGRAMS = (
     "b000_days_first_400",
     "b001_days_last_400",
+    "columns_families",
     "f0021_date",
     "f0064_months_trap",
 )

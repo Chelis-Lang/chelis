@@ -467,7 +467,8 @@ pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
 }
 
 pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    numeric_binop(args, Some(IntBinOp::Rem), None)
+    // [05-OP-64]: float `mod` is C `fmod` (chelis#626).
+    numeric_binop(args, Some(IntBinOp::Rem), Some(FloatBinOp::Rem))
 }
 
 pub(super) fn eval_floor_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
@@ -488,8 +489,27 @@ pub(super) fn bitwise_binop(
                 .map_err(|error| error.to_string())?;
             Ok(RuntimeValue::from_scalar_value(value))
         }
+        // chelis#2076, [05-OP-47]: two same-shaped tensors of one signed
+        // integer dtype, element by element with the scalar rule.
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            if lhs.value.shape != rhs.value.shape {
+                let render = |shape: &[usize]| {
+                    let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
+                    format!("[{}]", extents.join(", "))
+                };
+                return Err(format!(
+                    "tensor shapes must match for elementwise op, got {} vs {}",
+                    render(&lhs.value.shape),
+                    render(&rhs.value.shape)
+                ));
+            }
+            let storage =
+                chelis_types::bitwise_tensor(op, lhs.value.storage(), rhs.value.storage())
+                    .map_err(|error| error.to_string())?;
+            Ok(tensor_result(lhs, storage))
+        }
         other => Err(format!(
-            "bitwise op expects integer scalar args, got {other:?}"
+            "bitwise op expects two integer scalars or two integer tensors, got {other:?}"
         )),
     }
 }
@@ -728,22 +748,21 @@ pub(super) fn expect_string_arg(args: &[RuntimeValue], index: usize) -> Result<S
     }
 }
 
-pub(super) fn expect_list_arg(
-    args: &[RuntimeValue],
-    index: usize,
-) -> Result<Vec<RuntimeValue>, String> {
+/// The list argument at `index`, sharing its elements. A read leaves them
+/// in place and a write copies them only while another owner shares them, so
+/// a read-only builtin never pays for a copy of the list (chelis#2335).
+pub(super) fn expect_list_arg(args: &[RuntimeValue], index: usize) -> Result<Values, String> {
     match args.get(index) {
-        Some(RuntimeValue::List(items)) => Ok(items.to_vec()),
+        Some(RuntimeValue::List(items)) => Ok(items.clone()),
         other => Err(format!("expected list arg at index {index}, got {other:?}")),
     }
 }
 
-pub(super) fn expect_dict_arg(
-    args: &[RuntimeValue],
-    index: usize,
-) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
+/// The dict argument at `index`, sharing its entries as
+/// [`expect_list_arg`] shares a list's elements.
+pub(super) fn expect_dict_arg(args: &[RuntimeValue], index: usize) -> Result<Entries, String> {
     match args.get(index) {
-        Some(RuntimeValue::Dict(entries)) => Ok(entries.to_vec()),
+        Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
         other => Err(format!("expected dict arg at index {index}, got {other:?}")),
     }
 }
@@ -863,9 +882,10 @@ pub(super) fn cast_tensor_value(
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
-/// The [05-OP-6] tensor rung, routed through the same sealed kernel the
-/// DAG evaluator uses so the two eval surfaces cannot diverge.
-pub(super) fn cast_trunc_tensor_value(
+/// A named cast rung over a tensor, routed through the same sealed kernel
+/// the DAG evaluator uses so the two eval surfaces cannot diverge.
+pub(super) fn named_cast_tensor_value(
+    mode: chelis_deep::NamedCastMode,
     tensor: RuntimeTensorValue,
     target_prim: Prim,
 ) -> Result<RuntimeValue, String> {
@@ -873,7 +893,7 @@ pub(super) fn cast_trunc_tensor_value(
         value: ir_value,
         precision: _,
     } = tensor;
-    chelis_ir::eval::cast_trunc_tensor(&ir_value, target_prim)
+    chelis_ir::eval::named_cast_tensor(mode, &ir_value, target_prim)
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 

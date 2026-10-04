@@ -736,7 +736,8 @@ fn link_static_library_driver(out: &Path, library: &str, needs_blas: bool) -> bo
 
 fn nan_inventory_arity(name: &str) -> usize {
     match name {
-        "add" | "sub" | "mul" | "div" | "floor_div" | "min" | "max" | "min_elem" | "max_elem" => 2,
+        "add" | "sub" | "mul" | "div" | "floor_div" | "mod" | "min" | "max" | "min_elem"
+        | "max_elem" => 2,
         "neg" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "atan" | "tanh" | "relu"
         | "sigmoid" | "silu" | "gelu" | "floor" | "ceil" | "round" | "recip" | "abs" => 1,
         other => panic!("classify the arity of new float builtin `{other}` in this oracle"),
@@ -1236,7 +1237,8 @@ fn nan_atom_coverage(
         Id::ScatterElements => (RiscOp::ScatterElements { axis: 0 }, Rows),
         Id::Count => (RiscOp::Count { axes: vec![0] }, NoFloatValue),
         Id::TruncDiv => (RiscOp::TruncDiv, NoFloatValue),
-        Id::Mod => (RiscOp::Mod, NoFloatValue),
+        // [05-OP-64]: float `mod` is C `fmod` (chelis#626).
+        Id::Mod => (RiscOp::Mod, BuiltinInventory),
         Id::BitAnd => (RiscOp::Bitwise(BitwiseKind::And), NoFloatValue),
         Id::BitOr => (RiscOp::Bitwise(BitwiseKind::Or), NoFloatValue),
         Id::BitXor => (RiscOp::Bitwise(BitwiseKind::Xor), NoFloatValue),
@@ -1279,7 +1281,22 @@ fn nan_atom_coverage(
         Id::ArgminReduce => (RiscOp::Argmin { axis: 0 }, NoFloatValue),
         Id::Shape => (RiscOp::Shape { axis: 0 }, NoFloatValue),
         Id::CastTrunc => (
-            RiscOp::CastTrunc {
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Trunc,
+                new_precision: Prim::Int32,
+            },
+            NoFloatValue,
+        ),
+        Id::CastSaturate => (
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Saturate,
+                new_precision: Prim::Int32,
+            },
+            NoFloatValue,
+        ),
+        Id::CastWrap => (
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Wrap,
                 new_precision: Prim::Int32,
             },
             NoFloatValue,

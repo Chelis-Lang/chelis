@@ -32,7 +32,8 @@ tensor and its sum.
 
 - `add`, `sub`, and `mul` accept matching signed-integer or float scalars, or
   same-shaped tensors of one dtype. `div` accepts floats only. `floor_div`
-  accepts numeric values; `trunc_div` and `mod` accept signed integers.
+  and `mod` accept numeric values, and float `mod` is C `fmod`, the exact
+  remainder with the dividend's sign; `trunc_div` accepts signed integers.
 - `max_elem` and `min_elem` select element-wise extrema. `cmplt` or `lt`,
   `eq`, `neq`, `gt`, `gte`, and `lte` compare values and return `bool` values
   or tensors. `and`, `or`, and `not` operate on booleans.

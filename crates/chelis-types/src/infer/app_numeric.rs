@@ -784,15 +784,18 @@ pub(super) fn integer_binop_result_type(
     {
         let lhs = arg_tys
             .first()
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         let rhs = arg_tys
             .get(1)
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
+        // [05-OP-64]: `mod` also admits the active floats (C `fmod`,
+        // chelis#626); the bitwise operations stay integer-only ([05-OP-47]).
+        let admits = |prim: &Prim| prim.is_integer() || (fname == "mod" && prim.is_float());
         match (&lhs, &rhs) {
             (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
-                if lhs_prec.is_integer() && rhs_prec.is_integer() && lhs_prec == rhs_prec =>
+                if admits(lhs_prec) && lhs_prec == rhs_prec =>
             {
                 return Some(Type::Prim(*lhs_prec));
             }
@@ -802,13 +805,13 @@ pub(super) fn integer_binop_result_type(
             // was accepted while the same call on a resolved `i64` is
             // rejected. Suspending re-runs this rule against both bound types,
             // and the arm above is the one that then decides.
-            (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
+            (Type::Var(_), Type::Prim(rhs_prec)) if admits(rhs_prec) => {
                 if let Some(site) = suspension {
                     site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
-            (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
+            (Type::Prim(lhs_prec), Type::Var(_)) if admits(lhs_prec) => {
                 if let Some(site) = suspension {
                     site.register(arg_tys, result_ty, subst, product);
                 }
@@ -825,6 +828,11 @@ pub(super) fn integer_binop_result_type(
             (Type::Error(_), _) | (_, Type::Error(_)) => {
                 return Some(lhs);
             }
+            (Type::Tensor(..), _) | (_, Type::Tensor(..)) => {
+                return integer_tensor_operands(
+                    node, fname, &lhs, &rhs, arg_tys, subst, errors, suspension, result_ty, product,
+                );
+            }
             _ => {
                 return reject(
                     errors,
@@ -832,10 +840,16 @@ pub(super) fn integer_binop_result_type(
                         CheckErrorKind::TypeMismatch,
                         with_node_provenance(
                             node,
-                            format!(
-                                "{} requires matching integer arguments, got {} and {}",
-                                fname, lhs, rhs
-                            ),
+                            if fname == "mod" {
+                                format!(
+                                    "mod requires two signed-integer or two float operands of one dtype, got {lhs} and {rhs} ([05-OP-64])"
+                                )
+                            } else {
+                                format!(
+                                    "{} requires matching integer arguments, got {} and {}",
+                                    fname, lhs, rhs
+                                )
+                            },
                         ),
                         vec![],
                     ),
@@ -849,11 +863,11 @@ pub(super) fn integer_binop_result_type(
     {
         let lhs = arg_tys
             .first()
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         let rhs = arg_tys
             .get(1)
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         // chelis#1512: admissibility used to be two `matches!` disjunctions
         // folded into one boolean, which admitted an unresolved operand with no
@@ -897,6 +911,14 @@ pub(super) fn integer_binop_result_type(
             {
                 return Some(lhs);
             }
+            (Type::Error(_), Type::Tensor(..)) | (Type::Tensor(..), Type::Error(_)) => {
+                return Some(lhs);
+            }
+            (Type::Tensor(..), _) | (_, Type::Tensor(..)) => {
+                return integer_tensor_operands(
+                    node, fname, &lhs, &rhs, arg_tys, subst, errors, suspension, result_ty, product,
+                );
+            }
             _ => {
                 return reject(
                     errors,
@@ -917,4 +939,89 @@ pub(super) fn integer_binop_result_type(
     }
 
     None
+}
+
+/// [05-OP-64] and [05-OP-47]: `mod` and the bitwise and shift operations over
+/// tensors take two same-shaped tensors of one active signed-integer dtype
+/// and return that tensor type. There is no broadcasting, so a scalar beside a
+/// tensor is a type error.
+#[allow(clippy::too_many_arguments)]
+fn integer_tensor_operands(
+    node: &DeepNode,
+    fname: &str,
+    lhs: &Type,
+    rhs: &Type,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
+) -> Option<Type> {
+    let refuse = |errors: &mut DiagnosticSink<'_>, kind: CheckErrorKind, message: String| {
+        reject(
+            errors,
+            CheckError::new(kind, with_node_provenance(node, message), vec![]),
+        )
+    };
+    // Every concrete tensor precision is decided before anything suspends. A
+    // caller that passes no suspension (the direct-operation pre-check in
+    // `app.rs`) reads any returned type as a rejection, so an inadmissible
+    // tensor beside an unresolved operand must be refused here rather than
+    // published as the call's result.
+    for operand in [lhs, rhs] {
+        if let Type::Tensor(_, TensorPrec::Concrete(prim)) = operand
+            && !(prim.is_integer() || (fname == "mod" && prim.is_float()))
+        {
+            let admitted = if fname == "mod" {
+                "signed-integer or float tensors ([05-OP-64])"
+            } else {
+                "signed-integer tensors ([05-OP-47])"
+            };
+            return refuse(
+                errors,
+                CheckErrorKind::PrecisionMismatch,
+                format!("{fname} admits only {admitted}, got {lhs} and {rhs}"),
+            );
+        }
+    }
+    match (lhs, rhs) {
+        (Type::Tensor(_, left), Type::Tensor(_, right)) => {
+            if let (TensorPrec::Concrete(left), TensorPrec::Concrete(right)) = (left, right)
+                && left != right
+            {
+                return refuse(
+                    errors,
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "{fname} requires both tensor operands to have one dtype, got {} and {} ([05-OP-47], [05-OP-64])",
+                        left.name(),
+                        right.name()
+                    ),
+                );
+            }
+            if let Err(error) = unify(lhs, rhs, subst) {
+                return reject(errors, error.into());
+            }
+            Some(subst.apply(lhs))
+        }
+        // The other operand is not known to be a tensor yet: decide once it
+        // binds, as the scalar arms do.
+        (Type::Tensor(..), Type::Var(_)) | (Type::Var(_), Type::Tensor(..)) => {
+            if let Some(site) = suspension {
+                site.register(arg_tys, result_ty, subst, product);
+            }
+            Some(match lhs {
+                Type::Tensor(..) => lhs.clone(),
+                _ => rhs.clone(),
+            })
+        }
+        _ => refuse(
+            errors,
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "{fname} does not admit a scalar beside a tensor, got {lhs} and {rhs}: both operands are scalars or both are same-shaped tensors, with no broadcasting ([05-OP-47], [05-OP-64])"
+            ),
+        ),
+    }
 }

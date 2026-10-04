@@ -67,7 +67,8 @@ bool is_reserved_identifier(const std::string &identifier) {
          identifier == "grad" || identifier == "vmap" || identifier == "jit" ||
          identifier == "realize" || identifier == "copy" ||
          identifier == "tensor" || identifier == "cast" ||
-         identifier == "cast_trunc" ||
+         identifier == "cast_trunc" || identifier == "cast_saturate" ||
+         identifier == "cast_wrap" ||
          identifier == "export" || identifier == "par" || identifier == "do" ||
          identifier == "quote" || identifier == "unquote" ||
          identifier == "splice" || identifier == "true" || identifier == "false" ||
@@ -309,11 +310,13 @@ bool scan_pipe_lambda_fn(TSLexer *lexer, const bool *valid_symbols) {
   const bool transform_alias =
       (callable == "realize" || callable == "copy") && lexer->lookahead == ')';
   const bool cast_alias =
-      (callable == "cast" || callable == "cast_trunc") &&
+      (callable == "cast" || callable == "cast_trunc" ||
+       callable == "cast_saturate" || callable == "cast_wrap") &&
       lexer->lookahead == ',';
   if (transform_alias || cast_alias ||
       (callable != "realize" && callable != "copy" && callable != "cast" &&
-       callable != "cast_trunc" &&
+       callable != "cast_trunc" && callable != "cast_saturate" &&
+       callable != "cast_wrap" &&
        direct_argument_end)) {
     return false;
   }

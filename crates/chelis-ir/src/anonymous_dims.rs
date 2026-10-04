@@ -188,6 +188,20 @@ pub fn anonymous_axis_names(dag: &Dag, id: NodeId) -> Option<Vec<AnonymousAxisNa
     {
         return Some(names);
     }
+    if let RiscOp::Load { name } = &node.op
+        && let Some(first) = dag.nodes().iter().find(|other| {
+            other.id < id
+                && other.owner.decl == node.owner.decl
+                && matches!(&other.op, RiscOp::Load { name: other_name } if other_name == name)
+        })
+        && let Some(names) = same_rank(first.id)
+    {
+        // chelis#2893: every `Load` of one declaration's parameter reads the
+        // same runtime tensor, so each later use takes the first use's
+        // identity. A fresh identity per use made `neq(x, x)` compare two
+        // extents the C lane could not prove equal.
+        return Some(names);
+    }
     if node.inputs.is_empty()
         && let Some(names) = node.shape_deps.first().and_then(|dep| same_rank(*dep))
     {

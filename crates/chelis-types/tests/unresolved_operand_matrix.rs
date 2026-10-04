@@ -1184,7 +1184,7 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
                 resolved_invalid: "def f(x: i64) -> i64 = mod(x, 3i32)\n",
                 late_invalid: "def f(x: i64) -> i64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
                 late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
-                diagnostic: "mod requires matching integer arguments, got i64 and i32",
+                diagnostic: "mod requires two signed-integer or two float operands of one dtype, got i64 and i32",
             },
             resolved_valid: "def f(x: i32) -> i32 = mod(x, 3i32)\n",
         },
@@ -1260,7 +1260,12 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
         ),
     ] {
         if matches!(route, "sqrt" | "mod" | "shl") {
-            let family = if route == "sqrt" { "Float" } else { "Int" };
+            let family = match route {
+                "sqrt" => "Float",
+                // [05-OP-64]: `mod` admits integers and floats (chelis#626).
+                "mod" => "Numeric",
+                _ => "Int",
+            };
             let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
@@ -1328,7 +1333,7 @@ fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
 /// A dtype validator that suspends on one operand and then rejects on another
 /// in the same eager pass reports that rejection ONCE.
 ///
-/// `mod(t, 3.0f32)` reaches the rejecting arm while `t` is still a variable,
+/// `bitand(t, 3.0f32)` reaches the rejecting arm while `t` is still a variable,
 /// so the call both registers a suspension and fails, and a replay would
 /// re-run the same validator against the same argument list. Asserting the
 /// COUNT is the point: every cell above uses `.any(...)` and would pass either
@@ -1336,13 +1341,13 @@ fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
 /// the string routes.
 #[test]
 fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
-    let program = "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3.0f32)\n  g(x)\n}\n";
-    let errors = check(program).expect_err("mod over a float shift amount must be rejected");
+    let program = "def f(x: i32) -> i32 = {\n  g = fn (t) -> bitand(t, 3.0f32)\n  g(x)\n}\n";
+    let errors = check(program).expect_err("bitand over a float operand must be rejected");
     let hits = errors
         .iter()
         .filter(|e| {
             e.message
-                .contains("mod requires matching integer arguments")
+                .contains("bitand requires matching integer arguments")
         })
         .count();
     assert_eq!(
@@ -1361,7 +1366,7 @@ fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     assert!(
         errors.iter().any(|e| e
             .message
-            .contains("mod requires matching integer arguments")),
+            .contains("mod requires two signed-integer or two float operands")),
         "the late-bound operand's own validation must still run:\n{}",
         summary(&errors)
     );

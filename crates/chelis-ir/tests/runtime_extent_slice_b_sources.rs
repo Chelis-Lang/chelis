@@ -737,7 +737,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Drop => 45,
         RiscOp::Realize => 46,
         RiscOp::Cast { .. } => 47,
-        RiscOp::CastTrunc { .. } => 48,
+        RiscOp::NamedCast { .. } => 48,
         RiscOp::FusedElem { .. } => 49,
         RiscOp::BlasMatmul { .. } => 50,
         RiscOp::Gather { .. } => 51,
@@ -997,7 +997,8 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     ));
     nodes.push(add(
         &mut dag,
-        RiscOp::CastTrunc {
+        RiscOp::NamedCast {
+            mode: chelis_ir::dag::NamedCastMode::Trunc,
             new_precision: Prim::Int32,
         },
         vec![f],

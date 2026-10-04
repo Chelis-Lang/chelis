@@ -300,7 +300,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Drop
             | WireRiscOp::Realize
             | WireRiscOp::Cast { .. }
-            | WireRiscOp::CastTrunc { .. }
+            | WireRiscOp::NamedCast { .. }
             | WireRiscOp::FusedElem { .. }
             | WireRiscOp::BlasMatmul { .. }
             | WireRiscOp::Gather { .. }
@@ -628,7 +628,9 @@ const _: () = {
     // Version 24 adds the Tier 1 `Tanh`, a unary float primitive grouped with
     // `Atan`; it embeds no numeric payload.
     // Version 25 adds Softmax axis metadata, with no embedded numeric values.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 25);
+    // Version 26 makes `cast_trunc` the `trunc` rung of the tagged
+    // `NamedCast`; it embeds no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 26);
 };
 
 #[cfg(test)]

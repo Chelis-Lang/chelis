@@ -517,7 +517,7 @@
         "load_load_named_class_guards_every_non_canonical_member_on_eval",
         "malformed_parameter_ranks_keep_the_existing_helper_diagnostic",
         "no_environment_variable_disables_the_named_claim_guard",
-        "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        "runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval",
         "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
         "scalar_gradient_roots_keep_target_order_and_public_leaf_types",
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",

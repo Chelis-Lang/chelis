@@ -24,7 +24,7 @@ use common::{make_app, write_file};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const IMPORTS: &str = "import Std.Datetime (DateTime, ClampToMonthEnd, RejectInvalidDay, date, time, datetime, instant_from_unix, offset_from_seconds, period, duration)\nimport Std.Datetime.Zone (TimeZone, Zoned, ZonedText, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, UseZoneRules, RejectOffsetMismatch, time_zone_from_tzif, try_time_zone_from_tzif, time_zone_fixed, time_zone_utc, time_zone_offset_at, try_time_zone_offset_at, zoned, try_zoned, zoned_from_local, try_zoned_from_local, zoned_add_duration, zoned_add_period, zoned_to_string, parse_zoned_text, try_parse_zoned_text, zoned_from_text, try_zoned_from_text)\nimport Std.Test (assert_eq)";
+const IMPORTS: &str = "import Std.Datetime (DateTime, ClampToMonthEnd, RejectInvalidDay, date, time, datetime, instant_from_unix, offset_from_seconds, offset_seconds, period, duration)\nimport Std.Datetime.Zone (TimeZone, Zoned, ZonedText, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, UseZoneRules, RejectOffsetMismatch, time_zone_from_tzif, try_time_zone_from_tzif, time_zone_fixed, time_zone_utc, time_zone_offset_at, try_time_zone_offset_at, zoned, try_zoned, zoned_from_local, try_zoned_from_local, zoned_add_duration, zoned_add_period, zoned_to_string, parse_zoned_text, try_parse_zoned_text, zoned_from_text, try_zoned_from_text)\nimport Std.Test (assert_eq)";
 
 /// Helpers for the generated fixtures: zones read from the checked-in TZif
 /// files (`@TZIF@` is the fixture directory), a TZif writer for files no
@@ -114,6 +114,66 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         "tzif_extension_in_v2",
         r#"time_zone_from_tzif("Asia/Jerusalem", zone_file("synthetic/jerusalem_in_v2.tzif"))"#,
         r#"time_zone_from_tzif: domain: "Asia/Jerusalem": footer "IST-2IDT,M3.4.4/26,M10.5.0" uses the version 3 transition-time extension in a version 2 file"#,
+    ),
+    (
+        "tzif_bad_second_magic",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/bad_second_magic.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": the version 2+ header does not start with "TZif""#,
+    ),
+    (
+        "tzif_zero_charcnt",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/zero_charcnt.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": charcnt is 0"#,
+    ),
+    (
+        "tzif_short_isstdcnt",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/short_isstdcnt.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": isstdcnt 1 is neither 0 nor typecnt 2"#,
+    ),
+    (
+        "tzif_short_isutcnt",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/short_isutcnt.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": isutcnt 1 is neither 0 nor typecnt 2"#,
+    ),
+    (
+        "tzif_truncated_data",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/truncated_data.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": the file ends inside the version 2+ data block or its footer"#,
+    ),
+    (
+        "tzif_dst_flag",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/dst_flag.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": time type 1 has DST flag 2, not 0 or 1"#,
+    ),
+    (
+        "tzif_designation_index",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/designation_index.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": time type 1 has designation index 8, outside 0..7"#,
+    ),
+    (
+        "tzif_isstd_value",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/isstd_value.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": standard/wall indicator 1 is 2, not 0 or 1"#,
+    ),
+    (
+        "tzif_isut_value",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/isut_value.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": UT/local indicator 1 is 2, not 0 or 1"#,
+    ),
+    (
+        "tzif_isut_without_isstd",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/isut_without_isstd.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": UT/local indicator 1 is 1 but its standard/wall indicator is 0"#,
+    ),
+    (
+        "tzif_footer_without_newline",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/footer_without_newline.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": the footer does not start with a newline"#,
+    ),
+    (
+        "tzif_footer_control_byte",
+        r#"time_zone_from_tzif("Etc/Bad", zone_file("synthetic/footer_control_byte.tzif"))"#,
+        r#"time_zone_from_tzif: domain: "Etc/Bad": footer byte 3 is 127, not printable ASCII"#,
     ),
     (
         "tzif_name",
@@ -394,6 +454,18 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
 /// from Figure 2 under `UseZoneRules` and fails under a critical annotation
 /// (`from_text_plus_zero_critical` above).
 const EXACT_RESULTS: &[(&str, &str)] = &[
+    (
+        "tzif_indicators_accepted",
+        r#"assert_eq(time_zone_offset_at(time_zone_from_tzif("Etc/Good", zone_file("synthetic/indicators.tzif")), instant_from_unix(1000000000i64, 0i64)), offset_from_seconds(3600i64), "accepted")"#,
+    ),
+    (
+        "tzif_last_designation_accepted",
+        r#"assert_eq(time_zone_offset_at(time_zone_from_tzif("Etc/Good", zone_file("synthetic/last_designation.tzif")), instant_from_unix(1000000000i64, 0i64)), offset_from_seconds(3600i64), "accepted")"#,
+    ),
+    (
+        "tzif_version_3_footers",
+        r#"assert_eq(concat(map(fn (s: i64) -> offset_seconds(time_zone_offset_at(time_zone_from_tzif("Asia/Jerusalem", zone_file("synthetic/jerusalem_v3.tzif")), instant_from_unix(s, 0i64))), [1774569599i64, 1774569600i64, 1792882799i64, 1792882800i64]), map(fn (s: i64) -> offset_seconds(time_zone_offset_at(time_zone_from_tzif("Etc/All_Year_DST", zone_file("synthetic/all_year_dst.tzif")), instant_from_unix(s, 0i64))), [1798779599i64, 1798779600i64])), [7200i64, 10800i64, 10800i64, 7200i64, -14400i64, -14400i64], "version 3 footers")"#,
+    ),
     (
         "figure_2_elective_written",
         r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
@@ -700,7 +772,7 @@ fn std_datetime_zone_failures_report_their_exact_message() {
         .iter()
         .map(|(name, expression, _)| (name.to_string(), expression.to_string()))
         .collect();
-    // The pull-request lane ran the 66 cases in 38.9 s, 0.59 s a case, so
+    // The pull-request lane ran 66 cases in 38.9 s, 0.59 s a case, so
     // Linux CI may take 0.59 × NIGHTLY_SLOWDOWN = 4.13 s a case: runs of 36
     // cases, each limited to 3 × 36 × 4.13 = 447 s.
     let outcomes = run_expression_suite(
@@ -1071,7 +1143,8 @@ fn toolchain_json() -> String {
 }
 
 /// Runs the differential on `lanes` (`eval` or `c`): every fixture zone's
-/// offsets, every gap and fold under each `Disambiguation`, and the RFC 9557
+/// offsets (the full profile adds the synthetic version 3 footers of
+/// `jerusalem_v3.tzif` and `all_year_dst.tzif`), every gap and fold under each `Disambiguation`, and the RFC 9557
 /// text, against Python's `zoneinfo` reading the same file. Each lane is its
 /// own test so that neither comes near nextest's per-test kill on CI
 /// (`ci-full`: 3 000 s). Together they took 1 948 s there before the
@@ -1122,12 +1195,12 @@ fn run_zone_differential(profile: &str, lanes: &str, zones: &str) {
 
 #[test]
 fn std_datetime_zone_agrees_with_zoneinfo_on_eval() {
-    run_zone_differential("full", "eval", "7 zones");
+    run_zone_differential("full", "eval", "9 zones");
 }
 
 #[test]
 fn std_datetime_zone_agrees_with_zoneinfo_on_c() {
-    run_zone_differential("full", "c", "7 zones");
+    run_zone_differential("full", "c", "9 zones");
 }
 
 #[test]

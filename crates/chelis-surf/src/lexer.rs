@@ -542,7 +542,9 @@ fn classify_ident(text: &str) -> TokenKind {
         "copy" => TokenKind::Copy,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
-        "cast_trunc" => TokenKind::CastTrunc,
+        "cast_trunc" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Trunc),
+        "cast_saturate" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Saturate),
+        "cast_wrap" => TokenKind::NamedCast(chelis_deep::NamedCastMode::Wrap),
         "export" => TokenKind::Export,
         "par" => TokenKind::Par,
         "do" => TokenKind::Do,
@@ -924,7 +926,7 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc export par do quote unquote splice"
+                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc cast_saturate cast_wrap export par do quote unquote splice"
             ),
             vec![
                 TokenKind::Def,
@@ -947,7 +949,9 @@ mod tests {
                 TokenKind::Copy,
                 TokenKind::Tensor,
                 TokenKind::Cast,
-                TokenKind::CastTrunc,
+                TokenKind::NamedCast(chelis_deep::NamedCastMode::Trunc),
+                TokenKind::NamedCast(chelis_deep::NamedCastMode::Saturate),
+                TokenKind::NamedCast(chelis_deep::NamedCastMode::Wrap),
                 TokenKind::Export,
                 TokenKind::Par,
                 TokenKind::Do,

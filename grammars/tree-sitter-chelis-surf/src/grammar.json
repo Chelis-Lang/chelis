@@ -2566,6 +2566,14 @@
               {
                 "type": "STRING",
                 "value": "cast_trunc"
+              },
+              {
+                "type": "STRING",
+                "value": "cast_saturate"
+              },
+              {
+                "type": "STRING",
+                "value": "cast_wrap"
               }
             ]
           }
@@ -3581,6 +3589,14 @@
               {
                 "type": "STRING",
                 "value": "cast_trunc"
+              },
+              {
+                "type": "STRING",
+                "value": "cast_saturate"
+              },
+              {
+                "type": "STRING",
+                "value": "cast_wrap"
               }
             ]
           }

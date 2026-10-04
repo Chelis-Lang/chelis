@@ -212,6 +212,12 @@ impl TypeVarRestriction {
         !admitted.is_empty() && admitted.members().all(|prim| prim.is_float())
     }
 
+    /// Whether every dtype this bound admits is one `family` admits.
+    pub fn admits_only_within(self, family: TypeVarRestriction) -> bool {
+        let admitted = PrimSet::of_family(self.precision_family());
+        !admitted.is_empty() && admitted.members().all(|prim| family.admits(prim))
+    }
+
     /// Whether every dtype this bound admits is a signed integer.
     pub fn admits_only_integers(self) -> bool {
         let admitted = PrimSet::of_family(self.precision_family());

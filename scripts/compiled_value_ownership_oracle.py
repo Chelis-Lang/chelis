@@ -56,7 +56,7 @@ FROZEN_FIXTURE_IDS = frozenset(
     """
     oracle-self-tests runtime-ledger-process-tests runtime-heap-kind-tests
     runtime-option-node-tests runtime-mapped-file-tests runtime-write-guard-tests
-    runtime-list-skip-tests
+    runtime-list-skip-tests runtime-sort-tuple-tests
     aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
     aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
     list-string-4-threshold-control list-string-5-threshold
@@ -648,6 +648,13 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             "skip_owned_ledger_child",
             "skip_owned_refuses_a_negative_count_before_it_reads_the_list",
             "unique_skip_owned_advances_in_place_and_returns_the_same_list",
+        )),
+        # chelis#3032: a sort's result tuple holds the only owner of each
+        # tensor the sort allocates.
+        ("runtime-sort-tuple-tests", "sort_tuple_ownership", (
+            "a_released_sort_result_leaves_no_live_owner",
+            "an_unreleased_sort_tuple_keeps_one_owner_of_each_tensor_live",
+            "sort_tuple_contract_child",
         )),
         ("runtime-write-guard-tests", "tensor_write_guard", (
             "ended_write_guard_has_no_view_and_cannot_be_consumed_twice",

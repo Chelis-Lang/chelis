@@ -118,6 +118,23 @@ fn infer_copy(
     }
 }
 
+/// The type `&x` has once `x`'s type is settled: a reference stays itself,
+/// a tensor or tensor-carrying value (or an error) is borrowed, and anything
+/// else is no borrow (`None`), which the caller reports. The eager `borrow`
+/// arm and the discharge of a cast suspended on `&v` (chelis#3101) both
+/// decide through it, so the two cannot disagree.
+pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
+    match resolved {
+        Type::Ref(_) => Some(resolved),
+        Type::Tensor(_, _)
+        | Type::Adt(_, _)
+        | Type::KindedAdt(_, _)
+        | Type::Tuple(_)
+        | Type::Error(_) => Some(Type::Ref(Box::new(resolved))),
+        _ => None,
+    }
+}
+
 /// The source-side decision `copy` makes, factored out so the eager arm and
 /// the suspended constraint's discharge run *the same code* (chelis#1489).
 ///
@@ -406,12 +423,6 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
-                            Type::Ref(_) => resolved,
-                            Type::Tensor(_, _)
-                            | Type::Adt(_, _)
-                            | Type::KindedAdt(_, _)
-                            | Type::Tuple(_)
-                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
                             // unresolved type variable (e.g. the output of a
                             // polymorphic-return call whose dim variables
@@ -445,16 +456,19 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                                 subst.record_deferred_borrow_var(tv);
                                 Type::Ref(Box::new(Type::Var(tv)))
                             }
-                            _ => report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
+                            settled => match settled_borrow_type(settled.clone()) {
+                                Some(borrowed) => borrowed,
+                                None => report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        format!(
+                                            "borrow requires tensor or tensor-carrying input, got {settled}"
+                                        ),
+                                        vec!["Use `&x` only with tensor values".to_string()],
                                     ),
-                                    vec!["Use `&x` only with tensor values".to_string()],
                                 ),
-                            ),
+                            },
                         }
                     } else {
                         malformed_form(node, "borrow", "one wrapped expression", errors)

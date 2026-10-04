@@ -166,11 +166,10 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
 /// so these programs have no unsourced const left to trip over and build
 /// again. They are the parity tests this file said they would return as.
 ///
-/// **chelis#1482 is not fixed**, and nothing here should be read as saying so.
-/// Only this witness stopped reproducing. Replacing `relu` with `sigmoid`,
-/// `silu`, or `gelu`, each of which still synthesizes a const, refuses with
-/// the same receipt on the same shrink result. The gap keeps its own oracle
-/// row, `shrink.elementwise_const.build`, recorded at `typed_unsupported`.
+/// `sigmoid`, `silu` and `gelu` still synthesize constants; chelis#1482 gives
+/// each one the activation's input as its shape source, so they execute on
+/// the same shrink result too. Their oracle row,
+/// `shrink.elementwise_const.build`, records that execution.
 #[test]
 fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(0, i64)", "k");

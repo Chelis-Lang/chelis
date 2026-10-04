@@ -6544,11 +6544,7 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     // overflowing, spin the empty loop for hours. Neither is the empty result
     // [05-OP-33] owes.
     if (*tensor).size() == 0 {
-        let items = [
-            chelis_value_take_tensor(values),
-            chelis_value_take_tensor(indices),
-        ];
-        return chelis_tuple_from_values(items.as_ptr(), 2);
+        return sort_result_tuple(values, indices);
     }
     let iteration = metadata_or_fail(
         (*tensor).metadata.axis_decomposition(axis_i),
@@ -6616,11 +6612,24 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         RuntimeDType::Bool => runtime_fail!("sort is undefined for bool tensors"),
         RuntimeDType::Key => runtime_fail!("sort is undefined for key tensors"),
     }
-    let items = [
-        chelis_value_take_tensor(values),
-        chelis_value_take_tensor(indices),
-    ];
-    chelis_tuple_from_values(items.as_ptr(), 2)
+    sort_result_tuple(values, indices)
+}
+
+/// The `(values, indices)` tuple of a sort, holding the only owner of each
+/// tensor. `chelis_tuple_from_values` clones borrowed items, so passing it
+/// these freshly allocated tensors left each with an owner nothing released,
+/// and every compiled sort leaked both (chelis#3032).
+unsafe fn sort_result_tuple(
+    values: *mut chelis_tensor,
+    indices: *mut chelis_tensor,
+) -> *mut chelis_tuple {
+    new_tuple(
+        vec![
+            chelis_value_take_tensor(values),
+            chelis_value_take_tensor(indices),
+        ],
+        "chelis_tensor_sort",
+    )
 }
 
 #[no_mangle]

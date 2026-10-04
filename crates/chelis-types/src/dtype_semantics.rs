@@ -47,6 +47,7 @@
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_deep::NamedCastMode;
 use chelis_vocab::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
@@ -583,6 +584,9 @@ pub enum FloatBinOp {
     Mul,
     Div,
     FloorDiv,
+    /// [05-OP-64] float `mod`: C `fmod`, the exact remainder with the
+    /// quotient truncated toward zero (Rust's float `%`).
+    Rem,
     Max,
     Min,
 }
@@ -609,6 +613,7 @@ impl FloatBinOp {
             Self::Mul => "mul",
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
+            Self::Rem => "mod",
             Self::Max => "max_elem",
             Self::Min => "min_elem",
         }
@@ -1079,6 +1084,7 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     };
@@ -1095,6 +1101,7 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     };
@@ -1916,7 +1923,8 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| {
             from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
         }),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
@@ -1934,7 +1942,8 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, f64::is_nan)
         }),
@@ -4129,6 +4138,147 @@ pub fn cast_trunc_tensor(
         );
     }
     finalize_tensor(op, dst, RawTensor::Int(wides))
+}
+
+/// A named lossy cast of the chelis#759 ladder over a raw scalar, one
+/// kernel per rung. The rung's Surf keyword is the operation a trap names.
+pub fn named_cast_raw(
+    mode: NamedCastMode,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_raw(mode.keyword(), raw, dst),
+        NamedCastMode::Saturate => cast_saturate_raw(mode.keyword(), raw, dst),
+        NamedCastMode::Wrap => cast_wrap_raw(mode.keyword(), raw, dst),
+    }
+}
+
+/// [`named_cast_raw`] over a sealed scalar.
+pub fn named_cast_scalar(
+    mode: NamedCastMode,
+    value: ScalarValue,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_scalar(mode.keyword(), value, dst),
+        NamedCastMode::Saturate | NamedCastMode::Wrap => {
+            named_cast_raw(mode, exact_named_cast_source(mode, value), dst)
+        }
+    }
+}
+
+/// [`named_cast_raw`] over a tensor buffer. Every rung traps on the first
+/// offending element in order, identically to the scalar surface.
+pub fn named_cast_tensor(
+    mode: NamedCastMode,
+    raw: RawTensor,
+    dst: Prim,
+) -> Result<TensorStorage, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_tensor(mode.keyword(), raw, dst),
+        NamedCastMode::Saturate | NamedCastMode::Wrap => {
+            // In order, element by element through the scalar kernel, so the
+            // first NaN under `cast_saturate` is the one that traps, as the
+            // compiled lane's per-element loop reports it.
+            let elements: Vec<RawScalar> = match raw {
+                RawTensor::Int(values) => values.into_iter().map(RawScalar::Int).collect(),
+                RawTensor::Float(values) => values.into_iter().map(RawScalar::Float).collect(),
+            };
+            let mut wides = Vec::with_capacity(elements.len());
+            for element in elements {
+                let value = named_cast_raw(mode, element, dst)?;
+                wides.push(
+                    value
+                        .as_i64_exact()
+                        .expect("an integer target stores an exact i64"),
+                );
+            }
+            finalize_tensor(mode.keyword(), dst, RawTensor::Int(wides))
+        }
+    }
+}
+
+/// A sealed source read exactly at its stored dtype for [05-OP-23] and
+/// [05-OP-24]: a signed integer through its exact i64, a float through its
+/// exact f64 image (every active float width embeds in f64 exactly).
+fn exact_named_cast_source(mode: NamedCastMode, value: ScalarValue) -> RawScalar {
+    let source = value.prim();
+    match source {
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => RawScalar::Int(
+            value
+                .as_i64_exact()
+                .expect("a signed integer stores an exact i64"),
+        ),
+        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => RawScalar::Float(value.as_f64_lossy()),
+        Prim::Bool | Prim::F8e4m3 | Prim::String | Prim::Key => panic!(
+            "{}: `{}` is not an admitted source; the checker rejects it (op {})",
+            mode.atom(),
+            source.name(),
+            mode.keyword()
+        ),
+    }
+}
+
+/// [05-OP-23] `cast_saturate`: a finite float is truncated toward zero and
+/// the resulting integer clamped to the target's inclusive range; an integer
+/// is clamped directly. `-inf` gives the minimum and `+inf` the maximum. NaN
+/// traps `Domain` at the target dtype; nothing traps `Overflow`.
+pub fn cast_saturate_raw(
+    op: &'static str,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    let (min, max) = named_cast_target_range(op, dst);
+    let clamped = match raw {
+        RawScalar::Int(value) => value.clamp(min, max),
+        RawScalar::Float(value) if value.is_nan() => {
+            return Err(NumericTrap::Domain { op, prim: dst });
+        }
+        // Each bound is exact in f64 except i64::MAX, whose f64 image is
+        // 2^63. A value at or beyond a bound is that bound; strictly
+        // inside both, the truncated value is an exact i64.
+        RawScalar::Float(value) if value <= min as f64 => min,
+        RawScalar::Float(value) if value >= max as f64 => max,
+        RawScalar::Float(value) => value.trunc() as i64,
+    };
+    finalize_scalar(op, dst, RawScalar::Int(clamped))
+}
+
+/// [05-OP-24] `cast_wrap`: the unique signed target-width value congruent to
+/// the source modulo `2^width`. Signed integer sources only; never traps.
+pub fn cast_wrap_raw(
+    op: &'static str,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    named_cast_target_range(op, dst);
+    let value = match raw {
+        RawScalar::Int(value) => value,
+        RawScalar::Float(_) => panic!(
+            "cast_wrap_raw: a float source has no wrapping cast ([05-OP-24] is \
+             integer-to-integer only); the checker rejects it (op {op})"
+        ),
+    };
+    let wrapped = match dst {
+        Prim::Int8 => i64::from(value as i8),
+        Prim::Int16 => i64::from(value as i16),
+        Prim::Int32 => i64::from(value as i32),
+        _ => value,
+    };
+    finalize_scalar(op, dst, RawScalar::Int(wrapped))
+}
+
+/// The inclusive range of a named cast's integer target. Every rung's
+/// target is a signed integer by the checker's contract.
+fn named_cast_target_range(op: &'static str, dst: Prim) -> (i64, i64) {
+    dst.integer_range().unwrap_or_else(|| {
+        panic!(
+            "{op}: `{}` is not an integer target; the checker rejects every \
+             other target",
+            dst.name()
+        )
+    })
 }
 
 /// [05-OP-6] target contract: integer widths only. `bool` is excluded by

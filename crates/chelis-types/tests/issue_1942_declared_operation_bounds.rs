@@ -254,8 +254,8 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
         "op = sum\ndef g[p](x: tensor[3, p]) -> tensor[p] = op(x, 0i32)\n",
         false,
     );
-    // [05-OP-64], [05-OP-47]. Scalar controls avoid claiming a repair of
-    // the separate pre-existing bounded-tensor integer validator limitation.
+    // [05-OP-64], [05-OP-47]: `mod` admits the numeric dtypes (chelis#626),
+    // and the bitwise and shift operations the signed integers.
     for operation in ["mod", "bitand", "bitor", "bitxor", "shl", "shr"] {
         for binder in ["p", "p: Numeric", "p: Int"] {
             for alias in [false, true] {
@@ -267,7 +267,7 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
                 let callee = if alias { "op" } else { operation };
                 check(
                     &format!("{prefix}def g[{binder}](x: p) -> p = {callee}(x, x)\n"),
-                    binder == "p: Int",
+                    binder == "p: Int" || (operation == "mod" && binder == "p: Numeric"),
                 );
             }
         }

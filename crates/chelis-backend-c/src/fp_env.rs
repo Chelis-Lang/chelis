@@ -130,7 +130,9 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::UniformBoundAdjoint { .. }
         | RiscOp::BlasMatmul { .. }
         | RiscOp::ScatterAdd { .. }
-        | RiscOp::Cast { .. } => Some(NanFinalization::Canonical),
+        | RiscOp::Cast { .. }
+        // [05-OP-64] float `mod` (C `fmod`) canonicalizes the NaN it makes.
+        | RiscOp::Mod => Some(NanFinalization::Canonical),
         // A fused chain finalizes per step; the node as a whole is canonical
         // when any step is, and bit-preserving when every step selects.
         RiscOp::FusedElem { ops } => Some(
@@ -161,7 +163,6 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         RiscOp::Iota
         | RiscOp::ListMapCapture { .. }
         | RiscOp::TruncDiv
-        | RiscOp::Mod
         | RiscOp::Bitwise(..)
         | RiscOp::Compare(..)
         | RiscOp::Logical(..)
@@ -194,7 +195,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::Gather { .. }
         | RiscOp::Scatter { .. }
         | RiscOp::ScatterElements { .. } => None,

@@ -613,7 +613,7 @@ wildcard spelling); it does not allocate an inference variable.
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
-| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
+| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional mode selects a named rung: `trunc` [05-OP-6], `saturate` [05-OP-23], or `wrap` [05-OP-24] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 

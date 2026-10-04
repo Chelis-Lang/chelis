@@ -84,6 +84,8 @@ struct DagActivationGraph<'a> {
     dag: &'a mut Dag,
     ty: &'a TensorType,
     parent_span: Option<&'a str>,
+    /// The activation's input. Every constant is shaped like it.
+    input: NodeId,
 }
 
 impl ActivationGraph for DagActivationGraph<'_> {
@@ -92,14 +94,19 @@ impl ActivationGraph for DagActivationGraph<'_> {
 
     fn constant(&mut self, value: f64) -> Result<NodeId, Self::Error> {
         let op = RiscOp::synth_const(self.ty.precision, value);
-        Ok(add_synth(
+        let constant = add_synth(
             self.owner,
             self.dag,
             op,
             vec![],
             self.ty.clone(),
             self.parent_span,
-        ))
+        );
+        // An input-less constant has no extent of its own. Recording the
+        // input as its shape source sizes an axis known only at run time
+        // from the input (chelis#1482).
+        self.dag.add_shape_dep(constant, self.input);
+        Ok(constant)
     }
 
     fn unary(&mut self, op: FloatUnOp, x: NodeId) -> Result<NodeId, Self::Error> {
@@ -149,6 +156,7 @@ fn lower_derived_activation(
         dag,
         ty,
         parent_span,
+        input: x,
     };
     match lower_activation(&mut graph, activation, x) {
         Ok(node) => node,

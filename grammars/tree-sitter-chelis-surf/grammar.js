@@ -380,13 +380,14 @@ module.exports = grammar({
           ),
         ),
       ),
-    // The Rust parser admits `x |> cast(f32)` and `x |> cast_trunc(f32)` as
-    // call-stage sugar for `cast(x, f32)` / `cast_trunc(x, f32)`. Keep this
+    // The Rust parser admits `x |> cast(f32)` and each named rung, such as
+    // `x |> cast_trunc(i32)`, as call-stage sugar for `cast(x, f32)` /
+    // `cast_trunc(x, i32)`. Keep this
     // syntax scoped to pipe stages; ordinary cast expressions still require
     // both the value and precision arguments below.
     cast_pipe_stage: ($) =>
       seq(
-        field("mode", choice("cast", "cast_trunc")),
+        field("mode", choice("cast", "cast_trunc", "cast_saturate", "cast_wrap")),
         "(",
         field("precision", $.identifier),
         ")",
@@ -555,7 +556,7 @@ module.exports = grammar({
       ),
     cast_expression: ($) =>
       seq(
-        field("mode", choice("cast", "cast_trunc")),
+        field("mode", choice("cast", "cast_trunc", "cast_saturate", "cast_wrap")),
         "(",
         field("value", $.expression),
         ",",

@@ -107,7 +107,9 @@ Each row names its governing atom.
 | `Numeric:bitor:TableA` | [05-OP-47] |
 | `Numeric:bitxor:TableA` | [05-OP-47] |
 | `Numeric:cast:TableA` | [05-OP-63] |
+| `Numeric:cast_saturate:TableA` | [05-OP-23] |
 | `Numeric:cast_trunc:TableA` | [05-OP-6] |
+| `Numeric:cast_wrap:TableA` | [05-OP-24] |
 | `Numeric:ceil:TableA` | [05-OP-46] |
 | `Numeric:clamp:TableA` | [05-OP-53] |
 | `Numeric:cmplt:TableA` | [05-OP-36] |

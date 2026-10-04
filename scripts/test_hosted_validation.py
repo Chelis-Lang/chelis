@@ -232,14 +232,14 @@ class HostedCoverageTests(unittest.TestCase):
             assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_a_ledger_package_missing_from_either_side_is_rejected(self):
-        packages = (*ledger_targets.LEDGER_PACKAGES, "chelis-runtime")
+        packages = (*ledger_targets.LEDGER_PACKAGES, "chelis-ir")
         with mock.patch.object(ledger_targets, "LEDGER_PACKAGES", packages):
             with self.assertRaises(AssertionError):
                 assert_hosted_coverage(self, self.workflow, self.nightly)
             # The workflow alone gaining the package still disagrees with the gate.
             workflow = copy.deepcopy(self.nightly)
             workflow["jobs"]["macos-ownership-ledger"]["steps"].append(
-                {"name": "Ledger", "run": "python3 scripts/ownership_ledger_tests.py chelis-runtime"}
+                {"name": "Ledger", "run": "python3 scripts/ownership_ledger_tests.py chelis-ir"}
             )
             with self.assertRaises(AssertionError):
                 assert_hosted_coverage(self, self.workflow, workflow)

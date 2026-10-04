@@ -651,8 +651,21 @@ impl<'program> HostLoweringSession<'program> {
 
     /// The authored `defsig` signature a reference spelled `name` resolves to.
     fn defsig_named(&self, name: &str) -> Option<&'program Expr> {
-        let path = self.names().defsigs.resolve(name)?;
+        let names = self.names();
+        let path = if self.declares_exactly(name) {
+            names.defsigs.exact.get(name)?
+        } else {
+            names.defsigs.resolve(name)?
+        };
         named_item(self.item_at(path)?, DeepTag::Defsig).map(|(_, signature)| signature)
+    }
+
+    /// Whether `name` is exactly a top-level `def`'s name. Such a name
+    /// denotes that declaration alone, so no lookup by its last `__` segment
+    /// may answer for it: a root named `period_text` is not a library's
+    /// `period_text` (chelis#2916).
+    fn declares_exactly(&self, name: &str) -> bool {
+        self.names().defs.exact.contains_key(name)
     }
 
     /// The checked subexpression-lowering context for this program.
@@ -689,6 +702,39 @@ impl std::panic::RefUnwindSafe for HostLoweringSession<'_> {}
 /// Kernel-decision summary probes on this thread that missed the memo and ran
 /// a full callee lowering. A counted receipt bounds this instead of timing the
 /// evaluation, so it cannot flake under load. chelis#1829.
+/// Whether the C host lane's own elementwise loop for `builtin` covers a
+/// tensor of `precision`, or `None` when the lane has no such loop. Host
+/// lowering leaves an operation the loop covers on the host and runs every
+/// other one in the tensor lane; the C host emitter refuses a loop outside
+/// this table before emission. Both read this one table, so they cannot
+/// disagree about a dtype (chelis#2734).
+pub fn host_elementwise_loop_admits(builtin: &str, precision: Prim) -> Option<bool> {
+    match builtin {
+        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "and" | "or" | "neg" | "not" => {
+            Some(matches!(
+                precision,
+                Prim::F32 | Prim::F64 | Prim::Int32 | Prim::Int64 | Prim::Bool
+            ))
+        }
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" => {
+            Some(precision == Prim::F32)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `builtin` computes each result element from the operand elements
+/// at the same position and nothing else: shape-identity, no key, so no
+/// draw, and no comparison, whose own host loop covers every dtype it admits
+/// (chelis#3000). Only such an operation may move to the tensor lane over
+/// host-evaluated operands without changing what it computes or where its
+/// randomness is drawn (chelis#2734, chelis#2318).
+fn elementwise_function_of_operands(builtin: &str) -> bool {
+    chelis_types::shape_class(builtin) == chelis_types::ShapeClass::Identity
+        && chelis_types::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
+        && !chelis_types::COMPARISON_OPS.contains(&builtin)
+}
+
 pub fn host_summary_probe_builds() -> u64 {
     HOST_SUMMARY_PROBE_BUILDS.with(Cell::get)
 }
@@ -7742,7 +7788,7 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::Reshape { .. } => "reshape",
         RiscOp::Expand { .. } => "expand",
         RiscOp::Cast { .. } => "cast",
-        RiscOp::CastTrunc { .. } => "cast_trunc",
+        RiscOp::NamedCast { mode, .. } => mode.keyword(),
         RiscOp::Permute { .. } => "permute",
         RiscOp::Load { .. } => "load",
         RiscOp::Const { .. } => "const",
@@ -11917,6 +11963,9 @@ fn lower_app_host_expr(
         .get(&name)
         .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
+    let callee_is_builtin = BUILTIN_NAMES.contains(&name.as_str())
+        && !scope.contains_key(&name)
+        && program.def_named(&name).is_none();
     let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
     let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
@@ -12224,8 +12273,14 @@ fn lower_app_host_expr(
             kids.get(1)
                 .and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
         });
-    let (helper_expr, helper_scope, helper_bindings) =
-        hoist_host_lane_tensor_bindings(app_expr, program, scope, fn_sig.as_ref(), tensor_helpers)?;
+    let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
+        app_expr,
+        program,
+        scope,
+        fn_sig.as_ref(),
+        tensor_helpers,
+        HoistedOperands::HostLane,
+    )?;
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -12300,7 +12355,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if let Some(tensor_ty) = helper_tensor_ty
+    if let Some(tensor_ty) = helper_tensor_ty.clone()
         && !callee_is_local_callable
         && !has_callable_params
         && !callee_has_stages
@@ -12318,6 +12373,48 @@ fn lower_app_host_expr(
         }
         if let Some(tensor_call) = lowered {
             return Ok(tensor_call);
+        }
+    }
+    // [04-TOT-2]: a checked tensor builtin runs in the tensor execution lane.
+    // When an operand holds work that lane cannot represent, such as a
+    // `to_tensor` of a run-time List beneath a `cast`, the helper over the
+    // whole application fails. Each operand that does work is then evaluated
+    // on the host, once and in source order, and the builtin runs as a helper
+    // over those values, so its kernel is the one every dtype has
+    // (chelis#2734). An operation the C host lane's own elementwise loop
+    // covers stays on that loop, which needs no rebuilt application.
+    if let Some(tensor_ty) = helper_tensor_ty
+        && callee_is_builtin
+        && elementwise_function_of_operands(&name)
+        && host_elementwise_loop_admits(&name, tensor_ty.precision) != Some(true)
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
+    {
+        let (operation, operation_scope, mut bindings) = hoist_host_lane_tensor_bindings(
+            helper_expr.as_ref(),
+            program,
+            helper_scope.as_ref(),
+            fn_sig.as_ref(),
+            tensor_helpers,
+            HoistedOperands::EveryWorkingOperand,
+        )?;
+        if let Some(tensor_call) = try_lower_tensor_helper_call(
+            operation.as_ref(),
+            program,
+            operation_scope.as_ref(),
+            tensor_helpers,
+            tensor_ty,
+        ) {
+            let mut all_bindings = helper_bindings;
+            all_bindings.append(&mut bindings);
+            if all_bindings.is_empty() {
+                return Ok(tensor_call);
+            }
+            let ty = host_expr_type(&tensor_call);
+            return Ok(HostExpr::new(HostExprKind::Let {
+                bindings: all_bindings,
+                body: Box::new(tensor_call),
+                ty,
+            }));
         }
     }
     // WS-A8: if the callee is a polymorphic-precision sig, the host
@@ -15830,6 +15927,18 @@ fn call_graph_reaches_any(
     false
 }
 
+/// Which operands of an application [`hoist_host_lane_tensor_bindings`]
+/// evaluates on the host before the operation's helper.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HoistedOperands {
+    /// Only an operand the tensor lane must not hold: one kept in the host
+    /// lane, or one that reads a host record.
+    HostLane,
+    /// Every operand that does work, so the helper reads only names and
+    /// literals.
+    EveryWorkingOperand,
+}
+
 type HoistedHostLaneBindings<'expr, 'scope> = (
     Cow<'expr, Expr>,
     Cow<'scope, UnordMap<String, HostTypeTerm>>,
@@ -15842,6 +15951,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     scope: &'scope UnordMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut TensorHelperSink,
+    hoisted: HoistedOperands,
 ) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
     let Expr::Node(list, span) = expr else {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
@@ -15863,7 +15973,9 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
     let host_operand = |arg: &Expr| {
-        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, program, scope)
+        should_keep_tensor_expr_in_host_lane(arg)
+            || operand_reads_host_record(arg, program, scope)
+            || (hoisted == HoistedOperands::EveryWorkingOperand && operand_does_work(arg))
     };
     if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
@@ -16072,6 +16184,9 @@ fn checked_authored_function_signature<'a>(
                 .as_ref()
                 .unwrap_or(&inference.checked_signature),
         );
+    }
+    if program.declares_exactly(name) {
+        return None;
     }
     let mut matches = program
         .signature_inference()
@@ -16529,7 +16644,7 @@ fn remap_tensor_helper_dim_symbols(
                 node.op,
                 crate::dag::RiscOp::Copy
                     | crate::dag::RiscOp::Cast { .. }
-                    | crate::dag::RiscOp::CastTrunc { .. }
+                    | crate::dag::RiscOp::NamedCast { .. }
             ) {
                 break;
             }
@@ -17163,7 +17278,7 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize
             | crate::dag::RiscOp::Cast { .. }
-            | crate::dag::RiscOp::CastTrunc { .. }
+            | crate::dag::RiscOp::NamedCast { .. }
             | crate::dag::RiscOp::FusedElem { .. } => node
                 .inputs
                 .first()
@@ -17563,11 +17678,15 @@ fn derive_program_subexpr_lowering_context(
             .map(deep_expr_nodes)
             .sum::<usize>();
     });
+    // A host lane records the binders a `List` parameter's elements name
+    // when an activation starts: the C host lane in its entry contract's
+    // named states, `chelis eval` in its activation (chelis#3039).
     crate::lower::prepare_checked_subexpr_lowering_context(
         program,
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     )
+    .claiming_list_element_binders_at_activation()
 }
 
 fn definition_declares_list_entry(
@@ -18836,7 +18955,13 @@ fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &st
 fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
     lookup_authored_defsig_type_expr(program, name)
         .or_else(|| checked_authored_function_signature(program, name).map(type_to_deep_expr))
-        .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
+        .or_else(|| {
+            if program.declares_exactly(name) {
+                program.type_env().get(name).cloned()
+            } else {
+                lookup_type_expr(program.type_env(), name).cloned()
+            }
+        })
 }
 
 fn lookup_declared_host_type(

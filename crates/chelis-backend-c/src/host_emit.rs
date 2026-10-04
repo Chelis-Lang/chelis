@@ -189,6 +189,7 @@ impl CExpressionBuiltin {
             | Self::Mul
             | Self::Div
             | Self::FloorDiv
+            | Self::Mod
             | Self::Neg
             | Self::Sqrt
             | Self::Exp
@@ -210,7 +211,6 @@ impl CExpressionBuiltin {
             | Self::Max => Some(NanFinalization::Canonical),
             Self::Relu | Self::MinElem | Self::MaxElem => Some(NanFinalization::BitPreserving),
             Self::TruncDiv
-            | Self::Mod
             | Self::BitAnd
             | Self::BitOr
             | Self::BitXor
@@ -310,7 +310,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{DimInfo, NamedCastMode, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
     VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
@@ -1589,6 +1589,97 @@ fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
         .map(str::to_string),
     );
     out.push("#endif".to_string());
+}
+
+/// The bit width of a signed integer dtype.
+fn integer_bits(prim: Prim) -> u32 {
+    match prim {
+        Prim::Int8 => 8,
+        Prim::Int16 => 16,
+        Prim::Int32 => 32,
+        Prim::Int64 => 64,
+        other => panic!("`{}` is not a signed integer dtype", other.name()),
+    }
+}
+
+/// One element of a named cast rung of the chelis#759 ladder, as an
+/// `int64_t` C expression the caller narrows to the target's storage type.
+/// `value` reads the source element: a float source already widened out of
+/// any reduced storage, or an integer source. The DAG and host lanes share
+/// this one spelling of each rung, matching `chelis_types::named_cast_raw`.
+pub(crate) fn named_cast_c_expr(
+    mode: NamedCastMode,
+    source: Prim,
+    target: Prim,
+    value: &str,
+) -> String {
+    let (min, max) = target
+        .integer_range()
+        .expect("every named cast rung targets a signed integer");
+    let bound = |value: i64| match value {
+        i64::MIN => "INT64_MIN".to_string(),
+        i64::MAX => "INT64_MAX".to_string(),
+        value => format!("INT64_C({value})"),
+    };
+    let (min, max) = (bound(min), bound(max));
+    // Element types come from the existing spelling authority; the wrap
+    // rung's unsigned arithmetic uses `unsigned long long`, which holds at
+    // least the 64 bits it masks.
+    let f64_t = cast_prim_c_type(Prim::F64);
+    let i64_t = cast_prim_c_type(Prim::Int64);
+    let trap = |trap: NumericTrap| format!("{:?}", trap.to_string());
+    let domain = trap(NumericTrap::Domain {
+        op: mode.keyword(),
+        prim: target,
+    });
+    match mode {
+        NamedCastMode::Trunc => {
+            assert!(
+                source.is_float(),
+                "[05-OP-6] C emission converts a floating-point source only"
+            );
+            let overflow = trap(NumericTrap::Overflow {
+                op: mode.keyword(),
+                prim: target,
+            });
+            let width = integer_bits(target);
+            format!("chelis_trunc_float_to_int(({f64_t})({value}), {width}, {domain}, {overflow})")
+        }
+        // [05-OP-23]: NaN traps; a value at or beyond a bound is that bound
+        // (every bound's double image is exact or, for INT64_MAX, 2^63);
+        // strictly between them the truncated value is an exact int64_t.
+        NamedCastMode::Saturate if source.is_float() => {
+            let x = format!("({f64_t})({value})");
+            format!(
+                "(isnan({x}) ? (chelis_numeric_trap({domain}), INT64_C(0)) \
+                 : ({x} <= ({f64_t}){min} ? {min} \
+                 : ({x} >= ({f64_t}){max} ? {max} : ({i64_t})trunc({x}))))"
+            )
+        }
+        NamedCastMode::Saturate => {
+            let x = format!("({i64_t})({value})");
+            format!("({x} < {min} ? {min} : ({x} > {max} ? {max} : {x}))")
+        }
+        // [05-OP-24]: keep the low `width` bits and sign-extend them, in
+        // unsigned arithmetic so no step is implementation-defined.
+        NamedCastMode::Wrap => {
+            assert!(
+                source.is_integer(),
+                "[05-OP-24] C emission is integer-to-integer only"
+            );
+            let x = format!("({i64_t})({value})");
+            let width = integer_bits(target);
+            if width >= integer_bits(source) {
+                x
+            } else {
+                let sign = 1u64 << (width - 1);
+                let mask = (1u64 << width) - 1;
+                format!(
+                    "(({i64_t})(((unsigned long long){x} & {mask}ULL) ^ {sign}ULL) - INT64_C({sign}))"
+                )
+            }
+        }
+    }
 }
 
 /// C expression for an already-planned checked scalar conversion.
@@ -3398,7 +3489,14 @@ fn emit_function(
     // binders a site names is known once the body is emitted, so the frames
     // are placed here afterwards.
     let claims_at = emitter.lines.len();
-    emitter.first_site_frames = Some(FirstSiteFrames::of(function));
+    emitter.first_site_frames = Some(FirstSiteFrames::of(
+        function,
+        if entry_work.extent_at_body {
+            entry_work.body.named_list_binders.clone()
+        } else {
+            Vec::new()
+        },
+    ));
     // Entry guards and the frame still read parameters the body does not
     // use. Their verified entry drops run only after those reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
@@ -4083,16 +4181,22 @@ struct FirstSiteFrames {
     /// The declared result's dimensions when the result is a tensor.
     result_dims: Option<Vec<DimInfo>>,
     frames: Vec<FirstSiteFrame>,
+    /// The binders a `List` parameter's elements name, in the order of the
+    /// body's `__chelis_entry_named_states`, which recorded each one from
+    /// the elements when the invocation started; empty when the body holds
+    /// no such states.
+    list_states: Vec<String>,
 }
 
 impl FirstSiteFrames {
-    fn of(function: &HostFunction) -> Self {
+    fn of(function: &HostFunction, list_states: Vec<String>) -> Self {
         Self {
             result_dims: match &function.ret_ty {
                 HostAbiType::Tensor(ty) => Some(ty.dims.clone()),
                 _ => None,
             },
             frames: Vec::new(),
+            list_states,
         }
     }
 
@@ -6350,6 +6454,7 @@ impl<'a> HostEmitter<'a> {
         sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
     ) -> Result<(), Unsupported> {
         let origin = result_origin_name(target);
+        self.emit_list_element_sites(target, ty, sites)?;
         // Only an output-inferred binder's site binds or claims a frame, and
         // each such binder gets its frame at its first site, whatever the
         // declared result's shape.
@@ -6405,6 +6510,81 @@ impl<'a> HostEmitter<'a> {
                 "{indent}        chelis_numeric_trap({origin}->trap);"
             ));
             self.lines.push(format!("{indent}    }}"));
+            self.lines.push(format!("{indent}}}"));
+        }
+        Ok(())
+    }
+
+    /// Claim each site naming a binder a `List` parameter's elements name
+    /// against the extent the invocation recorded from those elements
+    /// (spec/04-type-system.md section 4.7), as `chelis eval` claims it
+    /// against its activation. A List that held no tensor recorded none, so
+    /// the site cannot resolve its extent and the program stops with the
+    /// evaluator's refusal (chelis#3039).
+    fn emit_list_element_sites(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
+    ) -> Result<(), Unsupported> {
+        let origin = result_origin_name(target);
+        for site in sites
+            .iter()
+            .filter(|site| site.list_element && !site.output_inferred)
+        {
+            if !matches!(ty, HostType::Tensor(_)) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "local ascription `{}` names List element binder `{}` on a non-tensor value",
+                        site.binding, site.binder
+                    ),
+                    "verified C host List element site emission",
+                ));
+            }
+            let binder = chelis_ir::lower::extent_binder_label(&site.binder);
+            let state = self
+                .first_site_frames
+                .as_ref()
+                .and_then(|frames| {
+                    frames
+                        .list_states
+                        .iter()
+                        .position(|name| chelis_ir::lower::extent_binder_label(name) == binder)
+                })
+                .ok_or_else(|| {
+                    invalid_abi_shape(
+                        format!(
+                            "local ascription `{}` names List element binder `{}`, which the \
+                             invocation records no extent for",
+                            site.binding, site.binder
+                        ),
+                        "verified C host List element site emission",
+                    )
+                })?;
+            let indent = self.indent.clone();
+            let axis = site.axis;
+            let recorded = format!("__chelis_entry_named_states[{state}]");
+            let extent = format!("chelis_tensor_shape({target}, {axis})");
+            self.lines.push(format!("{indent}if (!{recorded}.seen) {{"));
+            self.lines.push(format!(
+                "{indent}    fprintf(stderr, \"local tensor ascription `%s` cannot resolve authored extent `%s` in this activation\\n\", {}, {});",
+                c_string_literal(&site.binding),
+                c_string_literal(&binder)
+            ));
+            self.lines
+                .push(format!("{indent}    chelis_flush_and_abort();"));
+            self.lines.push(format!(
+                "{indent}}} else if ({recorded}.value != {extent}) {{"
+            ));
+            self.lines.push(format!(
+                "{indent}    if ({origin} == NULL || {origin}->child_count != -1 || {origin}->op == NULL || {origin}->trap == NULL) {{ fprintf(stderr, \"host runtime: an extent claim reached a tensor without producer provenance\\n\"); abort(); }}"
+            ));
+            self.lines.push(format!(
+                "{indent}    fprintf(stderr, \"extent `%s`: claimed = %lld, %s axis %lld = %lld\\n\", {}, (long long){recorded}.value, {origin}->op, (long long){axis}, (long long){extent});",
+                c_string_literal(&binder)
+            ));
+            self.lines
+                .push(format!("{indent}    chelis_numeric_trap({origin}->trap);"));
             self.lines.push(format!("{indent}}}"));
         }
         Ok(())
@@ -6760,6 +6940,13 @@ impl<'a> HostEmitter<'a> {
             self.tensor_nan_finalization = CExpressionBuiltin::decode(name)
                 .ok()
                 .and_then(CExpressionBuiltin::nan_finalization);
+            // The loops below cover the dtypes their arms name. Host lowering
+            // runs every other checked tensor operation in the tensor lane, so
+            // a dtype outside the arms is refused here, before emission, and
+            // never reaches a loop that would abort at run time (chelis#2734).
+            if let Some(arms) = host_elementwise_arms(name, &arg_vars) {
+                admit_host_elementwise(name, &arg_vars, arms)?;
+            }
             match name {
                 "add"
                     if matches!(
@@ -6889,6 +7076,24 @@ impl<'a> HostEmitter<'a> {
                     );
                     return Ok(());
                 }
+                // chelis#2076: `mod` and the bitwise and shift operations
+                // over two tensors computed on the host apply the scalar rule
+                // element by element after the same operand agreement check
+                // ([05-OP-47], [05-OP-64]).
+                "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_integer_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        name,
+                    );
+                    return Ok(());
+                }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
                         target,
@@ -6971,41 +7176,56 @@ impl<'a> HostEmitter<'a> {
                 self.assign_option_none(target, ty)?;
                 return Ok(());
             }
-            // [05-OP-6]. Unlike `cast`, this arm has NO identity
-            // fallback: the only legal pair is float source to integer
-            // target, and anything else must be a loud emission failure
-            // rather than a silent un-truncated pass-through.
-            "cast_trunc" => {
-                let expr = match (&arg_vars[0].1, ty) {
-                    (source, target) if is_float_abi(source) && is_integer_abi(target) => {
-                        let prim = integer_abi_prim(target)?;
-                        let domain = NumericTrap::Domain {
-                            op: "cast_trunc",
-                            prim,
-                        }
-                        .to_string();
-                        let overflow = NumericTrap::Overflow {
-                            op: "cast_trunc",
-                            prim,
-                        }
-                        .to_string();
+            // The named cast rungs. Unlike `cast`, these arms have NO
+            // identity fallback: each admits only its own scalar pairs, and
+            // anything else must be a loud emission failure rather than a
+            // silent pass-through.
+            "cast_trunc" | "cast_saturate" | "cast_wrap" => {
+                let mode = NamedCastMode::ALL
+                    .iter()
+                    .copied()
+                    .find(|mode| mode.keyword() == name)
+                    .expect("the arm's names are the rung keywords");
+                let source = &arg_vars[0].1;
+                if let (HostType::Tensor(_), HostType::Tensor(result)) = (source, ty) {
+                    self.assign_tensor_named_cast(target, &arg_vars[0].0, mode, result.precision);
+                    return Ok(());
+                }
+                let admitted = is_integer_abi(ty)
+                    && match mode {
+                        NamedCastMode::Trunc => is_float_abi(source),
+                        NamedCastMode::Saturate => is_float_abi(source) || is_integer_abi(source),
+                        NamedCastMode::Wrap => is_integer_abi(source),
+                    };
+                if !admitted {
+                    return Err(invalid_abi_shape(
                         format!(
-                            "({})chelis_trunc_float_to_int({}, {}, {domain:?}, {overflow:?})",
-                            c_type(target)?,
-                            host_float_as_double(&arg_vars[0].0, source),
-                            integer_abi_width(target)?
-                        )
+                            "`{name}` resolved to {source:?} -> {ty:?}; {} admits no such pair",
+                            mode.atom()
+                        ),
+                        "C host named cast emission",
+                    ));
+                }
+                let (source_prim, value) = match source {
+                    HostAbiType::Float16 => {
+                        (Prim::F16, host_float_as_double(&arg_vars[0].0, source))
                     }
-                    (source, target) => {
-                        return Err(invalid_abi_shape(
-                            format!(
-                                "`cast_trunc` resolved to {source:?} -> {target:?}; \
-                                 [05-OP-6] is float-to-integer only"
-                            ),
-                            "C host cast_trunc emission",
-                        ));
+                    HostAbiType::BFloat16 => {
+                        (Prim::Bf16, host_float_as_double(&arg_vars[0].0, source))
                     }
+                    HostAbiType::Float32 => {
+                        (Prim::F32, host_float_as_double(&arg_vars[0].0, source))
+                    }
+                    HostAbiType::Float64 => {
+                        (Prim::F64, host_float_as_double(&arg_vars[0].0, source))
+                    }
+                    other => (integer_abi_prim(other)?, arg_vars[0].0.clone()),
                 };
+                let expr = format!(
+                    "({}){}",
+                    c_type(ty)?,
+                    named_cast_c_expr(mode, source_prim, integer_abi_prim(ty)?, &value)
+                );
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, expr));
                 return Ok(());
@@ -7744,6 +7964,12 @@ impl<'a> HostEmitter<'a> {
                         numeric_arg(0),
                         numeric_arg(1),
                     )],
+                ),
+                // [05-OP-64] float `mod` is C `fmod`, which is exact; the
+                // result is finalized below like every float arm (chelis#626).
+                CExpressionBuiltin::Mod if !is_integer_abi(&arg_vars[0].1) => EmittedExpr::call(
+                    float_math_function(ty, "fmod", "fmodf"),
+                    [numeric_arg(0), numeric_arg(1)],
                 ),
                 CExpressionBuiltin::Mod => EmittedExpr::conditional(
                     binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
@@ -8509,6 +8735,232 @@ impl<'a> HostEmitter<'a> {
         self.end_tensor_write(&guard);
     }
 
+    /// Apply an integer `mod`, bitwise or shift operation to two agreeing
+    /// signed-integer tensors element by element, with the scalar lane's
+    /// rule: `mod` traps a zero divisor and gives 0 for a -1 divisor, and a
+    /// shift goes through the declared-width runtime helper, which traps a
+    /// negative count. The default arm is reached only by a dtype the checker
+    /// refuses.
+    /// A named cast rung over a host tensor: one in-order loop per admitted
+    /// source dtype through [`named_cast_c_expr`], so the first offender is
+    /// the one that traps, as in the DAG lane and the evaluator.
+    fn assign_tensor_named_cast(
+        &mut self,
+        target: &str,
+        input: &str,
+        mode: NamedCastMode,
+        dst: Prim,
+    ) {
+        self.emit_elementwise_index_step(target, "input", input, input);
+        let dst_dtype = dst
+            .runtime_dtype()
+            .expect("a named cast targets a signed integer dtype");
+        self.lines.push(format!(
+            "{}{target} = chelis_host_alloc_like({input}, {});",
+            self.indent,
+            dst_dtype.c_macro()
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}switch (chelis_host_tensor_dtype({input})) {{",
+            self.indent
+        ));
+        let index_t = cast_prim_c_type(Prim::Int64);
+        let dst_t = cast_prim_c_type(dst);
+        let ind = self.indent.clone();
+        let sources: &[(chelis_vocab::RuntimeDType, Prim, Option<&str>)] = &[
+            (chelis_vocab::RuntimeDType::F32, Prim::F32, None),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64, None),
+            (
+                chelis_vocab::RuntimeDType::F16,
+                Prim::F16,
+                Some("chelis_f16_to_f32"),
+            ),
+            (
+                chelis_vocab::RuntimeDType::Bf16,
+                Prim::Bf16,
+                Some("chelis_bf16_to_f32"),
+            ),
+            (chelis_vocab::RuntimeDType::I8, Prim::Int8, None),
+            (chelis_vocab::RuntimeDType::I16, Prim::Int16, None),
+            (chelis_vocab::RuntimeDType::I32, Prim::Int32, None),
+            (chelis_vocab::RuntimeDType::I64, Prim::Int64, None),
+        ];
+        for (dtype, prim, widen) in sources {
+            let admitted = match mode {
+                NamedCastMode::Trunc => prim.is_float(),
+                NamedCastMode::Saturate => true,
+                NamedCastMode::Wrap => prim.is_integer(),
+            };
+            if !admitted {
+                continue;
+            }
+            let elem_t = cast_prim_c_type(*prim);
+            let element = format!("__input_data[i * {target}_input_step]");
+            let element = match widen {
+                Some(widen) => format!("{widen}({element})"),
+                None => element,
+            };
+            let value = named_cast_c_expr(mode, *prim, dst, &element);
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {dst_t} *__target_data = ({dst_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__input_data = (const {elem_t}*)chelis_host_tensor_data({input});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines.push(format!(
+                "{ind}            __target_data[i] = ({dst_t})({value});"
+            ));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+        self.emit_default_runtime_fail_arm_for(
+            &format!("chelis_host_tensor_dtype({input})"),
+            mode.keyword(),
+        );
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+    }
+
+    fn assign_tensor_integer_elementwise(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        builtin: &str,
+    ) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
+        self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
+        self.lines.push(format!(
+            "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
+            self.indent
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}switch (chelis_host_tensor_dtype({lhs})) {{",
+            self.indent
+        ));
+        let index_t = cast_prim_c_type(Prim::Int64);
+        let ind = self.indent.clone();
+        for (dtype, prim, width) in [
+            (chelis_vocab::RuntimeDType::I8, Prim::Int8, 8),
+            (chelis_vocab::RuntimeDType::I16, Prim::Int16, 16),
+            (chelis_vocab::RuntimeDType::I32, Prim::Int32, 32),
+            (chelis_vocab::RuntimeDType::I64, Prim::Int64, 64),
+        ] {
+            let elem_t = cast_prim_c_type(prim);
+            let l = format!("__lhs_data[i * {target}_lhs_step]");
+            let r = format!("__rhs_data[i * {target}_rhs_step]");
+            let value = match builtin {
+                "mod" => {
+                    let zero = NumericTrap::DivZero { op: "mod", prim }.to_string();
+                    let overflow = NumericTrap::Overflow { op: "mod", prim }.to_string();
+                    format!(
+                        "({r} == -1) ? 0 : ({l} % ({elem_t})chelis_int_checked_divisor({l}, {r}, {width}, {zero:?}, {overflow:?}))"
+                    )
+                }
+                "bitand" => format!("{l} & {r}"),
+                "bitor" => format!("{l} | {r}"),
+                "bitxor" => format!("{l} ^ {r}"),
+                "shl" => format!("chelis_int_shl({l}, {r}, {width})"),
+                "shr" => format!("chelis_int_shr({l}, {r}, {width})"),
+                other => unreachable!("not an integer elementwise builtin: {other}"),
+            };
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines.push(format!(
+                "{ind}            __target_data[i] = ({elem_t})({value});"
+            ));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+        if builtin == "mod" {
+            self.emit_float_mod_arms(target, lhs, rhs, &view, ind.as_str());
+        }
+        self.emit_default_runtime_fail_arm_for(
+            &format!("chelis_host_tensor_dtype({lhs})"),
+            &format!("elementwise {builtin}"),
+        );
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+    }
+
+    /// [05-OP-64] float `mod` arms for [`Self::assign_tensor_integer_elementwise`]:
+    /// C `fmod` at f64 and `fmodf` at f32, each finalized through
+    /// `fp_env::finalize_float`, and `fmodf` over the exact f32 widening of
+    /// f16 and bf16 with one narrowing store, which is exact because `fmod`
+    /// is (chelis#626).
+    fn emit_float_mod_arms(&mut self, target: &str, lhs: &str, rhs: &str, view: &str, ind: &str) {
+        let index_t = cast_prim_c_type(Prim::Int64);
+        for (dtype, prim) in [
+            (chelis_vocab::RuntimeDType::F32, Prim::F32),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64),
+            (chelis_vocab::RuntimeDType::F16, Prim::F16),
+            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
+        ] {
+            let elem_t = cast_prim_c_type(prim);
+            let l = format!("__lhs_data[i * {target}_lhs_step]");
+            let r = format!("__rhs_data[i * {target}_rhs_step]");
+            let value = match prim {
+                Prim::F32 => crate::fp_env::finalize_float(
+                    &format!("fmodf({l}, {r})"),
+                    false,
+                    crate::fp_env::NanFinalization::Canonical,
+                ),
+                Prim::F64 => crate::fp_env::finalize_float(
+                    &format!("fmod({l}, {r})"),
+                    true,
+                    crate::fp_env::NanFinalization::Canonical,
+                ),
+                Prim::F16 => format!(
+                    "chelis_f32_to_f16(fmodf(chelis_f16_to_f32({l}), chelis_f16_to_f32({r})))"
+                ),
+                _ => format!(
+                    "chelis_f32_to_bf16(fmodf(chelis_bf16_to_f32({l}), chelis_bf16_to_f32({r})))"
+                ),
+            };
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines
+                .push(format!("{ind}            __target_data[i] = {value};"));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+    }
+
     fn assign_tensor_binary_func_elementwise(
         &mut self,
         target: &str,
@@ -8566,10 +9018,6 @@ impl<'a> HostEmitter<'a> {
         for arm in DtypeArm::f32_payload_func_arms() {
             self.emit_unary_func_elementwise_arm(target, input, func, *arm, &view);
         }
-        self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64, DtypeArm::Bool],
-            &format!("unary func elementwise ({func})"),
-        );
         self.emit_default_runtime_fail_arm_for(
             &format!("{view}.dtype"),
             &format!("unary func elementwise ({func})"),
@@ -8624,10 +9072,27 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
-        self.lines.push(format!(
-            "{ind}            __target_data[i] = {};",
-            self.finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]"))
-        ));
+        let element = match (arm, checked_integer_op(op)) {
+            // [04-NUM-3]: integer arithmetic traps on overflow at its width,
+            // as the tensor lane's kernels do, rather than wrapping.
+            (DtypeArm::I32 | DtypeArm::I64, Some((helper, name))) => {
+                let overflow = NumericTrap::Overflow {
+                    op: name,
+                    prim: arm.prim(),
+                }
+                .to_string();
+                // The checked helpers compute at the i64 width.
+                let wide = cast_prim_c_type(Prim::Int64);
+                format!(
+                    "({elem_t}){helper}(({wide})__lhs_data[idx_lhs], ({wide})__rhs_data[idx_rhs], {}, {overflow:?})",
+                    arm.integer_bits()
+                )
+            }
+            _ => self
+                .finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]")),
+        };
+        self.lines
+            .push(format!("{ind}            __target_data[i] = {element};"));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
@@ -8707,10 +9172,23 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
-        self.lines.push(format!(
-            "{ind}            __target_data[i] = {};",
-            self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]"))
-        ));
+        let element = match arm {
+            DtypeArm::I32 | DtypeArm::I64 if op == "-" => {
+                let overflow = NumericTrap::Overflow {
+                    op: "neg",
+                    prim: arm.prim(),
+                }
+                .to_string();
+                let wide = cast_prim_c_type(Prim::Int64);
+                format!(
+                    "({elem_t})chelis_int_checked_neg(({wide})__input_data[idx], {}, {overflow:?})",
+                    arm.integer_bits()
+                )
+            }
+            _ => self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]")),
+        };
+        self.lines
+            .push(format!("{ind}            __target_data[i] = {element};"));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
@@ -8748,21 +9226,6 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
-    }
-
-    /// Emit one or more `case CHELIS_*: { ... abort(); break; }` arms
-    /// for dtypes the surrounding switch cannot service.
-    fn emit_dtype_fail_arms(&mut self, arms: &[DtypeArm], site_name: &str) {
-        let ind = &self.indent;
-        for arm in arms {
-            let macro_name = arm.dtype_macro();
-            self.lines.push(format!("{ind}    case {macro_name}: {{"));
-            self.lines.push(format!(
-                "{ind}        fprintf(stderr, \"{site_name} unsupported for dtype {macro_name}\\n\");"
-            ));
-            self.lines.push(format!("{ind}        abort();"));
-            self.lines.push(format!("{ind}    }}"));
-        }
     }
 
     /// Emit the `default:` arm for an elementwise dtype switch.
@@ -11606,6 +12069,82 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
     }
 }
 
+/// The checked runtime helper and trap operation name of an integer
+/// binary operator that can overflow.
+fn checked_integer_op(op: &str) -> Option<(&'static str, &'static str)> {
+    match op {
+        "+" => Some(("chelis_int_checked_add", "add")),
+        "-" => Some(("chelis_int_checked_sub", "sub")),
+        "*" => Some(("chelis_int_checked_mul", "mul")),
+        _ => None,
+    }
+}
+
+/// The arms the host elementwise loop for `name` emits, when `name` over
+/// these operands is one of those loops.
+fn host_elementwise_arms(
+    name: &str,
+    arg_vars: &[(String, HostType)],
+) -> Option<&'static [DtypeArm]> {
+    let tensor = |index: usize| matches!(arg_vars.get(index), Some((_, HostType::Tensor(_))));
+    match name {
+        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "and" | "or"
+            if tensor(0) && tensor(1) =>
+        {
+            Some(DtypeArm::all_operator_arms())
+        }
+        "neg" | "not" if tensor(0) => Some(DtypeArm::all_operator_arms()),
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
+            if tensor(0) =>
+        {
+            Some(DtypeArm::f32_payload_func_arms())
+        }
+        _ => None,
+    }
+}
+
+/// Refuse a host elementwise loop over a dtype the shared host-loop table
+/// ([`chelis_ir::host::host_elementwise_loop_admits`]) does not admit. The
+/// loop's `arms` are that table's admitted dtypes, which
+/// `host_elementwise_arms_match_the_shared_table` checks.
+fn admit_host_elementwise(
+    name: &str,
+    arg_vars: &[(String, HostType)],
+    arms: &[DtypeArm],
+) -> Result<(), Unsupported> {
+    let Some((_, HostType::Tensor(operand))) = arg_vars.first() else {
+        return Ok(());
+    };
+    let admitted =
+        chelis_ir::host::host_elementwise_loop_admits(name, operand.precision) == Some(true);
+    if admitted {
+        if !arms.iter().any(|arm| arm.prim() == operand.precision) {
+            return Err(invalid_abi_shape(
+                format!(
+                    "the host loop for `{name}` has no arm for admitted `{}`",
+                    operand.precision.name()
+                ),
+                "C host elementwise emission",
+            ));
+        }
+        return Ok(());
+    }
+    Err(Unsupported::new(
+        UnsupportedKind::Builtin(name.to_string()),
+        format!(
+            "`{name}` over a `{}` tensor in `chelis build` host emission (the host \
+             elementwise loop has no arm for this dtype)",
+            operand.precision.name()
+        ),
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "a checked tensor operation must route through the typed DAG lane; the C \
+             host lane's elementwise loops are no fallback for a dtype they do not cover"
+        ),
+    ))
+}
+
 fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Construct(detail),
@@ -12281,6 +12820,27 @@ impl DtypeArm {
         }
     }
 
+    fn prim(self) -> Prim {
+        match self {
+            DtypeArm::F32 => Prim::F32,
+            DtypeArm::F64 => Prim::F64,
+            DtypeArm::I32 => Prim::Int32,
+            DtypeArm::I64 => Prim::Int64,
+            DtypeArm::Bool => Prim::Bool,
+        }
+    }
+
+    /// The width an integer arm's checked arithmetic traps at.
+    fn integer_bits(self) -> u32 {
+        match self {
+            DtypeArm::I32 => 32,
+            DtypeArm::I64 => 64,
+            DtypeArm::F32 | DtypeArm::F64 | DtypeArm::Bool => {
+                unreachable!("only an integer arm has checked arithmetic")
+            }
+        }
+    }
+
     fn elem_t(self) -> &'static str {
         match self {
             DtypeArm::F32 => "float",
@@ -12349,6 +12909,47 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    /// chelis#2734: host lowering keeps an operation on the host loop exactly
+    /// when the shared table admits its dtype, so each loop's arms must be
+    /// that table's admitted dtypes, no more and no fewer.
+    #[test]
+    fn host_elementwise_arms_match_the_shared_table() {
+        let prims = [
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ];
+        let tensor = |prim| {
+            (
+                "x".to_string(),
+                HostType::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: prim,
+                }),
+            )
+        };
+        for name in [
+            "add", "sub", "mul", "div", "max_elem", "min_elem", "and", "or", "neg", "not", "exp",
+            "log", "sin", "sqrt", "relu", "sigmoid", "tanh", "silu", "gelu",
+        ] {
+            for prim in prims {
+                let arms = host_elementwise_arms(name, &[tensor(prim), tensor(prim)])
+                    .unwrap_or_else(|| panic!("`{name}` has a host loop"));
+                assert_eq!(
+                    chelis_ir::host::host_elementwise_loop_admits(name, prim),
+                    Some(arms.iter().any(|arm| arm.prim() == prim)),
+                    "{name} at {prim:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn resolved_global_c_symbol_cannot_alias_authored_lookalikes() {

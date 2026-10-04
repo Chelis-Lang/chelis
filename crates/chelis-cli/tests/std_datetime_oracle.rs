@@ -10,9 +10,10 @@
 //! strict reference toolchain the `lane-check` gate uses, then holds the
 //! harness to its pass line.
 //!
-//! The canary runs on every pull request: four unchanged programs of the CI
-//! profile on both lanes, the first and last 400 days of the range and a
-//! domain and an overflow failure. The CI profile runs nightly:
+//! The canary runs on every pull request: five unchanged programs of the CI
+//! profile on both lanes, the first and last 400 days of the range, one
+//! column value per `Std.Datetime.Columns` family, and a domain and an
+//! overflow failure. The CI profile runs nightly:
 //! the range edges, seeded samples across the whole range, every policy
 //! branch, every year's Easter, and the valid and invalid text corpus on both
 //! lanes, plus every day from 1900-01-01 through 2100-12-31 in compiled C. Its
@@ -92,7 +93,7 @@ fn std_datetime_canary_agrees_with_the_reference_on_eval_and_c() {
     let stdout = run_harness("canary", "eval,c");
     assert!(stdout.contains("on lanes eval+c"), "{stdout}");
     assert!(
-        stdout.contains("canary: 2 bindings, 2 failure cases, 4 programs)"),
+        stdout.contains("canary: 12 bindings, 2 failure cases, 5 programs)"),
         "{stdout}"
     );
 }

@@ -491,6 +491,20 @@ def read_config(path: Path) -> Config:
         raise ValueError(
             f"test exclusions cannot sit under target exclusions: {contradictory_tests}"
         )
+    # A standing target is reused from ci-fast, which runs every active test
+    # unfiltered and never lists the target against its exclusions, so an
+    # exclusion there would neither hold nor be checked (chelis#3024).
+    standing_test_exclusions = sorted(
+        identity.canonical
+        for identity in test_exclusions
+        if identity.target_identity in set(standing)
+    )
+    if standing_test_exclusions:
+        raise ValueError(
+            "standing targets run every active test in ci-fast, unfiltered "
+            "and unlisted against exclusions; test exclusions are forbidden: "
+            f"{standing_test_exclusions}"
+        )
     manual_test_exclusions = sorted(
         identity.canonical
         for identity in test_exclusions
@@ -3301,6 +3315,19 @@ def _listing_tests(
         for exclusion in exclusions
         if exclusion.target_identity == identity
     }
+    # Each exclusion must name a test nextest lists as active and the filter
+    # removes. A test moved into a module is listed as `m::name` and passes
+    # the filter, and an ignored one is skipped above, so either drift leaves
+    # its row here, though `fn name()` is still in the source (chelis#3024).
+    unmatched_rows = sorted(
+        f"{expected}::{name}" for name in configured_nonmatching - nonmatching
+    )
+    if unmatched_rows:
+        raise ValueError(
+            f"test_exclusion rows match no active test in {expected}: "
+            f"{unmatched_rows}; a test moved into a module, marked #[ignore], "
+            "renamed, or deleted must update its row"
+        )
     if nonmatching != configured_nonmatching:
         raise ValueError(
             f"nonmatching active tests differ from exact exclusions for {expected}: "

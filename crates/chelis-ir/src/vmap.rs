@@ -334,7 +334,7 @@ fn vectorize_axis0_impl(
             | RiscOp::Drop
             | RiscOp::Realize
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. } => node.op.clone(),
         };
 
@@ -766,7 +766,7 @@ fn shared_scalar_op(op: &RiscOp) -> bool {
         op,
         RiscOp::CheckedReshapeExtent { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::Copy
             | RiscOp::Realize
             | RiscOp::Neg
@@ -807,7 +807,7 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
         | RiscOp::Const { .. }
         | RiscOp::Load { .. } => {}
         RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::Copy
         | RiscOp::Realize
         | RiscOp::Neg

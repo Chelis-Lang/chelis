@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "e8d4c44598086e83631ecce9a4708e9683e13b7fd584a6d5fdc407007094e6a3",
+  "corpus_sha256": "cfbc19ed3ae78846d9b426b308762c5b4a75b24291a68a65b6dd95cc38a805fd",
   "rows": [
     {
       "id": "claim.combinator_result.c",
@@ -2147,8 +2147,8 @@
     {
       "id": "shrink.elementwise_const.build",
       "baseline": "ice",
-      "phase_b": "typed_unsupported(#1482)",
-      "receipt": "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt"
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval"
     },
     {
       "id": "shrink.runtime_bound.overshoot.c",

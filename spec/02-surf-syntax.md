@@ -111,10 +111,11 @@ Lexically reserved. These words cannot be used as identifiers.
 ```
 def  sig  type  dim  macro  match  with  fn  module  import
 export  if  then  else  grad  vmap  jit  realize  copy  tensor
-cast  cast_trunc  par  do  quote  unquote  splice  true  false
+cast  cast_trunc  cast_saturate  cast_wrap  par  do  quote  unquote
+splice  true  false
 ```
 
-**Total: 29.**
+**Total: 31.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
 `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
@@ -157,10 +158,11 @@ operand expressions are observed in authored order. (`&&` and `||` are
 eager like every other application; there is no short-circuit special
 case.)
 
-In a pipe stage, `x |> cast(p)` and `x |> cast_trunc(p)` insert `x` as
-the value argument of the corresponding two-argument cast. The
-one-argument spelling is valid only after `|>`; `cast(p)` and
-`cast_trunc(p)` are not standalone expressions.
+In a pipe stage, `x |> cast(p)`, `x |> cast_trunc(p)`,
+`x |> cast_saturate(p)` and `x |> cast_wrap(p)` insert `x` as the value
+argument of the corresponding two-argument cast. The one-argument spelling
+is valid only after `|>`; `cast(p)` and the named forms `cast_trunc(p)`,
+`cast_saturate(p)` and `cast_wrap(p)` are not standalone expressions.
 
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
@@ -855,6 +857,8 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} i32)} 0))` | |
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
 | `cast_trunc(e, i32)` | `(cast {} e' (t-prim {} i32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
+| `cast_saturate(e, i8)` | `(cast {} e' (t-prim {} i8) saturate)` | Named saturating cast to a signed integer ([05-OP-23]) |
+| `cast_wrap(e, i8)` | `(cast {} e' (t-prim {} i8) wrap)` | Named wrapping signed-integer cast ([05-OP-24]) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
@@ -886,7 +890,8 @@ and `(if c then f else g)(x)` applies the selected function. A transform is
 self-delimiting, so `vmap(process)(xs)` likewise represents application whose
 callee is the transform value rather than an ordinary chained-call alias.
 
-`grad`, `vmap`, `jit`, `cast`, and `cast_trunc` require their call-like special form;
+`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `cast_saturate`, and `cast_wrap` require
+their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
@@ -1431,7 +1436,7 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 # ── Operator expressions ──
 
 PipeExpr      <- UpdateExpr (S '|>' S (CastPipeStage / UpdateExpr))*
-CastPipeStage <- ('cast' / 'cast_trunc') S '(' S Ident S ')'
+CastPipeStage <- ('cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap') S '(' S Ident S ')'
 UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
 OrExpr        <- AndExpr (S '||' S AndExpr)*
 AndExpr       <- CmpExpr (S '&&' S CmpExpr)*
@@ -1486,7 +1491,7 @@ TransformExpr <- TransformKw S '(' S Expr
                   (S ',' S TransformArg)? (S ',')? S ')'
                / 'realize' / 'copy'
 TransformKw   <- 'grad' / 'vmap' / 'jit' / 'realize'
-               / 'cast' / 'cast_trunc' / 'copy'
+               / 'cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap' / 'copy'
 TransformArg  <- PrecType / ('wrt' / 'axis') S '=' S Expr
 
 RecordExpr    <- CtorName S RecordBody
@@ -1591,7 +1596,8 @@ Keyword       <- ('def' / 'sig' / 'type' / 'dim'
                / 'macro'
                / 'match' / 'with' / 'fn' / 'module' / 'import'
                / 'export' / 'if' / 'then' / 'else' / 'grad'
-               / 'vmap' / 'jit' / 'cast' / 'cast_trunc' / 'realize' / 'copy'
+               / 'vmap' / 'jit' / 'cast' / 'cast_trunc' / 'cast_saturate'
+               / 'cast_wrap' / 'realize' / 'copy'
                / 'par' / 'true' / 'false' / 'tensor'
                / 'do' / 'quote' / 'unquote' / 'splice'
                / 'effect' / 'handler' / 'perform' / 'resume' / 'borrow'
@@ -1821,9 +1827,9 @@ negative zero.
 
 ### 6.4 Transform Recognition
 
-`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
+`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `cast_saturate`, `cast_wrap`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
 
-`cast_trunc(x, T)` is the named truncating float-to-integer cast of [05-OP-6]; it shares the `cast` node shape and differs only by carrying the `trunc` mode selector.
+`cast_trunc(x, T)`, `cast_saturate(x, T)` and `cast_wrap(x, T)` are the named lossy casts of [05-OP-6], [05-OP-23] and [05-OP-24]; each shares the `cast` node shape and differs only by carrying its `trunc`, `saturate` or `wrap` mode selector.
 
 ### 6.5 TypeIdent in Expression Position
 

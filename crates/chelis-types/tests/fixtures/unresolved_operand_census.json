@@ -243,6 +243,13 @@
     },
     {
       "file": "app_numeric.rs",
+      "function": "integer_tensor_operands",
+      "ordinal": 1,
+      "pattern": "(Type::Tensor(..) , Type::Var(_)) |(Type::Var(_) , Type::Tensor(..))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_numeric.rs",
       "function": "operand_dtype_rejection",
       "ordinal": 1,
       "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",

@@ -2730,7 +2730,7 @@ impl DesugarCtx {
                 let binder_is_declared = binder.is_some();
                 let binder_bound = binder.flatten();
                 let inner = match e.as_ref() {
-                    _ if *mode == CastMode::Trunc => {
+                    _ if matches!(mode, CastMode::Named(_)) => {
                         self.desugar_expr_with_scope(e, local_fn_params)
                     }
                     other => {

@@ -45,6 +45,10 @@ pub enum AdRejectionReason {
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
     PiecewiseConstant,
+    /// The op's value jumps wherever its truncated quotient changes, so it
+    /// has no derivative there; [05-OP-64] rejects differentiating `mod` at
+    /// every dtype (chelis#626).
+    TruncatedQuotientJump,
     /// Bool logical operations are control predicates, not numeric
     /// arithmetic, and have no reverse-mode adjoint.
     LogicalOperation,
@@ -131,6 +135,12 @@ impl fmt::Display for AdError {
                     f,
                     "grad: {op} is non-differentiable (piecewise constant); \
                      remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::TruncatedQuotientJump => write!(
+                    f,
+                    "grad: {op} is non-differentiable (it jumps wherever its truncated \
+                     quotient changes, [05-OP-64]); remove it from the gradient path or wrap \
+                     it in a stop-gradient"
                 ),
                 AdRejectionReason::LogicalOperation => write!(
                     f,
@@ -529,7 +539,7 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
         RiscOp::Mod => {
             return Some(AdError::NotSupported {
                 op: "mod",
-                reason: AdRejectionReason::PiecewiseConstant,
+                reason: AdRejectionReason::TruncatedQuotientJump,
             });
         }
         RiscOp::TruncDiv => {
@@ -559,15 +569,15 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
-        // [05-OP-6]: `cast_trunc` is piecewise constant, so its
-        // adjoint is zero almost everywhere and undefined at every
-        // integer boundary. Rejecting is the point of the atom's
+        // [05-OP-6]: every named cast rung is piecewise constant, so
+        // its adjoint is zero almost everywhere and undefined at every
+        // integer boundary. Rejecting is the point of each atom's
         // `no_grad` rule: a silent zero here would mask a modeling
         // bug rather than report it. The checked `cast` keeps its
         // float-to-float adjoint.
-        RiscOp::CastTrunc { .. } => {
+        RiscOp::NamedCast { mode, .. } => {
             return Some(AdError::NotSupported {
-                op: "cast_trunc",
+                op: mode.keyword(),
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
@@ -744,7 +754,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Drop => "drop",
         RiscOp::Realize => "realize",
         RiscOp::Cast { .. } => "cast",
-        RiscOp::CastTrunc { .. } => "cast_trunc",
+        RiscOp::NamedCast { mode, .. } => mode.keyword(),
         RiscOp::FusedElem { .. } => "fused_elem",
         RiscOp::BlasMatmul { .. } => "blas_matmul",
         RiscOp::Gather { .. } => "gather",
@@ -2821,7 +2831,7 @@ fn compute_adjoints(
                 // integer or bool target is piecewise constant and
                 // "never contributes a silent zero". There is no
                 // adjoint, so this arm refuses to invent one -- the
-                // same treatment `CastTrunc` gets below.
+                // same treatment `NamedCast` gets below.
                 //
                 // `structural_rejection` is shared by the live-node scan
                 // and backward walk, so either path reports the atom's
@@ -2852,7 +2862,7 @@ fn compute_adjoints(
         // atom forbids; this arm keeps the unchecked entry point from
         // inventing one. `structural_rejection` reports the atom's exact
         // reason from either checked traversal before this fallback.
-        RiscOp::CastTrunc { .. } => None,
+        RiscOp::NamedCast { .. } => None,
         RiscOp::FusedElem { .. } => {
             // Fused nodes should be un-fused before AD; gradient through fusion
             // is not yet supported.
@@ -4193,7 +4203,7 @@ mod tests {
     // [06] §7.5: a comparison queues exact zero cotangents for its
     // operands, so rejection analysis must visit their producers too.
     fn comparison_with_discrete_cast(
-        truncating: bool,
+        named: Option<crate::dag::NamedCastMode>,
         through_integer_extrema: bool,
     ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
@@ -4205,23 +4215,32 @@ mod tests {
             scalar_f32(),
             None,
         );
+        // `cast_wrap` reads only a signed integer.
+        let m_type = if named == Some(crate::dag::NamedCastMode::Wrap) {
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            }
+        } else {
+            scalar_f32()
+        };
         let m = dag.add_node(
             owner,
             RiscOp::Load { name: "m".into() },
             vec![],
-            scalar_f32(),
+            m_type,
             None,
         );
         let discrete = dag.add_node(
             owner,
-            if truncating {
-                RiscOp::CastTrunc {
+            match named {
+                Some(mode) => RiscOp::NamedCast {
+                    mode,
                     new_precision: Prim::Int32,
-                }
-            } else {
-                RiscOp::Cast {
+                },
+                None => RiscOp::Cast {
                     new_precision: Prim::Int32,
-                }
+                },
             },
             vec![m],
             TensorType {
@@ -4293,8 +4312,10 @@ mod tests {
 
     #[test]
     fn grad_comparison_operand_reports_its_structural_rejection() {
-        for (truncating, op) in [(false, "cast"), (true, "cast_trunc")] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, false);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let op = named.map_or("cast", |mode| mode.keyword());
+            let (dag, x, out) = comparison_with_discrete_cast(named, false);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => panic!("{op} beneath comparison must reject grad"),
                 Err(error) => error,
@@ -4311,8 +4332,9 @@ mod tests {
 
     #[test]
     fn grad_zero_only_integer_control_still_reports_float_to_integer_cast() {
-        for truncating in [false, true] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, true);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let (dag, x, out) = comparison_with_discrete_cast(named, true);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => {
                     panic!("float-to-integer cast beneath zero-only integer control must reject")
@@ -4322,7 +4344,7 @@ mod tests {
             assert_eq!(
                 error,
                 AdError::NotSupported {
-                    op: if truncating { "cast_trunc" } else { "cast" },
+                    op: named.map_or("cast", |mode| mode.keyword()),
                     reason: AdRejectionReason::PiecewiseConstant,
                 }
             );

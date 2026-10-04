@@ -110,7 +110,7 @@ class Writer(unittest.TestCase):
 
     def test_the_valid_synthetic_zones_load_with_zoneinfo(self) -> None:
         july = datetime.datetime(2026, 7, 1, tzinfo=datetime.timezone.utc)
-        for name, hours in (("jerusalem_v3", 3), ("all_year_dst", -4)):
+        for name, hours in (("jerusalem_v3", 3), ("all_year_dst", -4), ("indicators", 1), ("last_designation", 1)):
             with self.subTest(zone=name):
                 path = fixtures.FIXTURE_DIR / f"synthetic/{name}.tzif"
                 self.assertEqual(offset_at(path, name, july), datetime.timedelta(hours=hours))

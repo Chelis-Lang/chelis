@@ -2164,7 +2164,11 @@ pub struct WireRecordPatternField {
 ///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
 /// - `25`: `Softmax` retains [05-OP-48] through AD before stable forward
 ///   decomposition; a version-24 reader does not know the operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 25;
+/// - `26`: the named lossy casts share one tagged `NamedCast` operation
+///   whose `mode` names the rung (chelis#759): `trunc` for `cast_trunc`,
+///   `saturate` for `cast_saturate` and `wrap` for `cast_wrap`. A version-25
+///   reader does not know that operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2512,9 +2516,12 @@ impl WireDag {
                     }
                 }
                 WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
+                    // [05-OP-64]: `mod` also admits the floats (chelis#626);
+                    // the bitwise operations stay integer-only ([05-OP-47]).
+                    let mod_op = matches!(node.op, WireRiscOp::Mod);
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
-                            .is_some_and(|prim| prim.is_integer())
+                            .is_some_and(|prim| prim.is_integer() || (mod_op && prim.is_float()))
                         || node.inputs.iter().any(|id| {
                             self.nodes[..index]
                                 .iter()
@@ -2535,7 +2542,7 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            "WireDag {:?} node {} requires two earlier inputs with its dtype and shape",
                             node.op, node.id
                         )));
                     }
@@ -3522,7 +3529,7 @@ fn wire_axis_origin(
         | WireRiscOp::Drop
         | WireRiscOp::Realize
         | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::NamedCast { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
         | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
@@ -3949,6 +3956,15 @@ pub enum WireExtremaOperand {
     Right,
 }
 
+/// The rung of a [`WireRiscOp::NamedCast`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireNamedCastMode {
+    Trunc,
+    Saturate,
+    Wrap,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireComparisonKind {
@@ -4223,7 +4239,8 @@ pub enum WireRiscOp {
     Cast {
         new_precision: String,
     },
-    CastTrunc {
+    NamedCast {
+        mode: WireNamedCastMode,
         new_precision: String,
     },
     FusedElem {

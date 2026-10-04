@@ -30,7 +30,8 @@ pub enum TokenKind {
     Copy,
     Tensor,
     Cast,
-    CastTrunc,
+    /// A named lossy cast keyword (`cast_trunc`, `cast_saturate`, `cast_wrap`).
+    NamedCast(chelis_deep::NamedCastMode),
     Export,
     Par,
     Do,

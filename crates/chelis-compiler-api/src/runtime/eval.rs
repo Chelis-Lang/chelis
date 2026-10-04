@@ -3238,29 +3238,30 @@ impl<'a> EvalContext<'a> {
         let target_prim = prim_from_name(target)
             .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
-        // [05-OP-6]: the truncating rung has its own sealed kernel and
-        // its own trap brand. The checker has already pinned the pair to
-        // float source / integer target.
-        if chelis_deep::cast_mode_of(kids)
+        // Each named rung has its own sealed kernel and its own trap
+        // brand. The checker has already pinned the pair to the rung's
+        // admitted sources and integer targets.
+        if let chelis_deep::CastMode::Named(mode) = chelis_deep::cast_mode_of(kids)
             .map_err(|selector| format!("`{selector}` is not a recognized cast mode selector"))?
-            == chelis_deep::CastMode::Trunc
         {
             let result = match value {
                 RuntimeValue::Scalar(payload) => {
-                    chelis_types::cast_trunc_scalar("cast_trunc", payload.value(), target_prim)
+                    chelis_types::named_cast_scalar(mode, payload.value(), target_prim)
                         .map(RuntimeValue::from_scalar_value)
                         .map_err(|trap| trap.to_string())
                 }
-                RuntimeValue::Tensor(tensor) => cast_trunc_tensor_value(tensor, target_prim),
-                // The checker pins the source to a float scalar or
-                // tensor ([05-OP-6]), so this arm is unreachable for a
-                // well-typed program. It names no value: rendering one
-                // here would need a third numeric formatter, which
+                RuntimeValue::Tensor(tensor) => named_cast_tensor_value(mode, tensor, target_prim),
+                // The checker pins the source to a numeric scalar or
+                // tensor, so this arm is unreachable for a well-typed
+                // program. It names no value: rendering one here would
+                // need a third numeric formatter, which
                 // `spec/design/faithful_observation.md` B2.4 forbids.
                 _ => Err(format!(
-                    "unsupported cast_trunc operand for target {}; \
-                     [05-OP-6] requires a float scalar or tensor source",
-                    target_prim.name()
+                    "unsupported {} operand for target {}; \
+                     {} requires a scalar or tensor source",
+                    mode.keyword(),
+                    target_prim.name(),
+                    mode.atom()
                 )),
             };
             return if numeric_input {
@@ -3808,7 +3809,7 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .ok_or_else(|| "append expects 2 arguments".to_string())?,
                 );
-                Ok(RuntimeValue::List(list.into()))
+                Ok(RuntimeValue::List(list))
             }
             "concat" => match (args.first(), args.get(1).and_then(RuntimeValue::as_i64)) {
                 (Some(RuntimeValue::List(parts)), Some(axis))
@@ -3821,7 +3822,7 @@ impl<'a> EvalContext<'a> {
                 _ => {
                     let mut lhs = expect_list_arg(args, 0)?;
                     lhs.extend(expect_list_arg(args, 1)?);
-                    Ok(RuntimeValue::List(lhs.into()))
+                    Ok(RuntimeValue::List(lhs))
                 }
             },
             "take" => {
@@ -3831,7 +3832,7 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("take requires non-negative count, got {count}"));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().take(count as usize).collect(),
+                    list.iter().take(count as usize).cloned().collect(),
                 ))
             }
             "skip" => {
@@ -3841,7 +3842,7 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("skip requires non-negative count, got {count}"));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().skip(count as usize).collect(),
+                    list.iter().skip(count as usize).cloned().collect(),
                 ))
             }
             // [05-OP-67]: the explicit one-argument consume. The checker
@@ -4267,7 +4268,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
                 upsert_dict_entry(&mut dict, key, value);
-                Ok(RuntimeValue::Dict(dict.into()))
+                Ok(RuntimeValue::Dict(dict))
             }
             "dict_merge" => {
                 let mut lhs = expect_dict_arg(args, 0)?;
@@ -4276,7 +4277,7 @@ impl<'a> EvalContext<'a> {
                     ensure_dict_key_supported(&key)?;
                     upsert_dict_entry(&mut lhs, key, value);
                 }
-                Ok(RuntimeValue::Dict(lhs.into()))
+                Ok(RuntimeValue::Dict(lhs))
             }
             "dict_keys" => {
                 let dict = expect_dict_arg(args, 0)?;
