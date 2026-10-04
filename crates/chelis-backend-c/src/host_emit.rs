@@ -1622,6 +1622,11 @@ pub(crate) fn named_cast_c_expr(
         value => format!("INT64_C({value})"),
     };
     let (min, max) = (bound(min), bound(max));
+    // Element types come from the existing spelling authority; the wrap
+    // rung's unsigned arithmetic uses `unsigned long long`, which holds at
+    // least the 64 bits it masks.
+    let f64_t = cast_prim_c_type(Prim::F64);
+    let i64_t = cast_prim_c_type(Prim::Int64);
     let trap = |trap: NumericTrap| format!("{:?}", trap.to_string());
     let domain = trap(NumericTrap::Domain {
         op: mode.keyword(),
@@ -1631,28 +1636,28 @@ pub(crate) fn named_cast_c_expr(
         NamedCastMode::Trunc => {
             assert!(
                 source.is_float(),
-                "[05-OP-6] C emission is float-to-integer only"
+                "[05-OP-6] C emission converts a floating-point source only"
             );
             let overflow = trap(NumericTrap::Overflow {
                 op: mode.keyword(),
                 prim: target,
             });
             let width = integer_bits(target);
-            format!("chelis_trunc_float_to_int((double)({value}), {width}, {domain}, {overflow})")
+            format!("chelis_trunc_float_to_int(({f64_t})({value}), {width}, {domain}, {overflow})")
         }
         // [05-OP-23]: NaN traps; a value at or beyond a bound is that bound
         // (every bound's double image is exact or, for INT64_MAX, 2^63);
         // strictly between them the truncated value is an exact int64_t.
         NamedCastMode::Saturate if source.is_float() => {
-            let x = format!("(double)({value})");
+            let x = format!("({f64_t})({value})");
             format!(
                 "(isnan({x}) ? (chelis_numeric_trap({domain}), INT64_C(0)) \
-                 : ({x} <= (double){min} ? {min} \
-                 : ({x} >= (double){max} ? {max} : (int64_t)trunc({x}))))"
+                 : ({x} <= ({f64_t}){min} ? {min} \
+                 : ({x} >= ({f64_t}){max} ? {max} : ({i64_t})trunc({x}))))"
             )
         }
         NamedCastMode::Saturate => {
-            let x = format!("(int64_t)({value})");
+            let x = format!("({i64_t})({value})");
             format!("({x} < {min} ? {min} : ({x} > {max} ? {max} : {x}))")
         }
         // [05-OP-24]: keep the low `width` bits and sign-extend them, in
@@ -1662,7 +1667,7 @@ pub(crate) fn named_cast_c_expr(
                 source.is_integer(),
                 "[05-OP-24] C emission is integer-to-integer only"
             );
-            let x = format!("(int64_t)({value})");
+            let x = format!("({i64_t})({value})");
             let width = integer_bits(target);
             if width >= integer_bits(source) {
                 x
@@ -1670,7 +1675,7 @@ pub(crate) fn named_cast_c_expr(
                 let sign = 1u64 << (width - 1);
                 let mask = (1u64 << width) - 1;
                 format!(
-                    "((int64_t)(((uint64_t){x} & UINT64_C({mask})) ^ UINT64_C({sign})) - INT64_C({sign}))"
+                    "(({i64_t})(((unsigned long long){x} & {mask}ULL) ^ {sign}ULL) - INT64_C({sign}))"
                 )
             }
         }
