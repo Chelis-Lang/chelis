@@ -71,33 +71,12 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 /// name there. Metadata bound to the stage's own tag remains on that stage;
 /// the synthesized `app` gets its location from the stage's span metadata.
 fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
-    if let Some(param) = unary_param(stage)
-        && let Some((_, _, stage_kids)) = stamped(stage)
-        && let Some(body) = stage_kids.get(1)
+    if let Some((body, input)) = forwarding_stage(stage)
         && let Some((tag, meta, args)) = stamped(body)
     {
-        // Surf's call-first stages also use dedicated operand forms for
-        // cast, copy, and realize. Each evaluates its operand first.
-        let input = match tag {
-            DeepTag::App
-                if matches!(args.first().and_then(stamped), Some((DeepTag::Var, _, _))) =>
-            {
-                Some(1)
-            }
-            DeepTag::Cast | DeepTag::Copy | DeepTag::Realize => Some(0),
-            _ => None,
-        };
-        if let Some(input) = input
-            && args.get(input).is_some_and(|arg| is_var(arg, param))
-            && !args
-                .iter()
-                .enumerate()
-                .any(|(index, arg)| index != input && mentions_name(arg, param))
-        {
-            let mut children = args.to_vec();
-            children[input] = acc;
-            return Some(rebuild(body, tag, meta, children));
-        }
+        let mut children = args.to_vec();
+        children[input] = acc;
+        return Some(rebuild(body, tag, meta, children));
     }
     // This origin marker is valid only inside a pipe (spec/03 [03-META-1/2]).
     // A retained lambda is now an ordinary callee, so consume the marker.
@@ -120,6 +99,31 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     crate::node::Node::try_new(DeepTag::App, app_meta, vec![stage, acc])
         .ok()
         .map(|node| Expr::Node(Box::new(node), span))
+}
+
+/// The application a stage denotes when it forwards its parameter: the stage's
+/// body and the index of the body child the parameter fills, which the fold
+/// replaces with the accumulator. `None` for any other stage, which the fold
+/// applies to the accumulator as an ordinary callee.
+///
+/// Surf's call-first stages also use dedicated operand forms for cast, copy,
+/// and realize. Each evaluates its operand first.
+pub fn forwarding_stage(stage: &Expr) -> Option<(&Expr, usize)> {
+    let param = unary_param(stage)?;
+    let (_, _, stage_kids) = stamped(stage)?;
+    let body = stage_kids.get(1)?;
+    let (tag, _, args) = stamped(body)?;
+    let input = match tag {
+        DeepTag::App if matches!(args.first().and_then(stamped), Some((DeepTag::Var, _, _))) => 1,
+        DeepTag::Cast | DeepTag::Copy | DeepTag::Realize => 0,
+        _ => return None,
+    };
+    (args.get(input).is_some_and(|arg| is_var(arg, param))
+        && !args
+            .iter()
+            .enumerate()
+            .any(|(index, arg)| index != input && mentions_name(arg, param)))
+    .then_some((body, input))
 }
 
 #[cfg(test)]

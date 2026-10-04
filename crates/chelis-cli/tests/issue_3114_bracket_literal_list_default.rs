@@ -362,3 +362,106 @@ fn cast_operands_keep_their_values_through_resugaring() {
         );
     }
 }
+
+/// chelis#3114 round 2 (R2-1): a macro's literals adopt where expansion places
+/// them, so every macro form evaluates to the bits of the text its expansion
+/// produces, at sites that rebind the names the body reads and at sites that
+/// do not, and keeps those bits through `chelis deep` and `chelis surf`.
+#[test]
+fn macro_forms_evaluate_like_their_expansions_and_keep_their_bits() {
+    const PRELUDE: &str = "def f(x: tensor[2, f64]) -> tensor[2, f64] = x\n\
+                           def f2(n: i32, x: tensor[2, f64]) -> tensor[2, f64] = x\n\
+                           def tt[p: Float](l: List[p]) -> tensor[2, p] = to_tensor(l)\n\
+                           macro c(x) = cast(x, f64)\n\
+                           macro k(x) = f(x)\n\
+                           macro apply(h) = h(to_tensor([1.1, 2.2]))\n";
+    // (a local value for the name a site rebinds, that name, an invocation of
+    // one of the macros above or empty for a fresh body macro, the expansion's
+    // text). A program that a rebinding makes ill-typed, such as
+    // `f(to_tensor([1.1, 2.2]))` under a local `to_tensor`, is left to the
+    // chelis-types matrix, which needs no evaluation.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        ("fn (x) -> x", "f", "", "f(to_tensor([1.1, 2.2]))"),
+        ("fn (x) -> x", "f", "", "to_tensor([1.1, 2.2]) |> f"),
+        ("fn (x) -> x", "f", "", "[1.1, 2.2] |> to_tensor |> f"),
+        ("fn (n, x) -> x", "f2", "", "f2(1, to_tensor([1.1, 2.2]))"),
+        ("fn (n, x) -> x", "f2", "", "1 |> f2(to_tensor([1.1, 2.2]))"),
+        ("tt", "to_tensor", "", "cast(to_tensor([1.1, 2.2]), f64)"),
+        ("tt", "to_tensor", "", "to_tensor([1.1, 2.2]) |> cast(f64)"),
+        ("tt", "to_tensor", "", "[1.1, 2.2] |> to_tensor |> cast(f64)"),
+        ("tt", "to_tensor", "", "cast([1.1, 2.2] |> to_tensor, f64)"),
+        ("fn (x) -> x", "f", "c(1.1)", "cast(1.1, f64)"),
+        ("fn (x) -> x", "f", "c(-1.1)", "cast(-1.1, f64)"),
+        ("tt", "to_tensor", "c(to_tensor([1.1, 2.2]))", "cast(to_tensor([1.1, 2.2]), f64)"),
+        ("fn (x) -> x", "f", "k(to_tensor([1.1, 2.2]))", "f(to_tensor([1.1, 2.2]))"),
+        ("fn (x) -> x", "f", "apply(f)", "f(to_tensor([1.1, 2.2]))"),
+    ];
+    for rebind in [false, true] {
+        let mut source = PRELUDE.to_string();
+        for (index, (value, name, invocation, expansion)) in cases.iter().enumerate() {
+            let invocation = if invocation.is_empty() {
+                source.push_str(&format!("macro m{index}() = {expansion}\n"));
+                format!("m{index}()")
+            } else {
+                invocation.to_string()
+            };
+            let place = |e: &str| {
+                if rebind {
+                    format!("{{\n  {name} = {value}\n  {e}\n}}")
+                } else {
+                    e.to_string()
+                }
+            };
+            source.push_str(&format!(
+                "via{index} = {}\ndirect{index} = {}\n",
+                place(&invocation),
+                place(expansion)
+            ));
+        }
+        let directory = tempdir().expect("tempdir");
+        let file = "macros.ch";
+        common::write_file(&directory.path().join(file), &source);
+        let report = eval_json(directory.path(), file);
+        for index in 0..cases.len() {
+            assert_eq!(
+                root(&report, &format!("via{index}"))["value"],
+                root(&report, &format!("direct{index}"))["value"],
+                "case {index} (rebinding: {rebind}) evaluates differently through its macro:\n{source}"
+            );
+        }
+        let resugared = resugar(directory.path(), file);
+        assert_eq!(
+            eval_json(directory.path(), "resugared.ch")["roots"],
+            report["roots"],
+            "{source} changed value through chelis surf:\n{resugared}"
+        );
+    }
+}
+
+/// A macro argument expanded under an f64 cast binds at f64 exactly, and the
+/// value survives `chelis deep` and `chelis surf`.
+#[test]
+fn a_macro_argument_under_an_f64_cast_is_exact_through_resugaring() {
+    let directory = tempdir().expect("tempdir");
+    let file = "argument.ch";
+    common::write_file(
+        &directory.path().join(file),
+        "macro c(x) = cast(x, f64)\na = c(1.1)\nb = c(1.1f32)\n",
+    );
+    for file in [file, "resugared.ch"] {
+        if file == "resugared.ch" {
+            resugar(directory.path(), "argument.ch");
+        }
+        let report = eval_json(directory.path(), file);
+        assert_eq!(
+            root(&report, "a")["value"]["value"]["bits"],
+            EXACT_F64[0],
+            "{file}: {report}"
+        );
+        assert_eq!(
+            root(&report, "b")["value"]["value"]["bits"],
+            F32_WIDENED[0],
+            "{file}: {report}"
+        );
+    }
+}

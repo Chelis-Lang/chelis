@@ -4,6 +4,7 @@
 //! for Chelis Deep syntax (`.dp` files). Deep is the canonical s-expression
 //! form that the compiler operates on internally.
 
+pub mod adopt;
 pub mod ast;
 pub mod authoring;
 pub mod dtype_bounds;

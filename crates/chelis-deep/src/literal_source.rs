@@ -50,21 +50,7 @@ impl<'a> LiteralSource<'a> {
 
     /// Classify kind and family-wide value validity independently of provenance.
     pub fn family_fit(self, family: DtypeFamily) -> LiteralFamilyFit {
-        match self.numeric_atom {
-            Some(Atom::Float(_)) if matches!(family, DtypeFamily::Float | DtypeFamily::Numeric) => {
-                LiteralFamilyFit::Fits
-            }
-            Some(Atom::Int(_)) if family == DtypeFamily::Float => LiteralFamilyFit::Fits,
-            Some(Atom::Int(value))
-                if active_signed_integer_ranges()
-                    .into_iter()
-                    .all(|(min, max)| *value >= min && *value <= max) =>
-            {
-                LiteralFamilyFit::Fits
-            }
-            Some(Atom::Int(_)) => LiteralFamilyFit::IntegerOutOfRange,
-            _ => LiteralFamilyFit::IncompatibleKind,
-        }
+        atom_family_fit(self.numeric_atom, family)
     }
 
     /// Whether an unsuffixed literal is admitted by either §5.9 bound form.
@@ -79,38 +65,63 @@ impl<'a> LiteralSource<'a> {
     /// against the integer members the set actually lists, so `{i32, i64}`
     /// admits a value i8 could not hold, while `Int` still does not.
     pub fn bound_fit(self, bound: &crate::DtypeBound) -> LiteralFamilyFit {
-        let crate::DtypeBound::Set(members) = bound else {
-            let crate::DtypeBound::Family(family) = bound else {
-                unreachable!("DtypeBound has exactly two forms")
-            };
-            return self.family_fit(*family);
-        };
-        // §5.9 makes an empty set a declaration error, rejected before a
-        // bound is installed, so there is always at least one member.
-        let every_member_is_float = members.iter().all(|member| member.is_float());
-        match self.numeric_atom {
-            // A float literal cannot bind at an integer member.
-            Some(Atom::Float(_)) if every_member_is_float => LiteralFamilyFit::Fits,
-            Some(Atom::Float(_)) => LiteralFamilyFit::IncompatibleKind,
-            // An integer literal adopts a float member exactly as it does
-            // under `Float`.
-            Some(Atom::Int(_)) if every_member_is_float => LiteralFamilyFit::Fits,
-            Some(Atom::Int(value)) => {
-                if members
-                    .iter()
-                    .filter(|member| member.is_integer())
-                    .all(|member| {
-                        let (min, max) = signed_integer_range(*member);
-                        *value >= min && *value <= max
-                    })
-                {
-                    LiteralFamilyFit::Fits
-                } else {
-                    LiteralFamilyFit::IntegerOutOfRange
-                }
-            }
-            _ => LiteralFamilyFit::IncompatibleKind,
+        atom_bound_fit(self.numeric_atom, bound)
+    }
+}
+
+/// [`LiteralSource::family_fit`] of a numeric atom.
+fn atom_family_fit(atom: Option<&Atom>, family: DtypeFamily) -> LiteralFamilyFit {
+    match atom {
+        Some(Atom::Float(_)) if matches!(family, DtypeFamily::Float | DtypeFamily::Numeric) => {
+            LiteralFamilyFit::Fits
         }
+        Some(Atom::Int(_)) if family == DtypeFamily::Float => LiteralFamilyFit::Fits,
+        Some(Atom::Int(value))
+            if active_signed_integer_ranges()
+                .into_iter()
+                .all(|(min, max)| *value >= min && *value <= max) =>
+        {
+            LiteralFamilyFit::Fits
+        }
+        Some(Atom::Int(_)) => LiteralFamilyFit::IntegerOutOfRange,
+        _ => LiteralFamilyFit::IncompatibleKind,
+    }
+}
+
+/// [`LiteralSource::bound_fit`] of a numeric atom, which binder adoption also
+/// applies to an atom it has not yet written into a literal.
+pub(crate) fn atom_bound_fit(atom: Option<&Atom>, bound: &crate::DtypeBound) -> LiteralFamilyFit {
+    let crate::DtypeBound::Set(members) = bound else {
+        let crate::DtypeBound::Family(family) = bound else {
+            unreachable!("DtypeBound has exactly two forms")
+        };
+        return atom_family_fit(atom, *family);
+    };
+    // §5.9 makes an empty set a declaration error, rejected before a
+    // bound is installed, so there is always at least one member.
+    let every_member_is_float = members.iter().all(|member| member.is_float());
+    match atom {
+        // A float literal cannot bind at an integer member.
+        Some(Atom::Float(_)) if every_member_is_float => LiteralFamilyFit::Fits,
+        Some(Atom::Float(_)) => LiteralFamilyFit::IncompatibleKind,
+        // An integer literal adopts a float member exactly as it does
+        // under `Float`.
+        Some(Atom::Int(_)) if every_member_is_float => LiteralFamilyFit::Fits,
+        Some(Atom::Int(value)) => {
+            if members
+                .iter()
+                .filter(|member| member.is_integer())
+                .all(|member| {
+                    let (min, max) = signed_integer_range(*member);
+                    *value >= min && *value <= max
+                })
+            {
+                LiteralFamilyFit::Fits
+            } else {
+                LiteralFamilyFit::IntegerOutOfRange
+            }
+        }
+        _ => LiteralFamilyFit::IncompatibleKind,
     }
 }
 
