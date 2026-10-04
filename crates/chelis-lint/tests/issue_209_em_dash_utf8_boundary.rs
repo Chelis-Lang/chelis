@@ -45,7 +45,7 @@ fn run_check_and_fix(src: &str) -> Vec<chelis_lint::Violation> {
     let ctx = py_ctx(&path, src);
     let violations = NoEmDashInPublicStrings.check(&ctx);
     // Exercise fix() on every violation just like cmd_lint's
-    // violation_fix_status path does. This is where chelis#209
+    // fix_available_for_violation path does. This is where chelis#209
     // panicked.
     for v in &violations {
         let _ = NoEmDashInPublicStrings.fix(&ctx, v);

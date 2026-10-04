@@ -99,9 +99,7 @@ Style the formatter does not enforce:
   an exported API or dense signature benefits from clarity, and `copy(x)`
   only when forking ownership for downstream consumption. Existing fixtures
   and migration baselines may keep explicit `copy()` or `drop()` calls when
-  they prove compatibility or preserve baseline evidence;
-  `redundant-linearity-call` is advisory and is not papered over with
-  blocking-rule exceptions.
+  they prove compatibility or preserve baseline evidence.
 - lowered IR carries compiler-inserted `Copy` and `Drop` nodes for implicit
   linearity. If auto-copy/auto-drop produces unexpected IR, treat it as a
   structural blocker and escalate against `spec/design/implicit_linearity.md`

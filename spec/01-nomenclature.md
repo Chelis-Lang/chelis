@@ -1211,30 +1211,6 @@ commands after the gate is bypassed. `CHELIS_STYLE_GATE_DISABLE=1`
 suppresses the gate and the fixture/test advisory pass and remains
 reserved for tests.
 
-`redundant-linearity-call` is advisory: `chelis lint` reports explicit
-`copy()` and `drop()` source calls as warnings because implicit
-linearity inserts equivalent IR nodes, and `chelis check` prints the
-same warnings on user-facing runs. These warnings do not make
-`chelis lint --check` fail.
-
-Existing-corpus keep policy for `redundant-linearity-call`: checked-in
-fixtures, migration examples, and baseline files may keep explicit
-`copy()` or `drop()` when the call documents compatibility, preserves a
-before/after baseline, or exercises legacy source behavior. New or
-rewritten human-facing examples should use implicit linearity unless
-the example is specifically teaching or testing the explicit forms. A
-future promotion from advisory to blocking requires a separate cleanup
-plan and updated docs before the registry changes.
-
-`redundant-linearity-call` and `prefer-pipe-operator` do not expose
-auto-fixes until the fixer can prove the rewrite preserves semantics.
-For `copy()` / `drop()`, that proof requires the type and linearity
-pipeline, not source-text matching. For pipe rewrites, that proof
-requires knowing that the expression is a true first-argument dataflow
-chain, not merely a call nested inside a sibling argument. Until that
-semantic proof exists, `chelis lint --fix` must leave both warning
-classes unchanged.
-
 Exception entries inside the lint must carry a rule-id cross-reference
 to a section of this document, not free-form prose. The schema:
 
@@ -1507,9 +1483,6 @@ the blocking registry:
   from source string literals to active docs after existing current
   docs have been cleaned. Fixes should rewrite prose, not add path
   exceptions.
-- `redundant-linearity-call` promotion review: decide after the
-  implicit-linearity migration corpus is stable whether advisory
-  warnings should remain permanent or become blocking for new source.
 - Pipe-stage shape checks: if future syntax or decompiler work creates
   ambiguity around `x |> f(y)`, add coverage that preserves the
   first-argument semantics in §3.6 rather than accepting last-argument
@@ -1536,53 +1509,6 @@ The requirement is on the lint, not on the formatter. `chelis fmt
 --check` claims that the file it is named on is canonically formatted,
 and claims nothing about any other file; it therefore does not discharge
 this requirement, whatever it reports.
-
-### 12.6 Typed literals over literal casts
-
-**Rule:** A numeric literal that a `cast` exists only to bind at a concrete
-dtype is written with that dtype's literal suffix: `1.0f32`, not
-`cast(1.0, f32)`; `3i64`, not `cast(3, i64)`. The suffix states the dtype
-on the token itself.
-
-`prefer-typed-literal` is a warning with an autofix. It reports a direct call
-`cast(L, d)` whose first argument is one unsuffixed numeric literal token `L`
-and whose second is one of the eight suffix dtypes of
-`spec/02-surf-syntax.md` P10a, when `L` followed by `d` is a literal token.
-That holds in three cases:
-
-- an integer body, decimal or radix, under an integer dtype;
-- a float body under a float dtype;
-- a decimal integer body under a float dtype.
-
-In each case the two spellings are the same program. The cast form binds `L`
-at `d` (`spec/04-type-system.md` §5.6, position 4), so the cast itself is a
-same-dtype cast and changes no value ([04-NUM-14]); the suffixed form binds
-`L` at `d` directly (§5.5). Both finalize the literal's exact value once at
-`d` ([04-LIT-1], [04-LIT-2]), so they agree on every value and reject the
-same out-of-range or non-finite literals. The fix replaces the call with the
-body as written followed by the dtype name: `cast(1e-3, f64)` becomes
-`1e-3f64` and `cast(0xFF, i64)` becomes `0xFFi64`.
-
-The rule reports no other cast. In particular it does not report:
-
-- a negative operand such as `cast(-1, i64)`. `-1` is unary minus applied to
-  `1` (`spec/02-surf-syntax.md` §6.3), and the suffixed spelling negates a
-  value already bound at the suffix width, so the two disagree at an integer
-  minimum: `cast(-128, i8)` binds `-128`, while `-128i8` first binds `128i8`,
-  which is out of range;
-- a float body under an integer dtype (`cast(3.0, i64)`) or a radix body
-  under a float dtype (`cast(0x10, f32)`), which have no suffixed spelling
-  (§5.5);
-- a dtype outside the suffix set, including `bool`, a dtype binder, and
-  every reserved dtype name;
-- a cast spelled through a pipe, such as `1.0 |> cast(f64)`;
-- a call with a comment between its tokens, which the rewrite would delete.
-
-(The implementation does not yet report `cast(0, bf16)`, whose suffixed
-spelling `0bf16` the lexer rejects; see chelis#2852.)
-
-An example whose subject is `cast` itself, such as a demonstration of §5.6
-adoption, keeps the cast spelling.
 
 ---
 

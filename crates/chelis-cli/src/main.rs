@@ -402,11 +402,6 @@ enum Command {
         /// Run only the comma-separated set of rules.
         #[arg(long)]
         rules: Option<String>,
-        /// After the run, print one JSON line per file to stderr with the
-        /// typed rewrite gate's work: candidates, pipeline runs, and whether
-        /// the pipeline accepted the original source.
-        #[arg(long)]
-        stats: bool,
     },
     /// Internal: run the tests in a single file and emit NDJSON on stdout.
     /// Invoked by `chelis test` as a subprocess per file so a crash in one
@@ -1119,16 +1114,7 @@ fn main() {
             list,
             rule,
             rules,
-            stats,
-        }) => match cmd_lint(
-            paths,
-            check,
-            fix,
-            list,
-            rule.as_deref(),
-            rules.as_deref(),
-            stats,
-        ) {
+        }) => match cmd_lint(paths, check, fix, list, rule.as_deref(), rules.as_deref()) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -3381,7 +3367,6 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
     // e.g., `crates/chelis-surf/tests/fixtures/*.ch`). This advisory
     // emit is a best-effort nicety, so a detection failure skips
     // exception filtering rather than aborting `chelis check`.
-    let mut gate = TypedRewriteGate::default();
     let filtered = match style_gate::detect_lint_workspace_root(parent) {
         Ok(workspace_root) => {
             chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
@@ -3389,20 +3374,6 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         Err(_) => mine,
     };
     for violation in filtered {
-        // Parity with `cmd_lint`'s emit path (LP-LEAK-A / LP-LEAK-B):
-        // suppress warnings for rules that opt in to `check_mirrors_fix`
-        // when the autofix would silently decline or be rejected by the
-        // typed-pipeline gate. Without this filter `chelis check` floods
-        // with the same non-actionable false positives that
-        // `chelis lint --check` already suppresses, because the advisory
-        // emit path applied only the path-glob exception filter. Both
-        // code paths now decide suppression in `violation_fix_status`,
-        // so the two cannot drift again. The explicit file is both the
-        // lint scope and the fixability-probe target; walking its parent
-        // can make a temp fixture recursively lint all of `/tmp`.
-        if should_suppress_unfixable_violation(lint_scope, &rules, &violation, &mut gate) {
-            continue;
-        }
         eprintln!("warning: {violation}");
     }
 }
@@ -12730,112 +12701,6 @@ mod issue_1125_e5e_outer_reader_tests {
     }
 }
 
-/// Run the typed pipeline against a Surf source string (parse, desugar,
-/// macro-expand, type-check, effect-check, linearity-check) and return
-/// `true` iff every stage accepts.
-///
-/// Used by the lint fix driver to gate auto-fixes from rules that opt in
-/// via `Rule::fix_requires_typed_pipeline_check()` — currently only
-/// `redundant-linearity-call`. The spec safety bar in
-/// `spec/01-nomenclature.md` §12 names this exact pipeline: "the proof
-/// requires the type and linearity pipeline, not source-text matching".
-///
-/// Architectural rationale in
-/// `docs/archive/investigations/redundant_linearity_autofix_architecture.md`
-/// (Path 1B).
-fn typed_pipeline_accepts_surf(source: &str) -> bool {
-    matches!(
-        chelis_compiler_api::pipeline::run_source(chelis_compiler_api::pipeline::PipelineRequest {
-            source_kind: chelis_compiler_api::schema::SourceKind::Surf,
-            source,
-            entry: None,
-            goal: chelis_compiler_api::pipeline::PipelineGoal::FullCheck,
-        },),
-        Ok(chelis_compiler_api::pipeline::PipelineOutcome::Checked(_))
-    )
-}
-
-/// The typed-pipeline guard on lint rewrites.
-///
-/// `spec/01-nomenclature.md` §12 admits an autofix only when the rewrite
-/// preserves semantics. Each opted-in rule is intended to propose only
-/// meaning-preserving rewrites; whether that holds is open in chelis#3119.
-/// The pipeline check is a necessary guard, not a proof: it declines a
-/// candidate unless the pipeline accepts both the original source and the
-/// rewritten one. A source the pipeline rejects has no typed meaning to
-/// preserve, so every rewrite of it is declined.
-///
-/// The original's verdict depends only on the original text, so the gate
-/// computes it once per distinct source and checks it before any rewrite. A
-/// file the pipeline rejects then costs one pipeline run however many
-/// candidates its rules propose, instead of one full-file run per candidate
-/// (chelis#3108). The gate counts candidates and runs per file so tests can
-/// bound the work without timing it and `chelis lint --stats` can report it.
-#[derive(Default)]
-struct TypedRewriteGate {
-    original_accepted: BTreeMap<String, bool>,
-    files: BTreeMap<PathBuf, TypedRewriteFileStats>,
-}
-
-/// One file's work through the typed rewrite gate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct TypedRewriteFileStats {
-    /// Rewrites submitted to the gate.
-    candidates: usize,
-    /// Full typed-pipeline runs spent on them, the original's included.
-    pipeline_runs: usize,
-    /// The pipeline's verdict on the unedited source, once computed.
-    original_accepted: Option<bool>,
-}
-
-impl TypedRewriteGate {
-    fn accepts_rewrite(&mut self, path: &Path, original: &str, rewritten: &str) -> bool {
-        let mut runs = 0;
-        let original_accepted = match self.original_accepted.get(original) {
-            Some(accepted) => *accepted,
-            None => {
-                runs += 1;
-                let accepted = typed_pipeline_accepts_surf(original);
-                self.original_accepted
-                    .insert(original.to_string(), accepted);
-                accepted
-            }
-        };
-        let accepted = original_accepted && {
-            runs += 1;
-            typed_pipeline_accepts_surf(rewritten)
-        };
-        let stats = self.files.entry(path.to_path_buf()).or_default();
-        stats.candidates += 1;
-        stats.pipeline_runs += runs;
-        stats.original_accepted = Some(original_accepted);
-        accepted
-    }
-
-    #[cfg(test)]
-    fn pipeline_runs(&self) -> usize {
-        self.files.values().map(|stats| stats.pipeline_runs).sum()
-    }
-
-    /// One JSON object per file the gate saw, in path order: the
-    /// `chelis lint --stats` stderr lines.
-    fn stats_lines(&self) -> Vec<String> {
-        self.files
-            .iter()
-            .map(|(path, stats)| {
-                serde_json::json!({
-                    "lint_stats": "typed_rewrite_gate",
-                    "path": path.display().to_string(),
-                    "candidates": stats.candidates,
-                    "pipeline_runs": stats.pipeline_runs,
-                    "original_accepted": stats.original_accepted,
-                })
-                .to_string()
-            })
-            .collect()
-    }
-}
-
 /// `chelis lint` — naming-convention lint per `spec/01-nomenclature.md`.
 ///
 /// Walks each path in `paths` (default: `.`), dispatches to every registered
@@ -12849,7 +12714,6 @@ fn cmd_lint(
     list: bool,
     rule_filter: Option<&str>,
     rules_filter: Option<&str>,
-    stats: bool,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     if rule_filter.is_some() && rules_filter.is_some() {
         return Err("use either --rule or --rules, not both".into());
@@ -13006,9 +12870,8 @@ fn cmd_lint(
     let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
     // Bucket the rendered violation lines by severity instead of
     // printing them inline as targets are walked. A workspace `chelis
-    // lint --check .` can emit several hundred advisory lines (e.g.
-    // `prefer-pipe-operator` across packages/chelis-std/tests/*); when
-    // a handful of blocking ERROR lines are interleaved into that
+    // lint --check .` can emit many advisory lines; when a handful of
+    // blocking ERROR lines are interleaved into that
     // stream they are effectively invisible, and CI failure debugging
     // misreads the cause. The em-dash §8.6 rule has been bitten by
     // exactly this twice. Buckets let the blocking errors be printed
@@ -13018,16 +12881,9 @@ fn cmd_lint(
     let mut error_lines: Vec<String> = Vec::new();
     let mut warning_lines: Vec<String> = Vec::new();
     let mut advisory_lines: Vec<String> = Vec::new();
-    let mut gate = TypedRewriteGate::default();
     for target in &targets {
         if fix {
-            let applied = apply_lint_fixes(
-                target,
-                workspace_root.as_deref(),
-                &rules,
-                &exceptions,
-                &mut gate,
-            )?;
+            let applied = apply_lint_fixes(target, workspace_root.as_deref(), &rules, &exceptions)?;
             if applied > 0 {
                 println!(
                     "fixed {} replacement(s) under {}",
@@ -13039,22 +12895,12 @@ fn cmd_lint(
         let raw_violations = chelis_lint::lint(target, &rules)?;
         let kept = apply_exceptions_opt(&raw_violations, &exceptions, workspace_root.as_deref());
         for v in &kept {
-            // V2-F3 (PR #58): suppress warnings for rules that opt in
-            // to `check_mirrors_fix` when the autofix would silently
-            // decline (or be rejected by the typed-pipeline gate).
-            // Without this filter, `chelis lint --fix` is
-            // non-convergent for those rules: the warning fires, the
-            // autofix declines, and the next `--check` run fires the
-            // same warning again. Inline `keep` directives are
-            // honored separately by `violation_fix_status`, which decides
-            // both the suppression and the `[fix]` marker from one fix
-            // probe per violation.
-            let status = violation_fix_status(target, &rules, v, &mut gate);
-            if status.suppress {
-                continue;
-            }
             let severity = rule_severity(&rules, &v.rule_id);
-            let suffix = if status.fix_available { " [fix]" } else { "" };
+            let suffix = if fix_available_for_violation(target, &rules, v) {
+                " [fix]"
+            } else {
+                ""
+            };
             match severity {
                 chelis_lint::Severity::Error => error_lines.push(format!("{v}{suffix}")),
                 chelis_lint::Severity::Warning => {
@@ -13086,11 +12932,6 @@ fn cmd_lint(
             "lint --check failed: {blocking_total} blocking error(s) above \
              (advisory/warning lines, if any, are non-blocking)"
         );
-    }
-    if stats {
-        for line in gate.stats_lines() {
-            eprintln!("{line}");
-        }
     }
     if check && blocking_total > 0 {
         Ok(1)
@@ -13134,7 +12975,6 @@ fn apply_lint_fixes(
     workspace_root: Option<&Path>,
     rules: &[Box<dyn chelis_lint::Rule>],
     exceptions: &[chelis_lint::Exception],
-    gate: &mut TypedRewriteGate,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut total = 0usize;
     for _ in 0..5 {
@@ -13162,7 +13002,7 @@ fn apply_lint_fixes(
                 source: Some(&source),
                 surface,
             };
-            let mut replacements: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
+            let mut replacements: Vec<chelis_lint::Replacement> = Vec::new();
             for violation in &violations {
                 let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
                     continue;
@@ -13173,56 +13013,30 @@ fn apply_lint_fixes(
                     continue;
                 }
                 if let Some(replacement) = rule.fix(&ctx, violation) {
-                    replacements.push((replacement, rule.fix_requires_typed_pipeline_check()));
+                    replacements.push(replacement);
                 }
             }
-            replacements.sort_by_key(|(replacement, _)| {
+            replacements.sort_by_key(|replacement| {
                 (
                     replacement.end.saturating_sub(replacement.start),
                     replacement.start,
                 )
             });
-            let mut filtered: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
-            for (replacement, needs_check) in replacements {
+            let mut accepted: Vec<chelis_lint::Replacement> = Vec::new();
+            for replacement in replacements {
                 if replacement.start > replacement.end
-                    || filtered.iter().any(|(kept, _)| {
-                        replacement.start < kept.end && kept.start < replacement.end
-                    })
+                    || accepted
+                        .iter()
+                        .any(|kept| replacement.start < kept.end && kept.start < replacement.end)
                 {
                     continue;
-                }
-                filtered.push((replacement, needs_check));
-            }
-            if filtered.is_empty() {
-                continue;
-            }
-            filtered.sort_by_key(|(replacement, _)| replacement.start);
-
-            // Per-replacement typed-pipeline gate for rules that opted in
-            // (Path 1B per
-            // docs/archive/investigations/redundant_linearity_autofix_architecture.md).
-            // We test each verification-required replacement independently
-            // by applying it to the original source and running the typed
-            // pipeline. Independent verification preserves the maximum set
-            // of safe rewrites: one unsafe strip does not block the others.
-            let surface_eligible_for_typed_check =
-                matches!(surface, chelis_lint::Surface::SurfSource);
-            let mut accepted: Vec<chelis_lint::Replacement> = Vec::new();
-            for (replacement, needs_check) in filtered {
-                if needs_check && surface_eligible_for_typed_check {
-                    let mut candidate = source.clone();
-                    candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-                    if !gate.accepts_rewrite(&path, &source, &candidate) {
-                        // Drop this replacement silently; the lint warning
-                        // remains so the user sees the still-flagged copy().
-                        continue;
-                    }
                 }
                 accepted.push(replacement);
             }
             if accepted.is_empty() {
                 continue;
             }
+            accepted.sort_by_key(|replacement| replacement.start);
             let mut edited = source;
             for replacement in accepted.iter().rev() {
                 edited.replace_range(replacement.start..replacement.end, &replacement.text);
@@ -13238,208 +13052,34 @@ fn apply_lint_fixes(
     Ok(total)
 }
 
-/// The autofix standing of one violation on the `chelis lint` emit path.
-struct ViolationFixStatus {
-    /// The rule opted in to `check_mirrors_fix` and no fix would apply, so
-    /// the warning is not printed.
-    suppress: bool,
-    /// A fix would apply, so the printed line carries the `[fix]` marker.
-    fix_available: bool,
-}
-
-/// Decide suppression and the `[fix]` marker for `violation` from a single
-/// fix probe. An inline `keep` directive on the violation's line yields
-/// neither: the user pinned the diagnostic, so it prints without a marker.
-fn violation_fix_status(
+/// Whether `violation` carries the `[fix]` marker: its rule proposes a
+/// replacement and no inline `keep` directive pins the occurrence.
+fn fix_available_for_violation(
     target: &Path,
     rules: &[Box<dyn chelis_lint::Rule>],
     violation: &chelis_lint::Violation,
-    gate: &mut TypedRewriteGate,
-) -> ViolationFixStatus {
-    let neither = ViolationFixStatus {
-        suppress: false,
-        fix_available: false,
-    };
+) -> bool {
     let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
-        return neither;
+        return false;
     };
     let Ok(source) = fs::read_to_string(&violation.path) else {
-        return neither;
+        return false;
     };
     let Some(surface) = chelis_lint::Surface::classify(&violation.path, false) else {
-        return neither;
+        return false;
     };
     if violation.line.is_some_and(|line| {
         chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
     }) {
-        return neither;
+        return false;
     }
-    let fix_available =
-        fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation, gate);
-    ViolationFixStatus {
-        suppress: rule.check_mirrors_fix() && !fix_available,
-        fix_available,
-    }
-}
-
-/// Does the rule propose a safe fix for `violation` against `source` —
-/// ignoring any `keep` directive on the violation's line?
-///
-/// `violation_fix_status` reports no fix when an inline `keep`
-/// directive suppresses the rewrite; that's the correct gate for
-/// printing the `[fix]` marker (no marker on kept-on-purpose
-/// violations) and for `apply_lint_fixes` (no rewrite on kept
-/// violations). The CLI's `check_mirrors_fix` warning suppression
-/// (V2-F3 / PR #58) needs to distinguish "fix unavailable because the
-/// user said keep" (warning should still print) from "fix unavailable
-/// because the rule declined or the typed-pipeline gate rejected"
-/// (warning should be suppressed; `--fix` is non-convergent
-/// otherwise). This helper exposes the latter predicate.
-fn fix_would_apply_for_violation(
-    target: &Path,
-    rule: &dyn chelis_lint::Rule,
-    source: &str,
-    surface: chelis_lint::Surface,
-    violation: &chelis_lint::Violation,
-    gate: &mut TypedRewriteGate,
-) -> bool {
     let ctx = chelis_lint::Context {
         root: target,
         path: &violation.path,
-        source: Some(source),
+        source: Some(&source),
         surface,
     };
-    let Some(replacement) = rule.fix(&ctx, violation) else {
-        return false;
-    };
-    if rule.fix_requires_typed_pipeline_check()
-        && matches!(surface, chelis_lint::Surface::SurfSource)
-    {
-        let mut candidate = source.to_string();
-        if replacement.start > candidate.len() || replacement.end > candidate.len() {
-            return false;
-        }
-        candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-        return gate.accepts_rewrite(&violation.path, source, &candidate);
-    }
-    true
-}
-
-/// Should the CLI suppress this violation's warning because the rule
-/// opted in to `check_mirrors_fix` and the autofix would silently
-/// decline (or be rejected by the typed-pipeline gate)?
-///
-/// V2-F3 (PR #58): a rule whose warning is only actionable when
-/// paired with a safe rewrite should not surface the warning when no
-/// rewrite is on offer; otherwise `chelis lint --fix` is
-/// non-convergent for that rule. The CLI applies this filter at the
-/// final warning-emit path. Explicit `keep` directives are honored:
-/// the user has opted to preserve the source and see the warning, so
-/// suppression does not apply.
-fn should_suppress_unfixable_violation(
-    target: &Path,
-    rules: &[Box<dyn chelis_lint::Rule>],
-    violation: &chelis_lint::Violation,
-    gate: &mut TypedRewriteGate,
-) -> bool {
-    violation_fix_status(target, rules, violation, gate).suppress
-}
-
-#[cfg(test)]
-mod typed_rewrite_gate_tests {
-    //! chelis#3108: the typed-pipeline fix gate costs one pipeline run per
-    //! distinct original source plus one per rewrite it certifies, never one
-    //! full-file run per candidate on a source the pipeline rejects. The
-    //! bounds are counted runs, not timings.
-
-    use super::{TypedRewriteGate, violation_fix_status};
-    use std::fs;
-    use tempfile::tempdir;
-
-    const CANDIDATES: usize = 6;
-
-    /// Lint `source` with the registered rules and decide every
-    /// `prefer-pipe-operator` violation through one gate. Returns the
-    /// per-violation `(suppress, fix_available)` pairs and the gate's runs.
-    fn decide_pipe_violations(source: &str) -> (Vec<(bool, bool)>, usize) {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("candidates.ch");
-        fs::write(&path, source).expect("write fixture");
-        let rules = chelis_lint::registry::selectable_rules();
-        let violations = chelis_lint::lint(&path, &rules).expect("lint fixture");
-        let mut gate = TypedRewriteGate::default();
-        let statuses = violations
-            .iter()
-            .filter(|violation| violation.rule_id == "prefer-pipe-operator")
-            .map(|violation| {
-                let status = violation_fix_status(&path, &rules, violation, &mut gate);
-                (status.suppress, status.fix_available)
-            })
-            .collect();
-        (statuses, gate.pipeline_runs())
-    }
-
-    fn defs(body: &str) -> String {
-        (0..CANDIDATES)
-            .map(|index| format!("def f{index}(x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn rejected_original_costs_one_run_for_every_candidate() {
-        // `outer`, `inner`, and `scale` are undefined, so the pipeline
-        // rejects the unedited source and no rewrite of it is certified.
-        let (statuses, runs) = decide_pipe_violations(&defs("outer(inner(x), scale)"));
-        assert_eq!(
-            statuses.len(),
-            CANDIDATES,
-            "fixture must raise one candidate per def"
-        );
-        assert!(
-            statuses.iter().all(|&(suppress, fix)| suppress && !fix),
-            "every candidate of a rejected source is suppressed without a fix: {statuses:?}"
-        );
-        assert_eq!(
-            runs, 1,
-            "a rejected original costs one pipeline run, not one per candidate"
-        );
-    }
-
-    #[test]
-    fn accepted_original_costs_one_run_plus_one_per_candidate() {
-        // `relu(neg(x))` and its rewrite `x |> neg |> relu` both check.
-        let (statuses, runs) = decide_pipe_violations(&defs("relu(neg(x))"));
-        assert_eq!(
-            statuses.len(),
-            CANDIDATES,
-            "fixture must raise one candidate per def"
-        );
-        assert!(
-            statuses.iter().all(|&(suppress, fix)| !suppress && fix),
-            "every certified rewrite keeps its warning and offers a fix: {statuses:?}"
-        );
-        assert_eq!(
-            runs,
-            1 + CANDIDATES,
-            "one run for the original, one per rewrite"
-        );
-    }
-
-    #[test]
-    fn accepted_original_still_rejects_an_unsafe_rewrite() {
-        // The pipeline accepts this program but rejects the pipe rewrite
-        // the rule proposes for it, so the warning is suppressed after one
-        // run for the original and one for the rewrite.
-        let source = "def step(state: i64, index: i64) -> i64 = if gte(index, 288i64) then state else state |> add(1i64) |> step(add(index, 1i64))\nvalue = step(0i64, 0i64)\nout: List[i64] = [value, value]\n";
-        let (statuses, runs) = decide_pipe_violations(source);
-        assert_eq!(
-            statuses,
-            vec![(true, false)],
-            "one suppressed candidate without a fix"
-        );
-        assert_eq!(runs, 2, "one run for the original, one for the rewrite");
-    }
+    rule.fix(&ctx, violation).is_some()
 }
 
 #[cfg(test)]

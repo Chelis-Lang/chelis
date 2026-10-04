@@ -266,10 +266,7 @@ available.
 
 ## Migration And Linting
 
-Existing source with explicit `copy()` and `drop()` remains valid. The
-`redundant-linearity-call` lint flags removable explicit calls as warnings for
-user-facing `chelis lint` and `chelis check`. The lint is advisory in this release and
-does not fail style gates or fixture/test compilation paths unless explicitly invoked.
+Existing source with explicit `copy()` and `drop()` remains valid.
 
 Executable examples should move toward the implicit style. Fixture baseline updates
 must record before/after fitness data in machine-readable CSV or JSON. Expected deltas

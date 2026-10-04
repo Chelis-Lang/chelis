@@ -77,10 +77,9 @@ fn names_tensor_to_scalar(expr: &Expr) -> bool {
 
 /// The tensor operand of a final `tensor_to_scalar` call, in either spelling
 /// the formatter and linter accept: the call `tensor_to_scalar(e)`, or a pipe
-/// whose last stage is the bare name `tensor_to_scalar`. The pipe
-/// spelling is what `prefer-pipe-operator` rewrites a nested call chain to, so
-/// matching only the call form would let a style fix disconnect a property
-/// from Beacon.
+/// whose last stage is the bare name `tensor_to_scalar`. Both spellings
+/// denote the same application, so matching only the call form would let a
+/// change of spelling disconnect a property from Beacon.
 fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
     match expr {
         Expr::Apply(function, operands, _)
