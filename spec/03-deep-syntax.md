@@ -929,6 +929,11 @@ unsuffixed canonical numeric pattern token, including `-0.0` and the full
 
 ### 6.4 Literal Normalization
 
+A literal's `type` metadata binds its dtype. An expression ascription must
+carry its checking constraint separately from that literal metadata, for
+example on a one-expression `block` containing the intact literal. Replacing
+the operand's type metadata is not an ascription.
+
 | Type | Canonical | Normalizations |
 |---|---|---|
 | Integer | Decimal, no leading zeros | `07` → `7` |

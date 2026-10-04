@@ -941,6 +941,16 @@ fn parity_construct_alternatives() {
 }
 
 #[test]
+fn parity_literal_ascriptions() {
+    let path = examples_root().join("literal_ascriptions.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\n",
+    );
+    drive_parity(&examples_root().join("literal_ascriptions.ch"), true);
+}
+
+#[test]
 fn parity_linspace() {
     drive_parity(&examples_root().join("linspace.ch"), true);
 }

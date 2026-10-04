@@ -1524,11 +1524,18 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
     )
 }
 
-/// Inject a type annotation into the metadata of a desugared expression.
+/// Preserve the operand's binding type when adding a checking ascription.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
-    match expr {
+    match &expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Lit || node.meta().ty().is_some() => {
+            // A literal's type selects its dtype, and an existing expression
+            // type may itself be an authored check. Neither may be overwritten.
+            // The ordinary one-expression block preserves the operand and owns
+            // the new result constraint without introducing a new Deep form.
+            node_meta(DeepTag::Block, meta_with_type(ty), vec![expr])
+        }
         deep::Expr::Node(..) => with_metadata_value(expr, type_metadata(ty)),
-        other => node_meta(DeepTag::Var, meta_with_type(ty), vec![other]),
+        _ => node_meta(DeepTag::Var, meta_with_type(ty), vec![expr]),
     }
 }
 

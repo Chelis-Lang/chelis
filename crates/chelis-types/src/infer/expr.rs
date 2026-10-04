@@ -216,6 +216,32 @@ pub(super) fn infer_expr_with_expected(
     )
 }
 
+/// A Surf literal ascription keeps the literal intact inside a typed block.
+/// Retain the opaque-forgery diagnostic at that checking boundary as well as
+/// at the direct Deep literal-metadata boundary.
+pub(super) fn check_opaque_literal_ascription(
+    expr: &deep::Expr,
+    declared: &Type,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let Some((DeepTag::Block, _, [value])) = stamped_parts(expr) else {
+        return false;
+    };
+    if !matches!(stamped_parts(value), Some((DeepTag::Lit, _, _))) {
+        return false;
+    }
+    match declared {
+        Type::Adt(name, _) | Type::KindedAdt(name, _) => crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::LitForge,
+            name,
+            adt_reg,
+            errors,
+        ),
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expr_with_type_metadata_ownership(
     expr: &deep::Expr,
@@ -579,7 +605,9 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Ok(declared) => declared,
             Err(witness) => propagate(&witness),
         };
-        if product.defer_result_type_constraint(&result, &declared, subst) {
+        if check_opaque_literal_ascription(expr, &declared, adt_reg, errors) {
+            declared
+        } else if product.defer_result_type_constraint(&result, &declared, subst) {
             result
         } else {
             if let Err(error) = unify(&result, &declared, subst) {
@@ -1185,12 +1213,9 @@ pub(super) fn infer_lit(
             );
         }
         // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
-        // metadata on a literal outside the defining module
-        // forges an opaque value. Reachable from BOTH
-        // surfaces: Surf expression ascription
-        // (`0.5 : Probability`) and block-binding ascription
-        // desugar to exactly this metadata (RT-0), so the
-        // gate is not scoped to `.dp` ingestion.
+        // metadata on a Deep literal outside the defining module
+        // forges an opaque value. Surf's separate checking boundary
+        // retains the same diagnostic via check_opaque_literal_ascription.
         // `resolve_deep_type` expands transparent
         // aliases, so `0.5 : P2` cannot launder the gate.
         if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {

@@ -89,3 +89,11 @@ A local `to_tensor` binding that would capture a compiler-generated numeric
 literal conversion is currently refused with a source location. Rename the
 binding to use a tensor literal; an explicit `List[...]` annotation retains
 an authored List and ordinary calls to the local function.
+
+### Scalar ascriptions
+
+An ascription checks the value's type. `(1.5f64 : f64)` agrees;
+`(1.5f64 : f32)` is a precision mismatch. The same rule applies to
+`value: f64 = 1.5f64` inside a block. Use an explicit `cast` to convert
+a value, and a suffix or an adopting literal position to choose its dtype.
+Nested ascriptions retain each check.

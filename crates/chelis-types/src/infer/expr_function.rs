@@ -535,7 +535,9 @@ pub(super) fn infer_let(
                             Err(witness) => propagate(&witness),
                         },
                     };
-                    if product.defer_result_type_constraint(&expr_ty, &declared_ty, subst) {
+                    if check_opaque_literal_ascription(rhs_expr, &declared_ty, adt_reg, errors) {
+                        declared_ty
+                    } else if product.defer_result_type_constraint(&expr_ty, &declared_ty, subst) {
                         expr_ty
                     } else {
                         match unify(&expr_ty, &declared_ty, subst) {

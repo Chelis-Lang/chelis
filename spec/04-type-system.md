@@ -633,10 +633,10 @@ secondary type errors:
    the check unit declares any opaque type.
 6. Forging: Deep `cast` into the type (both `t-prim` and `t-adt`
    target shapes), `cast` out of an opaque value, and
-   `{type: (t-adt ...)}` literal metadata -- which is reachable from
-   BOTH surfaces, because Surf expression ascription
-   (`0.5 : Probability`) and block-binding ascription desugar to
-   exactly that metadata.
+   `{type: (t-adt ...)}` literal metadata. Surf expression ascription
+   (`0.5 : Probability`) and block-binding ascription of a literal to an
+   opaque type are also rejected outside its defining module; checking an
+   ascription does not authorize constructing the opaque type.
 
 **The sixth rejection (unexported references).** An out-of-module
 reference to an *unexported* binding of the defining module whose
@@ -2031,7 +2031,11 @@ type must say so via suffix, declared element type, or `cast`.
 
 The default is the **user-facing contract** and is non-overridable except by
 the three mechanisms above. Whichever dtype they select, the literal binds
-there under [04-LIT-2].
+there under [04-LIT-2]. An expression ascription `(e : T)` or scalar
+binding annotation checks that the already-bound value has type `T`; it does
+not select or replace a literal's dtype. A mismatched suffix or default is
+a type error, at both top-level and block scope. Nested ascriptions retain
+every checking constraint.
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
 > declared primitive family: integer atoms denote only integer primitives,
