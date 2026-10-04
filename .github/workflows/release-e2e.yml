@@ -21,8 +21,8 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || 'v0.18.12' }}
-  # release.yml dispatch of agent/static-linux-release at bcdef4eba.
-  CANDIDATE_RUN: '37227275376'
+  # release.yml dispatch of agent/static-linux-release at 9c7a37f5b.
+  CANDIDATE_RUN: '37233543284'
 
 jobs:
   inputs:
