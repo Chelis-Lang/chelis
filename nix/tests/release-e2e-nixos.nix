@@ -9,6 +9,14 @@
 #     --arg harness /abs/scripts/release_e2e.py \
 #     --argstr tag vX.Y.Z --argstr archiveLabel vX.Y.Z|dev-<sha8> \
 #     --argstr sourceSha <40-hex commit>
+#
+# `--arg online true` adds the bootstrap and the GitHub API install, through
+# QEMU's user-mode network. The Nix sandbox has no network, so build the
+# `driver` attribute instead and run it on the host with GITHUB_TOKEN set:
+#
+#   nix build --file nix/tests/release-e2e-nixos.nix driver --arg online true \
+#     --argstr repo OWNER/NAME ...
+#   GITHUB_TOKEN=... ./result/bin/nixos-test-driver -o "$PWD/nixos-result"
 {
   assets,
   gates,
@@ -16,6 +24,8 @@
   tag,
   archiveLabel ? tag,
   sourceSha,
+  online ? false,
+  repo ? "Chelis-Lang/chelis",
   # nixos-26.05 on 2026-10-04.
   nixpkgs ? fetchTarball {
     url = "https://github.com/NixOS/nixpkgs/archive/825e2028c29b702a4a5f085f08095d12099784f2.tar.gz";
@@ -57,8 +67,15 @@ let
         pkgs.binutils
         pkgs.gnutar
         pkgs.gzip
-      ];
+      ]
+      ++ lib.optional online pkgs.gh;
+    }
+    // lib.optionalAttrs online {
+      # The test framework leaves the user-mode NIC unconfigured; DHCP gives it
+      # QEMU's address, gateway, and DNS forwarder.
+      networking.interfaces.eth0.useDHCP = true;
     };
+  onlineFlags = lib.optionalString online " --online --repo ${repo}";
 in
 pkgs.testers.runNixOSTest {
   name = "chelis-release-e2e";
@@ -70,16 +87,32 @@ pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
+    import os
+    import tempfile
+
+    token_path: str | None = None
+    if ${if online then "True" else "False"}:
+        with tempfile.NamedTemporaryFile("w", delete=False) as token_file:
+            token_file.write(os.environ["GITHUB_TOKEN"])
+        token_path = token_file.name
+
     start_all()
     for machine in (stock, nixld):
         machine.wait_for_unit("multi-user.target")
+        prefix = ""
+        if token_path is not None:
+            machine.wait_until_succeeds("ip route show default | grep -q .", timeout=180)
+            machine.copy_from_host(token_path, "/tmp/github-token")
+            prefix = "GITHUB_TOKEN=$(cat /tmp/github-token) GH_TOKEN=$(cat /tmp/github-token) "
         status, _ = machine.execute(
-            f"python3 ${harnessScript} run --label 'NixOS 26.05 ({machine.name})'"
+            prefix
+            + f"python3 ${harnessScript} run --label 'NixOS 26.05 ({machine.name})'"
             " --tag ${tag} --archive-label ${archiveLabel} --source-sha ${sourceSha}"
-            " --assets ${linuxAssets} --gates ${gateTree}"
+            " --assets ${linuxAssets} --gates ${gateTree}${onlineFlags}"
             " --evidence /tmp/evidence > /tmp/console.log 2>&1",
             timeout=1800,
         )
+        machine.succeed("rm -f /tmp/github-token")
         print(machine.succeed("cat /tmp/console.log"))
         machine.succeed(
             f"mkdir -p /tmp/evidence && echo {status} > /tmp/evidence/exit-status"

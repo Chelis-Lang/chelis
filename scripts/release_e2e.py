@@ -313,12 +313,18 @@ class Proof:
         self.offline_home: Path | None = None
 
     def env(self, **extra: str | Path) -> dict[str, str]:
-        """The caller's environment without Chelis selection or CI identity."""
+        """The caller's environment without Chelis selection or CI identity.
+
+        `--chelis-cc` is the one exception: it names the C compiler the
+        install guide tells users of an older default compiler to select.
+        """
         environment = {
             key: value
             for key, value in os.environ.items()
             if not key.startswith(("CHELIS_", "CHELISUP_")) and key != "GITHUB_SHA"
         }
+        if self.args.chelis_cc:
+            environment["CHELIS_CC"] = self.args.chelis_cc
         environment.update({key: str(value) for key, value in extra.items()})
         return environment
 
@@ -449,17 +455,34 @@ class Proof:
         env = self.env(CHELIS_HOME=home)
         _, script, _ = self.run(
             "download-chelisup.sh",
-            [gh, "release", "download", "--repo", REPO, "--pattern", "chelisup.sh"]
+            [
+                gh,
+                "release",
+                "download",
+                "--repo",
+                self.args.repo,
+                "--pattern",
+                "chelisup.sh",
+            ]
             + ["--output", "-"],
             env=env,
             timeout=120,
         )
+        rewrite = ""
+        if self.args.repo != REPO:
+            # The script names the one repository it installs from. A rehearsal
+            # changes that line and nothing else.
+            line = f'repo="{REPO}"'
+            if script.count(line) != 1:
+                raise StepFailed(f"chelisup.sh does not assign {line} exactly once")
+            script = script.replace(line, f'repo="{self.args.repo}"')
+            rewrite = f"; its repo line rewritten to {self.args.repo}"
         self.run("sh", ["sh"], env=env, stdin=script.encode(), timeout=300)
         installed = home / "bin" / "chelisup"
         if not installed.is_file() or not os.access(installed, os.X_OK):
             raise StepFailed("the bootstrap did not install an executable chelisup")
         _, stdout, _ = self.run("chelisup-version", [installed, "--version"], env=env)
-        return f"installed {stdout.strip()} into $CHELIS_HOME/bin"
+        return f"chelisup.sh from {self.args.repo} installed {stdout.strip()}{rewrite}"
 
     def install_online(self) -> str:
         if not self.args.online:
@@ -470,13 +493,26 @@ class Proof:
         installer = home / "bin" / "chelisup"
         if not installer.is_file():
             installer = self.copy_installer(self.evidence / "online-installer")
-        self.run(
+        extra: dict[str, str | Path] = {"CHELIS_HOME": home}
+        if self.args.repo != REPO:
+            extra["CHELISUP_REPO"] = self.args.repo
+        _, stdout, _ = self.run(
             "install",
             [installer, "install", self.version],
-            env=self.env(CHELIS_HOME=home),
+            env=self.env(**extra),
             timeout=900,
         )
-        return "from the GitHub API; " + self.require_version(home)
+        installed = next(
+            (
+                line
+                for line in stdout.splitlines()
+                if line.startswith("installed chelis")
+            ),
+            "chelisup printed no install line",
+        )
+        return f"from {self.args.repo} through the GitHub API: {installed}; " + (
+            self.require_version(home)
+        )
 
     def install_offline(self) -> str:
         home = self.evidence / "offline-home"
@@ -734,6 +770,8 @@ def run(args: argparse.Namespace) -> int:
         "version": args.version,
         "source_sha": args.source_sha,
         "online": args.online,
+        "repo": args.repo,
+        "chelis_cc": args.chelis_cc,
         "host": facts,
         "status": "failed",
     }
@@ -848,6 +886,16 @@ def main() -> int:
         "dev-<sha> marks an unpublished candidate",
     )
     proof.add_argument("--online", action="store_true")
+    proof.add_argument(
+        "--repo",
+        default=REPO,
+        help="repository the online steps install from (default: %(default)s); "
+        "another one rehearses a release",
+    )
+    proof.add_argument(
+        "--chelis-cc",
+        help="C compiler to name in CHELIS_CC for every chelis command",
+    )
     proof.set_defaults(handler=run)
     table = commands.add_parser("summarize", help="render every report as one table")
     table.add_argument("root", type=Path)

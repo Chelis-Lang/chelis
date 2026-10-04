@@ -21,8 +21,8 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || 'v0.18.12' }}
-  # release.yml dispatch of agent/static-linux-release at 5a233eafc.
-  CANDIDATE_RUN: '37216662276'
+  # release.yml dispatch of agent/static-linux-release at bcdef4eba.
+  CANDIDATE_RUN: '37227275376'
 
 jobs:
   inputs:
@@ -109,12 +109,27 @@ jobs:
           retention-days: 7
 
   hosts:
-    name: ${{ matrix.runner }}
+    name: ${{ matrix.label || matrix.runner }}
     needs: inputs
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-15, macos-26, ubuntu-22.04, ubuntu-24.04]
+        include:
+          - runner: macos-14
+            id: macos-14
+          # The install guide's remedy for Xcode 15, the default on macos-14.
+          - runner: macos-14
+            id: macos-14-xcode-16.2
+            label: macos-14 + Xcode 16.2
+            xcode: /Applications/Xcode_16.2.app
+          - runner: macos-15
+            id: macos-15
+          - runner: macos-26
+            id: macos-26
+          - runner: ubuntu-22.04
+            id: ubuntu-22.04
+          - runner: ubuntu-24.04
+            id: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -126,6 +141,13 @@ jobs:
           name: release-e2e-inputs
           path: e2e
       - uses: astral-sh/setup-uv@v8.1.0
+      - name: Select ${{ matrix.xcode }}
+        if: matrix.xcode
+        env:
+          XCODE: ${{ matrix.xcode }}
+        run: |
+          sudo xcode-select --switch "$XCODE"
+          echo "selected $(xcode-select -p): $(clang --version | head -1)"
       - name: Prove the release on this host
         env:
           GH_TOKEN: ${{ github.token }}
@@ -133,7 +155,7 @@ jobs:
           SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
           TAG: ${{ needs.inputs.outputs.tag }}
           ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
-          LABEL: ${{ matrix.runner }}
+          LABEL: ${{ matrix.label || matrix.runner }}
         run: >-
           uv run --python 3.11 --no-project python scripts/release_e2e.py run --online
           --label "$LABEL" --tag "$TAG" --archive-label "$ARCHIVE_LABEL"
@@ -142,13 +164,13 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: release-e2e-evidence-${{ matrix.runner }}
+          name: release-e2e-evidence-${{ matrix.id }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: warn
           retention-days: 14
 
   distros:
-    name: ${{ matrix.image }}
+    name: ${{ matrix.label || matrix.image }}
     needs: inputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -189,6 +211,17 @@ jobs:
           - image: opensuse/leap:15.6
             id: opensuse-leap-15.6
             prepare: zypper -n -q install gcc gcc-c++ tar gzip
+          # The install guide's remedies for a default GCC older than 10.
+          - image: ubuntu:20.04
+            id: ubuntu-20.04-gcc-10
+            label: ubuntu:20.04 + gcc-10
+            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates gcc-10
+            remedy-cc: gcc-10
+          - image: opensuse/leap:15.6
+            id: opensuse-leap-15.6-gcc13
+            label: opensuse/leap:15.6 + gcc13
+            prepare: zypper -n -q install gcc gcc-c++ tar gzip gcc13
+            remedy-cc: gcc-13
           - image: archlinux:latest
             id: archlinux
             prepare: pacman -Syu --noconfirm --needed --quiet gcc tar gzip
@@ -210,24 +243,27 @@ jobs:
       # Each image gets the documented native prerequisites and nothing else.
       # gh is absent, so the run covers the GitHub API install but not the gh
       # bootstrap.
-      - name: Prove the release inside ${{ matrix.image }}
+      - name: Prove the release inside ${{ matrix.label || matrix.image }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
           TAG: ${{ needs.inputs.outputs.tag }}
           ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
           IMAGE: ${{ matrix.image }}
+          LABEL: ${{ matrix.label || matrix.image }}
           PREPARE: ${{ matrix.prepare }}
+          REMEDY_CC: ${{ matrix.remedy-cc }}
           PYTHON: ${{ matrix.python || '/work/.uv/uv run --python 3.11 --no-project python' }}
         run: |
           set -euo pipefail
           mkdir -p .uv && cp "$(command -v uv)" .uv/uv
-          docker run --rm -e GITHUB_TOKEN -e SOURCE_SHA -e TAG -e ARCHIVE_LABEL -e IMAGE \
-            -e PREPARE -e PYTHON -v "$PWD:/work" -w /work "$IMAGE" sh -c '
+          docker run --rm -e GITHUB_TOKEN -e SOURCE_SHA -e TAG -e ARCHIVE_LABEL -e LABEL \
+            -e REMEDY_CC -e PREPARE -e PYTHON -v "$PWD:/work" -w /work "$IMAGE" sh -c '
               set -e
               sh -c "$PREPARE" >/dev/null
-              $PYTHON scripts/release_e2e.py run --online --label "$IMAGE" \
+              $PYTHON scripts/release_e2e.py run --online --label "$LABEL" \
                 --tag "$TAG" --archive-label "$ARCHIVE_LABEL" --source-sha "$SOURCE_SHA" \
+                ${REMEDY_CC:+--chelis-cc "$REMEDY_CC"} \
                 --assets e2e/assets --gates e2e/gates --evidence /work/evidence'
       - if: always()
         uses: actions/upload-artifact@v7
