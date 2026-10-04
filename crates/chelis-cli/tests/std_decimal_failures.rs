@@ -5,9 +5,11 @@
 //! own validity is reported left to right, then `RejectInexact`, then the
 //! result's range, and every check runs before the arithmetic it protects, so
 //! no primitive numeric trap escapes a call for any arguments. Each eval suite
-//! runs as one `chelis test` invocation over a generated fixture whose every
-//! test calls one failing (or extreme) expression; the runner reports each
-//! call's failure message on its FAIL line. The compiled C lane builds one
+//! runs as `chelis test` invocations over generated fixtures whose every test
+//! calls one failing (or extreme) expression, at most `SUITE_BATCH` tests per
+//! invocation, so the runner's whole-suite timeout bounds one batch rather
+//! than the whole sweep; the runner reports each call's failure message on its
+//! FAIL line. The compiled C lane builds one
 //! program that selects a failing expression by the contents of `case.txt`
 //! and runs it once per case. Opaque construction and inspection outside the
 //! module, the removed names, and `grad` through `decimal_from_f64` are
@@ -300,53 +302,84 @@ fn run_chelis(app_pkg: &Path, reef_home: &Path, args: &[&str]) -> (bool, String)
     )
 }
 
-/// Runs one `chelis test` over a fixture with one test per expression and
-/// returns each test's outcome: `None` for PASS, `Some(message)` for FAIL.
+/// The most generated tests one `chelis test` invocation runs. An extreme case
+/// costs about 0.4 CPU s of evaluation on a macOS arm64 debug build, so a
+/// batch is about 20 CPU s there, leaving the runner's 600 s whole-suite
+/// timeout a wide margin on a slower or contended Linux runner (chelis#3142).
+const SUITE_BATCH: usize = 48;
+
+/// Runs `chelis test` over fixtures with one test per expression, at most
+/// `SUITE_BATCH` tests per invocation, and returns each test's outcome: `None`
+/// for PASS, `Some(message)` for FAIL. Expressions are dealt to the batches in
+/// turn, so cases of one callable, which are generated together and cost
+/// alike, spread across batches.
 fn run_expression_suite(
     dir_name: &str,
     expressions: &[(String, String)],
 ) -> BTreeMap<String, Option<String>> {
     let (_dir, reef_home, app_pkg) = make_app(dir_name);
-    let mut source = format!("module Demo.Tests.Decimal\n{IMPORTS}\n{HELPERS}");
-    for (name, expression) in expressions {
-        source.push_str(&format!(
-            "def test_{name}() -> unit ! {{ Test }} = {{\n  _value = {expression}\n  ()\n}}\n"
-        ));
-    }
     write_file(
         &app_pkg.join("src/main.ch"),
         "module Demo.Main\nanchor = 0i64\n",
     );
     let path = app_pkg.join("tests/decimal_cases.ch");
-    write_file(&path, &source);
-    let (_, rendered) = run_chelis(
-        &app_pkg,
-        &reef_home,
-        &["test", "--batch-mode", "file", path.to_str().unwrap()],
-    );
+    let batches = expressions.len().div_ceil(SUITE_BATCH);
     let mut outcomes = BTreeMap::new();
-    for line in rendered.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("test_") else {
-            continue;
-        };
-        let Some((name, verdict)) = rest.split_once(' ') else {
-            continue;
-        };
-        let verdict = verdict.trim_start_matches(['.', ' ']);
-        if verdict == "PASS" {
-            outcomes.insert(name.to_string(), None);
-        } else if let Some(message) = verdict
-            .strip_prefix("FAIL (")
-            .and_then(|tail| tail.strip_suffix(')'))
-        {
-            outcomes.insert(name.to_string(), Some(message.to_string()));
+    for batch in 0..batches {
+        let members: Vec<&(String, String)> =
+            expressions.iter().skip(batch).step_by(batches).collect();
+        let mut source = format!("module Demo.Tests.Decimal\n{IMPORTS}\n{HELPERS}");
+        for (name, expression) in &members {
+            source.push_str(&format!(
+                "def test_{name}() -> unit ! {{ Test }} = {{\n  _value = {expression}\n  ()\n}}\n"
+            ));
         }
+        write_file(&path, &source);
+        let started = std::time::Instant::now();
+        let (_, rendered) = run_chelis(
+            &app_pkg,
+            &reef_home,
+            &["test", "--batch-mode", "file", path.to_str().unwrap()],
+        );
+        eprintln!(
+            "{dir_name}: batch {} of {batches}, {} tests, {:.1} s",
+            batch + 1,
+            members.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let mut reported = 0usize;
+        for line in rendered.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("test_") else {
+                continue;
+            };
+            let Some((name, verdict)) = rest.split_once(' ') else {
+                continue;
+            };
+            let verdict = verdict.trim_start_matches(['.', ' ']);
+            let outcome = if verdict == "PASS" {
+                None
+            } else if let Some(message) = verdict
+                .strip_prefix("FAIL (")
+                .and_then(|tail| tail.strip_suffix(')'))
+            {
+                Some(message.to_string())
+            } else {
+                continue;
+            };
+            assert!(
+                outcomes.insert(name.to_string(), outcome).is_none(),
+                "test_{name} reported twice:\n{rendered}"
+            );
+            reported += 1;
+        }
+        assert_eq!(
+            reported,
+            members.len(),
+            "every generated test of batch {} of {batches} must report exactly one verdict:\n{rendered}",
+            batch + 1
+        );
     }
-    assert_eq!(
-        outcomes.len(),
-        expressions.len(),
-        "every generated test must report exactly one verdict:\n{rendered}"
-    );
+    assert_eq!(outcomes.len(), expressions.len());
     outcomes
 }
 

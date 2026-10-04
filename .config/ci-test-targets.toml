@@ -1445,7 +1445,7 @@ name = "std_decimal_extreme_arguments_raise_no_primitive_trap"
 workflow = "heavy-e2e.yml"
 job = "module-oracles"
 cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "the Std.Decimal extreme-argument sweep evaluates 324 calls in one chelis test suite"
+reason = "the Std.Decimal extreme-argument sweep evaluates 324 calls in seven chelis test runs of at most 48 (chelis#3142)"
 tracking_issue = "chelis#2794"
 
 [[test_exclusion]]
