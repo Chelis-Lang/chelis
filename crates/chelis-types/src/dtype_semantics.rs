@@ -47,6 +47,7 @@
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_deep::NamedCastMode;
 use chelis_vocab::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
@@ -4137,6 +4138,41 @@ pub fn cast_trunc_tensor(
         );
     }
     finalize_tensor(op, dst, RawTensor::Int(wides))
+}
+
+/// A named lossy cast of the chelis#759 ladder over a raw scalar, one
+/// kernel per rung. The rung's Surf keyword is the operation a trap names.
+pub fn named_cast_raw(
+    mode: NamedCastMode,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_raw(mode.keyword(), raw, dst),
+    }
+}
+
+/// [`named_cast_raw`] over a sealed scalar.
+pub fn named_cast_scalar(
+    mode: NamedCastMode,
+    value: ScalarValue,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_scalar(mode.keyword(), value, dst),
+    }
+}
+
+/// [`named_cast_raw`] over a tensor buffer. Every rung traps on the first
+/// offending element in order, identically to the scalar surface.
+pub fn named_cast_tensor(
+    mode: NamedCastMode,
+    raw: RawTensor,
+    dst: Prim,
+) -> Result<TensorStorage, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_tensor(mode.keyword(), raw, dst),
+    }
 }
 
 /// [05-OP-6] target contract: integer widths only. `bool` is excluded by

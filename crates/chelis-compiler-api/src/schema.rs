@@ -2164,7 +2164,10 @@ pub struct WireRecordPatternField {
 ///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
 /// - `25`: `Softmax` retains [05-OP-48] through AD before stable forward
 ///   decomposition; a version-24 reader does not know the operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 25;
+/// - `26`: the named lossy casts share one tagged `NamedCast` operation
+///   whose `mode` names the rung (chelis#759); `cast_trunc` is its `trunc`
+///   rung. A version-25 reader does not know that operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3525,7 +3528,7 @@ fn wire_axis_origin(
         | WireRiscOp::Drop
         | WireRiscOp::Realize
         | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::NamedCast { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
         | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
@@ -3952,6 +3955,13 @@ pub enum WireExtremaOperand {
     Right,
 }
 
+/// The rung of a [`WireRiscOp::NamedCast`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireNamedCastMode {
+    Trunc,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireComparisonKind {
@@ -4226,7 +4236,8 @@ pub enum WireRiscOp {
     Cast {
         new_precision: String,
     },
-    CastTrunc {
+    NamedCast {
+        mode: WireNamedCastMode,
         new_precision: String,
     },
     FusedElem {

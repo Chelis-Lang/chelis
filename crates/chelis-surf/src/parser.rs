@@ -2101,12 +2101,12 @@ impl Parser {
         // form `cast(value, type)`) falls through to `parse_prefix`.
         if let Some(mode) = match self.peek() {
             TokenKind::Cast => Some(CastMode::Checked),
-            TokenKind::CastTrunc => Some(CastMode::Trunc),
+            TokenKind::NamedCast(named) => Some(CastMode::Named(*named)),
             _ => None,
         } && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
         {
             self.reject_retired_integer_dtype_name(&precision, precision_span)?;
-            let cast_tok = self.advance(); // consume Cast / CastTrunc
+            let cast_tok = self.advance(); // consume Cast / NamedCast
             let span = cast_tok.span;
             self.advance(); // consume LParen
             self.advance(); // consume Ident
@@ -2165,10 +2165,10 @@ impl Parser {
         ) {
             pos += 1;
         }
-        // Step over `Cast` / `CastTrunc`.
+        // Step over `Cast` / `NamedCast`.
         if !matches!(
             self.tokens.get(pos).map(|t| &t.kind),
-            Some(TokenKind::Cast | TokenKind::CastTrunc)
+            Some(TokenKind::Cast | TokenKind::NamedCast(_))
         ) {
             return None;
         }
@@ -2355,7 +2355,7 @@ impl Parser {
             TokenKind::Match => self.parse_match()?,
             TokenKind::Fn => self.parse_lambda()?,
             TokenKind::Cast => self.parse_cast(CastMode::Checked)?,
-            TokenKind::CastTrunc => self.parse_cast(CastMode::Trunc)?,
+            TokenKind::NamedCast(named) => self.parse_cast(CastMode::Named(named))?,
             TokenKind::Grad => self.parse_grad()?,
             TokenKind::Vmap => self.parse_vmap()?,
             TokenKind::Jit => self.parse_jit()?,
@@ -2639,7 +2639,7 @@ impl Parser {
     }
 
     fn parse_cast(&mut self, mode: CastMode) -> Result<Expr, ParseError> {
-        let start = self.advance().span; // consume Cast / CastTrunc
+        let start = self.advance().span; // consume Cast / NamedCast
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;

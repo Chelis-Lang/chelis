@@ -1,6 +1,6 @@
 //! #1269: a pinned reader must see every operation-vocabulary change.
 use chelis_compiler_api::schema::{
-    WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireRiscOp, WireTensorType,
+    WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireNamedCastMode, WireRiscOp, WireTensorType,
 };
 use chelis_types::{scalar_from_i64, types::Prim};
 use serde::Deserialize;
@@ -91,7 +91,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "drop",
         "realize",
         "cast",
-        "cast_trunc",
+        "named_cast",
         "fused_elem",
         "blas_matmul",
         "gather",
@@ -129,10 +129,12 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         // Version 25 retains [05-OP-48] through differentiation.
         "softmax",
     ];
+    // Version 26 (chelis#759): `cast_trunc` became the `trunc` rung of the
+    // tagged `named_cast` operation, so the count is unchanged.
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 25,
+        WIRE_DAG_SCHEMA_VERSION, 26,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 79);
@@ -144,25 +146,29 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
 
 #[test]
 fn cast_trunc_has_its_exact_wire_spelling_and_round_trips() {
-    let op = WireRiscOp::CastTrunc {
+    let op = WireRiscOp::NamedCast {
+        mode: WireNamedCastMode::Trunc,
         new_precision: "int32".into(),
     };
     let encoded = serde_json::to_value(&op).unwrap();
     assert_eq!(
         encoded,
-        serde_json::json!({"kind": "cast_trunc", "new_precision": "int32"})
+        serde_json::json!({"kind": "named_cast", "mode": "trunc", "new_precision": "int32"})
     );
-    assert!(
-        matches!(serde_json::from_value::<WireRiscOp>(encoded).unwrap(),
-        WireRiscOp::CastTrunc { new_precision } if new_precision == "int32")
-    );
+    assert!(matches!(
+        serde_json::from_value::<WireRiscOp>(encoded).unwrap(),
+        WireRiscOp::NamedCast { mode: WireNamedCastMode::Trunc, new_precision }
+            if new_precision == "int32"
+    ));
 }
 
 #[test]
 fn cast_trunc_rejects_unknown_spelling_and_missing_target() {
     for encoded in [
-        serde_json::json!({"kind": "cast_truncate", "new_precision": "int32"}),
-        serde_json::json!({"kind": "cast_trunc"}),
+        serde_json::json!({"kind": "cast_trunc", "new_precision": "int32"}),
+        serde_json::json!({"kind": "named_cast", "mode": "truncate", "new_precision": "int32"}),
+        serde_json::json!({"kind": "named_cast", "new_precision": "int32"}),
+        serde_json::json!({"kind": "named_cast", "mode": "trunc"}),
     ] {
         assert!(serde_json::from_value::<WireRiscOp>(encoded).is_err());
     }
@@ -184,7 +190,7 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 fn resolved_global_load_has_a_v22_wire_identity() {
     let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
     let dag = WireDag {
-        schema_version: 25,
+        schema_version: 26,
         declarations: vec!["entry".to_string()],
         nodes: vec![WireDagNode {
             declaration: 0,
@@ -207,7 +213,7 @@ fn resolved_global_load_has_a_v22_wire_identity() {
     let encoded = serde_json::to_string(&dag).expect("v22 producer carries resolved origin");
     let decoded = WireDag::from_validated_json(&encoded).expect("v22 consumer retains origin");
     assert!(matches!(&decoded.nodes[0].op, WireRiscOp::Load { name } if name == global.as_str()));
-    let old = encoded.replace("\"schema_version\":25", "\"schema_version\":23");
+    let old = encoded.replace("\"schema_version\":26", "\"schema_version\":23");
     assert!(
         WireDag::from_validated_json(&old).is_err(),
         "v21 is rejected before label decode"

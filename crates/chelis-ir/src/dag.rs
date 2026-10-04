@@ -6,6 +6,7 @@
 use chelis_unord::{UnordMap, UnordSet};
 use std::fmt;
 
+pub use chelis_deep::NamedCastMode;
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
@@ -1258,12 +1259,13 @@ pub enum RiscOp {
     Cast {
         new_precision: Prim,
     },
-    /// The [05-OP-6] named truncating float-to-integer cast
-    /// (`cast_trunc`). A separate op rather than a mode flag on `Cast`
-    /// so every backend, evaluator, and adjoint site is forced by
-    /// exhaustive matching to state its disposition instead of
-    /// inheriting the checked default's.
-    CastTrunc {
+    /// A named lossy cast of the chelis#759 ladder: `cast_trunc`
+    /// ([05-OP-6]). A separate op rather than a mode flag on `Cast` so
+    /// every backend, evaluator, and adjoint site is forced by exhaustive
+    /// matching to state its disposition instead of inheriting the checked
+    /// default's, and the rung is an enum so each site states it per rung.
+    NamedCast {
+        mode: NamedCastMode,
         new_precision: Prim,
     },
 
@@ -1755,7 +1757,9 @@ impl RiscOp {
             Self::Stride { .. } => Semantic(Id::Stride),
             Self::Shape { .. } => Semantic(Id::Shape),
             Self::Cast { .. } => Semantic(Id::Cast),
-            Self::CastTrunc { .. } => Semantic(Id::CastTrunc),
+            Self::NamedCast { mode, .. } => Semantic(match mode {
+                NamedCastMode::Trunc => Id::CastTrunc,
+            }),
             Self::BlasMatmul { .. } => Semantic(Id::Matmul),
             Self::Gather { .. } => Semantic(Id::Gather),
             Self::ScatterAdd { .. } => Semantic(Id::Scatter),
@@ -2123,7 +2127,7 @@ impl RiscOp {
             // so it has no real-valued envelope to bound. The CHECKED
             // `cast` stays targetable because its float-to-float leg is
             // real-valued and its integer leg only admits exact values.
-            RiscOp::CastTrunc { .. } => false,
+            RiscOp::NamedCast { .. } => false,
 
             // `OneHot` produces a discrete 0/1 indicator from an integer
             // index; it is an internal lowering marker (dag.rs) consumed
@@ -2376,7 +2380,7 @@ impl DagNode {
     /// |---|---|---|
     /// | `OperandValues` | integer `Add` `Sub` `Mul` `Neg` `Abs` | overflow |
     /// | | `FloorDiv` `TruncDiv` `Mod`, integer `Div` | division by zero, `MIN / -1` |
-    /// | | `Cast` `CastTrunc` into an integer or bool width | domain, overflow |
+    /// | | `Cast` `NamedCast` into an integer or bool width | domain, overflow |
     /// | | integer `Sum` `ProdReduce`, integer `ReduceWindow` | overflow |
     /// | | integer `FusedElem` | its steps' overflow and division |
     /// | `MeanDivisor` | float `Div` | a lowered `mean`'s empty count |
@@ -2426,7 +2430,7 @@ impl DagNode {
             // Read the cast's OWN target, not the node's output type: if a
             // lowering ever let them drift, deriving the class from the
             // output type would silently switch the check off.
-            RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
+            RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } => {
                 value_check(new_precision.is_integer() || *new_precision == Prim::Bool)
             }
             RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => value_check(integer),
@@ -3667,7 +3671,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
@@ -4944,7 +4948,8 @@ mod tests {
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
-            RiscOp::CastTrunc {
+            RiscOp::NamedCast {
+                mode: NamedCastMode::Trunc,
                 new_precision: Prim::Int32,
             },
             RiscOp::FusedElem { ops: vec![] },
@@ -5248,7 +5253,8 @@ mod tests {
             "argmax returns discrete indices, not a real envelope"
         );
         assert!(
-            !RiscOp::CastTrunc {
+            !RiscOp::NamedCast {
+                mode: NamedCastMode::Trunc,
                 new_precision: Prim::Int32
             }
             .is_verifier_targetable(),

@@ -7788,7 +7788,7 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::Reshape { .. } => "reshape",
         RiscOp::Expand { .. } => "expand",
         RiscOp::Cast { .. } => "cast",
-        RiscOp::CastTrunc { .. } => "cast_trunc",
+        RiscOp::NamedCast { mode, .. } => mode.keyword(),
         RiscOp::Permute { .. } => "permute",
         RiscOp::Load { .. } => "load",
         RiscOp::Const { .. } => "const",
@@ -16644,7 +16644,7 @@ fn remap_tensor_helper_dim_symbols(
                 node.op,
                 crate::dag::RiscOp::Copy
                     | crate::dag::RiscOp::Cast { .. }
-                    | crate::dag::RiscOp::CastTrunc { .. }
+                    | crate::dag::RiscOp::NamedCast { .. }
             ) {
                 break;
             }
@@ -17278,7 +17278,7 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize
             | crate::dag::RiscOp::Cast { .. }
-            | crate::dag::RiscOp::CastTrunc { .. }
+            | crate::dag::RiscOp::NamedCast { .. }
             | crate::dag::RiscOp::FusedElem { .. } => node
                 .inputs
                 .first()

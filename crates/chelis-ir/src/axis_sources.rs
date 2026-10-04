@@ -299,7 +299,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. }
     )
 }
@@ -473,7 +473,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::Store { .. }
         | RiscOp::KeyFromSeed
@@ -1381,7 +1381,7 @@ pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option
         let producer = dag.get(current)?;
         match producer.op {
             RiscOp::Load { .. } => return Some(current),
-            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
+            RiscOp::Cast { .. } | RiscOp::NamedCast { .. } => {
                 current = *producer.inputs.first()?;
             }
             _ => return None,
@@ -3319,7 +3319,7 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
             while let Some(node) = dag.get(producer) {
                 if !matches!(
                     node.op,
-                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
                 ) {
                     break;
                 }
@@ -3385,7 +3385,7 @@ fn checked_result_extent_site(
         }
         if !matches!(
             node.op,
-            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
         ) {
             break;
         }
@@ -3448,7 +3448,7 @@ fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> b
         };
         if matches!(
             node.op,
-            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
         ) && let Some(input) = node.inputs.first()
         {
             pending.push(*input);
@@ -3620,7 +3620,7 @@ fn literal_result_interface_observation(
                 axis: RtAxis::Lit(read),
             } if matches!(
                 node.op,
-                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
             ) =>
             {
                 walk(

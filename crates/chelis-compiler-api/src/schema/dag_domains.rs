@@ -349,7 +349,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::Drop
         | WireRiscOp::Realize
         | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::NamedCast { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::BlasMatmul { .. }
         | WireRiscOp::Gather { .. }
@@ -412,7 +412,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::Dropout {}
             | WireRiscOp::DropoutReplay {}
             | WireRiscOp::Cast { .. }
-            | WireRiscOp::CastTrunc { .. }
+            | WireRiscOp::NamedCast { .. }
             | WireRiscOp::FusedElem { .. }
     )
 }

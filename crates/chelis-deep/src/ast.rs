@@ -165,10 +165,47 @@ pub enum CastMode {
     /// `Domain`.
     #[default]
     Checked,
-    /// `(cast {} expr target-type trunc)`: the [05-OP-6] named truncating
-    /// float-to-integer cast. Truncates toward zero; traps `Overflow` out
-    /// of range and `Domain` on a non-finite source.
+    /// `(cast {} expr target-type <selector>)`: one of the named lossy
+    /// rungs, each its own atom with its own admitted pairs and traps.
+    Named(NamedCastMode),
+}
+
+/// The named lossy rungs of the chelis#759 cast ladder. Each one is a
+/// separate atom; the lowering carries the rung on one `NamedCast` op so
+/// every backend, evaluator, and adjoint site states each rung's
+/// disposition by exhaustive matching instead of inheriting the checked
+/// default's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NamedCastMode {
+    /// `cast_trunc`, [05-OP-6]: float to integer, truncated toward zero;
+    /// traps `Overflow` out of range and `Domain` on a non-finite source.
     Trunc,
+}
+
+impl NamedCastMode {
+    /// Every named rung, in ladder order.
+    pub const ALL: &'static [NamedCastMode] = &[NamedCastMode::Trunc];
+
+    /// The Surf keyword and the operation name traps and diagnostics carry.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            NamedCastMode::Trunc => "cast_trunc",
+        }
+    }
+
+    /// The Deep mode selector symbol.
+    pub fn deep_selector(self) -> &'static str {
+        match self {
+            NamedCastMode::Trunc => "trunc",
+        }
+    }
+
+    /// The governing [05-OP-N] atom.
+    pub fn atom(self) -> &'static str {
+        match self {
+            NamedCastMode::Trunc => "[05-OP-6]",
+        }
+    }
 }
 
 impl CastMode {
@@ -176,7 +213,7 @@ impl CastMode {
     pub fn keyword(self) -> &'static str {
         match self {
             CastMode::Checked => "cast",
-            CastMode::Trunc => "cast_trunc",
+            CastMode::Named(named) => named.keyword(),
         }
     }
 
@@ -185,7 +222,7 @@ impl CastMode {
     pub fn deep_selector(self) -> Option<&'static str> {
         match self {
             CastMode::Checked => None,
-            CastMode::Trunc => Some("trunc"),
+            CastMode::Named(named) => Some(named.deep_selector()),
         }
     }
 
@@ -193,9 +230,17 @@ impl CastMode {
     /// `None` so the caller can reject it loudly rather than defaulting
     /// to the checked rung.
     pub fn from_deep_selector(symbol: &str) -> Option<Self> {
-        match symbol {
-            "trunc" => Some(CastMode::Trunc),
-            _ => None,
+        NamedCastMode::ALL
+            .iter()
+            .find(|named| named.deep_selector() == symbol)
+            .map(|named| CastMode::Named(*named))
+    }
+
+    /// The named rung, or `None` for the checked default.
+    pub fn named(self) -> Option<NamedCastMode> {
+        match self {
+            CastMode::Checked => None,
+            CastMode::Named(named) => Some(named),
         }
     }
 }

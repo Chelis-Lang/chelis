@@ -6696,7 +6696,7 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                 // runtime diagnostic.
                 let inner = kids.first()?;
                 let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                // The [05-OP-6] rung folds through its OWN kernel, so
+                // Each named rung folds through its OWN kernel, so
                 // a statically-recognized `cast_trunc(1.9, i32)`
                 // contributes 1 rather than declining as the checked
                 // ladder would. An unrecognized selector declines.
@@ -6709,12 +6709,12 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                             chelis_types::cast_scalar("cast", value, target).ok()?
                         }
                     },
-                    chelis_deep::CastMode::Trunc => match extract_numeric_leaf(inner)? {
+                    chelis_deep::CastMode::Named(mode) => match extract_numeric_leaf(inner)? {
                         StagedScalar::Raw(raw) => {
-                            chelis_types::cast_trunc_raw("cast_trunc", raw, target).ok()?
+                            chelis_types::named_cast_raw(mode, raw, target).ok()?
                         }
                         StagedScalar::Typed(value) => {
-                            chelis_types::cast_trunc_scalar("cast_trunc", value, target).ok()?
+                            chelis_types::named_cast_scalar(mode, value, target).ok()?
                         }
                     },
                 };
@@ -10489,7 +10489,7 @@ impl<'program> LowerCtx<'program> {
             }
             if !matches!(
                 owner.op,
-                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
             ) {
                 return false;
             }
@@ -21385,7 +21385,10 @@ impl<'program> LowerCtx<'program> {
         // lowering error, never a silent fall back to the checked rung.
         let op = match chelis_deep::cast_mode_of(kids) {
             Ok(chelis_deep::CastMode::Checked) => RiscOp::Cast { new_precision },
-            Ok(chelis_deep::CastMode::Trunc) => RiscOp::CastTrunc { new_precision },
+            Ok(chelis_deep::CastMode::Named(mode)) => RiscOp::NamedCast {
+                mode,
+                new_precision,
+            },
             Err(selector) => raise_fatal_lowering_error(
                 format!(
                     "`{selector}` is not a recognized cast mode selector; the \

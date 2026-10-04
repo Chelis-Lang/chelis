@@ -9,7 +9,7 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
-    LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
+    LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
@@ -42,10 +42,10 @@ use crate::schema::{
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
     WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm, WireParam,
-    WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm,
+    WireNamedCastMode, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
+    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl,
+    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
@@ -5633,25 +5633,27 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             // it cleanly here rather than letting it reach the launch-emit
             // `todo!`, which would abort the build with an `internal error`
             // panic. The C backend is canonical; use `--target c`.
-            // [05-OP-6] demands identical eval-vs-compiled behavior, and
-            // the HIP `cast` kernel is a raw device-side C++ conversion
-            // with no trap guard at all. Emitting `cast_trunc` through it
-            // would silently skip the Domain/Overflow traps, so the HIP
-            // lane rejects loudly until the guarded kernels land.
-            RiscOp::CastTrunc { .. } => {
+            // Every named cast atom demands identical eval-vs-compiled
+            // behavior, and the HIP `cast` kernel is a raw device-side C++
+            // conversion with no trap guard at all. Emitting a named rung
+            // through it would silently skip its traps, so the HIP lane
+            // rejects loudly until the guarded kernels land.
+            RiscOp::NamedCast { mode, .. } => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not support `cast_trunc`; \
+                        "`chelis build --target hip` does not support `{}`; \
                          lowered node {} requires it. The HIP cast kernels carry no \
-                         numeric-trap guard, so the [05-OP-6] Domain/Overflow traps \
+                         numeric-trap guard, so the {} traps \
                          cannot be honored on device yet; use `--target c`.",
-                        node.id.0
+                        mode.keyword(),
+                        node.id.0,
+                        mode.atom()
                     ),
                     "hip",
                     chelis_types::unimplemented_rejection!(
                         759,
                         "the HIP cast kernels emit an unguarded device-side conversion, \
-                         so the [05-OP-6] traps have no device implementation; the C \
+                         so the named cast traps have no device implementation; the C \
                          target is canonical for the named cast ladder"
                     ),
                 ));
@@ -7220,7 +7222,13 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Copy => WireRiscOp::Copy,
         RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
-        RiscOp::CastTrunc { new_precision } => WireRiscOp::CastTrunc {
+        RiscOp::NamedCast {
+            mode,
+            new_precision,
+        } => WireRiscOp::NamedCast {
+            mode: match mode {
+                NamedCastMode::Trunc => WireNamedCastMode::Trunc,
+            },
             new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
@@ -7342,7 +7350,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 25);
+        assert_eq!(wire.schema_version, 26);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7655,7 +7663,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 25);
+        assert_eq!(json["schema_version"], 26);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

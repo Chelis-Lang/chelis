@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
-    TensorType,
+    FusedStep, FusedStepOp, LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtAxis,
+    RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
@@ -1825,17 +1825,11 @@ impl CEmitter {
                     &node.inputs,
                     &node.output_type,
                     dag,
-                    /* trunc = */ false,
+                    /* named = */ None,
                 )
             }
-            RiscOp::CastTrunc { .. } => {
-                self.emit_cast(
-                    id,
-                    &node.inputs,
-                    &node.output_type,
-                    dag,
-                    /* trunc = */ true,
-                )
+            RiscOp::NamedCast { mode, .. } => {
+                self.emit_cast(id, &node.inputs, &node.output_type, dag, Some(*mode))
             }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
@@ -2310,19 +2304,22 @@ impl CEmitter {
                         node.id.0
                     );
                 }
-                RiscOp::CastTrunc { new_precision }
-                    if !matches!(
-                        new_precision,
-                        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
-                    ) =>
+                RiscOp::NamedCast {
+                    mode,
+                    new_precision,
+                } if !matches!(
+                    new_precision,
+                    Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
+                ) =>
                 {
                     panic!(
-                        "C backend does not support cast_trunc to {}, found at node {}",
+                        "C backend does not support {} to {}, found at node {}",
+                        mode.keyword(),
                         new_precision.name(),
                         node.id.0
                     );
                 }
-                RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {}
+                RiscOp::Cast { .. } | RiscOp::NamedCast { .. } => {}
                 _ => {}
             }
 
@@ -8933,16 +8930,48 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     // f64/integer sources round directly into f16/bf16 without an intermediate
     // f32 rounding. Every pair, including the exact same-Prim diagonal,
     // materializes logical element order from the source strides.
-    /// Emit a cast-ladder node. `trunc` selects the [05-OP-6] rung:
-    /// the float-to-integer leg truncates toward zero before its range
-    /// check instead of rejecting a fractional value.
+    /// The C expression for one element of a named cast rung, as an
+    /// `int64_t` the caller narrows to the target's storage type. The
+    /// source has already been widened out of any reduced float storage.
+    fn named_cast_c_expr(
+        mode: NamedCastMode,
+        src_prec: Prim,
+        dst_prec: Prim,
+        source_value: &str,
+    ) -> String {
+        let width = Self::integer_width(dst_prec);
+        let domain = NumericTrap::Domain {
+            op: mode.keyword(),
+            prim: dst_prec,
+        }
+        .to_string();
+        let overflow = NumericTrap::Overflow {
+            op: mode.keyword(),
+            prim: dst_prec,
+        }
+        .to_string();
+        match mode {
+            NamedCastMode::Trunc => {
+                assert!(
+                    src_prec.is_float() && dst_prec.is_integer(),
+                    "[05-OP-6] C emission is float-to-integer only"
+                );
+                format!(
+                    "chelis_trunc_float_to_int((double)({source_value}), {width}, {domain:?}, {overflow:?})"
+                )
+            }
+        }
+    }
+
+    /// Emit a cast-ladder node. `named` selects a named lossy rung;
+    /// `None` is the checked default.
     fn emit_cast(
         &mut self,
         id: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
-        trunc: bool,
+        named: Option<NamedCastMode>,
     ) {
         let a = inputs[0].0;
         let src_ty = &dag
@@ -8955,7 +8984,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let dst_et = Self::elem_type(ty);
         self.emit_elementwise_index_steps(id, inputs, ty);
         self.emit_slot_wrapper(id, ty);
-        let checked_plan = if trunc {
+        let checked_plan = if named.is_some() {
             None
         } else {
             Some(
@@ -8975,7 +9004,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
         // Checked scalar/identity projection is saved before destination allocation.
         //
-        // `cast_trunc` remains serial. Checked cast keeps valid-element
+        // Every named rung remains serial. Checked cast keeps valid-element
         // conversion parallel, but no worker calls an aborting helper:
         // workers reduce candidate indices and the selected lowest index is
         // reclassified after the region ([04-NUM-15]).
@@ -9011,30 +9040,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let src_elem = gated_source;
         let dst_elem = format!("(({dst_et}*)t{id}_data)[i]");
         let src_reduced = Self::is_reduced_float_prec(src_prec);
-        let assignment = if trunc {
-            assert!(
-                src_prec.is_float() && dst_prec.is_integer(),
-                "[05-OP-6] C emission is float-to-integer only"
-            );
+        let assignment = if let Some(mode) = named {
             let source_value = if src_reduced {
                 format!("{}({src_elem})", Self::reduced_to_f32_fn(src_prec))
             } else {
                 src_elem.clone()
             };
-            let domain = NumericTrap::Domain {
-                op: "cast_trunc",
-                prim: dst_prec,
-            }
-            .to_string();
-            let overflow = NumericTrap::Overflow {
-                op: "cast_trunc",
-                prim: dst_prec,
-            }
-            .to_string();
-            format!(
-                "{dst_elem} = ({dst_et})chelis_trunc_float_to_int((double)({source_value}), {}, {domain:?}, {overflow:?});",
-                Self::integer_width(dst_prec)
-            )
+            let expression = Self::named_cast_c_expr(mode, src_prec, dst_prec, &source_value);
+            format!("{dst_elem} = ({dst_et}){expression};")
         } else {
             let plan = checked_plan.expect("non-truncating cast carries a checked plan");
             let expression = if trapping {
@@ -10297,7 +10310,8 @@ mod tests {
         }
 
         let trunc = emit(
-            RiscOp::CastTrunc {
+            RiscOp::NamedCast {
+                mode: NamedCastMode::Trunc,
                 new_precision: Prim::Int32,
             },
             Prim::Int32,

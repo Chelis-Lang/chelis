@@ -1311,7 +1311,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::FusedElem { .. }
         // Its dims are symbolic expressions, which name no input.
         | RiscOp::BlasMatmul { .. }
@@ -2790,7 +2790,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. } => {
+            | RiscOp::NamedCast { .. } => {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
@@ -3669,7 +3669,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // C8: Cast validation — dims must not change, output precision must match target.
         // Both ladder rungs share the shape rule; only their element
         // semantics differ.
-        if let RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } = &node.op
+        if let RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } = &node.op
             && arity == 1
         {
             let input = dag.get(node.inputs[0]).unwrap();

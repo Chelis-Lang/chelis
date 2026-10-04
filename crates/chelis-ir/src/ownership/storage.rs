@@ -772,7 +772,7 @@ fn classify_nodes(
                 | RiscOp::OneHot { .. }
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
-                | RiscOp::CastTrunc { .. }
+                | RiscOp::NamedCast { .. }
                 | RiscOp::FusedElem { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Shrink { .. }

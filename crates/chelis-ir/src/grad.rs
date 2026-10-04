@@ -569,15 +569,15 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
-        // [05-OP-6]: `cast_trunc` is piecewise constant, so its
-        // adjoint is zero almost everywhere and undefined at every
-        // integer boundary. Rejecting is the point of the atom's
+        // [05-OP-6]: every named cast rung is piecewise constant, so
+        // its adjoint is zero almost everywhere and undefined at every
+        // integer boundary. Rejecting is the point of each atom's
         // `no_grad` rule: a silent zero here would mask a modeling
         // bug rather than report it. The checked `cast` keeps its
         // float-to-float adjoint.
-        RiscOp::CastTrunc { .. } => {
+        RiscOp::NamedCast { mode, .. } => {
             return Some(AdError::NotSupported {
-                op: "cast_trunc",
+                op: mode.keyword(),
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
@@ -754,7 +754,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Drop => "drop",
         RiscOp::Realize => "realize",
         RiscOp::Cast { .. } => "cast",
-        RiscOp::CastTrunc { .. } => "cast_trunc",
+        RiscOp::NamedCast { mode, .. } => mode.keyword(),
         RiscOp::FusedElem { .. } => "fused_elem",
         RiscOp::BlasMatmul { .. } => "blas_matmul",
         RiscOp::Gather { .. } => "gather",
@@ -2831,7 +2831,7 @@ fn compute_adjoints(
                 // integer or bool target is piecewise constant and
                 // "never contributes a silent zero". There is no
                 // adjoint, so this arm refuses to invent one -- the
-                // same treatment `CastTrunc` gets below.
+                // same treatment `NamedCast` gets below.
                 //
                 // `structural_rejection` is shared by the live-node scan
                 // and backward walk, so either path reports the atom's
@@ -2862,7 +2862,7 @@ fn compute_adjoints(
         // atom forbids; this arm keeps the unchecked entry point from
         // inventing one. `structural_rejection` reports the atom's exact
         // reason from either checked traversal before this fallback.
-        RiscOp::CastTrunc { .. } => None,
+        RiscOp::NamedCast { .. } => None,
         RiscOp::FusedElem { .. } => {
             // Fused nodes should be un-fused before AD; gradient through fusion
             // is not yet supported.
@@ -4225,7 +4225,8 @@ mod tests {
         let discrete = dag.add_node(
             owner,
             if truncating {
-                RiscOp::CastTrunc {
+                RiscOp::NamedCast {
+                    mode: crate::dag::NamedCastMode::Trunc,
                     new_precision: Prim::Int32,
                 }
             } else {

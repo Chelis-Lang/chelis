@@ -4,7 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
-use chelis_deep::CastMode;
+use chelis_deep::{CastMode, NamedCastMode};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_tuple(
@@ -1033,19 +1033,28 @@ pub(super) fn infer_cast(
             // restriction rejected an inference variable that a later binding
             // makes a float, and admitting it skipped a binder that nothing
             // ever binds.
-            let trunc_pair_rejected = |source_is_float: bool| {
-                mode == CastMode::Trunc
-                    && (!source_is_float
+            let named_pair_rejected = |source_admitted: bool| {
+                mode.named().is_some()
+                    && (!source_admitted
                         || !subst
                             .tvar_restriction(target)
                             .is_some_and(|restriction| restriction.admits_only_integers()))
             };
-            let trunc_pair_rejection = || {
+            let named_pair_rejection = |named: NamedCastMode| {
                 CheckError::new(
                     CheckErrorKind::CastNonTensor,
-                    "`cast_trunc` requires a float source and an integer target ([05-OP-6]); use `cast` for other conversions".to_string(),
+                    format!(
+                        "`{}` requires {} source and an integer target ({}); use `cast` for other conversions",
+                        named.keyword(),
+                        named_cast_source_noun(named),
+                        named.atom(),
+                    ),
                     vec![],
                 )
+            };
+            let source_admitted = |prim: Prim| {
+                mode.named()
+                    .is_none_or(|named| named_cast_source_family(named).admits(prim))
             };
             return match resolved {
                 // A source that is still a variable. A `cast_trunc` source must
@@ -1053,14 +1062,16 @@ pub(super) fn infer_cast(
                 // every bound is numeric, and an unbounded binder also denotes
                 // types no cast admits, so it is held to `Numeric`.
                 Type::Var(source) => {
-                    if trunc_pair_rejected(true) {
-                        return report(errors, trunc_pair_rejection());
+                    if let Some(named) = mode.named()
+                        && named_pair_rejected(true)
+                    {
+                        return report(errors, named_pair_rejection(named));
                     }
-                    let required = if mode == CastMode::Trunc {
-                        Some(TypeVarRestriction::ActiveFloat)
-                    } else {
-                        env.authored_type_binder(source, subst)
-                            .map(|_| TypeVarRestriction::ActiveNumeric)
+                    let required = match mode.named() {
+                        Some(named) => Some(named_cast_source_family(named)),
+                        None => env
+                            .authored_type_binder(source, subst)
+                            .map(|_| TypeVarRestriction::ActiveNumeric),
                     };
                     match required {
                         Some(required) => {
@@ -1105,17 +1116,20 @@ pub(super) fn infer_cast(
                     // [05-OP-63]: a dtype change preserves every dimension.
                     // The declaration's [04-DTYPE-2] bound is retained on the
                     // precision variable and checked at each instantiation.
-                    let source_is_float = match source {
-                        TensorPrec::Concrete(p) => p.is_float(),
+                    let admitted = match source {
+                        TensorPrec::Concrete(p) => source_admitted(p),
                         TensorPrec::Var(_) => true,
                     };
-                    if trunc_pair_rejected(source_is_float) {
-                        return report(errors, trunc_pair_rejection());
+                    if let Some(named) = mode.named()
+                        && named_pair_rejected(admitted)
+                    {
+                        return report(errors, named_pair_rejection(named));
                     }
-                    if let TensorPrec::Var(p) = source
+                    if let Some(named) = mode.named()
+                        && let TensorPrec::Var(p) = source
                         && let Some(error) = constrain_cast_source(
                             p,
-                            TypeVarRestriction::ActiveFloat,
+                            named_cast_source_family(named),
                             mode,
                             env,
                             subst,
@@ -1125,10 +1139,12 @@ pub(super) fn infer_cast(
                     }
                     Type::Tensor(dims, TensorPrec::Var(target))
                 }
-                // [05-OP-6] leaves `cast_trunc` only the float scalar sources.
+                // Each named rung admits only its own family's scalar sources.
                 Type::Prim(source) if source.is_data_element_dtype() => {
-                    if trunc_pair_rejected(source.is_float()) {
-                        return report(errors, trunc_pair_rejection());
+                    if let Some(named) = mode.named()
+                        && named_pair_rejected(source_admitted(source))
+                    {
+                        return report(errors, named_pair_rejection(named));
                     }
                     Type::Var(target)
                 }
@@ -1173,10 +1189,10 @@ pub(super) fn infer_cast(
     // the cast, whether it is a tensor source's precision or a scalar source.
     // The float requirement itself is recorded where the settled source is
     // decided, which discharge shares.
-    if mode == CastMode::Trunc
+    if let Some(named) = mode.named()
         && let Some(error) = authored_cast_source_rejection(
             &resolved,
-            TypeVarRestriction::ActiveFloat,
+            named_cast_source_family(named),
             mode,
             env,
             subst,
@@ -1268,12 +1284,12 @@ pub(crate) fn cast_result_from_settled_source(
                     new_prec, /* tensor = */ true,
                 )));
             }
-            if mode == CastMode::Trunc {
+            if let Some(named) = mode.named() {
                 let source = match src_prec {
                     TensorPrec::Concrete(p) => Some(p),
                     TensorPrec::Var(_) => None,
                 };
-                if let Some(error) = trunc_pair_error(source, new_prec) {
+                if let Some(error) = named_cast_pair_error(named, source, new_prec) {
                     return Err(Box::new(error));
                 }
                 // chelis#2158: a precision variable is constrained here rather
@@ -1283,7 +1299,7 @@ pub(crate) fn cast_result_from_settled_source(
                 if let TensorPrec::Var(precision) = src_prec
                     && let Some(error) = require_cast_source_family(
                         precision,
-                        TypeVarRestriction::ActiveFloat,
+                        named_cast_source_family(named),
                         mode,
                         subst,
                     )
@@ -1315,8 +1331,8 @@ pub(crate) fn cast_result_from_settled_source(
                     vec![],
                 )));
             }
-            if mode == CastMode::Trunc
-                && let Some(error) = trunc_pair_error(Some(src_prec), new_prec)
+            if let Some(named) = mode.named()
+                && let Some(error) = named_cast_pair_error(named, Some(src_prec), new_prec)
             {
                 return Err(Box::new(error));
             }
@@ -1447,48 +1463,75 @@ pub(crate) fn bounded_scalar_cast_result(
             new_prec, /* tensor = */ false,
         ))));
     }
-    if mode == CastMode::Trunc {
-        if let Some(error) = trunc_pair_error(None, new_prec) {
+    if let Some(named) = mode.named() {
+        if let Some(error) = named_cast_pair_error(named, None, new_prec) {
             return Some(Err(Box::new(error)));
         }
-        // [05-OP-6] wants a float source at every instantiation, which is a
-        // question about what the bound admits, not about which §5.9 form
-        // spells it: `{f32, f64}` satisfies it and `{f32, i32}` does not.
-        if !bound.admits_only_floats() {
+        // Each rung wants a source in its family at every instantiation,
+        // which is a question about what the bound admits, not about which
+        // §5.9 form spells it: for [05-OP-6], `{f32, f64}` satisfies it and
+        // `{f32, i32}` does not.
+        if !bound.admits_only_within(named_cast_source_family(named)) {
             return None;
         }
     }
     Some(Ok(Type::Prim(new_prec)))
 }
 
-/// The [05-OP-6] source/target contract: `cast_trunc` is float-to-integer
-/// ONLY. Every other pair is a check-time type error naming the checked
-/// `cast` as the remedy, so no program reaches a lane that has no
-/// truncating semantics for it.
+/// The source dtype family a named cast rung admits: [05-OP-6]'s
+/// `cast_trunc` reads a float.
+pub(crate) fn named_cast_source_family(mode: NamedCastMode) -> TypeVarRestriction {
+    match mode {
+        NamedCastMode::Trunc => TypeVarRestriction::ActiveFloat,
+    }
+}
+
+/// [`named_cast_source_family`], spelled for a diagnostic.
+fn named_cast_source_noun(mode: NamedCastMode) -> &'static str {
+    match mode {
+        NamedCastMode::Trunc => "a float",
+    }
+}
+
+/// The source/target contract of a named cast rung: an integer target and a
+/// source in the rung's family. Every other pair is a check-time type error
+/// naming the checked `cast` as the remedy, so no program reaches a lane that
+/// has no semantics for it.
 ///
 /// `source == None` means the operand's tensor precision is still a
 /// variable, and this function decides only the target for it. Its callers
-/// record the source's float requirement on that variable with
+/// record the source's family requirement on that variable with
 /// [`require_cast_source_family`] (chelis#2158): an authored binder is never
 /// bound, so no later binding would re-check it.
-pub(super) fn trunc_pair_error(source: Option<Prim>, target: Prim) -> Option<CheckError> {
-    let hint = "`cast_trunc` truncates a float toward zero into an integer \
-                width ([05-OP-6]); use `cast` for every other conversion"
-        .to_string();
+pub(crate) fn named_cast_pair_error(
+    mode: NamedCastMode,
+    source: Option<Prim>,
+    target: Prim,
+) -> Option<CheckError> {
+    let keyword = mode.keyword();
+    let hint = match mode {
+        NamedCastMode::Trunc => "`cast_trunc` truncates a float toward zero into an integer \
+                                 width ([05-OP-6]); use `cast` for every other conversion"
+            .to_string(),
+    };
     if !target.is_integer() {
         return Some(CheckError::new(
             CheckErrorKind::CastNonTensor,
             format!(
-                "`cast_trunc` target `{}` is not an integer dtype",
+                "`{keyword}` target `{}` is not an integer dtype",
                 target.name()
             ),
             vec![hint],
         ));
     }
     match source {
-        Some(prim) if !prim.is_float() => Some(CheckError::new(
+        Some(prim) if !named_cast_source_family(mode).admits(prim) => Some(CheckError::new(
             CheckErrorKind::CastNonTensor,
-            format!("`cast_trunc` source `{}` is not a float dtype", prim.name()),
+            format!(
+                "`{keyword}` source `{}` is not {} dtype",
+                prim.name(),
+                named_cast_source_noun(mode)
+            ),
             vec![hint],
         )),
         _ => None,
@@ -1512,14 +1555,11 @@ pub(crate) fn require_cast_source_family(
     mode: CastMode,
     subst: &Subst,
 ) -> Option<CheckError> {
-    let operation = if mode == CastMode::Trunc {
-        "cast_trunc"
-    } else {
-        "cast"
-    };
+    let operation = mode.keyword();
+    let atom = cast_mode_atom(mode);
     let hint = format!(
         "Declare the source's binder with the `{}` bound, or convert the source with `cast` \
-         first ([05-OP-6])",
+         first ({atom})",
         required.bound_spelling()
     );
     match subst.apply(&Type::Var(variable)) {
@@ -1532,7 +1572,7 @@ pub(crate) fn require_cast_source_family(
             Some(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), but the \
+                    "`{operation}` requires a source of dtype family `{}` ({atom}), but the \
                      source dtype is bounded by {} ({}), which shares no dtype \
                      with it (spec/04-type-system.md §5.9 [04-DTYPE-2])",
                     required.bound_spelling(),
@@ -1545,7 +1585,7 @@ pub(crate) fn require_cast_source_family(
         Type::Prim(prim) if !required.admits(prim) => Some(CheckError::new(
             CheckErrorKind::PrecisionMismatch,
             format!(
-                "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), got `{}`",
+                "`{operation}` requires a source of dtype family `{}` ({atom}), got `{}`",
                 required.bound_spelling(),
                 prim.name(),
             ),
@@ -1585,15 +1625,12 @@ fn authored_cast_source_rejection(
     if bound.intersect(required) == Some(bound) {
         return None;
     }
-    let operation = if mode == CastMode::Trunc {
-        "cast_trunc"
-    } else {
-        "cast"
-    };
+    let operation = mode.keyword();
+    let atom = cast_mode_atom(mode);
     Some(CheckError::new(
         CheckErrorKind::PrecisionMismatch,
         format!(
-            "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), but its source \
+            "`{operation}` requires a source of dtype family `{}` ({atom}), but its source \
              dtype is the declared type parameter `{name}`, whose `{}` bound ({}) admits dtypes \
              outside `{}`; an authored binder must satisfy the operation at every instantiation \
              its declaration admits (spec/04-type-system.md §3.1.3 [04-INF-6], §5.9 \
@@ -1605,10 +1642,19 @@ fn authored_cast_source_rejection(
         ),
         vec![format!(
             "Declare `{name}: {}` in the binder list, or convert the source with `cast` first \
-             ([05-OP-6])",
+             ({atom})",
             required.bound_spelling()
         )],
     ))
+}
+
+/// The atom a cast diagnostic cites: the named rung's, or [05-OP-63] for the
+/// checked default.
+fn cast_mode_atom(mode: CastMode) -> &'static str {
+    match mode {
+        CastMode::Checked => "[05-OP-63]",
+        CastMode::Named(named) => named.atom(),
+    }
 }
 
 /// [`authored_cast_source_rejection`], then [`require_cast_source_family`]:

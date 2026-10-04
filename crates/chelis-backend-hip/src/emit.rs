@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
     ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
-    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
+    LogicalKind, NamedCastMode, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
@@ -1776,7 +1776,7 @@ impl HipEmitter {
             // chelis-compiler-api) gate this out before codegen; the
             // emitter arms below are the backstop if a future caller
             // reaches the backend without passing a gate.
-            RiscOp::CastTrunc { .. } => None,
+            RiscOp::NamedCast { .. } => None,
             RiscOp::Count { .. } => Some(format!("kernel_count_{}", node.id.0)),
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
@@ -2203,8 +2203,8 @@ impl HipEmitter {
                     .byte_width(),
             ),
             RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag, take_gate())?,
-            RiscOp::CastTrunc { .. } => {
-                return Err(Self::cast_trunc_unsupported(node));
+            RiscOp::NamedCast { mode, .. } => {
+                return Err(Self::named_cast_unsupported(node, *mode));
             }
             RiscOp::Count { axes } => {
                 let input = dag
@@ -2846,7 +2846,9 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
+            RiscOp::NamedCast { mode, .. } => {
+                return Err(Self::named_cast_unsupported(node, *mode));
+            }
             RiscOp::Count { axes } => {
                 self.emit_count_launch(id, axes, &node.inputs, &node.output_type, dag)
             }
@@ -5323,16 +5325,16 @@ impl HipEmitter {
     /// These arms exist so a future HIP implementation has to remove
     /// this rejection deliberately rather than inherit `cast`'s
     /// unguarded conversion by accident.
-    fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
+    fn named_cast_unsupported(node: &DagNode, mode: NamedCastMode) -> Unsupported {
         Unsupported::new(
-            UnsupportedKind::Op("cast_trunc".to_string()),
+            UnsupportedKind::Op(mode.keyword().to_string()),
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
             chelis_types::unimplemented_rejection!(
                 759,
                 "the HIP cast kernels emit an unguarded device-side conversion, \
-                 so the [05-OP-6] Domain/Overflow traps have no device \
-                 implementation; the C target is canonical for the named cast ladder"
+                 so the named cast traps have no device implementation; the C \
+                 target is canonical for the named cast ladder"
             ),
         )
     }
@@ -5399,7 +5401,7 @@ impl HipEmitter {
             | RiscOp::Realize
             | RiscOp::Reshape { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }

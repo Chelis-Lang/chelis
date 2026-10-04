@@ -195,7 +195,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::Gather { .. }
         | RiscOp::Scatter { .. }
         | RiscOp::ScatterElements { .. } => None,

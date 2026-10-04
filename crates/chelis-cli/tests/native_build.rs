@@ -1281,7 +1281,8 @@ fn nan_atom_coverage(
         Id::ArgminReduce => (RiscOp::Argmin { axis: 0 }, NoFloatValue),
         Id::Shape => (RiscOp::Shape { axis: 0 }, NoFloatValue),
         Id::CastTrunc => (
-            RiscOp::CastTrunc {
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Trunc,
                 new_precision: Prim::Int32,
             },
             NoFloatValue,

@@ -1095,7 +1095,8 @@ mod tests {
             ),
             (
                 "cast_trunc to integer",
-                RiscOp::CastTrunc {
+                RiscOp::NamedCast {
+                    mode: crate::dag::NamedCastMode::Trunc,
                     new_precision: Prim::Int64,
                 },
                 1,
@@ -1104,7 +1105,8 @@ mod tests {
             ),
             (
                 "cast_trunc to float twin",
-                RiscOp::CastTrunc {
+                RiscOp::NamedCast {
+                    mode: crate::dag::NamedCastMode::Trunc,
                     new_precision: Prim::F32,
                 },
                 1,
