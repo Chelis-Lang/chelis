@@ -402,6 +402,17 @@ packages = ["chelis-runtime-bundle"]
 reason = "runtime dependency changes can add runtime inputs the build record must declare"
 tracking_issue = "chelis#1354"
 
+# chelis#3120: ownership and host/kernel classification consume Surf literals
+# and shared CLI fixtures. Execute their existing positive/negative suites in
+# standing PR CI so an upstream literal or fixture edit cannot omit them.
+[[standing_target]]
+package = "chelis-ir"
+name = "ownership_lowering"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1277_kernel_decision"
+
 # chelis#1582: package-resolved scalar callables stay lexical under vmap, with
 # exact evaluator/native-C agreement and unimported-name rejection controls.
 [[standing_target]]
