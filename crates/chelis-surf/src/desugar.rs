@@ -156,8 +156,10 @@ struct DesugarCtx {
     /// bare bracket-literal body just as an inline result type does
     /// (position 3).
     top_level_fn_result_tensor_prec: UnordMap<String, String>,
-    /// `to_tensor([...])` calls through a lexical `to_tensor`, by source span.
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
+    /// References rebound by a local binder (see [`LexicalResolution`]).
+    local_references: UnordSet<ReferenceKey>,
+    /// `to_tensor` references through a binding of that name.
+    bound_constructor_references: UnordSet<ReferenceKey>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -252,7 +254,8 @@ impl DesugarCtx {
             explicit_sig_names,
             top_level_binding_tensor_prec,
             top_level_fn_result_tensor_prec,
-            shadowed_tensor_constructor_calls: resolution.shadowed_tensor_constructor_calls,
+            local_references: resolution.local_references,
+            bound_constructor_references: resolution.bound_constructor_references,
             def_effects,
             next_destructure_temp: std::cell::Cell::new(0),
             declared_type_binders,
@@ -263,7 +266,8 @@ impl DesugarCtx {
     fn with_resolution(resolution: LexicalResolution) -> Self {
         Self {
             resolved_grad_indices: resolution.grad_indices,
-            shadowed_tensor_constructor_calls: resolution.shadowed_tensor_constructor_calls,
+            local_references: resolution.local_references,
+            bound_constructor_references: resolution.bound_constructor_references,
             ..Self::default()
         }
     }
@@ -368,6 +372,9 @@ struct LexicalCallableId(u64);
 #[derive(Clone, Default)]
 struct CallableScope {
     values: UnordMap<String, CallableOrigin>,
+    /// Names a local binder (a parameter, a block or lambda binding, a
+    /// pattern) rebinds in this scope, as opposed to top-level declarations.
+    locals: UnordSet<String>,
 }
 
 impl CallableScope {
@@ -379,6 +386,12 @@ impl CallableScope {
     }
 
     fn bind(&mut self, name: String, value: CallableOrigin) {
+        self.locals.insert(name.clone());
+        self.values.insert(name, value);
+    }
+
+    /// Bind a top-level declaration, which no local binder rebinds.
+    fn bind_global(&mut self, name: String, value: CallableOrigin) {
         self.values.insert(name, value);
     }
 }
@@ -387,19 +400,30 @@ impl CallableScope {
 #[derive(Default)]
 struct LexicalResolution {
     grad_indices: Vec<(usize, Vec<i64>)>,
-    /// Source spans of the `to_tensor([...])` calls made through a lexical
-    /// binding named `to_tensor`. Such a call is an ordinary call, so its
-    /// argument adopts no contextual dtype (`spec/02-surf-syntax.md` §P10b).
-    /// Spans, not node addresses, identify the calls because pipe stages are
-    /// desugared from cloned expressions.
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
+    /// References to a name that a local binder rebinds. A call through one
+    /// does not name a top-level function, so it reads no declared signature
+    /// (`spec/04-type-system.md` §5.6 position 2).
+    local_references: UnordSet<ReferenceKey>,
+    /// References to `to_tensor` made through any binding of that name. A call
+    /// through one is an ordinary call, so its argument adopts no contextual
+    /// dtype (`spec/02-surf-syntax.md` §P10b).
+    bound_constructor_references: UnordSet<ReferenceKey>,
+}
+
+/// A variable reference, identified by its name and source span rather than by
+/// node address, because pipe stages are desugared from cloned expressions.
+type ReferenceKey = (usize, usize, String);
+
+fn reference_key(name: &str, span: Span) -> ReferenceKey {
+    (span.offset, span.len, name.to_string())
 }
 
 #[derive(Default)]
 struct GradSelectorResolver {
     globals: CallableScope,
     resolved: Vec<(usize, Vec<i64>)>,
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
+    local_references: UnordSet<ReferenceKey>,
+    bound_constructor_references: UnordSet<ReferenceKey>,
     /// Functions whose standalone `sig` declares a tensor result, so that a
     /// bare bracket-literal body receives a synthesized conversion.
     tensor_result_signatures: UnordSet<String>,
@@ -433,7 +457,8 @@ impl GradSelectorResolver {
     fn into_resolution(self) -> LexicalResolution {
         LexicalResolution {
             grad_indices: self.resolved,
-            shadowed_tensor_constructor_calls: self.shadowed_tensor_constructor_calls,
+            local_references: self.local_references,
+            bound_constructor_references: self.bound_constructor_references,
         }
     }
 
@@ -452,7 +477,7 @@ impl GradSelectorResolver {
                         continue;
                     };
                     let identity = self.deep_callable_identity(&children[1]);
-                    self.globals.bind(
+                    self.globals.bind_global(
                         name.to_string(),
                         CallableOrigin::Known {
                             identity,
@@ -490,7 +515,7 @@ impl GradSelectorResolver {
                     };
                     let scope = self.globals.clone();
                     let value = self.deep_callable_origin(&children[1], &scope, name);
-                    self.globals.bind(name.to_string(), value);
+                    self.globals.bind_global(name.to_string(), value);
                 }
                 _ => {}
             }
@@ -539,7 +564,7 @@ impl GradSelectorResolver {
             }
             Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
                 let identity = self.fresh_callable_identity();
-                self.globals.bind(
+                self.globals.bind_global(
                     name.clone(),
                     CallableOrigin::Known {
                         identity,
@@ -603,12 +628,12 @@ impl GradSelectorResolver {
                     });
                 }
                 self.visit_expr(body, &scope)?;
-                self.globals.bind(name.clone(), callable);
+                self.globals.bind_global(name.clone(), callable);
             }
             Decl::LetDef { name, value, .. } => {
                 let scope = self.globals.clone();
                 let value = self.visit_expr(value, &scope)?;
-                self.globals.bind(name.clone(), value);
+                self.globals.bind_global(name.clone(), value);
             }
             Decl::MacroDef {
                 params, body, name, ..
@@ -618,7 +643,7 @@ impl GradSelectorResolver {
                     scope.bind(param.clone(), CallableOrigin::Unknown);
                 }
                 let value = self.visit_expr(body, &scope)?;
-                self.globals.bind(name.clone(), value);
+                self.globals.bind_global(name.clone(), value);
             }
             Decl::TypeDef {
                 invariant: Some(invariant),
@@ -647,14 +672,17 @@ impl GradSelectorResolver {
     ) -> Result<CallableOrigin, DesugarError> {
         let ordinary = match expr {
             Expr::Lit(..) | Expr::Constructor(..) => CallableOrigin::NonCallable,
-            Expr::Var(name, _) => scope.lookup(name),
-            Expr::Apply(function, arguments, span) => {
-                if is_tensor_constructor_call(function, arguments)
-                    && scope.values.contains_key("to_tensor")
-                {
-                    self.shadowed_tensor_constructor_calls
-                        .insert(span_key(*span));
+            Expr::Var(name, span) => {
+                if scope.locals.contains(name) {
+                    self.local_references.insert(reference_key(name, *span));
                 }
+                if name == "to_tensor" && scope.values.contains_key(name) {
+                    self.bound_constructor_references
+                        .insert(reference_key(name, *span));
+                }
+                scope.lookup(name)
+            }
+            Expr::Apply(function, arguments, _) => {
                 self.visit_expr(function, scope)?;
                 let payloads = arguments
                     .iter()
@@ -3371,6 +3399,26 @@ impl DesugarCtx {
         node(DeepTag::App, vec![dvar("to_tensor"), list])
     }
 
+    /// Whether a reference names the intrinsic `to_tensor` rather than a
+    /// binding of that name.
+    fn is_intrinsic_tensor_constructor(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Var(name, span) if name == "to_tensor"
+            && !self.bound_constructor_references.contains(&reference_key(name, *span)))
+    }
+
+    /// The per-parameter tensor element dtypes of the top-level function a
+    /// callee names (§5.6 position 2). A callee a local binder rebinds names
+    /// another callable and declares nothing.
+    fn declared_callee_tensor_params(&self, callee: &Expr) -> Option<&Vec<Option<String>>> {
+        let Expr::Var(name, span) = callee else {
+            return None;
+        };
+        if self.local_references.contains(&reference_key(name, *span)) {
+            return None;
+        }
+        self.top_level_fn_tensor_param_prec.get(name)
+    }
+
     /// Desugar a tensor literal that stands in a §5.6 adopting position with
     /// element type `prec_name`. A bare bracket literal is one only where its
     /// own declaration states the tensor type (`declared`, positions 1 and
@@ -3389,10 +3437,8 @@ impl DesugarCtx {
                 Some(self.desugar_list_as_tensor_literal(items, prec_name, local_fn_params))
             }
             Expr::Apply(function, arguments, span)
-                if is_tensor_constructor_call(function, arguments)
-                    && !self
-                        .shadowed_tensor_constructor_calls
-                        .contains(&span_key(*span)) =>
+                if self.is_intrinsic_tensor_constructor(function)
+                    && matches!(arguments.as_slice(), [Expr::List(_, _)]) =>
             {
                 let [Expr::List(items, list_span)] = arguments.as_slice() else {
                     unreachable!("a tensor constructor call has one bracket-literal argument")
@@ -3540,17 +3586,6 @@ pub(crate) fn literal_adopts_tensor_element(integer: bool, prec_name: &str) -> b
     float || (integer && int)
 }
 
-/// Whether a call is spelled `to_tensor([...])`: the constructor name applied
-/// to one bracket literal. Whether the name is the intrinsic is lexical.
-fn is_tensor_constructor_call(function: &Expr, arguments: &[Expr]) -> bool {
-    matches!(function, Expr::Var(name, _) if name == "to_tensor")
-        && matches!(arguments, [Expr::List(_, _)])
-}
-
-fn span_key(span: Span) -> (usize, usize) {
-    (span.offset, span.len)
-}
-
 impl DesugarCtx {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
         // Position 2 (spec §P10b / §5.6): if the callee is a top-level
@@ -3566,12 +3601,7 @@ impl DesugarCtx {
         // through the standard `Cons`/`to_tensor` element-type
         // unification path; the contextual narrowing here is the
         // ergonomic affordance for the named-callee case.
-        let callee_param_prec: Option<&Vec<Option<String>>> =
-            if let Expr::Var(callee_name, _) = func {
-                self.top_level_fn_tensor_param_prec.get(callee_name)
-            } else {
-                None
-            };
+        let callee_param_prec = self.declared_callee_tensor_params(func);
 
         let desugared_args: Vec<deep::Expr> = args
             .iter()

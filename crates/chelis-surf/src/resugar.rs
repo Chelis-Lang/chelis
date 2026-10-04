@@ -13,7 +13,7 @@ use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
 use chelis_deep::{CastMode, DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::ast::{
@@ -192,7 +192,8 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     validate_grad_selector_consistency(std::slice::from_ref(expr))?;
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
-    let _declared = DeclaredTensorsScope::install(DeclaredTensors::default());
+    let _declared =
+        DeclaredTensorsScope::install(DeclaredTensors::collect(std::slice::from_ref(expr)));
     resugar_expression_inner(expr)
 }
 
@@ -3913,19 +3914,105 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
 /// signatures by name (`spec/02-surf-syntax.md` §P10b): a value signature
 /// (position 1), a function result (position 3) and each function parameter
 /// (position 2). A resugared tensor literal prints against the contexts its
-/// re-desugaring will see.
+/// re-desugaring will see, including the desugarer's lexical facts: a callee a
+/// local binder rebinds declares no signature, and a `to_tensor` any binding
+/// rebinds is an ordinary call.
 #[derive(Default)]
 struct DeclaredTensors {
     values: BTreeMap<String, String>,
     results: BTreeMap<String, String>,
     parameters: BTreeMap<String, Vec<Option<String>>>,
+    /// `var` nodes, by address, whose name a local binder rebinds.
+    local_references: BTreeSet<usize>,
+    /// `var` nodes, by address, naming `to_tensor` through a binding of it.
+    bound_constructor_references: BTreeSet<usize>,
 }
 
 impl DeclaredTensors {
     fn collect(exprs: &[DeepExpr]) -> Self {
         let mut declared = Self::default();
         declared.collect_into(exprs);
+        let constructor_declared = declared_names(exprs).contains("to_tensor");
+        for expr in exprs {
+            declared.collect_references(expr, &BTreeSet::new(), constructor_declared);
+        }
         declared
+    }
+
+    /// Walk `expr` with the names local binders bring into scope, as the
+    /// desugarer's lexical pre-pass does.
+    fn collect_references(
+        &mut self,
+        expr: &DeepExpr,
+        locals: &BTreeSet<String>,
+        constructor_declared: bool,
+    ) {
+        let Ok(node) = node_ref(expr) else {
+            if let DeepExpr::BareList(children, _) = expr {
+                for child in children {
+                    self.collect_references(child, locals, constructor_declared);
+                }
+            }
+            return;
+        };
+        match node.tag {
+            DeepTag::Var => {
+                if let Some(name) = variable_name(expr) {
+                    let address = expr as *const DeepExpr as usize;
+                    if locals.contains(name) {
+                        self.local_references.insert(address);
+                    }
+                    if name == "to_tensor" && (constructor_declared || locals.contains(name)) {
+                        self.bound_constructor_references.insert(address);
+                    }
+                }
+            }
+            DeepTag::Fn if node.children.len() == 2 => {
+                let mut scoped = locals.clone();
+                if let Ok(params) = node_ref(&node.children[0])
+                    && params.tag == DeepTag::Params
+                {
+                    scoped.extend(params.children.iter().filter_map(parameter_name));
+                }
+                self.collect_references(&node.children[1], &scoped, constructor_declared);
+            }
+            DeepTag::Let if node.children.len() == 2 => {
+                let mut scoped = locals.clone();
+                if let Ok(bindings) = node_ref(&node.children[0])
+                    && bindings.tag == DeepTag::Bind
+                {
+                    for pair in bindings.children.chunks(2) {
+                        if let [name, value] = pair {
+                            self.collect_references(value, &scoped, constructor_declared);
+                            if let Some(name) = atom_name(name) {
+                                scoped.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                self.collect_references(&node.children[1], &scoped, constructor_declared);
+            }
+            DeepTag::Match if !node.children.is_empty() => {
+                self.collect_references(&node.children[0], locals, constructor_declared);
+                for arm in &node.children[1..] {
+                    let Ok(arm) = node_ref(arm) else {
+                        continue;
+                    };
+                    let mut scoped = locals.clone();
+                    if let Some(pattern) = arm.children.first() {
+                        deep_pattern_names(pattern, &mut scoped);
+                    }
+                    for child in arm.children.iter().skip(1) {
+                        self.collect_references(child, &scoped, constructor_declared);
+                    }
+                }
+            }
+            _ => {
+                for child in node.children {
+                    self.collect_references(child, locals, constructor_declared);
+                }
+            }
+        }
     }
 
     fn collect_into(&mut self, exprs: &[DeepExpr]) {
@@ -3966,6 +4053,70 @@ impl DeclaredTensors {
                 self.parameters.insert(name.to_string(), parameters);
             }
         }
+    }
+}
+
+/// Names a top-level `def` or `defsig` declares, through nested modules.
+fn declared_names(exprs: &[DeepExpr]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for expr in exprs {
+        let Ok(node) = node_ref(expr) else {
+            continue;
+        };
+        match node.tag {
+            DeepTag::Module => {
+                names.extend(declared_names(node.children.get(1..).unwrap_or_default()))
+            }
+            DeepTag::Def | DeepTag::Defsig => {
+                if let Ok(name) = name_child(&node, 0) {
+                    names.insert(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Names a match pattern binds.
+fn deep_pattern_names(pattern: &DeepExpr, names: &mut BTreeSet<String>) {
+    let Ok(node) = node_ref(pattern) else {
+        return;
+    };
+    match node.tag {
+        DeepTag::PatVar => {
+            if let Some(name) = node.children.first().and_then(atom_name) {
+                names.insert(name.to_string());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = node.children.first().and_then(atom_name) {
+                names.insert(name.to_string());
+            }
+            if let Some(nested) = node.children.get(1) {
+                deep_pattern_names(nested, names);
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in node.children {
+                deep_pattern_names(child, names);
+            }
+        }
+        DeepTag::PatCtor => {
+            for child in node.children.iter().skip(1) {
+                deep_pattern_names(child, names);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in node.children.iter().skip(1) {
+                if let Ok(field) = node_ref(field)
+                    && let [_, value] = field.children
+                {
+                    deep_pattern_names(value, names);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -4120,7 +4271,12 @@ fn adopting_tensor_call_items(
     let [function, chain] = node.children else {
         return Ok(None);
     };
-    if variable_name(function) != Some("to_tensor") || node_ref(function)?.meta.ty().is_some() {
+    if variable_name(function) != Some("to_tensor")
+        || node_ref(function)?.meta.ty().is_some()
+        || declared_tensors()
+            .bound_constructor_references
+            .contains(&(function as *const DeepExpr as usize))
+    {
         return Ok(None);
     }
     resugar_adopting_items(chain, precision)
@@ -4197,7 +4353,13 @@ fn resugar_call_arguments(
     first_parameter: usize,
 ) -> Result<Vec<Expr>, ResugarError> {
     let declared = declared_tensors();
-    let parameters = variable_name(function).and_then(|name| declared.parameters.get(name));
+    let parameters = variable_name(function)
+        .filter(|_| {
+            !declared
+                .local_references
+                .contains(&(function as *const DeepExpr as usize))
+        })
+        .and_then(|name| declared.parameters.get(name));
     arguments
         .iter()
         .enumerate()

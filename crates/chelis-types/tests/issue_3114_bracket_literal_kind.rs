@@ -517,7 +517,7 @@ fn a_lexically_rebound_callee_adopts_nothing() {
     let shadowed = [
         "def g() = {\n  f = fn (y) -> cast(y, f64)\n  f(to_tensor([1.1, 2.2]))\n}\n",
         "def g(f: tensor[2, f32] -> tensor[2, f32]) -> tensor[2, f32] = f(to_tensor([1.1, 2.2]))\n",
-        "h = fn (f: tensor[2, f32] -> tensor[2, f32]) -> f(to_tensor([1.1, 2.2]))\n",
+        "def g() = {\n  h = fn (f: tensor[2, f32] -> tensor[2, f32]) -> f(to_tensor([1.1, 2.2]))\n  h\n}\n",
         "def g(o: Option[tensor[2, f32] -> tensor[2, f32]]) = match o with {\n  | Some(f) => f(to_tensor([1.1, 2.2]))\n  | None => to_tensor([0.0, 0.0])\n}\n",
         "def g() = {\n  (f, k) = (fn (y: tensor[2, f32]) -> y, 1)\n  f(to_tensor([1.1, 2.2]))\n}\n",
         "def g(f: tensor[2, f32] -> tensor[2, f32]) -> tensor[2, f32] = to_tensor([1.1, 2.2]) |> f\n",
