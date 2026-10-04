@@ -7,12 +7,14 @@
 #   nix build --file nix/tests/release-e2e-nixos.nix \
 #     --arg assets /abs/assets --arg gates /abs/gates \
 #     --arg harness /abs/scripts/release_e2e.py \
-#     --argstr tag vX.Y.Z --argstr sourceSha <40-hex commit>
+#     --argstr tag vX.Y.Z --argstr archiveLabel vX.Y.Z|dev-<sha8> \
+#     --argstr sourceSha <40-hex commit>
 {
   assets,
   gates,
   harness,
   tag,
+  archiveLabel ? tag,
   sourceSha,
   # nixos-26.05 on 2026-10-04.
   nixpkgs ? fetchTarball {
@@ -73,7 +75,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_unit("multi-user.target")
         status, _ = machine.execute(
             f"python3 ${harnessScript} run --label 'NixOS 26.05 ({machine.name})'"
-            " --tag ${tag} --source-sha ${sourceSha}"
+            " --tag ${tag} --archive-label ${archiveLabel} --source-sha ${sourceSha}"
             " --assets ${linuxAssets} --gates ${gateTree}"
             " --evidence /tmp/evidence > /tmp/console.log 2>&1",
             timeout=1800,

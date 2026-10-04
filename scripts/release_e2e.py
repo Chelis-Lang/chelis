@@ -30,6 +30,7 @@ one Markdown table.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -43,16 +44,21 @@ import tarfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = "Chelis-Lang/chelis"
 SCHEMA = "chelis-release-e2e/v1"
 TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
-# The installer slug and the toolchain build chelisup installs on each host.
+# The installer slug and the toolchain builds chelisup installs on each host,
+# in preference order: a Linux release without a static build installs its
+# glibc-2.31 build.
 PLATFORMS = {
-    ("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-glibc2.31"),
-    ("Darwin", "arm64"): ("darwin-arm64", "darwin-arm64"),
+    ("Linux", "x86_64"): (
+        "linux-x86_64",
+        ("linux-x86_64-static", "linux-x86_64-glibc2.31"),
+    ),
+    ("Darwin", "arm64"): ("darwin-arm64", ("darwin-arm64",)),
 }
 FIRST_PROGRAM_PAGE = Path("docs/book/src/first-program.md")
 FENCE = re.compile(r"```([A-Za-z0-9_-]*)")
@@ -257,6 +263,35 @@ def host_facts() -> dict[str, object]:
     return facts
 
 
+def glibc_version() -> str | None:
+    try:
+        return os.confstr("CS_GNU_LIBC_VERSION")
+    except (OSError, ValueError):
+        return None
+
+
+def map_archive(source: Path, destination: Path, root: str) -> None:
+    """Copy a release archive under a new top-level directory, payload unchanged."""
+    with (
+        tarfile.open(source, "r:gz") as incoming,
+        tarfile.open(destination, "w:gz") as outgoing,
+    ):
+        for original in incoming:
+            member = copy.copy(original)
+            member.name = str(
+                PurePosixPath(root, *PurePosixPath(member.name).parts[1:])
+            )
+            member.pax_headers = {
+                key: value for key, value in member.pax_headers.items() if key != "path"
+            }
+            stream = incoming.extractfile(original) if member.isfile() else None
+            try:
+                outgoing.addfile(member, stream)
+            finally:
+                if stream is not None:
+                    stream.close()
+
+
 class Proof:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -266,9 +301,15 @@ class Proof:
         self.steps: dict[str, Step] = {}
         self.current = Step("setup")
         self.version = args.version
-        self.slug, self.build = PLATFORMS.get(
-            (platform.system(), platform.machine()), (None, None)
+        self.slug, self.builds = PLATFORMS.get(
+            (platform.system(), platform.machine()), (None, ())
         )
+        self.build: str | None = None
+        # An unpublished candidate's archives carry its dev label; chelisup
+        # installs them from a copy under the released root name.
+        self.candidate = args.archive_label != args.tag
+        self.install_assets: Path = args.assets
+        self.glibc_host = platform.system() != "Linux" or glibc_version() is not None
         self.offline_home: Path | None = None
 
     def env(self, **extra: str | Path) -> dict[str, str]:
@@ -334,7 +375,7 @@ class Proof:
         return stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
     def archive(self, build: str) -> Path:
-        return self.args.assets / f"chelis-{self.args.tag}-{build}.tar.gz"
+        return self.args.assets / f"chelis-{self.args.archive_label}-{build}.tar.gz"
 
     def copy_installer(self, directory: Path) -> Path:
         source = self.args.assets / f"chelisup-{self.slug}"
@@ -357,20 +398,50 @@ class Proof:
         return f"`chelis --version` prints {stdout.strip()!r}"
 
     def assets(self) -> str:
-        if self.slug is None or self.build is None:
+        if self.slug is None:
             raise StepFailed(
                 f"no release build exists for {platform.system()}/{platform.machine()}"
             )
-        names = [self.archive(self.build), self.args.assets / f"chelisup-{self.slug}"]
+        self.build = next(
+            (build for build in self.builds if self.archive(build).is_file()), None
+        )
+        if self.build is None:
+            listed = ", ".join(self.archive(build).name for build in self.builds)
+            raise StepFailed(f"the release has none of {listed}")
+        archive = self.archive(self.build)
+        names = [archive, self.args.assets / f"chelisup-{self.slug}"]
         for path in names:
             verify_sidecar(path)
         if not (self.args.assets / "chelisup.sh").is_file():
             raise StepFailed("the release has no chelisup.sh")
-        return "sidecars match " + ", ".join(path.name for path in names)
+        mapping = ""
+        if self.candidate:
+            self.install_assets = self.evidence / "release-assets"
+            self.install_assets.mkdir()
+            root = f"chelis-v{self.version}-{self.build}"
+            mapped = self.install_assets / f"{root}.tar.gz"
+            map_archive(archive, mapped, root)
+            Path(f"{mapped}.sha256").write_text(
+                f"{digest(mapped)}  {mapped.name}\n", encoding="utf-8"
+            )
+            mapping = f"; installs {archive.name} as {mapped.name}"
+        return (
+            f"{self.build}: sidecars match "
+            + ", ".join(path.name for path in names)
+            + mapping
+        )
+
+    def require_glibc_host(self) -> None:
+        if not self.glibc_host:
+            raise StepSkipped(
+                "the runtime archive is a glibc library and this host's C library is not glibc"
+            )
 
     def bootstrap(self) -> str:
         if not self.args.online:
             raise StepSkipped("offline run")
+        if self.candidate:
+            raise StepSkipped("unpublished candidate")
         gh = shutil.which("gh")
         if gh is None:
             raise StepSkipped("gh is not on PATH")
@@ -393,6 +464,8 @@ class Proof:
     def install_online(self) -> str:
         if not self.args.online:
             raise StepSkipped("offline run")
+        if self.candidate:
+            raise StepSkipped("unpublished candidate")
         home = self.evidence / "online-home"
         installer = home / "bin" / "chelisup"
         if not installer.is_file():
@@ -411,7 +484,7 @@ class Proof:
         self.run(
             "install",
             [installer, "install", self.version],
-            env=self.env(CHELIS_HOME=home, CHELISUP_RELEASE_BASE=self.args.assets),
+            env=self.env(CHELIS_HOME=home, CHELISUP_RELEASE_BASE=self.install_assets),
             timeout=600,
         )
         detail = "from local assets; " + self.require_version(home)
@@ -420,6 +493,7 @@ class Proof:
 
     def first_program(self) -> str:
         home = self.require_offline_home()
+        self.require_glibc_host()
         page = self.args.gates / FIRST_PROGRAM_PAGE
         program, commands = walkthrough(page.read_text(encoding="utf-8"))
         if program is None or not commands:
@@ -455,6 +529,7 @@ class Proof:
 
     def native(self) -> str:
         home = self.require_offline_home()
+        self.require_glibc_host()
         work = self.evidence / "native"
         work.mkdir()
         (work / "app.ch").write_text(NATIVE_PROBE, encoding="utf-8")
@@ -502,6 +577,7 @@ class Proof:
         return tail(stdout or stderr, 1)
 
     def canary(self) -> str:
+        self.require_glibc_host()
         if shutil.which("cc") is None:
             raise StepFailed("no `cc` on PATH; the canary links generated C")
         gate = self.args.gates / "scripts" / "installed_artifact_canary.py"
@@ -510,7 +586,8 @@ class Proof:
             "installed_artifact_canary",
             [sys.executable, gate, "--artifacts", self.args.assets]
             + ["--installer-assets", self.args.assets]
-            + ["--source-sha", self.args.source_sha, "--build-label", self.args.tag]
+            + ["--source-sha", self.args.source_sha]
+            + ["--build-label", self.args.archive_label]
             + ["--version", self.version, "--evidence", evidence],
             env=self.env(),
             timeout=900,
@@ -568,6 +645,13 @@ class Proof:
     def elf_linkage(self, name: str, path: Path) -> str:
         facts = elf_dynamic(path)
         self.current.processes.append({"label": f"elf-{name}", "facts": facts})
+        if self.build is not None and self.build.endswith("-static"):
+            if facts["interpreter"] is not None or facts["needed"]:
+                raise StepFailed(
+                    f"{name} is not static: interpreter {facts['interpreter']}, "
+                    f"needs {facts['needed']}"
+                )
+            return f"{name}: static, no program interpreter or shared library"
         if facts["interpreter"] != LINUX_LOADER:
             raise StepFailed(f"{name} loads through {facts['interpreter']}")
         stored = [entry for entry in facts["rpath"] if "/nix/store" in str(entry)]
@@ -616,6 +700,7 @@ def run(args: argparse.Namespace) -> int:
     if match is None or SOURCE_SHA.fullmatch(args.source_sha) is None:
         raise SystemExit("--tag must be vX.Y.Z and --source-sha a full commit")
     args.version = match.group(1)
+    args.archive_label = args.archive_label or args.tag
     args.assets = args.assets.resolve()
     args.gates = args.gates.resolve()
     args.evidence = args.evidence.resolve()
@@ -645,6 +730,7 @@ def run(args: argparse.Namespace) -> int:
         "schema": SCHEMA,
         "label": args.label or f"{facts['os']} ({facts['machine']})",
         "tag": args.tag,
+        "archive_label": args.archive_label,
         "version": args.version,
         "source_sha": args.source_sha,
         "online": args.online,
@@ -679,6 +765,7 @@ def run(args: argparse.Namespace) -> int:
         report["status"] = "failed" if failing else "passed"
         return 1 if failing else 0
     finally:
+        report["build"] = proof.build
         report["steps"] = [asdict(step) for step in proof.steps.values()]
         (args.evidence / "report.json").write_text(
             json.dumps(report, indent=2) + "\n", encoding="utf-8"
@@ -699,7 +786,7 @@ def cell(step: dict[str, object] | None) -> str:
 
 
 def render(reports: list[dict[str, object]]) -> str:
-    header = ["Host", "OS", "libc", *STEPS, "Result"]
+    header = ["Host", "OS", "libc", "Build", *STEPS, "Result"]
     lines = [
         "| " + " | ".join(header) + " |",
         "|" + "---|" * len(header),
@@ -713,6 +800,7 @@ def render(reports: list[dict[str, object]]) -> str:
             str(report.get("label")),
             str(host.get("os")),
             str(host.get("libc") or "-"),
+            str(report.get("build") or "-"),
             *(cell(steps.get(name)) for name in STEPS),
             "pass" if report.get("status") == "passed" else "**FAIL**",
         ]
@@ -754,6 +842,11 @@ def main() -> int:
     proof.add_argument("--gates", type=Path, required=True)
     proof.add_argument("--evidence", type=Path, required=True)
     proof.add_argument("--label")
+    proof.add_argument(
+        "--archive-label",
+        help="label in the archive names (default: --tag); "
+        "dev-<sha> marks an unpublished candidate",
+    )
     proof.add_argument("--online", action="store_true")
     proof.set_defaults(handler=run)
     table = commands.add_parser("summarize", help="render every report as one table")

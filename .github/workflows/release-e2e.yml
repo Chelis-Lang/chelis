@@ -1,9 +1,11 @@
 name: Release E2E
 
-# Proves that a published release installs and runs on each host class it
-# claims, using the published assets and the gates from the tagged source.
-# Nothing here builds Chelis. scripts/release_e2e.py owns the steps and the
-# report; this workflow only provides the hosts.
+# Proves that a release installs and runs on each host class it claims. With
+# CANDIDATE_RUN empty it proves the published RELEASE_TAG; with a release.yml
+# run id it proves that run's unpublished artifacts. Gates come from the source
+# that produced the artifacts. Nothing here builds Chelis.
+# scripts/release_e2e.py owns the steps and the report; this workflow only
+# provides the hosts.
 on:
   push:
     branches: [agent/release-e2e-proof]
@@ -15,45 +17,89 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   RELEASE_TAG: ${{ inputs.tag || 'v0.18.12' }}
+  # release.yml dispatch of agent/static-linux-release at 5a233eafc.
+  CANDIDATE_RUN: '37216662276'
 
 jobs:
   inputs:
-    name: Published assets and tagged gates
+    name: Release assets and gates
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.identity.outputs.source-sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+      archive-label: ${{ steps.identity.outputs.archive-label }}
     steps:
-      - name: Checkout the tagged release gates
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          path: tagged
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/installed_artifact_canary.py
-            .github/scripts/smoke_macos_manifested_callable.py
-            .github/scripts/verify_release_smt.py
-            docs/book/src/first-program.md
-          sparse-checkout-cone-mode: false
-      - name: Download and verify the published assets
+      - name: Resolve the source under test
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p e2e/assets e2e/gates/scripts e2e/gates/.github/scripts e2e/gates/docs/book/src
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir e2e/assets
+          if [ -n "$CANDIDATE_RUN" ]; then
+            sha="$(gh run view "$CANDIDATE_RUN" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)"
+            echo "ref=$sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout the gates of that source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source.outputs.ref }}
+          path: tagged
+          persist-credentials: false
+          sparse-checkout: |
+            Cargo.toml
+            scripts/installed_artifact_canary.py
+            scripts/verify_runtime_package.py
+            .github/scripts/smoke_macos_manifested_callable.py
+            .github/scripts/verify_release_smt.py
+            docs/book/src/first-program.md
+          sparse-checkout-cone-mode: false
+      - name: Download the published assets
+        if: env.CANDIDATE_RUN == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir e2e/assets
+      - name: Download the candidate run's artifacts
+        if: env.CANDIDATE_RUN != ''
+        uses: actions/download-artifact@v7
+        with:
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+          pattern: chelis-*
+          merge-multiple: true
+          path: e2e/assets
+      - name: Verify sidecars and stage the gates
+        run: |
+          set -euo pipefail
           (cd e2e/assets && sha256sum -c ./*.sha256)
+          mkdir -p e2e/gates/scripts e2e/gates/.github/scripts e2e/gates/docs/book/src
           cp tagged/scripts/installed_artifact_canary.py e2e/gates/scripts/
+          if [ -f tagged/scripts/verify_runtime_package.py ]; then
+            cp tagged/scripts/verify_runtime_package.py e2e/gates/scripts/
+          fi
           cp tagged/.github/scripts/smoke_macos_manifested_callable.py \
             tagged/.github/scripts/verify_release_smt.py e2e/gates/.github/scripts/
           cp tagged/docs/book/src/first-program.md e2e/gates/docs/book/src/
-      - name: Record the tagged commit
+      - name: Record the identity under test
         id: identity
-        run: echo "source-sha=$(git -C tagged rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          sha="$(git -C tagged rev-parse HEAD)"
+          echo "source-sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ -n "$CANDIDATE_RUN" ]; then
+            version="$(awk '/^\[workspace.package\]/{p=1} p&&/^version/{gsub(/"/,"",$3); print $3; exit}' tagged/Cargo.toml)"
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "archive-label=dev-${sha::8}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "archive-label=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: release-e2e-inputs
@@ -85,11 +131,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+          TAG: ${{ needs.inputs.outputs.tag }}
+          ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
           LABEL: ${{ matrix.runner }}
         run: >-
           uv run --python 3.11 --no-project python scripts/release_e2e.py run --online
-          --label "$LABEL" --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
-          --assets e2e/assets --gates e2e/gates --evidence "$RUNNER_TEMP/evidence"
+          --label "$LABEL" --tag "$TAG" --archive-label "$ARCHIVE_LABEL"
+          --source-sha "$SOURCE_SHA" --assets e2e/assets --gates e2e/gates
+          --evidence "$RUNNER_TEMP/evidence"
       - if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -107,8 +156,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # glibc 2.31, the floor the Linux build targets. Bullseye's LTS has
-          # ended and its moving mirror 404s, so apt reads the immutable
+          # glibc 2.31, the floor of the dynamic Linux builds. Bullseye's LTS
+          # has ended and its moving mirror 404s, so apt reads the immutable
           # snapshot that scripts/ci_apt_get.py pins for the release build.
           # Plain http: the base image has no CA bundle, and apt verifies the
           # signed indices.
@@ -143,6 +192,12 @@ jobs:
           - image: archlinux:latest
             id: archlinux
             prepare: pacman -Syu --noconfirm --needed --quiet gcc tar gzip
+          # musl, no glibc: Alpine's own Python runs the harness, because the
+          # host's uv is a glibc build.
+          - image: alpine:latest
+            id: alpine
+            prepare: apk add --no-cache --quiet python3 gcc musl-dev tar gzip
+            python: python3
     steps:
       - uses: actions/checkout@v6
         with:
@@ -153,23 +208,26 @@ jobs:
           path: e2e
       - uses: astral-sh/setup-uv@v8.1.0
       # Each image gets the documented native prerequisites and nothing else.
-      # uv supplies the harness interpreter; gh is absent, so the run covers
-      # the GitHub API install but not the gh bootstrap.
+      # gh is absent, so the run covers the GitHub API install but not the gh
+      # bootstrap.
       - name: Prove the release inside ${{ matrix.image }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+          TAG: ${{ needs.inputs.outputs.tag }}
+          ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
           IMAGE: ${{ matrix.image }}
           PREPARE: ${{ matrix.prepare }}
+          PYTHON: ${{ matrix.python || '/work/.uv/uv run --python 3.11 --no-project python' }}
         run: |
           set -euo pipefail
           mkdir -p .uv && cp "$(command -v uv)" .uv/uv
-          docker run --rm -e GITHUB_TOKEN -e RELEASE_TAG -e SOURCE_SHA -e IMAGE -e PREPARE \
-            -v "$PWD:/work" -w /work "$IMAGE" sh -c '
+          docker run --rm -e GITHUB_TOKEN -e SOURCE_SHA -e TAG -e ARCHIVE_LABEL -e IMAGE \
+            -e PREPARE -e PYTHON -v "$PWD:/work" -w /work "$IMAGE" sh -c '
               set -e
               sh -c "$PREPARE" >/dev/null
-              /work/.uv/uv run --python 3.11 --no-project python scripts/release_e2e.py run --online \
-                --label "$IMAGE" --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
+              $PYTHON scripts/release_e2e.py run --online --label "$IMAGE" \
+                --tag "$TAG" --archive-label "$ARCHIVE_LABEL" --source-sha "$SOURCE_SHA" \
                 --assets e2e/assets --gates e2e/gates --evidence /work/evidence'
       - if: always()
         uses: actions/upload-artifact@v7
@@ -207,13 +265,16 @@ jobs:
       - name: Run the release inside both VMs
         env:
           SOURCE_SHA: ${{ needs.inputs.outputs.source-sha }}
+          TAG: ${{ needs.inputs.outputs.tag }}
+          ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
         run: |
           set -euo pipefail
           nix build --print-build-logs --out-link nixos-result \
             --file nix/tests/release-e2e-nixos.nix \
             --arg assets "$PWD/e2e/assets" --arg gates "$PWD/e2e/gates" \
             --arg harness "$PWD/scripts/release_e2e.py" \
-            --argstr tag "$RELEASE_TAG" --argstr sourceSha "$SOURCE_SHA"
+            --argstr tag "$TAG" --argstr archiveLabel "$ARCHIVE_LABEL" \
+            --argstr sourceSha "$SOURCE_SHA"
           for node in stock nixld; do
             mkdir -p "nixos-evidence/$node"
             tar -C "nixos-evidence/$node" -xzf "nixos-result/$node/evidence.tar.gz"
