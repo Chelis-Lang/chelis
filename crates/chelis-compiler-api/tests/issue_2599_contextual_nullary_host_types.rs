@@ -132,6 +132,22 @@ const POSITIVE: &[Case] = &[
         name: "concat_and_dict_merge_nested_empty_literals",
         source: "def c(xs: List[List[i32]]) -> List[List[i32]] = concat(xs, [[]])\ndef d(m: Dict[string, List[i64]]) -> Dict[string, List[i64]] = dict_merge(m, dict_of([(\"k\", [])]))\na = c([[1i32]])\nb = d(dict_of([(\"x\", [1i64])]))\n",
     },
+    // chelis#3153: the empty accumulator's element type is a DIMENSION-generic
+    // ADT, so only the callee's parameter type carries the dimension into it.
+    // A type-generic ADT (`Box[a]`), a non-generic ADT, and a bare
+    // `tensor[n, f32]` element each already compiled, so the dimension beneath
+    // the ADT is the whole trigger.
+    Case {
+        name: "empty_accumulator_dimension_generic_adt",
+        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([FCol(to_tensor([cast(1.0, f32), cast(2.0, f32)]))], []))\n",
+    },
+    // chelis#3153, Coral's actual shape: the element is a tuple whose second
+    // component is the dimension-generic ADT, threaded through a named
+    // accumulator binding rather than an inline argument.
+    Case {
+        name: "empty_accumulator_tuple_of_dimension_generic_adt",
+        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[(string, Col[n])], acc: List[(string, Col[n])]) -> List[(string, Col[n])] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    next = append(acc, hp)\n    repl(skip(xs, 1i64), next)\n  }\na = len(repl([(\"a\", FCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], []))\n",
+    },
 ];
 
 /// Each shape above with a `None` whose type nothing determines.
@@ -155,6 +171,13 @@ const AMBIGUOUS: &[Case] = &[
     Case {
         name: "fold_callback_len_of_none",
         source: "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, x: i64) -> add(acc, len([None])), 0i64, [1i64, 2i64])\na = case(true)\n",
+    },
+    // chelis#3153 negative parity: both arguments are empty, so nothing fixes
+    // the dimension of `Col[n]`. The checker accepts it and the evaluator runs
+    // it, but no host type exists, so the fix must NOT invent one.
+    Case {
+        name: "empty_accumulator_dimension_generic_adt_unfixed",
+        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([], []))\n",
     },
 ];
 
