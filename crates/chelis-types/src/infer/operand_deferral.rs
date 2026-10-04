@@ -4,7 +4,8 @@
 //! decides what its operands must be; this module only records that the
 //! decision could not be made yet and which call has to be re-entered once it
 //! can. The replay itself lives with the deferred shape ledger in
-//! `checked.rs`, beside the six per-route rules chelis#1489 registered there.
+//! `checked/deferred_shape.rs`, which also replays the six per-route rules
+//! chelis#1489 registered.
 
 use super::*;
 

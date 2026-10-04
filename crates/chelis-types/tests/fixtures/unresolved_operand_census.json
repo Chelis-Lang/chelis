@@ -829,13 +829,6 @@
     },
     {
       "file": "checked.rs",
-      "function": "finish_deferred_shape_checks",
-      "ordinal": 1,
-      "pattern": "Type::Var(var)",
-      "disposition": "not_a_route"
-    },
-    {
-      "file": "checked.rs",
       "function": "record_call_result_contracts",
       "ordinal": 1,
       "pattern": "Type::Var(variable) | Type::Tensor(_ , TensorPrec::Var(variable))",
@@ -843,7 +836,14 @@
       "reason": "records constrained call-result variables for declaration-boundary admission checking; local bindings or authored givens discharge them, otherwise finish_admission_contracts rejects them under [04-INF-9]"
     },
     {
-      "file": "checked.rs",
+      "file": "checked/deferred_shape.rs",
+      "function": "finish_deferred_shape_checks",
+      "ordinal": 1,
+      "pattern": "Type::Var(var)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "checked/deferred_shape.rs",
       "function": "shape_operand_awaits_binding",
       "ordinal": 1,
       "pattern": "Type::Var(_)",
