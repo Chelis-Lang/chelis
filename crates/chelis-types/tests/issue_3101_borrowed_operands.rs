@@ -9,7 +9,7 @@
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::check_ir_program;
+use chelis_types::{check_ir_program, check_linearity, check_typed_program};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
@@ -185,4 +185,69 @@ fn borrowed_cast_trunc_source_is_admitted() {
             .any(|m| m.contains("is not a float dtype")),
         "cast_trunc keeps its float-source rule through a borrow"
     );
+}
+
+/// The type checker's and then linearity's messages, as
+/// reports them.
+fn linearity_errors_of(source: &str) -> Vec<String> {
+    let checked = match check_typed_program(&surf_to_deep(source)) {
+        Ok(checked) => checked,
+        Err(report) => return report.errors.iter().map(|e| e.message.clone()).collect(),
+    };
+    match check_linearity(&checked) {
+        Ok(_) => vec![],
+        Err(errors) => errors.iter().map(|e| e.message.clone()).collect(),
+    }
+}
+
+/// Every read-only tensor operation and the operand dtype it admits.
+const READ_ONLY_OPS: [(&str, &str); 10] = [
+    ("cast(x, f64)", "f32"),
+    ("cast_trunc(x, i32)", "f32"),
+    ("cast_saturate(x, i16)", "f32"),
+    ("cast_wrap(x, i8)", "i32"),
+    ("mod(x, x)", "i32"),
+    ("bitand(x, x)", "i32"),
+    ("bitor(x, x)", "i32"),
+    ("bitxor(x, x)", "i32"),
+    ("shl(x, x)", "i32"),
+    ("shr(x, x)", "i32"),
+];
+
+/// [05-OP-63], [05-OP-6], [05-OP-23], [05-OP-24], [05-OP-47] and
+/// [05-OP-64]: an owned argument auto-borrows, so the source stays readable
+/// after the operation, at a def's body and at top level.
+#[test]
+fn an_owned_read_only_operand_auto_borrows() {
+    for (call, dtype) in READ_ONLY_OPS {
+        let body = format!(
+            "def f(x: tensor[3, {dtype}]) -> tensor[3, {dtype}] = {{\n  a = {call}\n  add(&x, &x)\n}}\n"
+        );
+        let errors = linearity_errors_of(&body);
+        assert!(errors.is_empty(), "`{call}` consumed x: {errors:?}");
+        let top =
+            format!("x = to_tensor([1{dtype}, 2{dtype}, 3{dtype}])\na = {call}\nb = add(&x, &x)\n");
+        let errors = linearity_errors_of(&top);
+        assert!(
+            errors.is_empty(),
+            "top-level `{call}` consumed x: {errors:?}"
+        );
+    }
+}
+
+/// The negative twin: a position that takes its operand by value (here a
+/// tuple element of the result) still consumes it after the read-only call,
+/// so a later borrow is refused.
+#[test]
+fn a_consuming_operation_still_consumes_beside_a_read_only_one() {
+    for (call, dtype) in READ_ONLY_OPS {
+        let body = format!(
+            "def f(x: tensor[3, {dtype}]) -> (tensor[3, {dtype}], tensor[3, {dtype}]) = {{\n  a = {call}\n  (x, add(&x, &x))\n}}\n"
+        );
+        let errors = linearity_errors_of(&body);
+        assert!(
+            errors.iter().any(|m| m.contains("already consumed")),
+            "returning x after `{call}` must consume it: {errors:?}"
+        );
+    }
 }

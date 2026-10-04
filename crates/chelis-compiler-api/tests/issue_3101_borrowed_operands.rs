@@ -45,6 +45,30 @@ fn cases() -> Vec<(String, String)> {
              widened = to_list(cast(&x, f32))\n",
         ),
     ));
+    // An owned source auto-borrows: every rung reads `x`, which stays live
+    // for the borrows after it, and the identity cast leaves both the result
+    // and `x` owned.
+    cases.push((
+        "owned_cast_sources".to_string(),
+        program(
+            "def apply(x: tensor[3, f32]) -> (tensor[3, f64], tensor[3, i32], tensor[3, i16], tensor[3, f32], tensor[3, f32]) = {\n\
+             \x20 a = cast(x, f64)\n\
+             \x20 b = cast_trunc(x, i32)\n\
+             \x20 c = cast_saturate(x, i16)\n\
+             \x20 same = cast(x, f32)\n\
+             \x20 (a, b, c, same, add(&x, &x))\n\
+             }\n\
+             def wrap(y: tensor[3, i32]) -> (tensor[3, i8], tensor[3, i32]) = {\n\
+             \x20 w = cast_wrap(y, i8)\n\
+             \x20 (w, add(&y, &y))\n\
+             }\n\
+             graph = apply(to_tensor([1.75f32, -2.5f32, 40000.0f32]))\n\
+             wrapped = wrap(to_tensor([200i32, -129i32, 5i32]))\n\
+             x = to_tensor([1.5f64, -0.5f64])\n\
+             top = to_list(cast_trunc(x, i8))\n\
+             again = to_list(add(&x, &x))\n",
+        ),
+    ));
     cases
 }
 

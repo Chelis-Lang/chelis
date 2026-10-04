@@ -998,14 +998,7 @@ impl Checker {
                     // forward (via the alias chain) to the underlying
                     // tuple source.  Treat the var argument as a borrow.
                     DeepTag::TupleGet => self.check_tuple_get(children, scope),
-                    // chelis#3101, [05-OP-63]: a cast's tensor source is a
-                    // read-only parameter (spec/05 section 1.3.1), so an
-                    // explicit borrow there is a read, as at a call argument.
-                    // The target and mode slots are types and selectors.
-                    DeepTag::Cast if children.first().and_then(borrow_inner).is_some() => {
-                        let inner = borrow_inner(&children[0]).expect("guarded above");
-                        self.check_borrow_arg(&children[0], inner, scope);
-                    }
+                    DeepTag::Cast => self.check_cast(children, scope),
                     _ => self.check_children_by_role(tag, children, scope),
                 }
             }
@@ -1058,6 +1051,32 @@ impl Checker {
             ),
             vec![],
         ));
+    }
+
+    /// chelis#3101, [05-OP-63], [05-OP-6], [05-OP-23], [05-OP-24]: every
+    /// cast rung's tensor source is a read-only parameter (spec/05 section
+    /// 1.3.1). An explicit borrow there is a read, as at a call argument, and
+    /// an owned variable auto-borrows: it is read, not consumed, as a
+    /// borrowed builtin argument is. A key holder is never borrowed
+    /// ([04-LIN-9]), so it keeps the by-role check. The target and mode slots
+    /// are types and selectors.
+    fn check_cast(&mut self, children: &[Expr], scope: &mut LinearScope) {
+        let Some(source) = children.first() else {
+            return;
+        };
+        if let Some(inner) = borrow_inner(source) {
+            self.check_borrow_arg(source, inner, scope);
+        } else if is_var_expr(source)
+            && !self.expr_holds_key(source, scope)
+            && self.expr_is_owned_linear(source, scope)
+        {
+            self.read_var_expr(source, scope);
+        } else {
+            self.check_child_by_role(DeepTag::Cast, 0, children.len(), source, scope);
+        }
+        for (index, child) in children.iter().enumerate().skip(1) {
+            self.check_child_by_role(DeepTag::Cast, index, children.len(), child, scope);
+        }
     }
 
     fn check_children_by_role(
