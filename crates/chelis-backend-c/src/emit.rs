@@ -6193,22 +6193,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         if updates.is_some() {
             self.line(&format!("if (t{id}_byte_capacity != 0 && t{id}_data != t{base}_data) memcpy(t{id}_data, t{base}_data, (size_t)t{id}_byte_capacity);"));
         }
-        if let (Some(updates), Some("+=")) = (updates, update) {
-            let lines = Self::scatter_add_tree_lines(
-                &format!("t{id}_scatter"),
-                &format!("t{id}_sparse"),
+        let add = matches!(update, Some("+="));
+        let tree = format!("t{id}_scatter");
+        if add {
+            let lines = Self::scatter_add_tree_open_lines(
+                &tree,
                 &format!("t{id}_sparse_count"),
-                &format!("t{indices}_data"),
-                index_element,
-                &format!("t{id}_data"),
                 &format!("t{id}_size"),
-                &format!("t{updates}_data"),
                 ty.precision,
-                self.nan_finalization,
             );
             self.emit_relative_lines(lines);
-            self.line(&format!("chelis_sparse_plan_release(t{id}_sparse);"));
-            return;
         }
         // Ascending iteration positions are the exact updates row-major order,
         // including duplicate destinations. Each scatter therefore stays serial.
@@ -6219,13 +6213,31 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("{index_type} t{id}_index_slot = chelis_sparse_index_slot(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
         self.line(&format!("{index_type} t{id}_selected = ((const {index_element}*)t{indices}_data)[t{id}_index_slot];"));
         self.line(&format!("{index_type} t{id}_base_index = chelis_sparse_data_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
-        if let (Some(updates), Some(update)) = (updates, update) {
+        if add {
+            self.line(&Self::scatter_add_tree_record_line(
+                &tree,
+                &format!("t{id}_i"),
+                &format!("t{id}_base_index"),
+            ));
+        } else if let (Some(updates), Some(update)) = (updates, update) {
             self.line(&format!("(({element}*)t{id}_data)[t{id}_base_index] {update} ((const {element}*)t{updates}_data)[t{id}_i];"));
         } else {
             self.line(&format!("(({element}*)t{id}_data)[t{id}_i] = ((const {element}*)t{base}_data)[t{id}_base_index];"));
         }
         self.indent -= 1;
         self.line("}");
+        if let (true, Some(updates)) = (add, updates) {
+            let lines = Self::scatter_add_tree_close_lines(
+                &tree,
+                &format!("t{id}_sparse_count"),
+                &format!("t{id}_data"),
+                &format!("t{id}_size"),
+                &format!("t{updates}_data"),
+                ty.precision,
+                self.nan_finalization,
+            );
+            self.emit_relative_lines(lines);
+        }
         self.line(&format!("chelis_sparse_plan_release(t{id}_sparse);"));
     }
 
@@ -6478,6 +6490,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
 
+    /// The C spelling of an `i64` index or count, from the element-type
+    /// authority.
+    fn index_c_type() -> &'static str {
+        Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        })
+    }
+
     /// [05-OP-30]'s canonical adjacent-pair balanced tree over
     /// `level[0..count)`, folded in place into `level[0]`. Each pass combines
     /// positions `2j` and `2j + 1` in order and carries an odd last leaf
@@ -6490,6 +6511,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         count: &str,
         combine: impl Fn(&str, &str) -> String,
     ) -> Vec<(usize, String)> {
+        let index = Self::index_c_type();
         let sum = combine(
             &format!("{level}[__pair_left]"),
             &format!("{level}[__pair_right]"),
@@ -6498,14 +6520,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             (0, format!("while ({count} > 1) {{")),
             (
                 1,
-                format!("int64_t __pair_next = {count} / 2 + {count} % 2;"),
+                format!("{index} __pair_next = {count} / 2 + {count} % 2;"),
             ),
             (
                 1,
-                "for (int64_t __pair = 0; __pair < __pair_next; __pair++) {".into(),
+                format!("for ({index} __pair = 0; __pair < __pair_next; __pair++) {{"),
             ),
-            (2, "int64_t __pair_left = 2 * __pair;".into()),
-            (2, "int64_t __pair_right = __pair_left + 1;".into()),
+            (2, format!("{index} __pair_left = 2 * __pair;")),
+            (2, format!("{index} __pair_right = __pair_left + 1;")),
             (
                 2,
                 format!(
@@ -6527,75 +6549,60 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
     }
 
-    /// [05-OP-33] scatter-add into `out`, which already holds the base. Each
-    /// destination's leaves are its base value followed by its targeting
-    /// updates in increasing row-major update order (a stable counting sort
-    /// of the plan's destinations), combined by
-    /// [`Self::adjacent_pair_fold_lines`] at the operand arithmetic width:
-    /// f16 and bf16 widen to f32 and narrow at every node ([04-NUM-8]),
-    /// integers check overflow at every node. An untargeted destination
-    /// keeps its base bits; a targeted one is finalized once. The DAG kernel
-    /// (the gather adjoint and forward scatter-add) and the host sparse
-    /// summary both emit this, so the lanes cannot fold differently.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn scatter_add_tree_lines(
-        prefix: &str,
-        plan: &str,
+    /// The scratch of one [05-OP-33] scatter-add tree, in allocation order.
+    fn scatter_add_tree_scratch(
         count: &str,
-        indices: &str,
-        index_element: &str,
-        out: &str,
         out_count: &str,
-        updates: &str,
         precision: Prim,
-        finalization: Option<crate::fp_env::NanFinalization>,
-    ) -> Vec<(usize, String)> {
+    ) -> [(&'static str, String, &'static str, &'static str); 4] {
+        let index = Self::index_c_type();
+        let index_dtype = Self::dtype_macro(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
         let scalar = TensorType {
             dims: vec![],
             precision,
         };
-        let element = Self::elem_type(&scalar);
-        let dtype = Self::dtype_macro(&scalar);
-        let combine = |left: &str, right: &str| {
-            if matches!(precision, Prim::F16 | Prim::Bf16) {
-                let load = Self::reduced_to_f32_fn(precision);
-                let store = Self::f32_to_reduced_fn(precision);
-                format!("{store}({load}({left}) + {load}({right}))")
-            } else if precision.is_integer() {
-                let bits = Self::integer_width(precision);
-                let trap = NumericTrap::Overflow {
-                    op: "scatter",
-                    prim: precision,
-                }
-                .to_string();
-                format!(
-                    "({element})chelis_int_checked_add((int64_t){left}, (int64_t){right}, {bits}, {trap:?})"
-                )
-            } else {
-                format!("{left} + {right}")
-            }
-        };
-        let level = format!("{prefix}_level");
-        let total = if matches!(precision, Prim::F16 | Prim::Bf16) {
-            format!(
-                "{}({}({level}[0]))",
-                Self::f32_to_reduced_fn(precision),
-                Self::reduced_to_f32_fn(precision)
-            )
-        } else {
-            finalize_elem(finalization, format!("{level}[0]"), &scalar)
-        };
-        let scratch = [
-            ("dest", count.to_string(), "int64_t", "CHELIS_DTYPE_I64"),
-            ("order", count.to_string(), "int64_t", "CHELIS_DTYPE_I64"),
-            ("end", out_count.to_string(), "int64_t", "CHELIS_DTYPE_I64"),
-            ("level", format!("{count} + 1"), element, dtype),
-        ];
+        [
+            ("dest", count.to_string(), index, index_dtype),
+            ("order", count.to_string(), index, index_dtype),
+            ("end", out_count.to_string(), index, index_dtype),
+            (
+                "level",
+                format!("{count} + 1"),
+                Self::elem_type(&scalar),
+                Self::dtype_macro(&scalar),
+            ),
+        ]
+    }
+
+    /// [05-OP-33] scatter-add, in three parts that bracket the caller's own
+    /// checked sparse loop. This part allocates the scratch. In that loop,
+    /// [`Self::scatter_add_tree_record_line`] records each update's
+    /// destination; [`Self::scatter_add_tree_close_lines`] then folds into
+    /// `out`, which already holds the base. Each destination's leaves are its
+    /// base value followed by its targeting updates in increasing row-major
+    /// update order (a stable counting sort of the recorded destinations),
+    /// combined by [`Self::adjacent_pair_fold_lines`] at the operand
+    /// arithmetic width: f16 and bf16 widen to f32 and narrow at every node
+    /// ([04-NUM-8]), integers check overflow at every node. An untargeted
+    /// destination keeps its base bits; a targeted one is finalized once.
+    /// The DAG kernel (the gather adjoint) and the host sparse summary both
+    /// emit these parts, so the lanes cannot fold differently.
+    pub(crate) fn scatter_add_tree_open_lines(
+        prefix: &str,
+        count: &str,
+        out_count: &str,
+        precision: Prim,
+    ) -> Vec<(usize, String)> {
+        let index = Self::index_c_type();
         let mut lines = Vec::new();
-        for (name, extent, et, dtype) in &scratch {
+        for (name, extent, et, dtype) in Self::scatter_add_tree_scratch(count, out_count, precision)
+        {
             let var = format!("{prefix}_{name}");
             lines.extend([
-                (0, format!("int64_t {var}_n = {extent};")),
+                (0, format!("{index} {var}_n = {extent};")),
                 (
                     0,
                     format!("chelis_tensor *{var}_tensor = chelis_alloc(1, &{var}_n, {dtype});"),
@@ -6612,51 +6619,86 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 ),
             ]);
         }
-        let i64_scalar =
-            |value: &str| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {value})");
-        lines.extend([
-            (0, format!("for (int64_t __i = 0; __i < {count}; ++__i) {{")),
-            (
-                1,
+        lines
+    }
+
+    /// Record that update `update` targets the checked data index
+    /// `destination`; see [`Self::scatter_add_tree_open_lines`].
+    pub(crate) fn scatter_add_tree_record_line(
+        prefix: &str,
+        update: &str,
+        destination: &str,
+    ) -> String {
+        format!("{prefix}_dest[{update}] = {destination}; {prefix}_end[{destination}] += 1;")
+    }
+
+    /// Fold every recorded destination and release the scratch; see
+    /// [`Self::scatter_add_tree_open_lines`].
+    pub(crate) fn scatter_add_tree_close_lines(
+        prefix: &str,
+        count: &str,
+        out: &str,
+        out_count: &str,
+        updates: &str,
+        precision: Prim,
+        finalization: Option<crate::fp_env::NanFinalization>,
+    ) -> Vec<(usize, String)> {
+        let scalar = TensorType {
+            dims: vec![],
+            precision,
+        };
+        let element = Self::elem_type(&scalar);
+        let index = Self::index_c_type();
+        let combine = |left: &str, right: &str| {
+            if matches!(precision, Prim::F16 | Prim::Bf16) {
+                let load = Self::reduced_to_f32_fn(precision);
+                let store = Self::f32_to_reduced_fn(precision);
+                format!("{store}({load}({left}) + {load}({right}))")
+            } else if precision.is_integer() {
+                let bits = Self::integer_width(precision);
+                let trap = NumericTrap::Overflow {
+                    op: "scatter",
+                    prim: precision,
+                }
+                .to_string();
                 format!(
-                    "int64_t __slot = chelis_sparse_index_slot({plan}, {});",
-                    i64_scalar("__i")
-                ),
-            ),
-            (
-                1,
-                format!("int64_t __selected = ((const {index_element}*){indices})[__slot];"),
-            ),
-            (
-                1,
-                format!(
-                    "{prefix}_dest[__i] = chelis_sparse_data_index({plan}, {}, {});",
-                    i64_scalar("__i"),
-                    i64_scalar("__selected")
-                ),
-            ),
-            (1, format!("{prefix}_end[{prefix}_dest[__i]] += 1;")),
-            (0, "}".into()),
+                    "({element})chelis_int_checked_add(({index}){left}, ({index}){right}, {bits}, {trap:?})"
+                )
+            } else {
+                format!("{left} + {right}")
+            }
+        };
+        let level = format!("{prefix}_level");
+        let total = if matches!(precision, Prim::F16 | Prim::Bf16) {
+            format!(
+                "{}({}({level}[0]))",
+                Self::f32_to_reduced_fn(precision),
+                Self::reduced_to_f32_fn(precision)
+            )
+        } else {
+            finalize_elem(finalization, format!("{level}[0]"), &scalar)
+        };
+        let mut lines = vec![
             (
                 0,
                 format!(
-                    "for (int64_t __d = 1; __d < {out_count}; ++__d) {prefix}_end[__d] += {prefix}_end[__d - 1];"
+                    "for ({index} __d = 1; __d < {out_count}; ++__d) {prefix}_end[__d] += {prefix}_end[__d - 1];"
                 ),
             ),
             (
                 0,
                 format!(
-                    "for (int64_t __i = {count} - 1; __i >= 0; --__i) {prefix}_order[--{prefix}_end[{prefix}_dest[__i]]] = __i;"
+                    "for ({index} __i = {count} - 1; __i >= 0; --__i) {prefix}_order[--{prefix}_end[{prefix}_dest[__i]]] = __i;"
                 ),
             ),
             (
                 0,
-                format!("for (int64_t __d = 0; __d < {out_count}; ++__d) {{"),
+                format!("for ({index} __d = 0; __d < {out_count}; ++__d) {{"),
             ),
             (
                 1,
                 format!(
-                    "int64_t __first = {prefix}_end[__d], __last = __d + 1 < {out_count} ? {prefix}_end[__d + 1] : {count};"
+                    "{index} __first = {prefix}_end[__d], __last = __d + 1 < {out_count} ? {prefix}_end[__d + 1] : {count};"
                 ),
             ),
             (1, "if (__first == __last) continue;".into()),
@@ -6664,11 +6706,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             (
                 1,
                 format!(
-                    "for (int64_t __k = __first; __k < __last; ++__k) {level}[__k - __first + 1] = ((const {element}*){updates})[{prefix}_order[__k]];"
+                    "for ({index} __k = __first; __k < __last; ++__k) {level}[__k - __first + 1] = ((const {element}*){updates})[{prefix}_order[__k]];"
                 ),
             ),
-            (1, "int64_t __leaves = __last - __first + 1;".into()),
-        ]);
+            (1, format!("{index} __leaves = __last - __first + 1;")),
+        ];
         lines.extend(
             Self::adjacent_pair_fold_lines(&level, "__leaves", combine)
                 .into_iter()
@@ -6678,7 +6720,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             (1, format!("(({element}*){out})[__d] = {total};")),
             (0, "}".into()),
         ]);
-        for (name, ..) in scratch.iter().rev() {
+        for (name, ..) in Self::scatter_add_tree_scratch(count, out_count, precision)
+            .iter()
+            .rev()
+        {
             lines.extend([
                 (
                     0,
@@ -11673,7 +11718,7 @@ mod tests {
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
-        assert!(c.contains("((const int64_t*)t1_data)[__slot]"));
+        assert!(c.contains("((const int64_t*)t1_data)[t3_index_slot]"));
         assert!(c.contains("memcpy(t3_data, t0_data, (size_t)t3_byte_capacity);"));
         // [05-OP-33]: the base leaf and the destination's updates in update
         // order, folded by the canonical balanced tree and finalized once;
@@ -11686,7 +11731,7 @@ mod tests {
         ] {
             assert!(c.contains(fragment), "missing {fragment:?}: {c}");
         }
-        assert!(!c.contains("[t3_base_index] +"), "{c}");
+        assert!(!c.contains("((double*)t3_data)[t3_base_index]"), "{c}");
     }
 
     #[test]

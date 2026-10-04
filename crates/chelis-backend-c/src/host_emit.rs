@@ -9436,35 +9436,17 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}if ({bytes} != 0) memcpy({view}.data, chelis_host_tensor_data({base}), (size_t){bytes});", self.indent));
         }
-        if matches!(kind, SparseSummaryKind::ScatterAdd) {
-            let updates = &args[summary.input_indices[2]];
+        let tree = matches!(kind, SparseSummaryKind::ScatterAdd).then(|| {
             let prefix = self.next_temp("sparse_add");
-            let lines = CEmitter::scatter_add_tree_lines(
+            let lines = CEmitter::scatter_add_tree_open_lines(
                 &prefix,
-                plan,
                 count,
-                &format!("chelis_host_tensor_data({indices})"),
-                index_element,
-                &format!("{view}.data"),
                 &format!("chelis_tensor_numel({target})"),
-                &format!("chelis_host_tensor_data({updates})"),
                 summary.output.precision,
-                crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
-                    axis: summary.axis,
-                    batch_rank: 0,
-                }),
             );
-            for (depth, line) in lines {
-                self.lines
-                    .push(format!("{}{}{line}", self.indent, "    ".repeat(depth)));
-            }
-            self.end_tensor_write(&guard);
-            self.lines.push(format!(
-                "{}chelis_sparse_plan_release({plan});",
-                self.indent
-            ));
-            return;
-        }
+            self.push_relative_lines(lines);
+            prefix
+        });
         let linear = self.next_temp("sparse_linear");
         let slot = self.next_temp("sparse_slot");
         let selected = self.next_temp("sparse_selected");
@@ -9479,7 +9461,9 @@ impl<'a> HostEmitter<'a> {
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
             SparseSummaryKind::ScatterAdd => {
-                unreachable!("scatter-add emits the balanced tree above")
+                let tree = tree.as_deref().expect("scatter-add opened its tree");
+                let record = CEmitter::scatter_add_tree_record_line(tree, &linear, &offset);
+                self.lines.push(format!("{}    {record}", self.indent));
             }
             SparseSummaryKind::ScatterReplace => {
                 let updates = &args[summary.input_indices[2]];
@@ -9487,11 +9471,35 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.lines.push(format!("{}}}", self.indent));
+        if let Some(tree) = tree {
+            let updates = &args[summary.input_indices[2]];
+            let lines = CEmitter::scatter_add_tree_close_lines(
+                &tree,
+                count,
+                &format!("{view}.data"),
+                &format!("chelis_tensor_numel({target})"),
+                &format!("chelis_host_tensor_data({updates})"),
+                summary.output.precision,
+                crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                    axis: summary.axis,
+                    batch_rank: 0,
+                }),
+            );
+            self.push_relative_lines(lines);
+        }
         self.end_tensor_write(&guard);
         self.lines.push(format!(
             "{}chelis_sparse_plan_release({plan});",
             self.indent
         ));
+    }
+
+    /// Push lines whose indentation is relative to the current depth.
+    fn push_relative_lines(&mut self, lines: Vec<(usize, String)>) {
+        for (depth, line) in lines {
+            self.lines
+                .push(format!("{}{}{line}", self.indent, "    ".repeat(depth)));
+        }
     }
 
     fn assign_call(
