@@ -122,8 +122,8 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 23 is explicitly\npresent", "wire v23 presence"),
-            ("spec/10-serialization.md", "versions 1 through 22", "wire old-version rejection"),
+            ("spec/10-serialization.md", "Schema version 25 is explicitly\npresent", "wire v25 presence"),
+            ("spec/10-serialization.md", "versions 1 through 24", "wire old-version rejection"),
             ("spec/10-serialization.md", "Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and\n`Scatter` wire operations", "wire paired sparse batch rank"),
             ("spec/10-serialization.md", "and every future version are decode errors before any IR\nnode is consumed", "wire future-version rejection"),
             ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),

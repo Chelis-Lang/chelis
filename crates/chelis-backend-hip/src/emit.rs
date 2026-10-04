@@ -1531,6 +1531,17 @@ impl HipEmitter {
                     ),
                 ));
             }
+            RiscOp::Softmax { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("softmax".into()),
+                    "undecomposed softmax reached HIP emission",
+                    Stage::Codegen("hip"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-48]",
+                        "prepare the retained softmax identity after AD and before ownership/codegen"
+                    ),
+                ));
+            }
             RiscOp::Iota => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("Iota".into()),
@@ -2412,6 +2423,17 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::Softmax { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("softmax".into()),
+                    "undecomposed softmax reached HIP emission",
+                    Stage::Codegen("hip"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-48]",
+                        "prepare the retained softmax identity after AD and before ownership/codegen"
+                    ),
+                ));
+            }
             RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(format!("{:?}", node.op)),
@@ -5262,6 +5284,7 @@ impl HipEmitter {
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Neg
             | RiscOp::Recip

@@ -1121,6 +1121,7 @@ fn nan_atom_coverage(
         Id::Tan => (RiscOp::Tan, BuiltinInventory),
         Id::Atan => (RiscOp::Atan, BuiltinInventory),
         Id::Tanh => (RiscOp::Tanh, BuiltinInventory),
+        Id::Softmax => (RiscOp::Softmax { axis: 0 }, Rows),
         Id::Abs => (RiscOp::Abs, BuiltinInventory),
         Id::Floor => (RiscOp::Floor, BuiltinInventory),
         Id::Ceil => (RiscOp::Ceil, BuiltinInventory),
@@ -1323,6 +1324,7 @@ fn nan_atom_rows(
     // (chelis#729).
     let f32_only = name == "f32";
     match atom {
+        Id::Softmax => vec![row("softmax", x3(), vec![3], "softmax(&x, 0i32)".into())],
         Id::Sum => vec![
             row(
                 "sum",

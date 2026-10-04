@@ -101,7 +101,7 @@ fn assert_version_rejected_before_node_decode(payload: &str, expected: &str) {
 
 #[test]
 fn current_exact_wire_round_trips_direct_sub_identity() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 24);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 25);
     let payload = direct_sub_payload(Some(WIRE_DAG_SCHEMA_VERSION));
     let decoded = WireDag::from_validated_json(&payload).expect("exact current Sub must decode");
     assert!(matches!(decoded.nodes[2].op, WireRiscOp::Sub));
@@ -133,7 +133,7 @@ fn missing_older_and_future_versions_fail_before_node_decode() {
     };
 
     assert_version_rejected_before_node_decode(&unknown_op(None), "missing");
-    for version in 1..=11 {
+    for version in 1..WIRE_DAG_SCHEMA_VERSION {
         assert_version_rejected_before_node_decode(
             &unknown_op(Some(version)),
             &version.to_string(),

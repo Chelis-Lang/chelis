@@ -115,6 +115,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Tan
         | RiscOp::Atan
         | RiscOp::Tanh
+        | RiscOp::Softmax { .. }
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil

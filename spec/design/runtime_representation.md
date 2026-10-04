@@ -2224,3 +2224,18 @@ a new exact identity until classified by final authority.
 [#1360]: https://github.com/Chelis-Lang/chelis/issues/1360
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
 [#1364]: https://github.com/Chelis-Lang/chelis/issues/1364
+
+### Retained Softmax composition source registration (#2990)
+
+`crates/chelis-ir/src/compositions.rs` joins the Phase 0 source universe.
+The concurrent text-parser registration is retained alongside it: the combined
+universe contains 83 Rust and eleven native sources, 94 in total. The
+source-list completeness and exact-path omission controls remain unchanged.
+It composes existing typed DAG nodes after AD and remaps ownership, spans,
+shape dependencies, result claims and roots; it introduces no representation
+carrier or untagged numeric seam. The source-universe contract test runs the
+current inventory and a negative control that removes this exact path and
+requires the stale-source diagnostic. This is the B1 source registration
+path: no immutable foundation identity, classifier, final-form authority,
+freeze digest or rejection rule changes. The full Phase 0 oracle must still
+classify the expanded source universe before landing.

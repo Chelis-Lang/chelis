@@ -30,6 +30,7 @@ pub mod axis_sources;
     reason = "the #893 CapacityKey prerequisite lands before PR #1565 consumes it"
 )]
 pub mod capacity_key;
+pub mod compositions;
 pub mod dag;
 pub mod eval;
 pub mod fuse;

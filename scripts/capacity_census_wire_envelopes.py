@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 24, "declarations": [], "nodes": [], "roots": []}
+    empty = {"schema_version": 25, "declarations": [], "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25):
+    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 24,
+        "schema_version": 25,
         "declarations": ["entry"],
         "nodes": [
             {
@@ -234,7 +234,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 24,
+            "schema_version": 25,
             "declarations": ["entry"],
             "nodes": [
                 copy.deepcopy(load),
@@ -252,6 +252,19 @@ def dag_cases():
             ],
             "roots": [1],
         }
+
+    softmax = graph({"kind": "softmax", "axis": 0})
+    add("softmax", softmax, True)
+    for label, target, value in (
+        ("axis", "op", {"kind": "softmax", "axis": 1}),
+        ("negative-axis", "op", {"kind": "softmax", "axis": -1}),
+        ("arity", "inputs", []),
+        ("dtype", "output_type", {"dims": [{"kind": "lit", "size": 2}], "precision": "i32"}),
+        ("shape", "output_type", {"dims": [{"kind": "lit", "size": 3}], "precision": "f32"}),
+    ):
+        bad = copy.deepcopy(softmax)
+        bad["nodes"][1][target] = value
+        add("softmax-invalid-" + label, bad, False)
 
     good = graph({"kind": "copy"})
     add("owned-reference", good, True)
@@ -358,7 +371,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 24,
+        "schema_version": 25,
         "declarations": ["entry"],
         "nodes": [
             value_node,
@@ -464,7 +477,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 24,
+        "schema_version": 25,
         "declarations": ["entry"],
         "nodes": [
             copy.deepcopy(load),
@@ -719,7 +732,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 24,
+        "schema_version": 25,
         "declarations": ["entry"],
         "nodes": [
             {
@@ -776,7 +789,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25):
+        for version in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

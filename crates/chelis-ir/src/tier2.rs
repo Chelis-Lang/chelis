@@ -882,7 +882,7 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
 
 /// Keep the reduction result at its accumulator dtype, then explicitly
 /// finalize into the enclosing float composition's storage dtype (§5.7.1).
-fn lower_sum_to_storage(
+pub(crate) fn lower_sum_to_storage(
     owner: Owner,
     dag: &mut Dag,
     x: NodeId,
@@ -923,6 +923,25 @@ fn lower_sum_to_storage(
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    axis: usize,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    add_synth(
+        owner,
+        dag,
+        RiscOp::Softmax { axis },
+        vec![x],
+        ty.clone(),
+        parent_span,
+    )
+}
+
+/// Expand the stable forward graph after differentiation selected [05-OP-48].
+pub fn decompose_softmax(
     owner: Owner,
     dag: &mut Dag,
     x: NodeId,
@@ -1913,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn softmax_produces_maxreduce_sub_exp_sum_div() {
+    fn softmax_decomposition_produces_maxreduce_sub_exp_sum_div() {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
         let ty = vec_5();
@@ -1924,7 +1943,7 @@ mod tests {
             ty.clone(),
             None,
         );
-        let result = lower_softmax(owner, &mut dag, x, 0, &ty, None);
+        let result = decompose_softmax(owner, &mut dag, x, 0, &ty, None);
 
         // Check the chain of ops produced.
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -2217,7 +2236,7 @@ mod tests {
             ty.clone(),
             None,
         );
-        let out = lower_softmax(owner, &mut dag, x, 0, &ty, None);
+        let out = decompose_softmax(owner, &mut dag, x, 0, &ty, None);
         let expand_sizes: Vec<_> = dag
             .nodes()
             .iter()

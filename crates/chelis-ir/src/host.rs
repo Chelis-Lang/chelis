@@ -7735,6 +7735,7 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::Relu => "relu",
+        RiscOp::Softmax { .. } => "softmax",
         RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Abs => "abs",
@@ -17142,6 +17143,7 @@ fn actualize_tensor_helper_types(
                 }),
             crate::dag::RiscOp::Neg
             | crate::dag::RiscOp::Relu
+            | crate::dag::RiscOp::Softmax { .. }
             | crate::dag::RiscOp::Exp
             | crate::dag::RiscOp::Log
             | crate::dag::RiscOp::Sin

@@ -96,6 +96,20 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
         self.assertIn(source, str(caught.exception))
 
+    def test_softmax_composition_source_is_registered_and_removal_fails_closed(self) -> None:
+        source = "crates/chelis-ir/src/compositions.rs"
+        self.assertIn(source, oracle.INVENTORY_SOURCES)
+        oracle._assert_source_list_current(REPO_ROOT)
+        with mock.patch.object(
+            oracle,
+            "INVENTORY_SOURCES",
+            tuple(path for path in oracle.INVENTORY_SOURCES if path != source),
+        ):
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle._assert_source_list_current(REPO_ROOT)
+        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
+        self.assertIn(source, str(caught.exception))
+
     def test_the_universe_holds_the_phase2_owned_sources(self) -> None:
         for source in (
             "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
@@ -1641,7 +1655,7 @@ class RedTeamRegressionTests(unittest.TestCase):
         native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
         self.assertIn(
-            "Eighty-two are Rust and eleven are C, C++, or Objective-C sources",
+            "Eighty-three are Rust and eleven are C, C++, or Objective-C sources",
             source,
         )
-        self.assertEqual((rust, native), (82, 11))
+        self.assertEqual((rust, native), (83, 11))

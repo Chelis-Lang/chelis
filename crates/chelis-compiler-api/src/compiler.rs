@@ -5964,6 +5964,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Realize
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Where
             | RiscOp::Sub
@@ -6990,6 +6991,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Relu => WireRiscOp::Relu,
+        RiscOp::Softmax { axis } => WireRiscOp::Softmax {
+            axis: i32::try_from(*axis).expect("normalized softmax axis is i32"),
+        },
         RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,
@@ -7338,7 +7342,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 24);
+        assert_eq!(wire.schema_version, 25);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7651,7 +7655,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 24);
+        assert_eq!(json["schema_version"], 25);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

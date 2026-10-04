@@ -240,6 +240,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Sqrt
         | RiscOp::Tan
         | RiscOp::Tanh
+        // [05-OP-48] retains softmax's exact primitive graph after AD.
+        | RiscOp::Softmax { .. }
         | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
@@ -398,6 +400,7 @@ fn agreement_operation_identity_is_derived_from_ir() {
         (RiscOp::Tan, AgreementOp::Exact),
         (RiscOp::Atan, AgreementOp::Exact),
         (RiscOp::Tanh, AgreementOp::Exact),
+        (RiscOp::Softmax { axis: 0 }, AgreementOp::Exact),
     ];
     for (risc, expected) in cases {
         assert_eq!(agreement_op_for_risc(&risc), expected);

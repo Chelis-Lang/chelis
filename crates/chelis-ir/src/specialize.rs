@@ -28,7 +28,8 @@ pub const SPECIALIZATION_PIPELINE_ORDER: &[&str] = &[
 
 /// Run the closed-list no-op cleanup plus backend specialization, then DCE.
 pub fn specialize_for_blas(dag: &Dag) -> Dag {
-    let cleaned = eliminate_closed_list_noops(dag);
+    let decomposed = crate::compositions::decompose(dag);
+    let cleaned = eliminate_closed_list_noops(&decomposed);
     let gathered = replace_dense_gather_patterns(&cleaned);
     let lowered = lower_unmatched_one_hot(&gathered);
     let specialized = replace_matmul_patterns(&lowered);
@@ -42,7 +43,8 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
 /// those bits, so exact C preparation cannot synthesize `BlasMatmul`.
 /// Existing explicit backend nodes are not constructed by this pass.
 pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
-    let cleaned = eliminate_closed_list_noops(dag);
+    let decomposed = crate::compositions::decompose(dag);
+    let cleaned = eliminate_closed_list_noops(&decomposed);
     let gathered = replace_dense_gather_patterns(&cleaned);
     let lowered = lower_unmatched_one_hot(&gathered);
     crate::optimize::dead_code_eliminate(&lowered)
@@ -813,6 +815,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Recip

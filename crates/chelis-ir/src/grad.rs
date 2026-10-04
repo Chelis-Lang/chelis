@@ -691,6 +691,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
         RiscOp::Relu => "relu",
+        RiscOp::Softmax { .. } => "softmax",
         RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Recip => "recip",
@@ -1638,6 +1639,39 @@ fn compute_adjoints(
                 None,
             );
             Some(vec![(a, zero_a), (b, zero_b), (cotangent, dg)])
+        }
+        RiscOp::Softmax { axis } => {
+            let x = node.inputs[0];
+            let ty = node.output_type.clone();
+            let mut reduced = ty.clone();
+            reduced.dims.remove(*axis);
+            let gy = dag.add_node(node.owner, RiscOp::Mul, vec![g, node.id], ty.clone(), None);
+            let sum =
+                crate::tier2::lower_sum_to_storage(node.owner, dag, gy, *axis, &reduced, None);
+            let broadcast = dag.add_node(
+                node.owner,
+                RiscOp::Expand {
+                    axis: *axis,
+                    size: RtDim::InputAxis {
+                        tensor: 1,
+                        axis: crate::dag::RtAxis::Lit(
+                            i32::try_from(*axis).expect("checked tensor axis"),
+                        ),
+                    },
+                },
+                vec![sum, x],
+                ty.clone(),
+                None,
+            );
+            let difference = dag.add_node(
+                node.owner,
+                RiscOp::Sub,
+                vec![g, broadcast],
+                ty.clone(),
+                None,
+            );
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![node.id, difference], ty, None);
+            Some(vec![(x, dx)])
         }
         RiscOp::Relu => {
             let x = node.inputs[0];

@@ -907,6 +907,10 @@ pub enum RiscOp {
     /// intact so its zero-at-zero adjoint is not replaced by MaxElem's
     /// first-operand tie rule.
     Relu,
+    /// [05-OP-48] identity retained through AD; one float tensor input.
+    Softmax {
+        axis: usize,
+    },
     /// AD-only [05-OP-43] selector. Inputs are `(x, cotangent)`; output is the
     /// complete cotangent exactly where `0 < x`, and exact positive zero
     /// otherwise (including both zeros and NaN).
@@ -1354,6 +1358,7 @@ pub enum RiscOp {
 /// typed source instead of a Python allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiscAtomIdentity {
+    Softmax,
     ReluAdjoint,
     Relu,
     ExtremaAdjoint,
@@ -1435,6 +1440,7 @@ pub enum RiscAtomIdentity {
 
 impl RiscAtomIdentity {
     pub const ALL: &[Self] = &[
+        Self::Softmax,
         Self::ReluAdjoint,
         Self::Relu,
         Self::ExtremaAdjoint,
@@ -1518,6 +1524,7 @@ impl RiscAtomIdentity {
         match self {
             Self::ReluAdjoint => "ReluAdjoint",
             Self::Relu => "relu",
+            Self::Softmax => "softmax",
             Self::ExtremaAdjoint => "ExtremaAdjoint",
             Self::Count => "count",
             Self::MinElem => "min_elem",
@@ -1666,6 +1673,7 @@ impl RiscOp {
         match self {
             Self::ReluAdjoint { .. } => Semantic(Id::ReluAdjoint),
             Self::Relu => Semantic(Id::Relu),
+            Self::Softmax { .. } => Semantic(Id::Softmax),
             Self::ExtremaAdjoint { .. } => Semantic(Id::ExtremaAdjoint),
             Self::Count { .. } => Semantic(Id::Count),
             Self::MinElem => Semantic(Id::MinElem),
@@ -2163,6 +2171,10 @@ impl RiscOp {
             // rule. Beacon has not yet registered dedicated transformers.
             RiscOp::Relu | RiscOp::ReluAdjoint => false,
 
+            // [05-OP-48] remains a retained composition identity. Beacon
+            // has no dedicated transformer for an undecomposed Softmax.
+            RiscOp::Softmax { .. } => false,
+
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
             // pre-fusion elementwise ops, not the fused marker, so it is
@@ -2424,7 +2436,8 @@ impl DagNode {
                 integer && matches!(reducer, ReduceWindowKind::Sum | ReduceWindowKind::Mean),
             ),
             RiscOp::FusedElem { .. } => value_check(integer),
-            RiscOp::MaxReduce { .. }
+            RiscOp::Softmax { .. }
+            | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. } => RuntimeCheck::EmptyAxis,
@@ -3056,7 +3069,8 @@ impl Dag {
     /// be empty at run time: anything but a nonzero literal extent.
     fn reduced_axis_may_be_empty(&self, node: &DagNode) -> bool {
         let axis = match &node.op {
-            RiscOp::MaxReduce { axis }
+            RiscOp::Softmax { axis }
+            | RiscOp::MaxReduce { axis }
             | RiscOp::MinReduce { axis }
             | RiscOp::Argmax { axis }
             | RiscOp::Argmin { axis } => *axis,
@@ -3645,6 +3659,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::UniformLike
         | RiscOp::Dropout
         | RiscOp::DropoutReplay => shape_source_for_axis(dag, *node.inputs.first()?, axis),
@@ -4954,6 +4969,7 @@ mod tests {
             },
             RiscOp::ScatterElements { axis: 0 },
             RiscOp::Relu,
+            RiscOp::Softmax { axis: 0 },
             RiscOp::ReluAdjoint,
         ]
     }
@@ -5164,8 +5180,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            68,
-            "one_of_every_risc_op must list all 68 classified samples"
+            69,
+            "one_of_every_risc_op must list all 69 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5192,13 +5208,15 @@ mod tests {
         // baked draws with the two key-operand draws and adds their two
         // AD replays (+2 = 27). The four explicit key derivations produce
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
-        // branch's key join (+1 = 32).
+        // branch's key join (+1 = 32). The internal extrema adjoint
+        // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
+        // composition has no dedicated transformer (+1 = 34).
         assert_eq!(
             targetable, 35,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 33,
+            excluded, 34,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -5206,6 +5224,10 @@ mod tests {
         // reclassification (not just a count drift) is caught.
         assert!(RiscOp::Add.is_verifier_targetable());
         assert!(RiscOp::Exp.is_verifier_targetable());
+        assert!(
+            !RiscOp::Softmax { axis: 0 }.is_verifier_targetable(),
+            "retained Softmax requires its own transformer before verifier admission"
+        );
         assert!(
             RiscOp::Compare(ComparisonKind::CmpLt).is_verifier_targetable(),
             "Compare(CmpLt) drives erf64 branch-and-bound; must be targetable"
