@@ -65,8 +65,7 @@ fn deny_all_refuses_each_operation_before_adapter_execution() {
         system.load_mapped_file_bytes(path).unwrap_err(),
         system
             .run_process("no-process-access", &[])
-            .err()
-            .expect("denied process"),
+            .expect_err("denied process"),
     ];
     for (error, operation) in failures.into_iter().zip([
         EvalSystemOperation::ReadFile,
@@ -108,8 +107,7 @@ fn mixed_capability_policies_allow_only_their_independent_host_effects() {
     assert_eq!(
         filesystem_only
             .run_process("echo", &["not spawned".to_owned()])
-            .err()
-            .expect("process denied")
+            .expect_err("process denied")
             .to_string(),
         "process_run refused: Process capability is not permitted"
     );
