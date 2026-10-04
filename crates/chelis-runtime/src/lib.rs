@@ -33,6 +33,7 @@ use metadata::{
 };
 mod ownership_ledger;
 pub mod public_headers;
+pub mod text_parse;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
@@ -4383,40 +4384,6 @@ fn valid_signed_decimal(text: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn valid_finite_decimal(text: &str) -> bool {
-    let unsigned = text
-        .strip_prefix('+')
-        .or_else(|| text.strip_prefix('-'))
-        .unwrap_or(text);
-    if unsigned.is_empty() {
-        return false;
-    }
-    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
-        Some(index) => (&unsigned[..index], Some(&unsigned[index + 1..])),
-        None => (unsigned, None),
-    };
-    if mantissa.bytes().any(|byte| byte == b'e' || byte == b'E') {
-        return false;
-    }
-    if let Some(exponent) = exponent {
-        let digits = exponent
-            .strip_prefix('+')
-            .or_else(|| exponent.strip_prefix('-'))
-            .unwrap_or(exponent);
-        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            return false;
-        }
-    }
-    match mantissa.split_once('.') {
-        Some((whole, fraction)) => {
-            (!whole.is_empty() || !fraction.is_empty())
-                && whole.bytes().all(|byte| byte.is_ascii_digit())
-                && fraction.bytes().all(|byte| byte.is_ascii_digit())
-        }
-        None => !mantissa.is_empty() && mantissa.bytes().all(|byte| byte.is_ascii_digit()),
-    }
-}
-
 fn parse_integer_scalar(text: &str, dtype: RuntimeDType) -> Option<chelis_scalar> {
     if !valid_signed_decimal(text) {
         return None;
@@ -4464,8 +4431,7 @@ fn parse_float_scalar(text: &str, dtype: RuntimeDType) -> Option<chelis_scalar> 
     if !matches!(
         dtype,
         RuntimeDType::F16 | RuntimeDType::Bf16 | RuntimeDType::F32 | RuntimeDType::F64
-    ) || !valid_finite_decimal(text)
-    {
+    ) {
         return None;
     }
     let bits = match dtype {
@@ -4505,6 +4471,31 @@ pub unsafe extern "C" fn chelis_parse_scalar(
         Some(value) => new_option(Some(chelis_value_box_scalar(value)), "chelis_parse_scalar"),
         None => new_option(None, "chelis_parse_scalar"),
     }
+}
+
+/// [05-OP-59] `to_int` for compiled programs. The language builtin is not the
+/// scalar-carrier parse of `chelis_parse_scalar`; both lanes share
+/// [`text_parse::to_int`].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_to_int(text: chelis_string) -> *mut chelis_option {
+    let parsed = text_parse::to_int(&string_value(text).value).map(|value| {
+        chelis_value_box_scalar(chelis_scalar_from_bits(
+            CHELIS_DTYPE_I64,
+            u64::from_ne_bytes(value.to_ne_bytes()),
+        ))
+    });
+    new_option(parsed, "chelis_to_int")
+}
+
+/// [05-OP-59] `to_float` for compiled programs: a finite spelling that
+/// overflows f64 yields a signed infinity, not `None`. Both lanes share
+/// [`text_parse::to_float`].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_to_float(text: chelis_string) -> *mut chelis_option {
+    let parsed = text_parse::to_float(&string_value(text).value).map(|value| {
+        chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
+    });
+    new_option(parsed, "chelis_to_float")
 }
 
 #[no_mangle]

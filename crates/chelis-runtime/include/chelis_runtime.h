@@ -338,6 +338,12 @@ chelis_string chelis_string_from_scalar(chelis_scalar value);
  * hex digits, then `)` (spec/08 section 2). */
 chelis_string chelis_string_from_key(chelis_key key);
 chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
+/* [05-OP-59]: the language builtins `to_int` and `to_float`, distinct from the
+ * scalar-carrier parse above. Each trims surrounding Unicode whitespace and
+ * returns an owned option whose Some child is an i64 or f64 scalar; a finite
+ * float spelling that overflows f64 yields a signed infinity. */
+chelis_option *chelis_to_int(chelis_string text);
+chelis_option *chelis_to_float(chelis_string text);
 chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);
 int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis);

@@ -335,15 +335,10 @@ PRELUDE = {
         '  | None => fail(string_concat("not an i64 case field: ", line))\n'
         "}\n"
     ),
-    # The non-finite values are quotients, as in `f64_lit`; the compiled lane's
-    # `to_float` does not read their spellings yet (chelis#2870).
+    # Both lanes' `to_float` reads `field_line`'s `nan`, `inf` and `-inf`
+    # spellings as well as every finite one ([05-OP-59]).
     "float_field": (
-        'def float_field(line: string) -> f64 = if eq(line, "nan") then (0.0f64 / 0.0f64) '
-        'else if eq(line, "inf") then (1.0f64 / 0.0f64) else if eq(line, "-inf") then (-1.0f64 / 0.0f64) '
-        "else finite_field(line)\n"
-    ),
-    "finite_field": (
-        "def finite_field(line: string) -> f64 = match to_float(line) with {\n"
+        "def float_field(line: string) -> f64 = match to_float(line) with {\n"
         "  | Some(v) => v\n"
         '  | None => fail(string_concat("not an f64 case field: ", line))\n'
         "}\n"

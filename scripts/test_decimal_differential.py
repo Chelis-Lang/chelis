@@ -787,8 +787,8 @@ class Literals(unittest.TestCase):
         self.assertIn("range(0i64, trunc_div(len(lines), 4i64))", source)
         self.assertIn("row_parse(text_field(index(lines, k)))", harness.grid_source("row_parse"))
         floats = harness.grid_source("row_from_f64")
-        self.assertIn('if eq(line, "nan") then (0.0f64 / 0.0f64)', floats)
-        self.assertIn("def finite_field(", floats)
+        self.assertIn("def float_field(line: string) -> f64 = match to_float(line) with {", floats)
+        self.assertNotIn("0.0f64 / 0.0f64", floats)
         failure = harness.failure_source("decimal_from_f64")
         self.assertIn(f"{harness.FAILURE_ROOT} = {{", failure)
         self.assertIn("decimal_from_f64(float_field(index(lines, 0i64)), int_field(index(lines, 1i64)), "

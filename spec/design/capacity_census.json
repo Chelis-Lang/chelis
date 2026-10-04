@@ -416,6 +416,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_to_float ( chelis_string text ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_to_int ( chelis_string text ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_read_view chelis_tensor_read_view ( const chelis_tensor * tensor ) ;",
       "flags": []
     },
