@@ -49,6 +49,125 @@
       "reason": "decision helper has no diagnostic sink; either unresolved concat operand returns Ok(None), leaving overload selection and compatibility pending"
     },
     {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 2,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 3,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 4,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 5,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 6,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 7,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 8,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 9,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 10,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 11,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "finish_collection_app",
+      "ordinal": 12,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_convert.rs",
+      "function": "finish_conversion_app",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_convert.rs",
+      "function": "finish_conversion_app",
+      "ordinal": 2,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_convert.rs",
+      "function": "finish_conversion_app",
+      "ordinal": 3,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_convert.rs",
+      "function": "finish_conversion_app",
+      "ordinal": 4,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_convert.rs",
+      "function": "finish_conversion_app",
+      "ordinal": 5,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
       "file": "app_equality.rs",
       "function": "reach",
       "ordinal": 1,
@@ -462,125 +581,6 @@
       "pattern": "Type::Var(tv)",
       "disposition": "constrains_the_variable",
       "reason": "publishes the element's own type variable as the precision rather than a placeholder, so outer inference pins both together"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 26,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 27,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 28,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 29,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 30,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 31,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 32,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 33,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 34,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 35,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 36,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 37,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 38,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 39,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 40,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 41,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 42,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
     },
     {
       "file": "app_scatter.rs",
