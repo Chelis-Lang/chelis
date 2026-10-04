@@ -3529,6 +3529,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: void chelis_pad_sequences_to_require_width ( int64_t width ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-10]",
+        authority_anchor: "`width` SHALL be non-negative",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
             &["numeric-op"],
         ),

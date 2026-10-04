@@ -5949,15 +5949,28 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     out
 }
 
+/// [05-OP-10]: `width` is the result's axis-1 extent and SHALL be
+/// non-negative, so a negative one fails spec/04-type-system.md section 4.7's
+/// non-negativity guard, a `Domain` trap in `pad_sequences_to`. Compiled code
+/// calls this before a result claim reads `width`, as the operation does
+/// before it allocates.
+#[no_mangle]
+pub extern "C" fn chelis_pad_sequences_to_require_width(width: i64) {
+    if width < 0 {
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::negative_target_extent("pad_sequences_to", 1, width)
+        );
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_pad_sequences_to(
     sequences: *const chelis_list,
     width: i64,
     pad_value: chelis_scalar,
 ) -> *mut chelis_tensor {
-    if width < 0 {
-        runtime_fail!("Domain: pad_sequences_to requires non-negative width");
-    }
+    chelis_pad_sequences_to_require_width(width);
     let batch = chelis_list_len(sequences);
     let shape = [batch, width];
     let dtype = validate_scalar(pad_value, "chelis_pad_sequences_to pad value");

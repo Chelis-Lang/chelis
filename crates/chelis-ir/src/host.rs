@@ -20577,46 +20577,22 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(HostTypeTerm::Tensor(_)) => Some(fresh_host_inference()),
             _ => Some(fresh_host_inference()),
         },
-        "pad_sequences" => match arg_tys.first() {
+        // [05-OP-9], [05-OP-10]: the result's dtype is the nested lists'
+        // element dtype, any active data element dtype, moved exactly.
+        "pad_sequences" | "pad_sequences_to" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => match &**inner {
                 HostTypeTerm::List(nested) => match **nested {
-                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::Int64,
-                    })),
-                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::F32,
-                    })),
-                    _ => Some(fresh_host_inference()),
-                },
-                _ => Some(fresh_host_inference()),
-            },
-            _ => Some(fresh_host_inference()),
-        },
-        "pad_sequences_to" => match arg_tys.first() {
-            Some(HostTypeTerm::List(inner)) => match &**inner {
-                HostTypeTerm::List(nested) => match **nested {
-                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::Int64,
-                    })),
-                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::F32,
-                    })),
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision))
+                        if precision.is_data_element_dtype() =>
+                    {
+                        Some(HostTypeTerm::Tensor(TensorType {
+                            dims: vec![
+                                crate::dag::DimInfo::Named("batch".to_string(), None),
+                                crate::dag::DimInfo::Named("seq".to_string(), None),
+                            ],
+                            precision,
+                        }))
+                    }
                     _ => Some(fresh_host_inference()),
                 },
                 _ => Some(fresh_host_inference()),

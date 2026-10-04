@@ -7741,9 +7741,12 @@ impl<'a> HostEmitter<'a> {
                 if let Some(claims) = result_claims {
                     let width = &arg_vars[1].0;
                     let sequences = &arg_vars[0].0;
+                    // The operation's own precondition comes before the
+                    // claim that reads `width`.
                     self.lines.push(format!(
-                        "{}if ({width} < 0) {{ fprintf(stderr, \"Domain: pad_sequences_to requires non-negative width\\n\"); exit(1); }}",
-                        self.indent));
+                        "{}chelis_pad_sequences_to_require_width({width});",
+                        self.indent
+                    ));
                     self.lines.push(format!(
                         "{}__chelis_check_host_result_extent_claims({claims}, 2, (const int64_t[][3]){{ {{0, 0, chelis_list_len({sequences})}}, {{1, 1, {width}}} }}, 2, \"pad_sequences_to\", \"numeric trap: domain in pad_sequences_to at i64\");",
                         self.indent));

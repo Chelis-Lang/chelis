@@ -1108,7 +1108,8 @@ pub(super) fn tensor_to_list_values(
 }
 
 /// Shared row collector for the `pad_sequences*` family: the pad scalar fixes
-/// the exact output dtype, every non-empty row must carry that same dtype,
+/// the exact output dtype, any active data element dtype including `bool`
+/// ([05-OP-9]), every non-empty row must carry that same dtype,
 /// and the padded row-major data stays in a wide ingress buffer until final
 /// storage construction (chelis#729 Phase 1, section C3).
 fn pad_sequences_rows(
@@ -1122,11 +1123,15 @@ fn pad_sequences_rows(
         {
             payload.dtype()
         }
+        RuntimeValue::Bool(_) => Prim::Bool,
         other => {
-            return Err(format!("{op} expects numeric pad value, got {other:?}"));
+            return Err(format!(
+                "{op} expects a data element pad value, got {other:?}"
+            ));
         }
     };
-    let pad_is_int = pad_precision.is_integer();
+    // Bools travel as 0/1 in the exact integer family ([`list_to_tensor_data`]).
+    let pad_is_int = !pad_precision.is_float();
     let mut rows = Vec::with_capacity(sequences.len());
     let mut lens = Vec::with_capacity(sequences.len());
     for sequence in sequences {
@@ -1176,8 +1181,10 @@ pub(super) fn pad_sequences_to_value(
     pad: &RuntimeValue,
 ) -> Result<(Prim, ListTensorData, usize), String> {
     if width < 0 {
-        return Err(format!(
-            "pad_sequences_to requires non-negative width, got {width}"
+        return Err(chelis_abi::failure::negative_target_extent(
+            "pad_sequences_to",
+            1,
+            width,
         ));
     }
     let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences_to")?;
@@ -1196,14 +1203,17 @@ fn pad_rows(
     pad: &RuntimeValue,
     batch: usize,
 ) -> Result<ListTensorData, String> {
-    let RuntimeValue::Scalar(payload) = pad else {
-        return Err(format!(
-            "pad_sequences expects numeric pad value, got {pad:?}"
-        ));
-    };
     match rows {
         ListTensorData::Int(flat) => {
-            let pad_value = payload.as_i64();
+            let pad_value = match pad {
+                RuntimeValue::Scalar(payload) => payload.as_i64(),
+                RuntimeValue::Bool(value) => i64::from(*value),
+                other => {
+                    return Err(format!(
+                        "pad_sequences expects a data element pad value, got {other:?}"
+                    ));
+                }
+            };
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
             for &len in lens {
@@ -1215,6 +1225,9 @@ fn pad_rows(
             Ok(ListTensorData::Int(out))
         }
         ListTensorData::Float(flat) => {
+            let RuntimeValue::Scalar(payload) = pad else {
+                return Err("pad_sequences expects a float pad value for float rows".into());
+            };
             let pad_value = payload.value();
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;

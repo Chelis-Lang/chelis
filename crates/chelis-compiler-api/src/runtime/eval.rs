@@ -1824,8 +1824,10 @@ impl<'a> EvalContext<'a> {
                 let width = expect_int_arg(&args, 1)?;
                 // Preserve the operation precondition before the local claim.
                 if width < 0 {
-                    return Err(format!(
-                        "pad_sequences_to requires non-negative width, got {width}"
+                    return Err(chelis_abi::failure::negative_target_extent(
+                        "pad_sequences_to",
+                        1,
+                        width,
                     ));
                 }
                 for claim in claims {

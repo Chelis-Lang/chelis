@@ -789,4 +789,74 @@ fn matmul_trap_naming_survives_nested_and_look_alike_products() {
         assert_eq!(run.context, context, "{name}: {run:?}");
     }
 }
+// ---------------------------------------------------------------------------
+// [05-OP-9], [05-OP-10] pad_sequences and pad_sequences_to
+// ---------------------------------------------------------------------------
 
+/// Both operations admit every active data element dtype, `bool` included,
+/// and move its bits unchanged on both lanes (an `f64` element keeps its
+/// width), inside and outside a function, padding short
+/// rows and truncating long ones.
+#[test]
+fn pad_sequences_moves_bool_elements_like_eval() {
+    let source = "def padded(rows: List[List[bool]]) -> tensor[*, *, bool] = pad_sequences(rows, false)\n\
+                  a = pad_sequences([[true], [false, true]], false)\n\
+                  b = pad_sequences_to([[true, true, true], [false]], 2i64, true)\n\
+                  c = padded([[false, true], [true]])\n\
+                  d = pad_sequences_to([[1i8], [2i8, 3i8]], 3i64, 0i8)\n\
+                  e = pad_sequences([[0.1f64], [0.2f64, 0.3f64]], 0.5f64)\n\
+                  f = pad_sequences_to([[cast(0.1f32, f16)]], 2i64, cast(0.0f32, f16))\n";
+    let run = parity::assert_lanes_agree(source, "padbool");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "a = tensor(shape=[2, 2], data=[true, false, false, true])\n",
+        "b = tensor(shape=[2, 2], data=[true, true, false, true])\n",
+        "c = tensor(shape=[2, 2], data=[false, true, true, false])\n",
+        "d = tensor(shape=[2, 3], data=[1, 0, 0, 2, 3, 0])\n",
+        "e = tensor(shape=[2, 2], data=[0.1, 0.5, 0.2, 0.3])\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
+    }
+}
+
+/// `string` and `key` are not data element dtypes, so nested lists of them
+/// are type errors, reported as such rather than as a target gate.
+#[test]
+fn pad_sequences_rejects_a_non_data_element_dtype_by_type() {
+    for source in [
+        "a = pad_sequences([[\"x\"], [\"y\", \"z\"]], \"\")\n",
+        "a = pad_sequences_to([[\"x\"]], 2i64, \"\")\n",
+        "k = key_from_seed(7i64)\na = pad_sequences([[k]], k)\n",
+    ] {
+        let stderr = build_rejection(source);
+        assert!(stderr.contains("pad_sequences"), "{source}: {stderr}");
+    }
+}
+
+/// A negative `width` is a negative result extent, so spec/04-type-system.md
+/// section 4.7's non-negativity guard traps `Domain` in `pad_sequences_to`,
+/// with one context line, on both lanes.
+#[test]
+fn pad_sequences_to_traps_a_negative_width_like_eval() {
+    let width = "tensor_to_scalar(sum(to_tensor(map(fn (i: i64) -> -1i64, range(0i64, 2i64))), 0))";
+    let source = format!(
+        "def run(w: i64) -> tensor[*, *, i8] ! {{IO}} = {{\n\
+         _ = print(\"before\")\n\
+         pad_sequences_to([[1i8]], w, 0i8)\n\
+         }}\n\
+         a = run({width})\n"
+    );
+    let run = parity::assert_lanes_agree(&source, "padneg");
+    assert_eq!(run.status, Some(1), "{run:?}");
+    assert_eq!(
+        run.failure, "numeric trap: domain in pad_sequences_to at i64",
+        "{run:?}"
+    );
+    assert_eq!(
+        run.context, "pad_sequences_to target extent at axis 1 is negative: -2",
+        "{run:?}"
+    );
+}

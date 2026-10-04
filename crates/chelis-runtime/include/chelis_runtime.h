@@ -543,6 +543,7 @@ chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype);
 chelis_list *chelis_tensor_elements(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value);
+void chelis_pad_sequences_to_require_width(int64_t width);
 chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value);
 chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis);
 chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes);

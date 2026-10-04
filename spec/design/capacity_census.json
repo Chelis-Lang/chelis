@@ -1280,6 +1280,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_pad_sequences_to_require_width ( int64_t width ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
       "flags": []
     },
