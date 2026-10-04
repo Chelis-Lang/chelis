@@ -395,8 +395,11 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   most the largest decimal at their wider scale, which keeps both results in range),
   `decimal_to_f64(decimal(t)) = to_float(t)`, idempotent rounding, and the i64 round trip.
   A `where` guard keeps only the inputs a law speaks about, so rejected samples are counted
-  rather than passed. `crates/chelis-cli/tests/std_decimal_properties.rs` runs them and a
-  deliberately false variant of each, which must fail.
+  rather than passed. The fuzz generator's binder ranges make each property's sampled
+  domain narrower than its law (no i64 extremes, floats within [-10, 10]); each property
+  states its sampled domain and names the deterministic tests that check the callables at
+  the extremes outside it. `crates/chelis-cli/tests/std_decimal_properties.rs` runs them and
+  a deliberately false variant of each, which must fail.
 
 ## 15. Delivery and consumers
 
