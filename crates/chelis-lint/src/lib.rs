@@ -235,9 +235,7 @@ pub struct Exception {
 }
 
 /// Walk `root`, classify each entry, dispatch to every matching rule, and
-/// collect violations. Entries are checked in parallel and their results
-/// reassembled in walk order, so the returned list, sorted by path, is
-/// identical to a serial pass.
+/// collect violations. Returns violations sorted by path (stable across runs).
 pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, LintError> {
     let policy = std::sync::Arc::new(policy::TraversalPolicy::load_for(root)?);
     let entries: Vec<walker::Entry> = walker::walk_with_policy(root, &policy)?
@@ -248,11 +246,37 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
         .map(|rule| rule.prepare_run(root, &entries, &policy))
         .collect::<Result<_, _>>()?;
 
-    let mut violations: Vec<Violation> =
-        check_entries_in_parallel(&entries, |entry| check_entry(root, rules, &prepared, entry))
-            .into_iter()
-            .flatten()
-            .collect();
+    let mut violations = Vec::new();
+    for entry in &entries {
+        let surface = match entry.surface {
+            Some(s) => s,
+            None => continue,
+        };
+        let source = if surface.needs_source() {
+            match std::fs::read_to_string(&entry.path) {
+                Ok(s) => Some(s),
+                Err(_) => continue, // binary file or unreadable; skip
+            }
+        } else {
+            None
+        };
+        let ctx = Context {
+            root,
+            path: &entry.path,
+            source: source.as_deref(),
+            surface,
+        };
+        for (rule, prepared) in rules.iter().zip(&prepared) {
+            if !rule.applies_to().contains(&surface) {
+                continue;
+            }
+            violations.extend(
+                rule.check_prepared(&ctx, prepared.as_ref())
+                    .into_iter()
+                    .filter(|v| !inline_allows(source.as_deref(), surface, v)),
+            );
+        }
+    }
     violations.sort_by(|a, b| {
         a.path
             .cmp(&b.path)
@@ -260,92 +284,6 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
             .then(a.rule_id.cmp(&b.rule_id))
     });
     Ok(violations)
-}
-
-/// Stack size for each file-checking worker. Rules parse Surf recursively, so
-/// workers get the same 8 MiB the main thread has rather than the 2 MiB spawned
-/// threads default to.
-const ENTRY_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
-
-/// Run `check` over every entry on up to `available_parallelism` workers and
-/// return the results in entry order. Worker `w` takes entries `w`, `w + n`,
-/// `w + 2n`, ...; results are placed back by index, so the output is identical
-/// to a serial pass whatever the worker count or scheduling.
-fn check_entries_in_parallel<F>(entries: &[walker::Entry], check: F) -> Vec<Vec<Violation>>
-where
-    F: Fn(&walker::Entry) -> Vec<Violation> + Sync,
-{
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len());
-    if workers <= 1 {
-        return entries.iter().map(&check).collect();
-    }
-    let mut results: Vec<Vec<Violation>> = vec![Vec::new(); entries.len()];
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|worker| {
-                let check = &check;
-                std::thread::Builder::new()
-                    .stack_size(ENTRY_WORKER_STACK_BYTES)
-                    .spawn_scoped(scope, move || {
-                        (worker..entries.len())
-                            .step_by(workers)
-                            .map(|index| (index, check(&entries[index])))
-                            .collect::<Vec<_>>()
-                    })
-                    .expect("spawn lint worker")
-            })
-            .collect();
-        for handle in handles {
-            let checked = handle
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            for (index, violations) in checked {
-                results[index] = violations;
-            }
-        }
-    });
-    results
-}
-
-/// Every violation the applicable rules raise on one walked entry.
-fn check_entry(
-    root: &Path,
-    rules: &[Box<dyn Rule>],
-    prepared: &[PreparedRuleState],
-    entry: &walker::Entry,
-) -> Vec<Violation> {
-    let mut violations = Vec::new();
-    let surface = match entry.surface {
-        Some(s) => s,
-        None => return violations,
-    };
-    let source = if surface.needs_source() {
-        match std::fs::read_to_string(&entry.path) {
-            Ok(s) => Some(s),
-            Err(_) => return violations, // binary file or unreadable; skip
-        }
-    } else {
-        None
-    };
-    let ctx = Context {
-        root,
-        path: &entry.path,
-        source: source.as_deref(),
-        surface,
-    };
-    for (rule, prepared) in rules.iter().zip(prepared) {
-        if !rule.applies_to().contains(&surface) {
-            continue;
-        }
-        violations.extend(
-            rule.check_prepared(&ctx, prepared.as_ref())
-                .into_iter()
-                .filter(|v| !inline_allows(source.as_deref(), surface, v)),
-        );
-    }
-    violations
 }
 
 fn inline_allows(source: Option<&str>, surface: Surface, violation: &Violation) -> bool {
@@ -503,46 +441,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
-
-    /// chelis#3108: parallel entry checking returns exactly the serial result,
-    /// in walk order, even when later entries finish first. The worker count
-    /// comes from `available_parallelism`; on a one-core runner the helper
-    /// takes its serial path and this test does not exercise parallel order.
-    #[test]
-    fn parallel_entry_checks_match_serial_order() {
-        let entries: Vec<walker::Entry> = (0..64)
-            .map(|index| walker::Entry {
-                path: PathBuf::from(format!("entry_{index:02}.ch")),
-                surface: Some(Surface::SurfSource),
-            })
-            .collect();
-        let check = |entry: &walker::Entry| {
-            let index: u64 = entry.path.to_string_lossy()[6..8].parse().unwrap();
-            // Early entries sleep longest so workers finish out of order.
-            std::thread::sleep(std::time::Duration::from_micros((64 - index) * 100));
-            (0..index % 3)
-                .map(|ordinal| Violation {
-                    rule_id: "order-test".to_string(),
-                    spec_ref: "§12.1".to_string(),
-                    path: entry.path.clone(),
-                    line: Some(ordinal as usize + 1),
-                    col: None,
-                    message: format!("{index}:{ordinal}"),
-                })
-                .collect::<Vec<_>>()
-        };
-        let render = |results: Vec<Vec<Violation>>| -> Vec<String> {
-            results
-                .into_iter()
-                .flatten()
-                .map(|v| v.to_string())
-                .collect()
-        };
-        let serial = render(entries.iter().map(check).collect());
-        let parallel = render(check_entries_in_parallel(&entries, check));
-        assert!(!serial.is_empty());
-        assert_eq!(parallel, serial);
-    }
 
     struct RunLifecycleRule {
         prepare_calls: Arc<AtomicUsize>,
