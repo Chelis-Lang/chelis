@@ -218,6 +218,45 @@ pub struct Param {
 /// node shape owns it) and re-exported so Surf consumers see one type.
 pub use chelis_deep::CastMode;
 
+/// Surf-only stage syntax. The expression preserves source spelling and spans;
+/// the syntax discriminator never travels into Deep or depends on binder names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipeStage {
+    pub expression: Expr,
+    pub syntax: PipeStageSyntax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipeStageSyntax {
+    Callable,
+    CallFirst,
+    Cast(CastMode),
+    Copy,
+    Realize,
+}
+
+impl std::ops::Deref for PipeStage {
+    type Target = Expr;
+    fn deref(&self) -> &Expr {
+        &self.expression
+    }
+}
+impl std::ops::DerefMut for PipeStage {
+    fn deref_mut(&mut self) -> &mut Expr {
+        &mut self.expression
+    }
+}
+impl From<Expr> for PipeStage {
+    fn from(expression: Expr) -> Self {
+        let syntax = if matches!(expression, Expr::Apply(..)) {
+            PipeStageSyntax::CallFirst
+        } else {
+            PipeStageSyntax::Callable
+        };
+        Self { expression, syntax }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Lit(Literal, Span),
@@ -231,7 +270,7 @@ pub enum Expr {
     TupleGet(Box<Expr>, i64, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Unary(UnaryOp, Box<Expr>, Span),
-    Pipe(Box<Expr>, Vec<Expr>, Span), // x |> f |> g
+    Pipe(Box<Expr>, Vec<PipeStage>, Span), // x |> f |> g (Surf only)
     If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body

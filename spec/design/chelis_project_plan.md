@@ -340,10 +340,10 @@ domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
 
-Shipped. This remains the stylistic foundation for the remaining Phase 3 work:
-pipe-first Surf, short-form block bindings, width-aware multiline layout, and
-human-readable examples. All new Phase 3 language-completeness examples should continue
-to follow this idiom.
+Shipped. The pipe-first promotion policy is superseded by #3130: `fmt` preserves
+authored pipes, while decompilation emits calls. Use pipes for sequential dataflow
+and calls where nested arguments read more clearly. Short-form block bindings,
+width-aware layout, and readable examples remain the style foundation.
 
 ### 3a: Package System (Shells + Reef)
 
@@ -955,7 +955,7 @@ documentation for users.
 - ~10 full models (40+ ops, end-to-end training pipelines)
 
 **Each program ships as:**
-- `corpus/NNN_name.ch` — Surf source (pipe-first style)
+- `corpus/NNN_name.ch` — Surf source (explicit, readable dataflow)
 - `corpus/NNN_name.dp` — Canonical Deep (pretty-printed)
 - `corpus/NNN_name.json` — Fitness score, type info, effect info
 
@@ -964,8 +964,8 @@ ADTs, dimension polymorphism, pipe-heavy data flow, effects (Resource), random k
 linearity (copy, borrow), macros, vmap, tuple returns, grad with multiple wrt targets,
 PyTorch-equivalent translation pairs.
 
-**Quality gate:** All programs compile, type-check with fitness >= 0.9, use idiomatic
-pipe-first style, and exercise the full Phase 2 language surface.
+**Quality gate:** All programs compile, type-check with fitness >= 0.9, use explicit, readable
+dataflow, and exercise the full Phase 2 language surface.
 
 ### 4b: ICL Effect Measurement
 

@@ -28,7 +28,6 @@ module.exports = grammar({
     $._canonical_identifier,
     $._canonical_record_field_name,
     $._canonical_record_pattern_field_name,
-    $._canonical_pipe_lambda_fn,
     $._canonical_then,
     $._canonical_else,
     $._property_body_colon,
@@ -55,6 +54,8 @@ module.exports = grammar({
     [$.primary_expression, $.qualified_type_name],
     [$.value_identifier, $.primary_expression],
     [$.infer_type, $.wildcard],
+    [$.non_lambda_expression, $._open_form_expression],
+    [$.expression, $._open_form_expression],
   ],
 
   rules: {
@@ -246,9 +247,9 @@ module.exports = grammar({
     non_lambda_expression: ($) =>
       choice(
         $.pipe_expression,
-        $._pipe_operand,
+        $._non_pipe_operand,
       ),
-    _pipe_operand: ($) =>
+    _non_pipe_operand: ($) =>
       choice(
         $.if_expression,
         $.match_expression,
@@ -272,17 +273,24 @@ module.exports = grammar({
         $.primary_expression,
       ),
 
+    _pipe_operand: ($) => choice(
+      $.with_handler_expression, $.block_expression, $.par_expression,
+      $.do_expression, $.call_expression, $.field_expression,
+      $.transform_expression, $.quote_expression, $.primary_expression,
+    ),
+    _open_form_expression: ($) => choice($.lambda_expression, $._non_pipe_operand),
+
     if_expression: ($) =>
       seq(
         "if",
-        field("condition", $.expression),
+        field("condition", $._open_form_expression),
         alias($._canonical_then, "then"),
-        field("consequence", $.expression),
+        field("consequence", $._open_form_expression),
         alias($._canonical_else, "else"),
-        field("alternative", $.expression),
+        field("alternative", $._open_form_expression),
       ),
     match_expression: ($) =>
-      seq("match", field("value", $.expression), "with", "{", repeat1($.match_arm), "}"),
+      seq("match", field("value", $._open_form_expression), "with", "{", repeat1($.match_arm), "}"),
     match_arm: ($) =>
       seq(
         "|",
@@ -292,7 +300,7 @@ module.exports = grammar({
         field("body", $.expression),
       ),
     lambda_expression: ($) =>
-      seq("fn", "(", commaSep($.parameter), ")", "->", field("body", $.expression)),
+      seq("fn", "(", commaSep($.parameter), ")", "->", field("body", $._open_form_expression)),
 
     with_handler_expression: ($) =>
       seq(
@@ -363,7 +371,7 @@ module.exports = grammar({
     pipe_expression: ($) =>
       prec.left(
         PREC.pipe,
-        seq(choice($.lambda_expression, $._pipe_operand), repeat1($.pipe_stage)),
+        seq($._pipe_operand, repeat1($.pipe_stage)),
       ),
     pipe_stage: ($) =>
       prec.left(
@@ -373,7 +381,6 @@ module.exports = grammar({
           field(
             "value",
             choice(
-              $.canonical_pipe_lambda_expression,
               $.cast_pipe_stage,
               $._pipe_operand,
             ),
@@ -391,15 +398,6 @@ module.exports = grammar({
         "(",
         field("precision", $.identifier),
         ")",
-      ),
-    canonical_pipe_lambda_expression: ($) =>
-      seq(
-        $._canonical_pipe_lambda_fn,
-        "(",
-        commaSep($.parameter),
-        ")",
-        "->",
-        field("body", $.expression),
       ),
     logical_or_expression: ($) =>
       prec.left(

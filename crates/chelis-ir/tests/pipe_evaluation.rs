@@ -1,15 +1,6 @@
-//! Pipe-stage lowering: pin all four supported callable shapes.
-//!
-//! `lower_pipe()` in `crates/chelis-ir/src/lower.rs` chains a seed value
-//! through stages. Plain function, `vmap`, `grad`, and `vmap(grad)`
-//! callable stages all lower via the shared non-pipe construction.
-//!
-//! This file pins all four shapes:
-//!
-//! 1. Plain unary builtin (`x |> relu`).
-//! 2. Plain callable with extra args (`x |> add(a)` ≡ `add(x, a)`).
-//! 3. `x |> grad(f)` ≡ `grad(f)(x)`.
-//! 4. `xs |> vmap(grad(f))` ≡ `vmap(grad(f))(xs)`.
+//! Application lowering for the four callable shapes represented by Surf pipes:
+//! unary builtin, extra arguments, grad, and vmap(grad).
+//! Retired Deep pipes are not an IR ingress representation.
 
 use chelis_unord::UnordMap;
 
@@ -49,10 +40,10 @@ fn parse_one(src: &str) -> Expr {
 fn pipe_unary_builtin_stage_lowers_and_evaluates() {
     // (pipe {} (var {} x) (var {} relu))
     let pipe_src = r#"
-        (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-          (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-          (var {} relu))
-    "#;
+(app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+  (var {} relu)
+  (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
+"#;
     let pipe_expr = parse_one(pipe_src);
     let scoped = UnordMap::from([("x".to_string(), f32_vec(3))]);
     let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
@@ -78,21 +69,25 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
 // Fixture 2 — control: `x |> add(a)` lowers and evaluates as `add(x, a)`.
 // Surf desugars `x |> add(a)` into a lambda
 // `(fn (params __chelis_pipe) (app add __chelis_pipe a))`. Use that shape
-// here so this test pins the Plain-callable path through `lower_pipe`.
+// here so this test pins the Plain-callable path through ordinary application lowering.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn pipe_plain_callable_with_args_lowers_and_evaluates() {
     let pipe_src = r#"
-        (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-          (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-          (fn {type: (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}
-            (params {} (__chelis_pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
-            (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-              (var {} add)
-              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} __chelis_pipe)
-              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))))
-    "#;
+(app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+  (fn {type: (t-fn {}
+                (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+                (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+      }
+    (params {}
+      (__chelis_pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
+    (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+      (var {} add)
+      (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} __chelis_pipe)
+      (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a)))
+  (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
+"#;
     let pipe_expr = parse_one(pipe_src);
     let scoped = UnordMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
     let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
@@ -141,10 +136,10 @@ fn pipe_grad_stage_matches_non_pipe_application() {
     // bare `(grad {} (var {} f))` callable (no lambda wrap; Surf does not
     // wrap `Grad`-stage pipes in a lambda).
     let pipe_src = r#"
-        (pipe {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
-          (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input)
-          (grad {} (var {} loss)))
-    "#;
+(app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
+  (grad {} (var {} loss))
+  (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
+"#;
     // Non-pipe reference: `grad(f)(x)`.
     let app_src = r#"
         (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -229,10 +224,10 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
     // `xs |> vmap(grad(f))` -- the seed is the batched input, the stage is the
     // bare `(vmap {} (grad {} f) axis=0)` callable.
     let pipe_src = r#"
-        (pipe {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
-          (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs)
-          (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0)))
-    "#;
+(app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
+  (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))
+  (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
+"#;
     let app_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
           (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))
@@ -320,10 +315,10 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
     "#;
     let pipe_src = r#"
-        (pipe {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
-          (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs)
-          (vmap {} (var {} relu_row) (lit {type: (t-prim {} i32)} 0)))
-    "#;
+(app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+  (vmap {} (var {} relu_row) (lit {type: (t-prim {} i32)} 0))
+  (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs))
+"#;
     let mut program_defs = UnordMap::new();
     program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
     let scoped = UnordMap::from([("xs".to_string(), f32_mat(2, 3))]);
@@ -351,7 +346,7 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
 // The bug: `resolve_callable_expr_inner` returns `None` when the pipe stage
 // resolves to a `(var {} f)` for a function-typed parameter, because the name
 // lives in `bindings` (as a parameter Load) but not in `local_callables` or
-// `program_defs`. `lower_pipe` then hits the `None`-resolution fallthrough at
+// `program_defs`. application lowering then hits the `None`-resolution fallthrough at
 // `crates/chelis-ir/src/lower.rs:4631` and rejects with
 // "pipe stage is not supported by IR evaluation yet".
 //
@@ -388,17 +383,20 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
     // exact path `try_lower_program` takes for every top-level def, which is
     // what `chelis eval --file` and `chelis build` exercise.
     let fn_src = r#"
-        (fn {}
-          (params {}
-            (f {type: (t-fn {}
-                         (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
-                         (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})
-            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
-          (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-            (var {} f)
-            (var {} f)))
-    "#;
+(fn {}
+  (params {}
+    (f
+      {type: (t-fn {}
+                (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+                (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+      })
+    (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+  (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+    (var {} f)
+    (app {}
+      (var {} f)
+      (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))))
+"#;
     let result = try_lower_subexpr_program(
         &parse_one(fn_src),
         UnordMap::new(),
@@ -432,16 +430,18 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     // recursion guard interaction that a nested `f(f(x))` non-pipe shape
     // would expose (separate bug; out of scope for Item 2-extended).
     let apply_one_pipe_src = r#"
-        (fn {}
-          (params {}
-            (f {type: (t-fn {}
-                         (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
-                         (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})
-            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
-          (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-            (var {} f)))
-    "#;
+(fn {}
+  (params {}
+    (f
+      {type: (t-fn {}
+                (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+                (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+      })
+    (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+  (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+    (var {} f)
+    (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
+"#;
     // Non-pipe equivalent: `def apply_one_app(f, x) = f(x)`.
     let apply_one_app_src = r#"
         (fn {}

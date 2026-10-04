@@ -78,7 +78,7 @@ fn check_both_ingresses(source: &str, accepted: bool) {
 fn a_deferred_cast_preserves_its_consumers_family_rejection() {
     for dtype in ["i32", "f32"] {
         check(
-            &format!("out = 2.0f32 |> recip |> fn (v) -> cast(floor(v), {dtype}) |> recip\n"),
+            &format!("out = 2.0f32 |> recip |> (fn (v) -> (cast(floor(v), {dtype}) |> recip))\n"),
             dtype == "f32",
         );
     }

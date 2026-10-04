@@ -51,9 +51,9 @@ fn source_arguments_and_extension_values_are_data() {
 }
 
 #[test]
-fn registered_inventory_contains_thirty_compiler_owned_keys() {
+fn registered_inventory_contains_twenty_nine_compiler_owned_keys() {
     let keys = chelis_deep::metadata::REGISTERED_METADATA_KEYS;
-    assert_eq!(keys.len(), 30);
+    assert_eq!(keys.len(), 29);
     assert_eq!(TYPED_CASES.len(), keys.len());
     for key in keys {
         assert!(
@@ -197,10 +197,6 @@ const TYPED_CASES: &[(&str, &str)] = &[
     (
         "surf_dim_group_size",
         "(defdim {surf_dim_group_size: 2} n) (defdim {} m)",
-    ),
-    (
-        "surf_pipe_stage",
-        "(pipe {} 1 (fn {surf_pipe_stage: \"call-first\"} (params {} x) (var {} x)))",
     ),
     (
         "surf_literal_style",
@@ -489,6 +485,12 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
         // The `random` handler kind was retired with the counter stream
         // (#2413): its source no longer parses and its old core JSON no
         // longer decodes, each naming the retired kind.
+        if source.contains("(pipe ") {
+            assert!(parse_str(source).unwrap_err().to_string().contains("0.20"));
+            assert!(serde_json::from_value::<Vec<chelis_deep::Expr>>(json).is_err());
+            retired += 1;
+            continue;
+        }
         if source.contains("{effect: random}") {
             assert!(parse_str(source).is_err(), "retired kind parsed: {source}");
             let error = serde_json::from_value::<Vec<chelis_deep::Expr>>(json)
@@ -520,7 +522,7 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
         );
     }
     assert!(accepted > 0 && rejected > 0);
-    assert_eq!(retired, 1);
+    assert_eq!(retired, 2);
     assert!(
         bincode::deserialize::<Vec<Vec<chelis_deep::Expr>>>(include_bytes!(
             "fixtures/metadata_df5daab/ast.bin"

@@ -4609,7 +4609,7 @@ fn list_tensor_bridges_require_checked_dtype_and_empty_shape_evidence() {
 /// bounded by the program rather than by the number of lowering ingresses.
 ///
 /// The receipt is a count, not a wall clock, so it cannot flake under machine
-/// load. `chelis_ir::lower::program_def_fold_passes` rises once per prepared
+/// load. `chelis_ir::lower::program_context_preparations` rises once per prepared
 /// context, which is once per whole-program fold.
 ///
 /// Failing first, measured on this exact test with only the memo in
@@ -4648,7 +4648,7 @@ mod issue_2207_routing_lowering_context {
     /// same sum: a fixture that stopped reaching the named-axis lane would
     /// satisfy the bound below without ever exercising it.
     fn fold_passes_for(routed_reductions: u32) -> u64 {
-        chelis_ir::lower::reset_program_def_fold_passes();
+        chelis_ir::lower::reset_program_context_preparations();
         super::super::named_axis::reset_named_axis_routes();
         let result = eval_selected(
             EvalRequest {
@@ -4659,7 +4659,7 @@ mod issue_2207_routing_lowering_context {
             &["answer".to_string()],
         )
         .expect("the routed program evaluates");
-        let passes = chelis_ir::lower::program_def_fold_passes();
+        let passes = chelis_ir::lower::program_context_preparations();
         assert_eq!(
             super::super::named_axis::named_axis_routes(),
             u64::from(routed_reductions),
@@ -4674,7 +4674,7 @@ mod issue_2207_routing_lowering_context {
     }
 
     #[test]
-    fn routed_named_axis_reductions_fold_the_program_once() {
+    fn routed_named_axis_reductions_prepare_the_context_once() {
         // A recursive fixture in a debug evaluator needs the stack the other
         // recursion tests here take, without a runner environment flag.
         std::thread::Builder::new()
@@ -4682,7 +4682,9 @@ mod issue_2207_routing_lowering_context {
             .spawn(|| {
                 let one = fold_passes_for(1);
                 let many = fold_passes_for(40);
-                eprintln!("whole-program folds: 1 routed reduction = {one}, 40 = {many}");
+                eprintln!(
+                    "whole-program context preparations: 1 routed reduction = {one}, 40 = {many}"
+                );
                 assert_eq!(
                     many, one,
                     "40 routed reductions cost {many} whole-program definition folds, 1 costs {one}"
@@ -4702,7 +4704,7 @@ mod issue_2207_routing_lowering_context {
 ///
 /// Failing first, measured on this test with only the memo in
 /// `ProgramScope::transform_lowering_context` bypassed: 1 application cost 3
-/// whole-program folds and 40 cost 42, one per application. With the memo
+/// whole-program context preparations and 40 cost 42, one per application. With the memo
 /// both counts are 2.
 mod issue_2439_transform_lowering_context {
     use crate::compiler::{eval_selected, wire_values};
@@ -4724,7 +4726,7 @@ mod issue_2439_transform_lowering_context {
     /// checking the answer, so an evaluation that failed cannot report a
     /// flattering zero.
     fn fold_passes_for(applications: u32) -> u64 {
-        chelis_ir::lower::reset_program_def_fold_passes();
+        chelis_ir::lower::reset_program_context_preparations();
         let result = eval_selected(
             EvalRequest {
                 source_kind: SourceKind::Surf,
@@ -4734,7 +4736,7 @@ mod issue_2439_transform_lowering_context {
             &["answer".to_string()],
         )
         .expect("the grad program evaluates");
-        let passes = chelis_ir::lower::program_def_fold_passes();
+        let passes = chelis_ir::lower::program_context_preparations();
         // d/dx sum(x * x) at [1, 1] is [2, 2], so each application adds 4.
         assert_eq!(
             serde_json::to_value(&result.roots[0].value).unwrap(),
@@ -4745,13 +4747,15 @@ mod issue_2439_transform_lowering_context {
     }
 
     #[test]
-    fn repeated_grad_applications_fold_the_program_once() {
+    fn repeated_grad_applications_prepare_the_context_once() {
         std::thread::Builder::new()
             .stack_size(32 * 1024 * 1024)
             .spawn(|| {
                 let one = fold_passes_for(1);
                 let many = fold_passes_for(40);
-                eprintln!("whole-program folds: 1 grad application = {one}, 40 = {many}");
+                eprintln!(
+                    "whole-program context preparations: 1 grad application = {one}, 40 = {many}"
+                );
                 assert_eq!(
                     many, one,
                     "40 grad applications cost {many} whole-program definition folds, 1 costs {one}"

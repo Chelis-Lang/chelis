@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_the_single_node_spelling() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 25);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 26);
     }
 
     #[test]

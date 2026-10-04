@@ -420,12 +420,12 @@ def leak(x: f32) -> f32 = {
 fn outside_module_field_access_on_deferred_lambda_param_rejected() {
     // The access target is an unannotated lambda parameter whose type
     // is still a Var when the access is inferred; the pipe stage
-    // application (`p |> fn (q) -> q.value` means the lambda applied
+    // application (`p |> (fn (q) -> q.value)` means the lambda applied
     // to `p`) pins it to the opaque type later in the def. D-CHECK
     // requires a deferred-access ledger (mirroring the
     // deferred-borrow ledger) re-checked at def-level resolution.
     let outside = "module Agent.Strategy
-def leak(p: Probability) -> f32 = p |> fn (q) -> q.value
+def leak(p: Probability) -> f32 = p |> (fn (q) -> q.value)
 ";
     let exprs = deep_of_surf(&[PROB_MODULE, outside]);
     assert_single_violation(

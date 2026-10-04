@@ -102,6 +102,30 @@ agrees exactly with the ordered metadata names. Contradictory, malformed,
 absent, or dynamically unresolved selectors fail resugaring; the round-trip
 laws do not authorize dropping or reconstructing the operative child.
 
+### 0.2 Pipe sugar and explicit grouping
+
+> **[02-PIPE-1]** `|>` exists only in Surf. Desugaring SHALL normalize
+> `x |> f(y)` to `f(x, y)` before literal dtype selection, with bare `f`
+> meaning `f(x)`. `cast(T)`, `cast_trunc(T)`, bare `copy`, and bare `realize`
+> stages normalize to their corresponding operand forms. General authored
+> lambdas remain function values applied to the carried expression; no
+> arbitrary beta reduction or capture-prone substitution is permitted.
+
+> **[02-PIPE-2]** A pipe operand SHALL be explicitly grouped when it contains
+> an unparenthesized non-pipe binary or unary operator, type ascription,
+> record update, or open-ended `if`, `match`, or lambda form. Parentheses,
+> argument lists, and delimited blocks establish independent expression
+> boundaries. Thus `(a * b) |> f`, `a * (b |> f)`,
+> `(if c then a else b) |> f`, and `x |> (fn (v) -> v + y)` are valid;
+> `a * b |> f`, `-x |> f`, `if c then a else b |> f`, and
+> `x |> fn (v) -> v + y` are rejected with a grouping diagnostic.
+
+> **[02-PIPE-3]** Formatting SHALL preserve authored pipe sugar and comments,
+> be type-independent and idempotent. Deep SHALL contain only the normalized
+> operation and no pipe spelling-restoration metadata. Diagnostics SHALL
+> refer to authored stage spans and source, not synthesized call text.
+
+
 ---
 
 ## 1. Keywords
@@ -133,7 +157,7 @@ Final. Binding power from lowest to highest:
 
 | BP | Operators | Assoc | Deep form |
 |----|-----------|-------|-----------|
-| 1 | `\|>` | left | `(pipe {} ...)` |
+| 1 | `\|>` | left | nested `app` (first-argument insertion) |
 | 2 | `\|\|` | left | `(app {} (var {} or) ...)` |
 | 3 | `&&` | left | `(app {} (var {} and) ...)` |
 | 4 | `==` `!=` | none | `eq` / `neq` |
@@ -149,7 +173,7 @@ Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b =
 Every operator row desugars with the authored operand order preserved: an
 application row `a OP b` becomes `(app {} (var {} op) a' b')` with `a'`
 first, no row swaps its operands, and `|>` keeps its stage order in the
-`pipe` node. `a > b` therefore desugars to the `gt` built-in, whose result
+application chain. `a > b` therefore desugars to the `gt` built-in, whose result
 is defined as `cmplt(b, a)` over the already-evaluated operand values
 (`spec/05-risc-primitives.md` §3.2), not to an operand-swapped `cmplt`
 application. Combined with Deep's left-to-right application-argument
@@ -634,7 +658,7 @@ Additional canonical style rules:
 
 - use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
   bindings such as `result = expr`
-- prefer pipe-first composition for eligible linear flows
+- use pipes or calls according to which makes the dataflow clearer
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
 
@@ -1435,6 +1459,8 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 
 # ── Operator expressions ──
 
+# The [02-PIPE-2] grouping guard applies to each expression after parsing.
+# Unparenthesized mixed operators or open-ended forms cannot contain '|>'.
 PipeExpr      <- UpdateExpr (S '|>' S (CastPipeStage / UpdateExpr))*
 CastPipeStage <- ('cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap') S '(' S Ident S ')'
 UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
@@ -1718,7 +1744,7 @@ a || b                            ⟹  (app {} (var {} or) a' b')
 !a                                ⟹  (app {} (var {} not) a')
 
 -- Pipe
-x |> f |> g                       ⟹  (pipe {} x' (var {} f) (var {} g))
+x |> f |> g                       ⟹  (app {} (var {} g) (app {} (var {} f) x'))
 
 -- Control flow
 if c then a else b                ⟹  (if {} c' a' b')
@@ -1844,7 +1870,7 @@ After `type Name =`, the parser checks if the next non-whitespace token is `|`. 
 ## 7. Deep Vocabulary Boundary
 
 `typealias`, `record-update`, and `pat-tuple` are active members of the closed
-public Deep vocabulary. The complete 62-tag inventory and its compile-time
+public Deep vocabulary. The complete 61-tag inventory and its compile-time
 totality rule live in `spec/03-deep-syntax.md` §2 and §2.13; this Surf chapter
 does not maintain a second count.
 
@@ -1908,7 +1934,7 @@ def activate(act: Activation, x: tensor[batch, hidden_dim, f32]) -> tensor[batch
 def forward(w1, b1, w2, b2, act, x) = {
   h = matmul(x, w1)
     |> add(b1)
-    |> fn (z) -> activate(act, z)
+    |> (fn (z) -> activate(act, z))
   add(matmul(h, w2), b2)
 }
 ```

@@ -105,7 +105,7 @@ mod tests {
             "def explicitly_pure() ! {} = ()\n",
             "different_record_field = Point { x: y }\n",
             "different_record_pattern = match p with { | Point { x: y } => y }\n",
-            "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
+            "later_pipe_argument = x |> (fn (v) -> f(y, v))\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
             "@property bounded forall(x: i32) where x <= 1: true\n",
             "@property grouped_operand forall(x: i32, y: i32) where (x + 1) <= y: true\n",
@@ -230,6 +230,39 @@ mod tests {
             "def f() -> bool = {\n  x = true\n  x\n  || false\n}\n",
         ] {
             assert_surf_parser_parity(source, false);
+        }
+    }
+
+    #[test]
+    fn pipes_require_explicit_grouping_at_every_operator_family() {
+        for op in [
+            "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||",
+        ] {
+            assert_surf_parser_parity(&format!("out = a {op} b |> f\n"), false);
+            assert_surf_parser_parity(&format!("out = (a {op} b) |> f\n"), true);
+            assert_surf_parser_parity(&format!("out = a {op} (b |> f)\n"), true);
+        }
+        for source in [
+            "out = -x |> f\n",
+            "out = !x |> f\n",
+            "out = &x |> f\n",
+            "out = if c then a else b |> f\n",
+            "out = fn (v) -> v |> f\n",
+            "out = match x |> f with { | _ => x }\n",
+            "out = x |> fn (v) -> v\n",
+            "out = x: i32 |> f\n",
+            "out = x |> f: i32\n",
+            "out = x with { a: y } |> f\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+        for source in [
+            "out = (-x) |> f\n",
+            "out = (if c then a else b) |> f\n",
+            "out = x |> (fn (v) -> v)\n",
+            "out = match (x |> f) with { | _ => x }\n",
+        ] {
+            assert_surf_parser_parity(source, true);
         }
     }
 

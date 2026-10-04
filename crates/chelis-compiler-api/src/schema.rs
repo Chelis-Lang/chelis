@@ -1716,6 +1716,13 @@ pub struct WireParam {
     pub span: Span,
 }
 
+/// Authored pipe-stage syntax; normalization consumes this before literal typing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireSurfPipeStage {
+    pub syntax: chelis_surf::ast::PipeStageSyntax,
+    pub expression: WireSurfExpr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireSurfExpr {
@@ -1773,7 +1780,7 @@ pub enum WireSurfExpr {
     },
     Pipe {
         expr: Box<WireSurfExpr>,
-        stages: Vec<WireSurfExpr>,
+        stages: Vec<WireSurfPipeStage>,
         span: Span,
     },
     If {

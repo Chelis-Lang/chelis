@@ -328,7 +328,6 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 DeepTag::Let => infer_let(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Match => infer_match(node, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Pipe => pipe_reached_inference_unfolded(node, errors),
                 DeepTag::Tuple => infer_tuple(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::TupleGet => {
                     infer_tuple_get(node, env, vg, subst, adt_reg, errors, product)

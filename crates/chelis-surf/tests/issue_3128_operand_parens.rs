@@ -108,8 +108,8 @@ fn an_open_tailed_ascription_operand_is_parenthesized() {
         ("((-x) : f32)", "((-x) : f32)"),
         ("((&x) : f32)", "((&x) : f32)"),
         (
-            "((x |> fn (v: f32) -> v) : f32)",
-            "((x |> fn (v: f32) -> v) : f32)",
+            "((x |> (fn (v: f32) -> v)) : f32)",
+            "((x |> (fn (v: f32) -> v)) : f32)",
         ),
     ] {
         assert_round_trips(body, expected);
@@ -121,19 +121,19 @@ fn closed_operands_stay_bare() {
     // Negative controls: none of these needs grouping, and the printer adds
     // none.
     for body in [
-        "-x |> f",
+        "(-x) |> f",
         "(x + 1.0) |> f",
-        "x |> f |> fn (v: f32) -> v",
-        "x |> if (x > 0.0) then f else g",
+        "x |> f |> (fn (v: f32) -> v)",
+        "x |> (if (x > 0.0) then f else g)",
         "x |> f(y) |> g",
-        "(x |> f : f32)",
+        "((x |> f) : f32)",
         // A pipe whose last stage is grouped is closed, so it needs no
         // further grouping as an ascription operand.
-        "(x |> (y |> fn (v: f32) -> v) : f32)",
+        "((x |> (y |> (fn (v: f32) -> v))) : f32)",
         "(x : f32) |> f",
         "x |> realize |> f",
         "x |> cast(f64) |> f",
-        "r with { f: x } |> g",
+        "(r with { f: x }) |> g",
         "(x, x) |> f",
         "do { x; x } |> f",
     ] {

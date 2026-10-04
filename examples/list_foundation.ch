@@ -16,6 +16,6 @@ flat_tokens_view = print(flat_tokens)
 token_batches_view = print(token_batches)
 roundtrip_view = print(roundtrip)
 selection_mask: tensor[2, bool] = [true, false]
-runtime_position: i64 = &selection_mask |> count(0) |> tensor_to_scalar
+runtime_position: i64 = (&selection_mask) |> count(0) |> tensor_to_scalar
 runtime_selected = index(ys, runtime_position)
 runtime_selected_view = print(runtime_selected)

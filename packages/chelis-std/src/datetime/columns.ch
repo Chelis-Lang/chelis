@@ -140,7 +140,7 @@ def field_mask[n](year: &tensor[n, i64], month: &tensor[n, i64], day: &tensor[n,
   fields = and(within(year, -9999i64, 9999i64), within(month, 1i64, 12i64))
   and(fields, and(gte(day, filled(day, 1i64)), lte(day, month_lengths(year, month))))
 }
-def field_detail(year: i64, month: i64, day: i64) -> string = if year |> in_span(-9999i64, 9999i64) |> not then outside_text("year", year, -9999i64, 9999i64) else if month |> in_span(1i64, 12i64) |> not then outside_text("month", month, 1i64, 12i64) else joined([outside_text("day", day, 1i64, days_in_month(year, month)), " for ", year_month_text(year, month)])
+def field_detail(year: i64, month: i64, day: i64) -> string = if (year |> in_span(-9999i64, 9999i64) |> not) then outside_text("year", year, -9999i64, 9999i64) else if (month |> in_span(1i64, 12i64) |> not) then outside_text("month", month, 1i64, 12i64) else joined([outside_text("day", day, 1i64, days_in_month(year, month)), " for ", year_month_text(year, month)])
 def dates_from_ymd[n](year: &tensor[n, i64], month: &tensor[n, i64], day: &tensor[n, i64]) -> Dates[n] = {
   bad = first_false(to_list(field_mask(year, month, day)))
   if gte(bad, 0i64) then fail(element_failure("dates_from_ymd", "domain", bad, field_detail(element_at(year, bad), element_at(month, bad), element_at(day, bad)))) else dates_from_epoch_days(epoch_day_columns(year, month, day))
@@ -178,7 +178,7 @@ def shifted_months[n](start: &tensor[n, i64], months: &tensor[n, i64], overflow:
   }
   admitted = and(fits, or(keeps, flags_filled(day, not(rejecting))))
   bad = first_false(to_list(admitted))
-  if gte(bad, 0i64) then if fits |> to_list |> index(bad) then fail(element_failure("dates_add_months", "domain", bad, joined([outside_text("day", element_at(day, bad), 1i64, element_at(length, bad)), " for ", year_month_text(element_at(target_year, bad), element_at(target_month, bad))]))) else fail(element_failure("dates_add_months", "overflow", bad, joined([day_text(element_at(start, bad)), " plus ", to_string(element_at(months, bad)), " months is outside the supported date range"]))) else dates_from_epoch_days(epoch_day_columns(target_year, target_month, where(keeps, day, length)))
+  if gte(bad, 0i64) then if (fits |> to_list |> index(bad)) then fail(element_failure("dates_add_months", "domain", bad, joined([outside_text("day", element_at(day, bad), 1i64, element_at(length, bad)), " for ", year_month_text(element_at(target_year, bad), element_at(target_month, bad))]))) else fail(element_failure("dates_add_months", "overflow", bad, joined([day_text(element_at(start, bad)), " plus ", to_string(element_at(months, bad)), " months is outside the supported date range"]))) else dates_from_epoch_days(epoch_day_columns(target_year, target_month, where(keeps, day, length)))
 }
 def dates_days_until[n](a: Dates[n], b: Dates[n]) -> tensor[n, i64] = {
   start = dates_epoch_days(a)
@@ -253,7 +253,7 @@ def units_per_second(unit: TimeUnit) -> i64 =
 def instants_from_unix_count[n](counts: &tensor[n, i64], unit: TimeUnit) -> Instants[n] = {
   multiple = seconds_per_unit(unit)
   fraction = units_per_second(unit)
-  valid = if gt(multiple, 0i64) then within(counts, neg(floor_div(377705030401i64, multiple)), floor_div(253402214400i64, multiple)) else counts |> floored(fraction) |> within(-377705030401i64, 253402214400i64)
+  valid = if gt(multiple, 0i64) then within(counts, neg(floor_div(377705030401i64, multiple)), floor_div(253402214400i64, multiple)) else (counts |> floored(fraction) |> within(-377705030401i64, 253402214400i64))
   bad = first_false(to_list(valid))
   if gte(bad, 0i64) then fail(element_failure("instants_from_unix_count", "domain", bad, joined([to_string(element_at(counts, bad)), " ", name_of_unit(unit), " since the unix epoch is outside the supported instant range"]))) else if gt(multiple, 0i64) then instants_from_unix(times(counts, multiple), filled(counts, 0i64)) else instants_from_unix(floored(counts, fraction), counts |> euclid_mod(fraction) |> times(floor_div(1000000000i64, fraction)))
 }
@@ -315,7 +315,7 @@ def instants_to_unix_count[n](is: Instants[n], unit: TimeUnit, rounding: Roundin
   (seconds, nanoseconds) = parts(is)
   (counts, admitted, fits) = unit_counts(seconds, nanoseconds, unit, rounding)
   bad = first_false(to_list(and(admitted, fits)))
-  if gte(bad, 0i64) then if admitted |> to_list |> index(bad) then fail(element_failure("instants_to_unix_count", "overflow", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " in ", name_of_unit(unit), " does not fit in i64"]))) else fail(element_failure("instants_to_unix_count", "domain", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " is not a whole number of ", name_of_unit(unit)]))) else counts
+  if gte(bad, 0i64) then if (admitted |> to_list |> index(bad)) then fail(element_failure("instants_to_unix_count", "overflow", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " in ", name_of_unit(unit), " does not fit in i64"]))) else fail(element_failure("instants_to_unix_count", "domain", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " is not a whole number of ", name_of_unit(unit)]))) else counts
 }
 def instants_add_duration[n](is: Instants[n], ds: Durations[n]) -> Instants[n] = {
   (seconds, nanoseconds) = parts(is)
@@ -341,9 +341,9 @@ def instants_until[n](a: Instants[n], b: Instants[n]) -> Durations[n] = {
 def increment_problem(increment: Duration) -> Option[string] = {
   second = duration_second(increment)
   nanosecond = duration_nanosecond(increment)
-  if or(lt(second, 0i64), and(eq(second, 0i64), eq(nanosecond, 0i64))) then ["increment ", duration_to_string(increment), " is not positive"]
+  if or(lt(second, 0i64), and(eq(second, 0i64), eq(nanosecond, 0i64))) then (["increment ", duration_to_string(increment), " is not positive"]
   |> joined
-  |> Some else if gt(second, 86400i64) then Some(joined(["increment ", duration_to_string(increment), " does not divide one day"])) else if neq(mod(86400000000000i64, second |> mul(1000000000i64) |> add(nanosecond)), 0i64) then Some(joined(["increment ", duration_to_string(increment), " does not divide one day"])) else None
+  |> Some) else if gt(second, 86400i64) then Some(joined(["increment ", duration_to_string(increment), " does not divide one day"])) else if neq(mod(86400000000000i64, second |> mul(1000000000i64) |> add(nanosecond)), 0i64) then Some(joined(["increment ", duration_to_string(increment), " does not divide one day"])) else None
 }
 -- Rounds within each UTC day, as `instant_round_to` does.
 def instants_round_to[n](is: Instants[n], increment: Duration, rounding: Rounding) -> Instants[n] =
@@ -367,7 +367,7 @@ def instants_round_to[n](is: Instants[n], increment: Duration, rounding: Roundin
     admitted = exact_or_admitted(rounding, rem)
     fits = within(second, -377705030401i64, 253402214400i64)
     bad = first_false(to_list(and(admitted, fits)))
-    if gte(bad, 0i64) then if admitted |> to_list |> index(bad) then fail(element_failure("instants_round_to", "overflow", bad, joined(["rounding ", instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " to a multiple of ", duration_to_string(increment), " leaves the supported instant range"]))) else fail(element_failure("instants_round_to", "domain", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " is not a multiple of ", duration_to_string(increment)]))) else instants_from_unix(second, euclid_mod(rounded, 1000000000i64))
+    if gte(bad, 0i64) then if (admitted |> to_list |> index(bad)) then fail(element_failure("instants_round_to", "overflow", bad, joined(["rounding ", instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " to a multiple of ", duration_to_string(increment), " leaves the supported instant range"]))) else fail(element_failure("instants_round_to", "domain", bad, joined([instant_text(element_at(seconds, bad), element_at(nanoseconds, bad)), " is not a multiple of ", duration_to_string(increment)]))) else instants_from_unix(second, euclid_mod(rounded, 1000000000i64))
   }
   }
 def instants_to_dates_at[n](is: Instants[n], o: Offset) -> Dates[n] =

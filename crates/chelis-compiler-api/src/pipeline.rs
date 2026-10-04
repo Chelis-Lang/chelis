@@ -449,13 +449,15 @@ pub fn prepare_surf_decls_with_context(
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
-        .map_err(PreparationError::SurfDesugar)?;
-    let expanded =
-        chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
-            .map_err(PreparationError::Expansion)?
-            .into_exprs();
-    Ok(prepare_deep(expanded, entry))
+    chelis_types::run_on_grown_stack(|| {
+        let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
+            .map_err(PreparationError::SurfDesugar)?;
+        let expanded =
+            chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
+                .map_err(PreparationError::Expansion)?
+                .into_exprs();
+        Ok(prepare_deep(expanded, entry))
+    })
 }
 
 /// Wrap already-expanded Deep and apply optional entry pruning.

@@ -415,43 +415,19 @@ without overloading the colon for two unrelated jobs (parameter binding vs.
 function-result type). `chelis fmt` formats canonical Surf and does not act as
 a dialect translator.
 
-### 3.6 Pipe-first composition and first-argument stages
+### 3.6 Composition and first-argument pipe sugar
 
-**Rule:** Pipe stages use first-argument insertion. In Surf,
-`x |> f(y, z)` means `f(x, y, z)`, not `f(y, z, x)`.
+Surf pipes use first-argument insertion: `x |> f(y, z)` means
+`f(x, y, z)`. A bare stage passes the carried value as its only argument.
+A later argument position requires a parenthesized lambda:
+`x |> (fn (v) -> f(y, v))`.
 
-```chelis
-x |> normalize |> add(bias) |> relu
-```
+Pipes can make a linear sequence of tensor transformations easier to review;
+calls can make branching dataflow or argument roles clearer. Neither spelling
+is preferred by a lint. Keep meaningful intermediate bindings when they help
+human supervision. Formatters preserve authored pipes without type information;
+Deep decompilers print calls and do not reconstruct pipe spelling.
 
-desugars as if written:
-
-```chelis
-relu(add(normalize(x), bias))
-```
-
-A bare stage (`x |> f`) passes the piped value as the only argument to
-`f`. A call stage (`x |> f(y, z)`) inserts the piped value before the
-written arguments. If a later argument position is intended, write an
-explicit lambda:
-
-```chelis
-x |> fn (v) -> f(y, v)
-```
-
-Canonical Surf producers promote a nested application chain to this pipe form
-only when the typed pipeline proof establishes a linear first-argument
-dataflow chain. If that proof fails, the producer retains calls;
-later-position insertion retains the explicit lambda. The equivalence is
-limited to the proven chain and does not authorize token-only or untyped call
-rewriting.
-
-(This requirement is not fully implemented; see chelis#1171.)
-
-The decompiler may compact a lambda stage back to call-stage sugar only
-when the carried value is the first argument of the call. Naming rules
-that refer to a function's principal or first argument, including the
-type-suffix rule in §7.2, use this same interpretation for pipe stages.
 
 ---
 

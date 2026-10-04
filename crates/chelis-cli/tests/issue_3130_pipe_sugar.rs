@@ -1,0 +1,220 @@
+//! Public acceptance surface for spec/02 [02-PIPE-1..3].
+use assert_cmd::Command;
+use std::{fs, path::Path};
+use tempfile::tempdir;
+
+fn run(args: &[&str]) -> std::process::Output {
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(args)
+        .output()
+        .unwrap()
+}
+fn deep(path: &Path) -> String {
+    let output = run(&["deep", "--flat", path.to_str().unwrap()]);
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+#[test]
+fn pipe_cast_and_call_cast_have_the_same_bits_and_canonical_source() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("cast.ch");
+    fs::write(
+        &source,
+        "piped = 0.1 |> cast(f64)\ncalled = cast(0.1, f64)\nrounded = 0.1f32 |> cast(f64)\n",
+    )
+    .unwrap();
+    let result = run(&["eval", "--json", "--file", source.to_str().unwrap()]);
+    assert!(result.status.success(), "{result:?}");
+    let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let roots = result["roots"].as_array().unwrap();
+    assert_eq!(roots[0]["value"], roots[1]["value"]);
+    assert_ne!(roots[0]["value"], roots[2]["value"]);
+    let raw = deep(&source);
+    assert!(!raw.contains("(pipe ") && !raw.contains("surf_pipe_stage"));
+    let dp = dir.path().join("cast.dp");
+    fs::write(&dp, raw).unwrap();
+    let surf = run(&["surf", dp.to_str().unwrap()]);
+    assert!(surf.status.success(), "{surf:?}");
+    let surf = String::from_utf8(surf.stdout).unwrap();
+    assert!(!surf.contains("|>"));
+    let back = dir.path().join("back.ch");
+    fs::write(&back, &surf).unwrap();
+    let fmt = run(&["fmt", back.to_str().unwrap()]);
+    assert!(fmt.status.success(), "{fmt:?}");
+    assert_eq!(fmt.stdout, surf.as_bytes());
+}
+
+#[test]
+fn authored_stage_errors_retain_original_source_locations() {
+    let dir = tempdir().unwrap();
+    for (name, source, kind, stage) in [
+        (
+            "type",
+            "def f(x: bool) -> bool = x\nout = 1i32 |> f\n",
+            "PrecisionMismatch",
+            "f\n",
+        ),
+        (
+            "arity",
+            "def f(x: i32, y: i32) -> i32 = x + y\nout = 1i32 |> f\n",
+            "ArityMismatch",
+            "f\n",
+        ),
+        (
+            "ownership",
+            "def f(x: tensor[2, f32]) -> tensor[2, f32] = x |> realize |> add(x)\n",
+            "UseAfterConsume",
+            "x)\n",
+        ),
+    ] {
+        let path = dir.path().join(format!("{name}.ch"));
+        fs::write(&path, source).unwrap();
+        let result = run(&["check", path.to_str().unwrap()]);
+        assert!(!result.status.success(), "{name}: {result:?}");
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let error = report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|error| error["kind"] == kind)
+            .expect("expected diagnostic kind");
+        let offset = source.rfind(stage).unwrap();
+        assert_eq!(error["span"]["offset"], offset, "{source}\n{error}");
+        assert!(
+            error["span_id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("surf:{offset}.."))
+        );
+        assert!(source.contains("|>"));
+        let build = run(&["build", "--allow-style-violations", path.to_str().unwrap()]);
+        assert!(!build.status.success());
+        let rendered = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            rendered.contains("|>"),
+            "diagnostic must render authored pipe: {rendered}"
+        );
+        assert!(!rendered.contains("__chelis_pipe"));
+    }
+}
+
+#[test]
+fn persisted_pipe_nodes_are_rejected_with_version_and_cause() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("old.dp");
+    fs::write(&path, "(def {} out (pipe {} (var {} x) (var {} f)))").unwrap();
+    for command in ["surf", "fmt", "check"] {
+        let output = run(&[command, path.to_str().unwrap()]);
+        assert!(!output.status.success(), "{command}");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.contains("pipe") && output.contains("0.20"),
+            "{command}: {output}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_requires_old_dtype_evidence_and_checks_the_entire_batch_before_writing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let python = std::process::Command::new("uv")
+        .args(["python", "find", "3.11"])
+        .output()
+        .unwrap();
+    assert!(python.status.success());
+    let python = String::from_utf8(python.stdout).unwrap();
+    let baseline = dir.path().join("old-compiler");
+    // Frozen output from the previous grammar: its seed is f32, not f64.
+    let receipt = r#"(def {} out (pipe {} (lit {span: "surf:6..9", type: (t-prim {} f32)} 0.1) (fn {surf_pipe_stage: "call-first"} (params {} p) (cast {} (var {} p) (t-prim {} f64)))))"#;
+    fs::write(
+        &baseline,
+        format!(
+            "#!{}\nimport sys\nsys.stdout.write({receipt:?})\n",
+            python.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&baseline, fs::Permissions::from_mode(0o755)).unwrap();
+    let first = dir.path().join("first.ch");
+    let second = dir.path().join("second.ch");
+    let source = "out = 0.1 |> cast(f64)\n";
+    fs::write(&first, source).unwrap();
+    fs::write(&second, "out = 0.2 |> cast(f64)\n").unwrap();
+    let args = [
+        "migrate",
+        "pipes",
+        "--baseline-compiler",
+        baseline.to_str().unwrap(),
+    ];
+    let printed = run(&[args.as_slice(), &[first.to_str().unwrap()]].concat());
+    assert!(printed.status.success(), "{printed:?}");
+    assert_eq!(printed.stdout, b"out = 0.1f32 |> cast(f64)\n");
+    let batch = run(&[
+        args.as_slice(),
+        &[
+            "--inplace",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+    ]
+    .concat());
+    assert!(!batch.status.success());
+    assert!(String::from_utf8_lossy(&batch.stderr).contains("Deep differs"));
+    assert_eq!(fs::read_to_string(&first).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(&second).unwrap(),
+        "out = 0.2 |> cast(f64)\n"
+    );
+    let inplace = run(&[args.as_slice(), &["--inplace", first.to_str().unwrap()]].concat());
+    assert!(inplace.status.success(), "{inplace:?}");
+    assert_eq!(
+        fs::read_to_string(&first).unwrap(),
+        "out = 0.1f32 |> cast(f64)\n"
+    );
+    assert!(
+        run(&[args.as_slice(), &["--check", first.to_str().unwrap()]].concat())
+            .status
+            .success()
+    );
+    fs::write(
+        &baseline,
+        format!(
+            "#!{}\nprint('(def {{}} out (var {{}} x))')\n",
+            python.trim()
+        ),
+    )
+    .unwrap();
+    fs::write(&first, source).unwrap();
+    let missing = run(&[args.as_slice(), &["--inplace", first.to_str().unwrap()]].concat());
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no literal dtype"));
+    assert_eq!(fs::read_to_string(&first).unwrap(), source);
+}
+
+#[test]
+fn long_generated_pipe_chain_desugars_without_native_stack_overflow() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("long.ch");
+    fs::write(&path, format!("out = x{}\n", " |> f".repeat(1000))).unwrap();
+    let output = deep(&path);
+    assert!(!output.contains("(pipe "));
+    assert_eq!(output.matches("(app ").count(), 1000);
+    let dp = dir.path().join("long.dp");
+    fs::write(&dp, &output).unwrap();
+    let surf = run(&["surf", dp.to_str().unwrap()]);
+    assert!(surf.status.success(), "{surf:?}");
+    let canonical = dir.path().join("calls.ch");
+    fs::write(&canonical, &surf.stdout).unwrap();
+    let fmt = run(&["fmt", canonical.to_str().unwrap()]);
+    assert!(fmt.status.success(), "{fmt:?}");
+    assert_eq!(fmt.stdout, surf.stdout);
+    assert_eq!(deep(&canonical).matches("(app ").count(), 1000);
+}

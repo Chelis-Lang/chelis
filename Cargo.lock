@@ -962,6 +962,7 @@ name = "chelis-surf"
 version = "0.18.12"
 dependencies = [
  "chelis-deep",
+ "chelis-macros",
  "chelis-pred",
  "chelis-unord",
  "chelis-vocab",
@@ -970,6 +971,7 @@ dependencies = [
  "ryu",
  "serde",
  "serde_json",
+ "stacker",
  "tempfile",
  "thiserror 2.0.18",
 ]

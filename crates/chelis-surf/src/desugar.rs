@@ -12,10 +12,10 @@ use chelis_unord::{UnordMap, UnordSet};
 use chelis_deep::Span;
 use chelis_deep::annotations::{
     Amenability, BindingTypeOrigin, EffectMember, EffectSet as AstEffectSet, InvariantPredicate,
-    LiteralOrigin, LiteralStyle, MetadataValue as M, PipeStageOrigin, PositiveInteger, Present,
-    PropertyBinder, PropertyContracts, PropertyPreconditions, PropertyQuantifiers,
-    PropertySourceKind, ResourceEffect, RuntimeExpression, SpanId, Spanned, TypeSyntax,
-    VariableRef, VariableTuple, WrtTargets,
+    LiteralOrigin, LiteralStyle, MetadataValue as M, PositiveInteger, Present, PropertyBinder,
+    PropertyContracts, PropertyPreconditions, PropertyQuantifiers, PropertySourceKind,
+    ResourceEffect, RuntimeExpression, SpanId, Spanned, TypeSyntax, VariableRef, VariableTuple,
+    WrtTargets,
 };
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
@@ -34,6 +34,8 @@ pub(crate) use crate::dtype_name::{
 /// A Surf program that cannot be translated to semantically faithful Deep.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DesugarError {
+    #[error("invalid programmatic Surf pipe stage")]
+    InvalidPipeStage { span: Span },
     #[error("invalid Surf declaration ownership: {message}")]
     InvalidDeclarationOwnership { message: String },
     #[error(
@@ -61,7 +63,8 @@ impl DesugarError {
     pub fn span(&self) -> Option<Span> {
         match self {
             Self::InvalidDeclarationOwnership { .. } => None,
-            Self::UnknownGradParameter { span, .. }
+            Self::InvalidPipeStage { span }
+            | Self::UnknownGradParameter { span, .. }
             | Self::UnresolvedGradTarget { span, .. }
             | Self::NonCallableGradTarget { span, .. }
             | Self::CapturedTensorConstructor { span } => Some(*span),
@@ -82,17 +85,22 @@ pub fn desugar_program_with_context(
     decls: &[Decl],
     context: &[deep::Expr],
 ) -> Result<Vec<deep::Expr>, DesugarError> {
-    crate::parser::validate_bound_ownership(decls).map_err(|error| {
-        DesugarError::InvalidDeclarationOwnership {
-            message: error.to_string(),
-        }
-    })?;
-    let resolved_grad_indices = GradSelectorResolver::resolve_program_with_context(decls, context)?;
-    let ctx = DesugarCtx::new(decls, resolved_grad_indices);
-    Ok(decls
-        .iter()
-        .flat_map(|decl| ctx.desugar_decl(decl))
-        .collect())
+    stacker::grow(64 * 1024 * 1024, || {
+        crate::parser::validate_bound_ownership(decls).map_err(|error| {
+            DesugarError::InvalidDeclarationOwnership {
+                message: error.to_string(),
+            }
+        })?;
+        let normalized = crate::pipe_sugar::normalized_program(decls)?;
+        let decls = normalized.as_slice();
+        let resolved_grad_indices =
+            GradSelectorResolver::resolve_program_with_context(decls, context)?;
+        let ctx = DesugarCtx::new(decls, resolved_grad_indices);
+        Ok(decls
+            .iter()
+            .flat_map(|decl| ctx.desugar_decl(decl))
+            .collect())
+    })
 }
 
 pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
@@ -100,8 +108,12 @@ pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
 }
 
 pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
-    let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
-    Ok(DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr))
+    stacker::grow(64 * 1024 * 1024, || {
+        let normalized = crate::pipe_sugar::normalized_expression(expr)?;
+        let expr = &normalized;
+        let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
+        Ok(DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr))
+    })
 }
 
 /// Desugar an expression using the declarations that establish its callable
@@ -116,14 +128,21 @@ pub fn desugar_expr_in_program_scope(
     expr: &Expr,
     bound_names: &[String],
 ) -> Result<deep::Expr, DesugarError> {
-    crate::parser::validate_bound_ownership(decls).map_err(|error| {
-        DesugarError::InvalidDeclarationOwnership {
-            message: error.to_string(),
-        }
-    })?;
-    let resolved_grad_indices =
-        GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
-    Ok(DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names))
+    stacker::grow(64 * 1024 * 1024, || {
+        crate::parser::validate_bound_ownership(decls).map_err(|error| {
+            DesugarError::InvalidDeclarationOwnership {
+                message: error.to_string(),
+            }
+        })?;
+        let normalized = crate::pipe_sugar::normalized_expression(expr)?;
+        let expr = &normalized;
+        let resolved_grad_indices =
+            GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
+        Ok(
+            DesugarCtx::new(decls, resolved_grad_indices)
+                .desugar_expr_with_scope(expr, bound_names),
+        )
+    })
 }
 
 #[derive(Default)]
@@ -1601,49 +1620,6 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
     }
 }
 
-fn fresh_pipe_param_name(stage: &Expr) -> String {
-    let base = "__chelis_pipe";
-    let mut index = 0;
-    loop {
-        let candidate = if index == 0 {
-            base.to_string()
-        } else {
-            format!("{base}{index}")
-        };
-        if !expr_mentions_name(stage, &candidate) {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
-fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
-    let Expr::Lambda(params, body, _) = expr else {
-        return false;
-    };
-    let [param] = params.as_slice() else {
-        return false;
-    };
-    if param.ty.is_some() {
-        return false;
-    }
-    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
-    match body.as_ref() {
-        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
-        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _, _) => {
-            is_param(argument)
-        }
-        _ => false,
-    }
-}
-
-fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
-    with_metadata_value(
-        expr,
-        M::SurfPipeStage(Spanned::new(PipeStageOrigin::CallFirst, sp())),
-    )
-}
-
 fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Lit(_, _) => false,
@@ -1881,31 +1857,6 @@ fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
 }
 
 impl DesugarCtx {
-    fn desugar_pipe_stage(&self, stage: &Expr, local_fn_params: &[String]) -> deep::Expr {
-        match stage {
-            Expr::Apply(func, args, span) if !args.is_empty() => {
-                let pipe_param = fresh_pipe_param_name(stage);
-                let mut applied_args = Vec::with_capacity(args.len() + 1);
-                applied_args.push(Expr::Var(pipe_param.clone(), *span));
-                applied_args.extend(args.iter().cloned());
-                let lambda = Expr::Lambda(
-                    vec![Param {
-                        name: pipe_param,
-                        ty: None,
-                        span: *span,
-                    }],
-                    Box::new(Expr::Apply(func.clone(), applied_args, *span)),
-                    *span,
-                );
-                mark_call_first_pipe_stage(self.desugar_expr_with_scope(&lambda, local_fn_params))
-            }
-            Expr::Lambda(..) if is_first_argument_pipe_lambda(stage) => {
-                mark_call_first_pipe_stage(self.desugar_expr_with_scope(stage, local_fn_params))
-            }
-            _ => self.desugar_expr_with_scope(stage, local_fn_params),
-        }
-    }
-
     fn desugar_decl(&self, decl: &Decl) -> Vec<deep::Expr> {
         let mut lowered = match decl {
             Decl::FunDef {
@@ -2618,15 +2569,7 @@ impl DesugarCtx {
                 )
             }
 
-            Expr::Pipe(head, stages, _) => {
-                let mut children = vec![self.desugar_expr_with_scope(head, local_fn_params)];
-                children.extend(
-                    stages
-                        .iter()
-                        .map(|expr| self.desugar_pipe_stage(expr, local_fn_params)),
-                );
-                node(DeepTag::Pipe, children)
-            }
+            Expr::Pipe(..) => unreachable!("Surf pipes normalize before desugaring"),
 
             Expr::If(cond, then_e, else_e, _) => node(
                 DeepTag::If,
@@ -3880,24 +3823,27 @@ mod tests {
 
     #[test]
     fn test_pipe() {
-        let expr = Expr::Pipe(Box::new(tvar("x")), vec![tvar("f"), tvar("g")], s());
+        let expr = Expr::Pipe(
+            Box::new(tvar("x")),
+            vec![tvar("f").into(), tvar("g").into()],
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(pipe {} (var {} x) (var {} f) (var {} g))"
+            "(app {} (var {} g) (app {} (var {} f) (var {} x)))"
         );
     }
 
     #[test]
-    fn test_pipe_stage_call_desugars_to_unary_lambda() {
+    fn test_pipe_stage_call_desugars_to_application() {
         let expr = Expr::Pipe(
             Box::new(tvar("x")),
-            vec![Expr::Apply(Box::new(tvar("add")), vec![tvar("y")], s())],
+            vec![Expr::Apply(Box::new(tvar("add")), vec![tvar("y")], s()).into()],
             s(),
         );
         let rendered = print_expr(&desugar_expr(&expr));
         assert!(rendered.contains("(var {} x)"));
-        assert!(rendered.contains("(params {} __chelis_pipe)"));
-        assert!(rendered.contains("(app {} (var {} add) (var {} __chelis_pipe) (var {} y))"));
+        assert_eq!(rendered, "(app {} (var {} add) (var {} x) (var {} y))");
     }
 
     // --- If ---

@@ -1293,10 +1293,6 @@ impl<'a> EvalContext<'a> {
             // unresolved parameter had lost; the folded application carries
             // the operand's own annotation, so there is nothing left to
             // re-derive. Fail closed so a new unfolded ingress is loud.
-            DeepTag::Pipe => Err("a pipe reached evaluation unfolded: every checker \
-                 entry folds a pipe into the application it denotes \
-                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
-                .to_string()),
             DeepTag::Cast => self.eval_cast(node),
             DeepTag::Realize => {
                 // Bucket 1: `realize` is identity in the host runtime,

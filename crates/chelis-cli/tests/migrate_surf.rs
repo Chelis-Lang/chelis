@@ -80,7 +80,7 @@ fn migrate_surf_accepts_operator_named_pipe_stages() {
     // callee is an operator-named primitive.
     let dir = tempdir().expect("tempdir");
     let canonical_path = dir.path().join("canonical.ch");
-    let canonical = "def b() -> f32 = 0.0 |> fn (p) -> cast(p, f32) |> mul(cast(2.0, f32))\n";
+    let canonical = "def b() -> f32 = 0.0 |> (fn (p) -> (cast(p, f32) |> mul(cast(2.0, f32))))\n";
     fs::write(&canonical_path, canonical).expect("write canonical fixture");
 
     Command::cargo_bin("chelis")

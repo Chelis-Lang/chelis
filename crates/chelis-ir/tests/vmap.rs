@@ -911,42 +911,76 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
 /// A `vmap` over `tensor[batch, features]` whose mapped axis is the bound
 /// runtime parameter `ax: i32` (a non-constant).
 const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
-(defsig {} process
-  (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
-           (t-tensor {} (d-name {} features) (t-prim {} f32))))
-(def {} process
-  (fn {} (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
+(defsig {}
+  process
+  (t-fn {}
+    (t-tensor {} (d-name {} features) (t-prim {} f32))
+    (t-tensor {} (d-name {} features) (t-prim {} f32))))
+
+(def {}
+  process
+  (fn {}
+    (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
     (app {} (var {} relu) (var {} x))))
-(defsig {} batch_process
-  (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
-           (t-prim {} i32)
-           (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
-(def {} batch_process
-  (fn {} (params {}
-           (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))})
-           (ax {type: (t-prim {} i32)}))
-    (pipe {} (var {} xs)
-      (vmap {} (var {} process) (var {span: "dp:vmap-runtime-axis"} ax)))))
+
+(defsig {}
+  batch_process
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+
+(def {}
+  batch_process
+  (fn {}
+    (params {}
+      (xs
+        {type: (t-tensor {}
+                  (d-name {} batch)
+                  (d-name {} features)
+                  (t-prim {} f32))
+        })
+      (ax {type: (t-prim {} i32)}))
+    (app {}
+      (vmap {} (var {} process) (var {span: "dp:vmap-runtime-axis"} ax))
+      (var {} xs))))
 "#;
 
 /// The same program with a CONSTANT (`lit`) mapped axis — the negative
 /// parity control. Identical except the axis node is a literal, so it must
 /// lower cleanly.
 const VMAP_CONST_AXIS_DEEP: &str = r#"
-(defsig {} process
-  (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
-           (t-tensor {} (d-name {} features) (t-prim {} f32))))
-(def {} process
-  (fn {} (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
+(defsig {}
+  process
+  (t-fn {}
+    (t-tensor {} (d-name {} features) (t-prim {} f32))
+    (t-tensor {} (d-name {} features) (t-prim {} f32))))
+
+(def {}
+  process
+  (fn {}
+    (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
     (app {} (var {} relu) (var {} x))))
-(defsig {} batch_process
-  (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
-           (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
-(def {} batch_process
-  (fn {} (params {}
-           (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))}))
-    (pipe {} (var {} xs)
-      (vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0)))))
+
+(defsig {}
+  batch_process
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+
+(def {}
+  batch_process
+  (fn {}
+    (params {}
+      (xs
+        {type: (t-tensor {}
+                  (d-name {} batch)
+                  (d-name {} features)
+                  (t-prim {} f32))
+        }))
+    (app {}
+      (vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0))
+      (var {} xs))))
 "#;
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {

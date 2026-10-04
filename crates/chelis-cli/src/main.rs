@@ -439,6 +439,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
+    /// Preserve old pipe grouping and literal values, with exact Deep proof.
+    Pipes {
+        /// Previous toolchain executable, used as the independent baseline.
+        #[arg(long)]
+        baseline_compiler: PathBuf,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        inplace: bool,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
     /// Rewrite the isolated Surf v0.18 grammar to canonical Surf v0.19.
     Surf {
         /// Source grammar version. The only supported legacy version is 0.18.
@@ -926,6 +938,12 @@ fn main() {
             check,
         }) => cmd_fmt(&file, inplace, check),
         Some(Command::Migrate { command }) => match command {
+            MigrateCommand::Pipes {
+                baseline_compiler,
+                check,
+                inplace,
+                paths,
+            } => cmd_migrate_pipes(&baseline_compiler, &paths, check, inplace),
             MigrateCommand::Surf {
                 from,
                 check,
@@ -1140,80 +1158,88 @@ fn main() {
 }
 
 fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
-    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let deep_exprs = if annotate {
-        match chelis_types::check_ir_program(&deep_exprs) {
-            Ok(checked) => checked.annotated_exprs().to_vec(),
-            Err(result) => {
-                // [04-FIT-26]: the shared projected rendering, never `{:?}`.
-                const PREFIX: &str =
-                    "`chelis deep --annotate` requires a well-typed program; type errors:";
-                return Err(
-                    match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
-                        Ok(lines) => format!("{PREFIX}\n{lines}"),
-                        Err(reason) => format!("{PREFIX} {reason}"),
-                    }
-                    .into(),
-                );
+    // Call trees produced from long pipe chains need the same owned stack
+    // segment as checking, including temporary AST destruction.
+    chelis_types::run_on_grown_stack(|| {
+        let source = fs::read_to_string(file)?;
+        let decls = chelis_surf::parser::parse_str(&source)?;
+        let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+        let deep_exprs = if annotate {
+            match chelis_types::check_ir_program(&deep_exprs) {
+                Ok(checked) => checked.annotated_exprs().to_vec(),
+                Err(result) => {
+                    // [04-FIT-26]: the shared projected rendering, never `{:?}`.
+                    const PREFIX: &str =
+                        "`chelis deep --annotate` requires a well-typed program; type errors:";
+                    return Err(
+                        match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
+                            Ok(lines) => format!("{PREFIX}\n{lines}"),
+                            Err(reason) => format!("{PREFIX} {reason}"),
+                        }
+                        .into(),
+                    );
+                }
             }
-        }
-    } else {
-        deep_exprs
-    };
-    let output = if flat {
-        chelis_deep::printer::print_canonical_flat(&deep_exprs)
-    } else {
-        chelis_deep::printer::print_canonical(&deep_exprs)
-    };
-    print!("{output}");
-    Ok(())
+        } else {
+            deep_exprs
+        };
+        let output = if flat {
+            chelis_deep::printer::print_canonical_flat(&deep_exprs)
+        } else {
+            chelis_deep::printer::print_canonical(&deep_exprs)
+        };
+        print!("{output}");
+        Ok(())
+    })
 }
 
 fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let options = if verbose {
-        chelis_surf::decompile::DecompileOptions::verbose()
-    } else {
-        chelis_surf::decompile::DecompileOptions::idiomatic()
-    };
-    let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
-    if ext == "dp" {
-        let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-        let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
-        let surf = chelis_surf::decompile::try_decompile_program_with_context(
-            &deep_exprs,
-            &options,
-            synthetic_name,
-        )?;
-        let surf = if verbose {
-            surf
+    // Pipes now decompile through nested applications. Keep parsing, resugaring,
+    // canonical rendering and temporary tree destruction on the compiler stack.
+    chelis_types::run_on_grown_stack(|| {
+        let source = fs::read_to_string(file)?;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let options = if verbose {
+            chelis_surf::decompile::DecompileOptions::verbose()
         } else {
-            canonicalize_decompiled_surf(&surf)?
+            chelis_surf::decompile::DecompileOptions::idiomatic()
         };
-        print!("{surf}");
-    } else {
-        // For .ch files, round-trip through deep and back
-        let decls = chelis_surf::parser::parse_str(&source)?;
-        // Public Deep is post-expansion. Resugaring the pre-expansion
-        // compiler-only `defmacro`/`macro-invoke` forms would invent a second
-        // Surf dialect and makes even a valid macro program fail here.
-        let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-        let surf = chelis_surf::decompile::try_decompile_program_with_context(
-            &deep_exprs,
-            &options,
-            synthetic_name,
-        )?;
-        let surf = if verbose {
-            surf
+        let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
+        if ext == "dp" {
+            let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+            let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
+            let surf = chelis_surf::decompile::try_decompile_program_with_context(
+                &deep_exprs,
+                &options,
+                synthetic_name,
+            )?;
+            let surf = if verbose {
+                surf
+            } else {
+                canonicalize_decompiled_surf(&surf)?
+            };
+            print!("{surf}");
         } else {
-            canonicalize_decompiled_surf(&surf)?
-        };
-        print!("{surf}");
-    }
-    Ok(())
+            // For .ch files, round-trip through deep and back
+            let decls = chelis_surf::parser::parse_str(&source)?;
+            // Public Deep is post-expansion. Resugaring the pre-expansion
+            // compiler-only `defmacro`/`macro-invoke` forms would invent a second
+            // Surf dialect and makes even a valid macro program fail here.
+            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+            let surf = chelis_surf::decompile::try_decompile_program_with_context(
+                &deep_exprs,
+                &options,
+                synthetic_name,
+            )?;
+            let surf = if verbose {
+                surf
+            } else {
+                canonicalize_decompiled_surf(&surf)?
+            };
+            print!("{surf}");
+        }
+        Ok(())
+    })
 }
 
 fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -1223,29 +1249,92 @@ fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error
 }
 
 fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if inplace && check {
-        return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
-    }
-    let source = fs::read_to_string(file)?;
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let output = if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
-        chelis_deep::printer::print_canonical(&deep_exprs)
-    } else {
-        // .ch: parse Surf -> pretty-print Surf while preserving surface
-        // choices and source comments.
-        chelis_surf::format::format_source(&source)?
-    };
-    if check {
-        if output == source {
-            return Ok(());
+    // Call trees produced from long pipe chains need the same owned stack
+    // segment as checking, including temporary AST destruction.
+    chelis_types::run_on_grown_stack(|| {
+        if inplace && check {
+            return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
         }
-        return Err(format!("{} is not canonically formatted", file.display()).into());
+        let source = fs::read_to_string(file)?;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let output = if ext == "dp" {
+            let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
+            chelis_deep::printer::print_canonical(&deep_exprs)
+        } else {
+            // .ch: parse Surf -> pretty-print Surf while preserving surface
+            // choices and source comments.
+            chelis_surf::format::format_source(&source)?
+        };
+        if check {
+            if output == source {
+                return Ok(());
+            }
+            return Err(format!("{} is not canonically formatted", file.display()).into());
+        }
+        if inplace {
+            fs::write(file, &output)?;
+        } else {
+            print!("{output}");
+        }
+        Ok(())
+    })
+}
+
+fn cmd_migrate_pipes(
+    baseline_compiler: &Path,
+    paths: &[PathBuf],
+    check: bool,
+    inplace: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if check && inplace {
+        return Err("`migrate pipes` cannot combine --check and --inplace".into());
     }
-    if inplace {
-        fs::write(file, &output)?;
-    } else {
-        print!("{output}");
+    if !check && !inplace && paths.len() != 1 {
+        return Err(
+            "printing migration requires one path; use --check or --inplace for a batch".into(),
+        );
+    }
+    let mut staged = Vec::new();
+    for path in paths {
+        let original = fs::read_to_string(path)?;
+        let output = std::process::Command::new(baseline_compiler)
+            .args(["deep", "--flat"])
+            .arg(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "{}: previous compiler rejected the source: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        let previous = String::from_utf8(output.stdout)?;
+        let migration = chelis_surf::pipe_migration::prepare(&original, &previous)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let declarations = chelis_surf::parser::parse_str(&migration.source)?;
+        let current = expanded_desugared_program(&declarations).map_err(boxed_string_error)?;
+        let normalize = chelis_surf::resugar::normalize_deep_for_surface_roundtrip;
+        let expected = chelis_deep::printer::print_canonical(&normalize(&migration.baseline)?);
+        let actual = chelis_deep::printer::print_canonical(&normalize(&current)?);
+        if actual != expected {
+            return Err(format!("{}: migration rejected: expanded Deep differs from the previous compiler; no files written", path.display()).into());
+        }
+        staged.push((path.clone(), original, migration.source));
+    }
+    if check {
+        let stale: Vec<_> = staged
+            .iter()
+            .filter(|(_, old, new)| old != new)
+            .map(|(path, _, _)| path.display().to_string())
+            .collect();
+        if !stale.is_empty() {
+            return Err(format!("pipe migration required: {}", stale.join(", ")).into());
+        }
+    } else if inplace {
+        persist_migrations_atomically(&staged)?;
+    } else if let Some((_, _, migrated)) = staged.first() {
+        print!("{migrated}");
     }
     Ok(())
 }
@@ -3941,6 +4030,50 @@ fn cmd_build_dispatch(
     }
 }
 
+/// A standalone Surf file has one unambiguous authored span namespace.
+/// Linked programs need their source-file map before a span can name a snippet.
+fn render_build_check_failure(
+    error: &chelis_compiler_api::pipeline::PipelineRejection,
+    authored: Option<(&Path, &str)>,
+) -> String {
+    use chelis_compiler_api::pipeline::PipelineRejection;
+    let mut message = format!("Check errors: {error}");
+    let Some((file, source)) = authored else {
+        return message;
+    };
+    let errors = match error {
+        PipelineRejection::Type { fitness } => fitness.errors.as_slice(),
+        PipelineRejection::Linearity { errors } => errors.as_slice(),
+        _ => return message,
+    };
+    for diagnostic in errors {
+        let Some(offset) = diagnostic
+            .span_offset
+            .filter(|&offset| offset < source.len() && source.is_char_boundary(offset))
+        else {
+            continue;
+        };
+        let start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+        let end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |index| offset + index);
+        let line = source[..start]
+            .bytes()
+            .filter(|&byte| byte == b'\n')
+            .count()
+            + 1;
+        let column = source[start..offset].chars().count();
+        message.push_str(&format!(
+            "\n  --> {}:{line}:{}\n  {line} | {}\n    | {}^",
+            file.display(),
+            column + 1,
+            &source[start..end],
+            " ".repeat(column)
+        ));
+    }
+    message
+}
+
 fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
@@ -3948,9 +4081,8 @@ fn cmd_build(
     allow_style_violations: bool,
     emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Ok(source) = fs::read_to_string(file) {
-        style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
-    }
+    let source = fs::read_to_string(file)?;
+    style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
         .map_err(boxed_string_error)?;
     // RFC v5 (RT-1 F2 bypass): a reef-prepared build checks reef-linker
@@ -3968,10 +4100,7 @@ fn cmd_build(
     // (chelis#2331).
     let (decls, entry_decls) = match &prepared {
         Some(prepared) => (prepared.decls.clone(), Some(prepared.entry_decls.clone())),
-        None => {
-            let source = fs::read_to_string(file)?;
-            (chelis_surf::parser::parse_str(&source)?, None)
-        }
+        None => (chelis_surf::parser::parse_str(&source)?, None),
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
     // and reject a zero-declaration program rather than emitting a
@@ -4022,8 +4151,9 @@ fn cmd_build(
     };
     let selected_checked = match selected_checked {
         Some(checked) => checked,
-        None => checked_compilation_with_effects(&full_deep_exprs)
-            .map_err(|e| format!("Check errors: {e}"))?,
+        None => checked_compilation_with_effects_typed(&full_deep_exprs).map_err(|e| {
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+        })?,
     };
     // This gate covers tensor_scan in the selected program independently of
     // the later backend checks on the retained emission program.
@@ -4049,8 +4179,12 @@ fn cmd_build(
     let post_drop_checked =
         if prepared.is_none() && target == BuildTarget::C && pruning_fired && eval_drop_fired {
             Some(
-                checked_compilation_with_effects(&eval_pruned_deep_exprs)
-                    .map_err(|e| format!("Check errors: {e}"))?,
+                checked_compilation_with_effects_typed(&eval_pruned_deep_exprs).map_err(|e| {
+                    render_build_check_failure(
+                        &e,
+                        prepared.is_none().then_some((file, source.as_str())),
+                    )
+                })?,
             )
         } else {
             None
@@ -4076,7 +4210,9 @@ fn cmd_build(
     } else if preserve_host_library_surface {
         post_drop_checked.expect("a changed preserved host surface was checked")
     } else {
-        checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?
+        checked_compilation_with_effects_typed(&deep_exprs).map_err(|e| {
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+        })?
     };
     let checked = checked_compilation.program();
     let root_manifest = build_root_manifest(checked, target, &entry_defs);
@@ -11913,22 +12049,29 @@ fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> Strin
 fn checked_compilation_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_compiler_api::pipeline::CheckedCompilation, String> {
+    checked_compilation_with_effects_typed(deep_exprs).map_err(|rejection| rejection.to_string())
+}
+
+fn checked_compilation_with_effects_typed(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<
+    chelis_compiler_api::pipeline::CheckedCompilation,
+    chelis_compiler_api::pipeline::PipelineRejection,
+> {
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs.to_vec(), None);
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
             // chelis#1853 [04-FIT-26]: the shared rejection rendering, one
             // projected line per diagnostic.
-            return Err(
-                chelis_compiler_api::pipeline::PipelineRejection::Type { fitness }.to_string(),
-            );
+            return Err(chelis_compiler_api::pipeline::PipelineRejection::Type { fitness });
         }
     };
     chelis_compiler_api::pipeline::complete_checks(
         analysis,
         chelis_compiler_api::pipeline::SemanticContext::Isolated,
     )
-    .map_err(|rejection| rejection.to_string())
+    .map_err(chelis_compiler_api::pipeline::PipelineRejection::from)
 }
 
 fn checked_program_with_effects(

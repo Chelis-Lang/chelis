@@ -1,6 +1,6 @@
 //! The closed Deep tag vocabulary as a typed enum (chelis#731 Phase 3).
 //!
-//! `DeepTag` is the in-memory, typed form of the 62-tag closed vocabulary
+//! `DeepTag` is the in-memory, typed form of the 61-tag closed vocabulary
 //! normatively owned by `spec/03-deep-syntax.md` §2.
 //!
 //! The SERIALIZED Deep form stays frozen: a node's tag is still written as
@@ -66,7 +66,7 @@ pub enum DeepTag {
     Lit,
     Record,
     Access,
-    Pipe,
+
     Block,
     Tuple,
     TupleGet,
@@ -117,7 +117,7 @@ pub enum DeepTag {
 
 impl DeepTag {
     /// The vocabulary size (`spec/03-deep-syntax.md` §2.10's total row).
-    pub const COUNT: usize = 62;
+    pub const COUNT: usize = 61;
 
     /// Every tag once, in §2.10 category order.
     pub const ALL: [Self; Self::COUNT] = [
@@ -142,7 +142,6 @@ impl DeepTag {
         Self::Lit,
         Self::Record,
         Self::Access,
-        Self::Pipe,
         Self::Block,
         Self::Tuple,
         Self::TupleGet,
@@ -220,7 +219,6 @@ impl DeepTag {
             Self::Lit => "lit",
             Self::Record => "record",
             Self::Access => "access",
-            Self::Pipe => "pipe",
             Self::Block => "block",
             Self::Tuple => "tuple",
             Self::TupleGet => "tuple-get",
@@ -290,7 +288,7 @@ impl DeepTag {
             "lit" => Self::Lit,
             "record" => Self::Record,
             "access" => Self::Access,
-            "pipe" => Self::Pipe,
+
             "block" => Self::Block,
             "tuple" => Self::Tuple,
             "tuple-get" => Self::TupleGet,
@@ -344,7 +342,7 @@ mod tests {
     /// The §2.10 tag-count-summary rows, spelled out independently of the
     /// enum so the enum cannot drift from spec/03 without this failing
     /// (the same job the retired duplicated `VALID_TAGS` copies did).
-    const SPEC_03_SECTION_2_10: [&str; 62] = [
+    const SPEC_03_SECTION_2_10: [&str; 61] = [
         "module",
         "import",
         "import-all",
@@ -366,7 +364,6 @@ mod tests {
         "lit",
         "record",
         "access",
-        "pipe",
         "block",
         "tuple",
         "tuple-get",
@@ -424,11 +421,11 @@ mod tests {
 
     #[test]
     fn vocabulary_count_and_uniqueness() {
-        assert_eq!(DeepTag::COUNT, 62);
+        assert_eq!(DeepTag::COUNT, 61);
         let unique_tags: BTreeSet<&str> = DeepTag::ALL.into_iter().map(DeepTag::as_str).collect();
-        assert_eq!(unique_tags.len(), 62, "ALL must list every variant once");
+        assert_eq!(unique_tags.len(), 61, "ALL must list every variant once");
         let unique_strs: BTreeSet<&str> = DeepTag::ALL_STRS.into_iter().collect();
-        assert_eq!(unique_strs.len(), 62, "spellings must be distinct");
+        assert_eq!(unique_strs.len(), 61, "spellings must be distinct");
     }
 
     #[test]

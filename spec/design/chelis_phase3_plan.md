@@ -101,15 +101,18 @@ midpoint.
 
 **Status:** shipped.
 
-This remains the public style foundation for all remaining Phase 3 work:
+The pipe-first promotion policy is superseded by #3130. Pipes remain Surf
+sugar preserved by `fmt`; decompilation emits calls. Choose pipes for a readable
+sequence of transformations and calls for nested arguments. The remaining style
+foundation is:
 
-- pipe-first decompiler output
+- ordinary call decompiler output
 - short-form block bindings
 - width-aware multiline pipe layout
 - examples and docs that read like human-written Surf rather than typed Deep debug text
 
-All new examples introduced in `3h`, `3g`, `3i`, and `3f` should continue to follow
-this style.
+New examples should use the form that makes their dataflow clearest, grouping
+pipes explicitly when combined with other operators or open-ended forms.
 
 ### 3a: Package System (Shells + Reef)
 

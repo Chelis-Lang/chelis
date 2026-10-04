@@ -783,18 +783,28 @@ fn if_branch_mismatch() {
 #[test]
 fn pipe_simple() {
     check_ok(
-        "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (var {} x)))
-         (def {} result (pipe {} (lit {type: (t-prim {} f32)} 1.0) (var {} f)))",
+        r#"
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {} f (fn {} (params {} x) (var {} x)))
+
+(def {} result (app {} (var {} f) (lit {type: (t-prim {} f32)} 1.0)))
+"#,
     );
 }
 
 #[test]
 fn pipe_chain() {
     check_ok(
-        "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (var {} x)))
-         (def {} result (pipe {} (lit {type: (t-prim {} f32)} 1.0) (var {} f) (var {} f)))",
+        r#"
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {} f (fn {} (params {} x) (var {} x)))
+
+(def {}
+  result
+  (app {} (var {} f) (app {} (var {} f) (lit {type: (t-prim {} f32)} 1.0))))
+"#,
     );
 }
 

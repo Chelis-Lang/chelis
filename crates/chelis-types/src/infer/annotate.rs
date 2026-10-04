@@ -167,13 +167,6 @@ pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> Chi
                 Selector
             }
         }
-        DeepTag::Pipe => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
         DeepTag::TupleGet => {
             if index == 0 {
                 RuntimeExpr
@@ -773,7 +766,6 @@ pub(super) fn should_attach_type_metadata(tag: DeepTag) -> bool {
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::RecordUpdate
         | DeepTag::Par

@@ -271,7 +271,7 @@ position 4 lacks the #3148 parenthetical that §5.6 carries.
 
 Separated from #3145 on 2026-10-04; #3145 keeps only the kind rule, whose default
 [#3122](https://github.com/Chelis-Lang/chelis/issues/3122) decides. Whether literals adopt contextually is pending in #3164
-(option C). Pipes are being retired (#3130, after [#3119](https://github.com/Chelis-Lang/chelis/issues/3119)), which would remove
+(option C). Surf pipes are retained as sugar under #3130; normalization before literal typing removes
 the pass's pipe positions and the fold-equivalence test. Related: [#3080](https://github.com/Chelis-Lang/chelis/issues/3080), the
 motivating defect; [#3148](https://github.com/Chelis-Lang/chelis/issues/3148), binder cast targets; [#3152](https://github.com/Chelis-Lang/chelis/issues/3152), a parameter
 named `to_tensor` that checks but fails to evaluate.

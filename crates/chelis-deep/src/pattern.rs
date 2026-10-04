@@ -74,7 +74,6 @@ fn collect_pattern_binder_names(expr: &Expr, out: &mut Vec<String>) {
         | DeepTag::App
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet

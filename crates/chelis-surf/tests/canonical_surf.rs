@@ -792,7 +792,10 @@ fn every_public_deep_expression_family_has_direct_canonical_surf() {
             "Point { x, y: 2 }",
         ),
         ("(access {} (var {} point) x)", "point.x"),
-        ("(pipe {} (var {} x) (var {} f) (var {} g))", "x |> f |> g"),
+        (
+            "(app {} (var {} g) (app {} (var {} f) (var {} x)))",
+            "g(f(x))",
+        ),
         (
             "(block {} (app {} (var {} f) (var {} x)) (app {} (var {} g) (var {} y)))",
             "do { f(x); g(y) }",
@@ -1489,22 +1492,19 @@ fn migration_of_legacy_single_expression_function_blocks_is_a_fixed_point() {
 }
 
 #[test]
-fn pipe_call_stage_metadata_preserves_the_one_canonical_sugar() {
+fn pipe_call_stages_emit_no_spelling_metadata() {
     let source = concat!(
         "ordinary = x |> f(y)\n",
         "casted = x |> cast(f64)\n",
-        "later = x |> fn (v) -> f(y, v)\n",
+        "later = x |> (fn (v) -> f(y, v))\n",
     );
     let surf = parse_str(source).expect("canonical pipe stages parse");
     let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let printed = print_canonical(&deep);
 
-    assert_eq!(
-        printed.matches("surf_pipe_stage: \"call-first\"").count(),
-        2
-    );
+    assert_eq!(printed.matches("surf_pipe_stage").count(), 0);
     let resugared = format_program(&resugar_program(&deep).expect("pipe stages resugar"));
-    assert_eq!(resugared, source);
+    assert!(!resugared.contains("|>"));
     assert_eq!(
         print_canonical(
             &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
@@ -1521,13 +1521,15 @@ fn pipe_call_stage_metadata_preserves_the_one_canonical_sugar() {
 }
 
 #[test]
-fn explicit_first_argument_pipe_lambda_alias_is_rejected() {
+fn pipe_lambdas_require_explicit_grouping() {
     rejects("result = x |> fn (v) -> f(v, y)");
-    parses("result = x |> fn (v) -> f(y, v)");
+    rejects("result = x |> fn (v) -> f(y, v)");
+    parses("result = x |> (fn (v) -> f(v, y))");
+    parses("result = x |> (fn (v) -> f(y, v))");
 }
 
 #[test]
-fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
+fn operator_named_and_finite_list_pipe_stages_resugar_as_ordinary_calls() {
     // chelis#1197: the operator and finite-list sugars rewrite an
     // application into `Binary`, `Unary`, or `List`, none of which can
     // carry the `|> f(args)` stage form, so a stage calling `mul`, `cmplt`,
@@ -1536,14 +1538,14 @@ fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
         "scaled = x |> mul(y)\n",
         "compared = x |> cmplt(y)\n",
         "listed = x |> Cons(Nil)\n",
-        "chained = x |> fn (p) -> cast(p, f32) |> mul(cast(2.0, f32))\n",
+        "chained = x |> (fn (p) -> cast(p, f32)) |> mul(cast(2.0, f32))\n",
     );
     let surf = parse_str(source).expect("operator-named pipe stages parse");
     let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let resugared = resugar_program(&deep).expect("operator-named pipe stages resugar");
     let rendered = format_program(&resugared);
 
-    assert_eq!(rendered, source);
+    assert_eq!(format_source(&rendered).unwrap(), rendered);
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(
@@ -1562,36 +1564,25 @@ fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
 
 #[test]
 fn operator_sugar_inside_a_call_stage_argument_is_still_applied() {
-    // Only the stage application itself is held back from the operator
-    // sugar. An operand of that application keeps its canonical operator
-    // spelling.
     assert_eq!(
-        resugar_one(concat!(
-            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
-            "(app {} (var {} mul) (var {} p) (app {} (var {} add) (var {} a) (var {} b)))))",
-        )),
-        "x |> mul((a + b))"
+        resugar_one("(app {} (var {} mul) (var {} x) (app {} (var {} add) (var {} a) (var {} b)))"),
+        "(x * (a + b))"
     );
 }
 
 #[test]
-fn a_nested_stage_rebinding_the_pipe_parameter_keeps_its_sugar() {
-    // `fresh_pipe_param_name` only avoids the names visible in the Surf stage
-    // it is handed, so a pipe nested inside a stage operand is desugared
-    // separately and mints the same `__chelis_pipe` spelling. The inner
-    // occurrences are bound by the inner `fn`, so the outer stage is not
-    // stranding anything and keeps its call-stage sugar.
-    let source = "nested = x |> fn (p) -> cast(p, f32) |> mul(y |> add(z))\n";
+fn nested_pipe_stages_do_not_create_synthetic_binders() {
+    let source = "nested = x |> (fn (p) -> cast(p, f32)) |> mul(y |> add(z))\n";
     let surf = parse_str(source).expect("a nested pipe operand parses");
     let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(&deep).matches("__chelis_pipe").count(),
-        4,
-        "the fixture is only meaningful while both stages mint the same name",
+        0,
+        "pipe normalization must not mint binders",
     );
 
     let rendered = format_program(&resugar_program(&deep).expect("the nested stage resugars"));
-    assert_eq!(rendered, source);
+    assert_eq!(format_source(&rendered).unwrap(), rendered);
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(
@@ -1654,17 +1645,8 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
             "(app {} (var {} add) (var {} neg) (app {} (var {} neg) (var {} a)))))",
         ),
     ] {
-        let mut malformed = parse_deep(deep_source).expect("Deep fixture parses");
-        let rendered = print_canonical(&malformed);
-        let Err(error) = resugar_expression(&malformed.remove(0)) else {
-            panic!(
-                "a stage body that cannot carry the call-stage sugar must fail closed: {rendered}"
-            );
-        };
-        assert!(
-            error.to_string().contains("call-first stage"),
-            "unexpected diagnostic for {deep_source}: {error}",
-        );
+        let error = parse_deep(deep_source).expect_err("retired Deep pipe must fail at ingress");
+        assert!(error.to_string().contains("pipe"));
     }
 }
 
@@ -1676,19 +1658,8 @@ fn assert_call_first_rejected(param: &str, body: &str) {
         "(pipe {{}} (var {{}} x) (fn {{surf_pipe_stage: \"call-first\"}} \
          (params {{}} {param}) {body}))"
     );
-    let deep = parse_deep(&source).expect("Deep fixture parses");
-    let error = resugar_expression(&deep[0]).expect_err(&source);
-    assert!(
-        matches!(
-            error,
-            chelis_surf::resugar::ResugarError::InvalidChild {
-                tag: "fn",
-                index: 1,
-                ..
-            }
-        ),
-        "expected a rejected call-first body: {error}"
-    );
+    let error = parse_deep(&source).expect_err("retired pipe metadata must fail at ingress");
+    assert!(error.to_string().contains("pipe"));
 }
 
 #[test]
@@ -1753,11 +1724,8 @@ fn call_first_pipe_safe_ordinary_stages_preserve_the_roundtrip() {
     // Unlike an outer free occurrence, a name rebound by this inner lambda
     // stays bound when the outer call-first stage loses its own parameter.
     assert_eq!(
-        resugar_one(concat!(
-            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
-            "(app {} (var {} f) (var {} p) (fn {} (params {} p) (var {} p)))))"
-        )),
-        "x |> f(fn (p) -> p)"
+        resugar_one("(app {} (var {} f) (var {} x) (fn {} (params {} p) (var {} p)))"),
+        "f(x, fn (p) -> p)"
     );
 }
 
@@ -1766,7 +1734,7 @@ fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
     for (source, key) in [
         ("(var {surf_future: true} x)", "surf_future"),
         (
-            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v)))",
+            "(fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v))",
             "surf_pipe_stage",
         ),
         (

@@ -91,9 +91,7 @@ fn adt_with_fields() {
 #[test]
 fn pipe_with_lambda() {
     check_ok(
-        "(def {} result
-           (pipe {} (lit {type: (t-prim {} f32)} 1.0)
-                    (fn {} (params {} x) (var {} x))))",
+        "(def {}\n  result\n  (app {} (fn {} (params {} x) (var {} x)) (lit {type: (t-prim {} f32)} 1.0)))\n",
     );
 }
 

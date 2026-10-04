@@ -59,3 +59,45 @@ fn source_parameters_reject_alternate_numeric_encodings_and_overflow() {
             .is_err()
     );
 }
+
+#[test]
+fn pipe_stage_wire_preserves_syntax_without_synthesized_binders() {
+    use chelis_compiler_api::{
+        compiler,
+        schema::{ParseRequest, SourceKind, WireSurfDecl},
+    };
+    let parsed = compiler::parse(ParseRequest {
+        source_kind: SourceKind::Surf,
+        source: "out = x |> f(y) |> cast(f64) |> copy |> realize\n".into(),
+    })
+    .unwrap();
+    let declarations = parsed.surf_ast.unwrap();
+    let WireSurfDecl::LetDef {
+        value: WireSurfExpr::Pipe { stages, .. },
+        ..
+    } = &declarations[0]
+    else {
+        panic!("authored pipe is preserved")
+    };
+    use chelis_surf::ast::{CastMode, PipeStageSyntax as S};
+    assert_eq!(
+        stages.iter().map(|stage| stage.syntax).collect::<Vec<_>>(),
+        vec![
+            S::CallFirst,
+            S::Cast(CastMode::Checked),
+            S::Copy,
+            S::Realize
+        ]
+    );
+    let json = serde_json::to_value(&declarations).unwrap();
+    assert!(!json.to_string().contains("__chelis_pipe"));
+    let decoded: Vec<WireSurfDecl> = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    assert!(
+        compiler::parse(ParseRequest {
+            source_kind: SourceKind::Surf,
+            source: "out = x + y |> f\n".into()
+        })
+        .is_err()
+    );
+}

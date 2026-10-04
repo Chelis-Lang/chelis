@@ -70,14 +70,12 @@ fn tag_witnesses(tag: DeepTag) -> Vec<Shows> {
     match tag {
         // A user function's key parameter, and a constructor's key field.
         DeepTag::App => vec![
+            key("def f(k: key) -> tensor[2, key] = k |> split_keys(2i64)\n"),
             key(
                 "def g(k: key) -> tensor[2, key] = split_keys(k, 2i64)\n\ndef f(k: key) -> tensor[2, key] = g(k)\n",
             ),
             key("def f(k: key) -> Option[key] = Some(k)\n"),
         ],
-        DeepTag::Pipe => vec![key(
-            "def f(k: key) -> tensor[2, key] = k |> split_keys(2i64)\n",
-        )],
         DeepTag::Let => vec![key("def f(k: key) -> key = {\n  j = k\n  j\n}\n")],
         DeepTag::Block => vec![key("def f(k: key) -> key = do { k }\n")],
         DeepTag::Fn => vec![key("def f(k: key) -> key = (fn (j: key) -> j)(k)\n")],
