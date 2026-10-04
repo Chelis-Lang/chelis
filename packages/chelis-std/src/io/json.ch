@@ -6,7 +6,7 @@ type Json =
   | JsonBool(bool)
   | JsonInt(i64)
   | JsonBigInt(string)
-  | JsonFloat(f64)
+  | JsonFloat(f64, string)
   | JsonString(string)
   | JsonArray(List[Json])
   | JsonObject(Dict[string, Json])
@@ -63,7 +63,7 @@ def json_bigint(value: Option[Json]) -> Option[string] =
 def json_float(value: Option[Json]) -> Option[f64] =
   match value with {
     | Some(inner) => match inner with {
-    | JsonFloat(n) => Some(n)
+    | JsonFloat(n, _) => Some(n)
     | JsonInt(n) => Some(cast(n, f64))
     | _ => None
   }
@@ -104,7 +104,7 @@ def json_is_null(value: Option[Json]) -> bool =
 def to_json(value: Json) -> string =
   match try_to_json(value) with {
     | Some(text) => text
-    | None => fail("to_json failed: invalid JsonBigInt storage or non-finite number cannot be represented in JSON")
+    | None => fail("to_json failed: invalid JsonBigInt storage, or a JsonFloat whose text is malformed or does not round to its finite f64, cannot be represented in JSON")
   }
 def try_to_json(value: Json) -> Option[string] = if json_serializable(value) then Some(render_json(value)) else None
 def json_serializable(value: Json) -> bool =
@@ -113,19 +113,28 @@ def json_serializable(value: Json) -> bool =
     | JsonBool(_) => true
     | JsonInt(_) => true
     | JsonBigInt(text) => canonical_bigint_text(text)
-    | JsonFloat(x) => finite_f64(x)
+    | JsonFloat(x, text) => valid_float_pair(x, text)
     | JsonString(_) => true
     | JsonArray(items) => fold(fn (acc: bool, item: Json) -> and(acc, json_serializable(item)), true, items)
     | JsonObject(entries) => fold(fn (acc: bool, kv: (string, Json)) -> and(acc, json_serializable(kv.1)), true, canonical_object_entries(entries))
   }
 def finite_f64(x: f64) -> bool = not(or(neq(x, x), or(eq(x, div(1.0f64, 0.0f64)), eq(x, div(-1.0f64, 0.0f64)))))
+-- [05-OP-2]'s JsonFloat validity: float-form token text whose correctly
+-- rounded f64 is finite and bit-identical to the stored value. Shortest
+-- round-trip text is injective on finite values, signed zero included
+-- ([05-OBS-1]), so equal renderings mean equal bits.
+def valid_float_pair(value: f64, text: string) -> bool =
+  if not(float_token_text(text)) then false else match to_float(text) with {
+    | Some(parsed) => and(finite_f64(parsed), eq(to_string(parsed), to_string(value)))
+    | None => false
+  }
 def render_json(value: Json) -> string =
   match value with {
     | JsonNull => "null"
     | JsonBool(flag) => if flag then "true" else "false"
     | JsonInt(n) => to_string(n)
     | JsonBigInt(text) => text
-    | JsonFloat(x) => to_string(x)
+    | JsonFloat(_, text) => text
     | JsonString(text) => quote_string(text)
     | JsonArray(items) => string_concat("[", string_concat(join(map(fn (item: Json) -> render_json(item), items), ","), "]"))
     | JsonObject(entries) => string_concat("{", string_concat(join(map(fn (kv: (string, Json)) -> string_concat(quote_string(kv.0), string_concat(":", render_json(kv.1))), canonical_object_entries(entries)), ","), "}"))
@@ -138,7 +147,7 @@ def canonical_object_entries(entries: Dict[string, Json]) -> List[(string, Json)
 def write_json(path: string, value: Json) -> unit ! { IO } =
   match try_to_json(value) with {
     | Some(text) => write_file(path, text)
-    | None => fail(string_concat("write_json failed for ", string_concat(path, ": invalid JsonBigInt storage or non-finite number cannot be represented in JSON")))
+    | None => fail(string_concat("write_json failed for ", string_concat(path, ": invalid JsonBigInt storage, or a JsonFloat whose text is malformed or does not round to its finite f64, cannot be represented in JSON")))
   }
 def try_write_json(path: string, value: Json) -> Option[unit] ! { IO } =
   match try_to_json(value) with {
@@ -294,8 +303,8 @@ def quad_value(ch: string) -> Option[i64] = if eq(ch, "0") then Some(cast(0, i64
 def parse_number(text: string, idx: i64) -> Option[(Json, i64)] = {
   end = scan_number_end(text, idx)
   raw = string_slice(text, idx, sub(end, idx))
-  if or(string_contains(raw, "."), or(string_contains(raw, "e"), string_contains(raw, "E"))) then match to_float(raw) with {
-    | Some(value) => if finite_f64(value) then Some((JsonFloat(value), end)) else None
+  if or(string_contains(raw, "."), or(string_contains(raw, "e"), string_contains(raw, "E"))) then if not(float_token_text(raw)) then None else match to_float(raw) with {
+    | Some(value) => if finite_f64(value) then Some((JsonFloat(value, raw), end)) else None
     | None => None
   } else if not(canonical_integer_text(raw)) then None else match to_int(raw) with {
     | Some(value) => Some((JsonInt(value), end))
@@ -318,6 +327,26 @@ def canonical_integer_text(text: string) -> bool =
       if not(is_digit(first)) then false else if and(eq(first, "0"), neq(add(start, cast(1, i64)), string_len(text))) then false else all_digits(text, add(start, cast(1, i64)))
     }
   }
+-- RFC 8259 number token with a fraction or an exponent:
+-- -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?
+def float_token_text(text: string) -> bool = {
+  int_start = if eq(char_at(text, 0i64), "-") then 1i64 else 0i64
+  int_end = integer_part_end(text, int_start)
+  exp_end = exponent_end(text, fraction_end(text, int_end))
+  and(gt(int_end, int_start), and(gt(exp_end, int_end), eq(exp_end, string_len(text))))
+}
+def integer_part_end(text: string, idx: i64) -> i64 = {
+  first = char_at(text, idx)
+  if eq(first, "0") then add(idx, 1i64) else if is_digit(first) then digits_end(text, add(idx, 1i64)) else idx
+}
+def fraction_end(text: string, idx: i64) -> i64 = if and(eq(char_at(text, idx), "."), is_digit(char_at(text, add(idx, 1i64)))) then digits_end(text, add(idx, 2i64)) else idx
+def exponent_end(text: string, idx: i64) -> i64 =
+  if or(eq(char_at(text, idx), "e"), eq(char_at(text, idx), "E")) then {
+    sign = char_at(text, add(idx, 1i64))
+    digits_start = if or(eq(sign, "+"), eq(sign, "-")) then add(idx, 2i64) else add(idx, 1i64)
+    if is_digit(char_at(text, digits_start)) then digits_end(text, add(digits_start, 1i64)) else idx
+  } else idx
+def digits_end(text: string, idx: i64) -> i64 = if is_digit(char_at(text, idx)) then digits_end(text, add(idx, 1i64)) else idx
 def all_digits(text: string, idx: i64) -> bool = if gte(idx, string_len(text)) then true else and(is_digit(char_at(text, idx)), all_digits(text, add(idx, cast(1, i64))))
 def decimal_digits_greater(left: string, right: string, idx: i64) -> bool =
   if gte(idx, string_len(left)) then false else {

@@ -133,15 +133,22 @@ line-based, so CR or LF inside a header or field cannot round-trip; its writer
 rejects those values rather than emitting unreadable CSV.
 
 `Std.Io.Json` exports `Json` and its constructors, including `JsonInt(i64)`,
-`JsonBigInt(string)` for integer text outside `i64`, and `JsonFloat(f64)`.
+`JsonBigInt(string)` for integer text outside `i64`, and
+`JsonFloat(f64, string)` for a number token with a fraction or exponent: the
+token's correctly rounded `f64` and its exact text.
 Use `parse_json(text)` or `try_parse_json(text)` for text,
 `load_json(path)` or `try_load_json(path)` for files, and `json_get` and the
 `json_*` accessors to inspect values. `json_int` returns only a stored
-`JsonInt`; `json_float` also accepts a `JsonInt` through an explicit
-`i64`-to-`f64` conversion and does not accept `JsonBigInt`. `to_json` and
+`JsonInt`; `json_float` returns a stored `JsonFloat`'s `f64`, also accepts a
+`JsonInt` through an explicit `i64`-to-`f64` conversion, and does not accept
+`JsonBigInt`. Match `JsonFloat(_, text)` and pass `text` to `decimal` in
+`Std.Decimal` to get the exact value the producer wrote. `to_json` and
 `try_to_json` render text; `write_json` and `try_write_json` write files.
-Non-finite `JsonFloat` values and invalid `JsonBigInt` text cannot be
-serialized.
+A `JsonFloat` serializes as its text, so `1E5` and `19.950` keep their
+spelling, and documents that spell one number differently are unequal. Build
+one from a computed value with `JsonFloat(x, to_string(x))`. A `JsonFloat`
+whose text is not such a token or does not round to its finite `f64`, and
+invalid `JsonBigInt` text, cannot be serialized.
 
 Parsing, accessors, and text rendering in the CSV and JSON modules are pure.
 Their file operations carry `IO`. The file operations above run

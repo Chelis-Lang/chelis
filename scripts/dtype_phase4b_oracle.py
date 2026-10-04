@@ -136,7 +136,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     1: "`round_to(x, places) -> r`",
     2: "Ingestion preserves",
     3: "`io/json::json_int`",
-    4: "`JsonFloat(value)`",
+    4: "`JsonFloat(value, text)`",
     5: "`io/json::to_json`",
     6: "`cast_trunc(source, target)`",
     7: "The runtime extent read",
@@ -342,7 +342,7 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-34": tuple(
         """\
-| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64,string) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
 | `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
 | `datetime/columns::Durations` | `Durations { seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
@@ -2050,19 +2050,32 @@ def validate_normative_contract(
         ),
         "05-OP-2": (
             "A JSON number token containing `.`, `e`, or `E`",
-            "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
+            "float-form and SHALL ingest as `JsonFloat(value, text)`",
+            "`text` is the token's exact spelling and `value` is the correctly-rounded "
+            "f64 of `text`",
             "any other number token",
             "ingest as `JsonInt` carrying its exact i64 value",
             "An integer-form token outside i64 range SHALL ingest as",
             "`JsonBigInt` carrying the token's exact decimal spelling",
             "never\n> selects a lossy float image for an integer-form token",
+            "never discards a float-form token's spelling",
+            "`value` is bit-identical to the correctly-rounded f64 of `text`, which is "
+            "finite",
+            "signed zero is distinguished",
+            "Construction does not check validity ([05-OP-4]); serialization does "
+            "([05-OP-5])",
+            "no operation repairs an invalid `JsonFloat` or substitutes one field for "
+            "the other",
+            "`JsonFloat(x, to_string(x))` is valid",
+            "two spellings of one value are unequal documents",
             "CSV cells are TEXT at parse time",
             "integer accessors accept only its integer subset",
             "An empty or non-conforming cell is a loud error",
         ),
         "05-OP-3": (
             "`io/json::json_int` returns the stored `JsonInt` i64 exactly",
-            "`io/json::json_float` returns a stored `JsonFloat` f64 exactly",
+            "`io/json::json_float` returns a stored `JsonFloat`'s f64 exactly, without "
+            "reading or validating its text",
             "It never truncates or rounds a float into an integer",
             "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
             "`csv_ints` | `(List[Dict[string,string]], string) -> List[i64]`",
@@ -2074,7 +2087,8 @@ def validate_normative_contract(
             "They have no accumulator",
         ),
         "05-OP-4": (
-            "`JsonFloat(value)` accepts exactly f64",
+            "`JsonFloat(value, text)` accepts exactly `(f64, string)`",
+            "nor `JsonFloat`'s validity ([05-OP-2]) is a constructor special case",
             "`JsonInt(value)` accepts exactly i64",
             "every other operand width is a type error",
             "No construction path widens or narrows a numeric value",
@@ -2082,8 +2096,10 @@ def validate_normative_contract(
         ),
         "05-OP-5": (
             "emits a stored `JsonInt` i64 as its exact decimal digits",
-            "a stored f64 through the [05-OBS-1]",
-            "every finite emission parses back to the identical f64",
+            "A stored `JsonFloat` emits its `text` verbatim as the number token after "
+            "validating the pair under [05-OP-2]",
+            "an invalid `JsonFloat` is a loud serialization error",
+            "A serialized document therefore reparses to an equal document",
             "A non-finite `JsonFloat` is a loud serialization error",
             "Equal documents serialize to identical bytes",
             "`to_csv` accepts only the text-table type `List[Dict[string,string]]`",
@@ -2525,8 +2541,9 @@ def validate_normative_contract(
             "cotangent shape",
             "differentiable float fields receive their corresponding field cotangents",
             "non-differentiable fields carry `unit`",
-            "`JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes the "
-            "cotangent of `y` to `x`",
+            "`JsonFloat(x, s)` followed by an executed `JsonFloat(y, t)` match routes "
+            "the cotangent of `y` to `x`, and the string field carries `unit`",
+            "`JsonFloat`'s string field is the exact spelling of a float-form token",
             "integer-only ADTs naturally have only `unit` field cotangents",
             "constructors have no accumulator",
         ),

@@ -313,9 +313,9 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   art §11).
 - **Columns:** a decimal column is a fixed-scale integer tensor plus its scale, per spec/04
   §1.1.1's scaled-storage rule; it lands when Coral needs it.
-- **JSON exactness:** a JSON float token ingests as `JsonFloat(f64)` under [05-OP-2], so a
-  JSON price reaches `Decimal` only through f64. Keeping the token text is a [05-OP-2]
-  decision, tracked by #2871.
+- **JSON exactness:** a JSON float token ingests as `JsonFloat(f64, string)` under
+  [05-OP-2], keeping the token text beside its rounded f64, so `decimal(text)` reaches a
+  JSON price exactly.
 
 ## 12. Normative placement
 

@@ -325,10 +325,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_json_numeric_construction_never_implicitly_widens(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly i64",
-            "`JsonFloat(value)` accepts any float and widens it to f64",
+            "`JsonFloat(value, text)` accepts exactly `(f64, string)` and\n> `JsonInt(value)` accepts exactly i64",
+            "`JsonFloat(value, text)` accepts any float and widens it to f64",
         )
-        self.assert_contract_fails("OP-4.*exactly f64")
+        self.assert_contract_fails(r"OP-4.*exactly `\(f64, string\)`")
 
     def test_numeric_serialization_preserves_exact_json_variants(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -439,10 +439,44 @@ class ContractValidationTests(unittest.TestCase):
             "An integer-form token outside i64 range SHALL ingest as\n"
             "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
             " never\n"
-            "> selects a lossy float image for an integer-form token.",
-            "An integer-form token outside i64 range falls back to `JNum`.",
+            "> selects a lossy float image for an integer-form token",
+            "An integer-form token outside i64 range falls back to `JNum`",
         )
         self.assert_contract_fails("OP-2.*JsonBigInt")
+
+    def test_json_float_keeps_validated_token_text(self) -> None:
+        path = self.root / "spec/05-risc-primitives.md"
+        mutations = (
+            (
+                "`text` is\n> the token's exact spelling and `value` is the correctly-rounded f64 of\n> `text`",
+                "the token's spelling is discarded after rounding",
+                "OP-2.*exact spelling",
+            ),
+            (
+                "`value` is bit-identical to the correctly-rounded\n> f64 of `text`, which is finite; signed zero is distinguished",
+                "`value` is close to the f64 of `text`",
+                "OP-2.*bit-identical",
+            ),
+            (
+                "Construction does not check validity ([05-OP-4]); serialization\n> does ([05-OP-5])",
+                "Serialization trusts the stored pair",
+                r"OP-2.*Construction does not check validity",
+            ),
+            (
+                "A stored `JsonFloat` emits its `text` verbatim as the number\n> token after validating the pair under [05-OP-2]",
+                "A stored `JsonFloat` emits `to_string` of its f64",
+                "OP-5.*emits its `text` verbatim",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
 
     def test_uniform_like_uses_one_common_float_dtype_and_own_width_fma(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -2005,8 +2039,8 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-34.*recursive cotangent shape",
             ),
             (
-                "`JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes\n"
-                "> the cotangent of `y` to `x`",
+                "`JsonFloat(x, s)` followed by an executed `JsonFloat(y, t)` match\n"
+                "> routes the cotangent of `y` to `x`",
                 "JsonFloat match drops the field cotangent",
                 "OP-34.*JsonFloat",
             ),

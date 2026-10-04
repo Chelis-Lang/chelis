@@ -1,6 +1,10 @@
 module Std.Tests.Io.Json
 import Std.Io.Json (Json, JsonNull, JsonBool, JsonInt, JsonBigInt, JsonFloat, JsonString, JsonArray, JsonObject, parse_json, try_parse_json, load_json, try_load_json, to_json, try_to_json, write_json, try_write_json, json_get, json_string, json_int, json_bigint, json_float, json_bool, json_array, json_is_null)
 import Std.Test (assert_eq, assert_true, assert_false, fail)
+import Std.Decimal (decimal, try_decimal_from_f64)
+import Std.Rounding (RejectInexact)
+-- [05-OP-2]'s stated construction of a JsonFloat from an f64 alone.
+def float_json(x: f64) -> Json = JsonFloat(x, to_string(x))
 def test_parse_null_returns_json_null() -> unit ! { Test } =
   match parse_json("null") with {
     | JsonNull => assert_true(true, "parse_json(\"null\") matches JsonNull")
@@ -141,17 +145,95 @@ def test_try_to_json_rejects_noncanonical_or_in_range_bigint_storage() -> unit !
     | None => assert_true(true, string_concat("invalid JsonBigInt rejected: ", text))
   }, (), invalid)
 }
-def test_to_json_float_is_shortest_round_trip() -> unit ! { Test } = assert_eq(to_json(JsonFloat(0.15110743269565682f64)), "0.15110743269565682", "17-significant-digit f64 survives to_json byte-exactly")
+def test_to_json_float_is_shortest_round_trip() -> unit ! { Test } = assert_eq(to_json(float_json(0.15110743269565682f64)), "0.15110743269565682", "JsonFloat(x, to_string(x)) carries the 17-significant-digit shortest round-trip text")
+def test_float_token_spelling_survives_parse_and_serialize() -> unit ! { Test } = {
+  tokens = ["19.95", "1.50", "1E5", "1e+5", "1E+05", "2.5E-3", "0e0", "-0.0", "-0e0", "0.1000000000000000055511151231257827"]
+  fold(fn (acc: unit, token: string) -> assert_eq(to_json(parse_json(token)), token, string_concat("float token keeps its spelling: ", token)), (), tokens)
+}
+def test_nested_float_tokens_keep_their_spelling() -> unit ! { Test } = {
+  text = "[1E5,{\"price\":19.950,\"zero\":-0.0}]"
+  assert_eq(to_json(parse_json(text)), text, "float tokens inside containers keep their spelling")
+}
+def test_try_parse_json_rejects_non_rfc8259_float_tokens() -> unit ! { Test } = {
+  invalid = ["01.5", "-01.5", "00.5", "1.", "-1.", "1.e5", "-.5", "1.5e", "1e+", "1e-", "1.5.3", "1e5e5", "1.5-3", "1.5e+-3"]
+  fold(fn (acc: unit, token: string) -> match try_parse_json(token) with {
+    | Some(_) => fail(string_concat("try_parse_json must reject the malformed number token ", token))
+    | None => assert_true(true, string_concat("malformed number token rejected: ", token))
+  }, (), invalid)
+}
+def test_ingested_float_keeps_token_text_and_rounded_value() -> unit ! { Test } =
+  match parse_json("19.95") with {
+    | JsonFloat(value, text) => {
+    _ = assert_eq(text, "19.95", "the token text is kept verbatim")
+    _ = assert_true(eq(value, 19.95f64), "the f64 is the correctly rounded image of the token")
+    _ = assert_eq(decimal(text), decimal("19.95"), "decimal(text) reaches the producer's exact value")
+    match try_decimal_from_f64(value, 2i64, RejectInexact) with {
+      | Some(_) => fail("the f64 image of 19.95 must not be exactly 19.95")
+      | None => assert_true(true, "the f64 alone is only the binary image of 19.95")
+    }
+  }
+    | _ => fail("19.95 did not ingest as JsonFloat")
+  }
+def test_exponent_and_negative_zero_tokens_keep_spelling_and_value() -> unit ! { Test } = {
+  _ = match parse_json("1E5") with {
+    | JsonFloat(value, text) => {
+    _ = assert_eq(text, "1E5", "an exponent token keeps its spelling")
+    assert_true(eq(value, 100000.0f64), "an exponent token keeps its rounded value")
+  }
+    | _ => fail("1E5 did not ingest as JsonFloat")
+  }
+  match parse_json("-0.0") with {
+    | JsonFloat(value, text) => {
+    _ = assert_eq(text, "-0.0", "negative zero keeps its spelling")
+    assert_true(eq(div(1.0f64, value), div(-1.0f64, 0.0f64)), "negative zero keeps its sign")
+  }
+    | _ => fail("-0.0 did not ingest as JsonFloat")
+  }
+}
+def test_try_to_json_rejects_malformed_or_mismatched_json_float() -> unit ! { Test } = {
+  invalid = [JsonFloat(1.0f64, "2.0"), JsonFloat(0.30000000000000004f64, "0.3"), JsonFloat(0.0f64, "-0.0"), JsonFloat(neg(0.0f64), "0.0"), JsonFloat(1.0f64, "1"), JsonFloat(1.0f64, "01.0"), JsonFloat(1.0f64, "1."), JsonFloat(1.0f64, "+1.0"), JsonFloat(1.0f64, " 1.0"), JsonFloat(1.0f64, "1.0 "), JsonFloat(1.0f64, ""), JsonFloat(div(1.0f64, 0.0f64), "1e400"), JsonFloat(div(1.0f64, 0.0f64), "inf"), JsonFloat(div(0.0f64, 0.0f64), "NaN")]
+  fold(fn (acc: unit, value: Json) -> match try_to_json(value) with {
+    | Some(text) => fail(string_concat("try_to_json must reject an invalid JsonFloat, got ", text))
+    | None => assert_true(true, "invalid JsonFloat rejected")
+  }, (), invalid)
+}
+def test_valid_constructed_json_float_serializes_its_text_and_reparses_equal() -> unit ! { Test } = {
+  _ = assert_eq(to_json(JsonFloat(100000.0f64, "1E5")), "1E5", "a valid exponent spelling is emitted verbatim")
+  _ = assert_eq(to_json(JsonFloat(0.1f64, "0.1000000000000000055511151231257827")), "0.1000000000000000055511151231257827", "any text that rounds to the f64 is valid")
+  values = [1e16f64, 1e-7f64, neg(0.0f64), 5e-324f64, 1.7976931348623157e308f64, neg(2048.0f64)]
+  fold(fn (acc: unit, x: f64) -> {
+    doc = float_json(x)
+    _ = assert_eq(to_json(doc), to_string(x), "JsonFloat(x, to_string(x)) emits to_string(x)")
+    assert_true(eq(parse_json(to_json(doc)), doc), "a serialized JsonFloat reparses to an equal document")
+  }, (), values)
+}
+def test_json_float_projects_value_without_reading_text() -> unit ! { Test } =
+  match json_float(Some(JsonFloat(1.0f64, "2.0"))) with {
+    | Some(x) => assert_true(eq(x, 1.0f64), "json_float returns the stored f64 and does not validate the text")
+    | None => fail("json_float must project a stored JsonFloat")
+  }
+def test_float_documents_compare_by_spelling() -> unit ! { Test } = {
+  _ = assert_false(eq(parse_json("1.0"), parse_json("1.00")), "two spellings of one value are unequal documents")
+  assert_true(eq(parse_json("1.0"), JsonFloat(1.0f64, "1.0")), "an ingested float equals the pair built from its value and text")
+}
+def test_try_write_json_rejects_mismatched_float_before_opening() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_json_float_text_mismatch_r7k2.json"
+  _ = match try_write_json(path, JsonObject(dict_of([("price", JsonFloat(1.0f64, "2.0"))]))) with {
+    | Some(_) => fail("try_write_json must reject a mismatched JsonFloat")
+    | None => assert_true(true, "mismatched JsonFloat -> None through the write facade")
+  }
+  assert_false(file_exists(path), "the destination is not created for invalid content")
+}
 def test_to_json_string_escapes_specials() -> unit ! { Test } = assert_eq(to_json(JsonString("a\"b\\c\nd\te\rf")), "\"a\\\"b\\\\c\\nd\\te\\rf\"", "quote, backslash, and control whitespace are escaped")
 def test_to_json_string_escapes_every_c0_control() -> unit ! { Test } = assert_eq(to_json(JsonString("\0\u{8}\u{b}\u{c}\u{1f}")), "\"\\u0000\\b\\u000b\\f\\u001f\"", "every C0 control is emitted as RFC-valid JSON")
 def test_to_json_array_and_empty_containers() -> unit ! { Test } = {
-  _ = assert_eq(to_json(JsonArray([JsonFloat(1.5f64), JsonNull])), "[1.5,null]", "array renders compact with null")
+  _ = assert_eq(to_json(JsonArray([JsonFloat(1.5f64, "1.5"), JsonNull])), "[1.5,null]", "array renders compact with null")
   _ = assert_eq(to_json(JsonArray([])), "[]", "empty array renders []")
   assert_eq(to_json(JsonObject(dict_of([]))), "{}", "empty object renders {}")
 }
 def test_to_json_object_uses_recursive_canonical_unicode_key_order() -> unit ! { Test } = {
-  ba = JsonObject(dict_of([("b", JsonInt(cast(1, i64))), ("a", JsonFloat(2.0f64))]))
-  ab = JsonObject(dict_of([("a", JsonFloat(2.0f64)), ("b", JsonInt(cast(1, i64)))]))
+  ba = JsonObject(dict_of([("b", JsonInt(cast(1, i64))), ("a", JsonFloat(2.0f64, "2.0"))]))
+  ab = JsonObject(dict_of([("a", JsonFloat(2.0f64, "2.0")), ("b", JsonInt(cast(1, i64)))]))
   ba_bytes = to_json(ba)
   ab_bytes = to_json(ab)
   _ = assert_eq(ba_bytes, "{\"a\":2.0,\"b\":1}", "canonical order is independent of insertion history and preserves JsonFloat/JsonInt spelling")
@@ -162,21 +244,21 @@ def test_to_json_object_uses_recursive_canonical_unicode_key_order() -> unit ! {
   assert_eq(to_json(unicode_and_escaped), "{\"a\\\"\":1,\"a\\\\\":2,\"é\":3,\"😀\":4}", "keys order by Unicode scalar values before JSON escaping")
 }
 def test_try_to_json_non_finite_returns_none() -> unit ! { Test } = {
-  _ = match try_to_json(JsonFloat(div(0.0f64, 0.0f64))) with {
+  _ = match try_to_json(float_json(div(0.0f64, 0.0f64))) with {
     | Some(_) => fail("try_to_json(NaN) must return None")
     | None => assert_true(true, "NaN -> None")
   }
-  _ = match try_to_json(JsonFloat(div(1.0f64, 0.0f64))) with {
+  _ = match try_to_json(float_json(div(1.0f64, 0.0f64))) with {
     | Some(_) => fail("try_to_json(inf) must return None")
     | None => assert_true(true, "inf -> None")
   }
-  match try_to_json(JsonFloat(div(-1.0f64, 0.0f64))) with {
+  match try_to_json(float_json(div(-1.0f64, 0.0f64))) with {
     | Some(_) => fail("try_to_json(-inf) must return None")
     | None => assert_true(true, "-inf -> None")
   }
 }
 def test_to_json_round_trips_through_parse_json() -> unit ! { Test } = {
-  doc = JsonObject(dict_of([("cap", JsonFloat(0.15110743269565682f64)), ("name", JsonString("a\"b\\c")), ("n", JsonInt(cast(3, i64)))]))
+  doc = JsonObject(dict_of([("cap", float_json(0.15110743269565682f64)), ("name", JsonString("a\"b\\c")), ("n", JsonInt(cast(3, i64)))]))
   parsed = parse_json(to_json(doc))
   _ = match json_float(json_get(parsed, "cap")) with {
     | Some(x) => assert_true(eq(x, 0.15110743269565682f64), "float field round-trips bit-exactly")
@@ -192,12 +274,12 @@ def test_to_json_round_trips_through_parse_json() -> unit ! { Test } = {
   }
 }
 def test_try_to_json_array_with_non_finite_returns_none() -> unit ! { Test } =
-  match try_to_json(JsonArray([JsonFloat(1.0f64), JsonFloat(div(0.0f64, 0.0f64))])) with {
+  match try_to_json(JsonArray([JsonFloat(1.0f64, "1.0"), float_json(div(0.0f64, 0.0f64))])) with {
     | Some(_) => fail("a NaN inside an array must propagate None through try_to_json")
     | None => assert_true(true, "NaN in array -> None")
   }
 def test_try_to_json_object_with_non_finite_returns_none() -> unit ! { Test } = {
-  doc = JsonObject(dict_of([("ok", JsonFloat(1.5f64)), ("bad", JsonFloat(div(1.0f64, 0.0f64)))]))
+  doc = JsonObject(dict_of([("ok", JsonFloat(1.5f64, "1.5")), ("bad", float_json(div(1.0f64, 0.0f64)))]))
   match try_to_json(doc) with {
     | Some(_) => fail("an inf inside an object must propagate None through try_to_json")
     | None => assert_true(true, "inf in object -> None")
@@ -215,7 +297,7 @@ def test_to_json_long_string_renders_escaped() -> unit ! { Test } = {
   assert_eq(to_json(JsonString(big)), expected, "4 KiB string with escapes renders byte-exactly (parse-back of long strings is capped by the reader's recursion, chelis#953/#954 territory)")
 }
 def test_try_write_json_non_finite_returns_none() -> unit ! { Test, IO } = {
-  doc = JsonObject(dict_of([("bad", JsonFloat(div(0.0f64, 0.0f64)))]))
+  doc = JsonObject(dict_of([("bad", float_json(div(0.0f64, 0.0f64)))]))
   match try_write_json("/tmp/chelis_std_test_json_try_write.json", doc) with {
     | Some(_) => fail("try_write_json with a NaN field must return None")
     | None => assert_true(true, "non-finite doc -> None through the write facade")
@@ -230,12 +312,12 @@ def test_write_json_reads_back() -> unit ! { Test, IO } = {
     | None => fail("write_json output did not load back")
   }
 }
--- to_string renders f64 via the Rust Debug formatter, which always emits a
--- decimal point, so a whole-valued JsonFloat stays a float and round-trips as
--- JsonFloat, never collapsing to JsonInt; this pins the int/float boundary the
--- prelude JInt/JNum split (chelis#891) makes load-bearing.
+-- to_string's section 8.1 rendering of a whole-valued f64 keeps a decimal
+-- point, so JsonFloat(x, to_string(x)) stays float-form and round-trips as
+-- JsonFloat, never collapsing to JsonInt; this pins the int/float boundary
+-- that the prelude JInt/JNum split (chelis#891) depends on.
 def test_to_json_whole_valued_float_keeps_its_point() -> unit ! { Test } = {
-  _ = assert_eq(to_json(JsonFloat(2.0f64)), "2.0", "a whole-valued float renders with a decimal point")
+  _ = assert_eq(to_json(float_json(2.0f64)), "2.0", "a whole-valued float renders with a decimal point")
   _ = assert_eq(to_json(JsonInt(cast(2, i64))), "2", "an int renders without a decimal point")
   _ = match json_float(Some(parse_json("2.0"))) with {
     | Some(x) => assert_true(eq(x, 2.0f64), "\"2.0\" parses back as a float")
