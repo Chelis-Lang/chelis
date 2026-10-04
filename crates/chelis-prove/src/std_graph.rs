@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
 use chelis_compiler_api::compiler;
-use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
+use chelis_compiler_api::schema::{ExecutionValue, TensorValue};
 use chelis_reef::EmbeddedRuntime;
 use chelis_types::{ScalarValue, tensor_from_scalars, types::Prim};
 use sha2::{Digest, Sha256};
@@ -166,12 +166,9 @@ fn evaluate_normal_cdf(
     // The linked decls carry the linker's internal names, which the checker
     // accepts only under the linked-program guard.
     let _linked = chelis_types::install_linked_program_guard();
-    let result = compiler::eval_selected(
-        EvalRequest {
-            source_kind: SourceKind::Surf,
-            source: chelis_surf::format::format_program(&program.decls),
-            bindings,
-        },
+    let result = compiler::eval_decls_selected(
+        &program.decls,
+        bindings,
         &["prove_ncdf_outputs".to_string()],
     )
     .map_err(|err| {
@@ -227,12 +224,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let _linked = chelis_types::install_linked_program_guard();
-        let roots = compiler::eval_selected(
-            EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: chelis_surf::format::format_program(&program.decls),
-                bindings: Default::default(),
-            },
+        let roots = compiler::eval_decls_selected(
+            &program.decls,
+            Default::default(),
             &["a".to_string(), "b".to_string(), "c".to_string()],
         )
         .unwrap()
