@@ -605,11 +605,18 @@ fn list_for_tensor_hint(message: &str) -> Option<String> {
 
 /// The value-preserving ways to write a tensor whose elements have dtype
 /// `element`. `to_tensor` alone keeps each literal's own suffix or §5.3
-/// default, so the elements carry the suffix (spec/04-type-system.md §5.6).
+/// default, so for a numeric element dtype the elements carry its suffix
+/// (spec/04-type-system.md §5.6). Any other element type, a `bool` or a
+/// dtype binder, has no literal suffix, so the declared binding is the fix.
 pub fn list_to_tensor_hint(element: Option<&str>) -> String {
-    let element = element
-        .filter(|name| Prim::parse_name(name).is_some_and(|prim| prim.is_data_element_dtype()))
-        .unwrap_or("f64");
+    let numeric = element.filter(|name| {
+        Prim::parse_name(name).is_some_and(|prim| prim.is_float() || prim.is_integer())
+    });
+    let Some(element) = numeric else {
+        return "a bracket literal is a List, and only its own declared tensor type converts \
+                it; bind the literal under a declared tensor type"
+            .to_string();
+    };
     let (first, second) = if element.starts_with('i') {
         ("1", "2")
     } else {

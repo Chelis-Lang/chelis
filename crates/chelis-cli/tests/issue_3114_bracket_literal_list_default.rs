@@ -219,6 +219,41 @@ fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
             "{declarations}: the diagnostic must name the value-preserving spelling: {error}"
         );
     }
+    // A bool or dtype-binder element has no literal suffix, so the diagnostic
+    // names only the declared binding.
+    for (index, declarations) in [
+        "values = cast([true, false], bool)\n",
+        "def f(x: tensor[2, bool]) -> tensor[2, bool] = x\nvalues = f([true, false])\n",
+        "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = x\nvalues = f([1.1, 2.2])\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = tempdir().expect("tempdir");
+        let file = format!("unsuffixed{index}.ch");
+        common::write_file(&directory.path().join(&file), declarations);
+        let output = chelis(directory.path())
+            .args(["check", &file])
+            .output()
+            .expect("chelis check runs");
+        let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+        let error = report["errors"]
+            .as_array()
+            .expect("errors")
+            .iter()
+            .find(|error| {
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("List"))
+            })
+            .unwrap_or_else(|| panic!("{declarations} must be rejected as a List: {report}"));
+        let text = error.to_string();
+        assert!(
+            text.contains("bind the literal under a declared tensor type")
+                && !text.contains("to_tensor(["),
+            "{declarations}: no suffixed spelling exists for this element type: {error}"
+        );
+    }
     // A `to_tensor` argument is an ordinary List: under an f64 cast its
     // unsuffixed decimals keep the f32 default, so the suffix is what keeps
     // the value.
