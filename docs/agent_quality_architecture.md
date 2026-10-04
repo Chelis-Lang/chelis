@@ -185,7 +185,7 @@ table are part of landing any new canonical mechanism.
 | `checked_int_binop` | `chelis-compiler-api/src/runtime/host_ops.rs` | exact integer scalar arithmetic with traps | route integers through `Fn(f64,f64)` kernels ([#680]; superseded by [#729]'s kernel split when it lands) |
 | `raise_lowering_error` | `chelis-ir/src/lower.rs` | ANY unsupported case met during lowering | emit `RiscOp::Const {0.0}` placeholders ([#699]) or `unwrap_or_default()` extractions ([#725]) |
 | `fold_static_size`'s `checked_i64` walk | `chelis-ir/src/lower.rs` | compile-time integer folding (decline on overflow) | f64 condition folding ([#711]/[#720]) |
-| `chelis_int_div_guard` | `chelis-runtime/include/chelis_runtime.h` | the branded-trap message pattern | inventing new trap message shapes (see [#730] §C2 / spec/05 §7 atoms) |
+| `chelis_int_checked_divisor` | `chelis-runtime/include/chelis_runtime.h` | the branded-trap message pattern | inventing new trap message shapes (see [#730] §C2 / spec/05 §7 atoms) |
 | `tensor_float_unop_f32` | `host_ops.rs` | (historical) f32 lane agreement | applying to non-f32 dtypes ([#717]); superseded by [#729]'s finalizer |
 | `lower_unsupported` | `chelis-ir/src/lower.rs` | the correct unsupported-tag response | writing new catch-alls that return values ([#703]) |
 | HIP narrow-float rejection / Metal f64 rejection | `chelis-backend-hip` gate / `chelis-backend-metal` dtype | the calibration examples for unsupported diagnostics | silent `ElemKind` fallbacks ([#689]) |

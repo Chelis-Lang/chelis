@@ -77,7 +77,7 @@ that cannot return an error will always invent a value. Meanwhile the
 codebase contains all three possible responses to the same situation -
 silent substitution (the bug), internal panic (loud but user-hostile,
 [#692]), and clean diagnostic (`lower_unsupported`,
-`chelis_int_div_guard`, HIP's narrow-float rejection) - because each site
+`chelis_int_checked_divisor`, HIP's narrow-float rejection) - because each site
 chose independently.
 
 This plan: (1) gives every stage a **failure channel** (Result-typed

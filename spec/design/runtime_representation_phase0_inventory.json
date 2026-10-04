@@ -2106,7 +2106,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div",
-      "sample": "({et})(({av} / chelis_int_div_guard((int64_t)({bv}))) - ((((({av}) % chelis_int_div_guard((int64_..."
+      "sample": "({et})chelis_int_checked_floor_div((int64_t)({av}), (int64_t)({bv}), {bits}, {zero:?}, {overflow:?})"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div_reduced_f",

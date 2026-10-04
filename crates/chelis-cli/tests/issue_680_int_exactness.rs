@@ -55,7 +55,7 @@
 //!
 //! Per the #680 decision, integer overflow **traps with a branded diagnostic**
 //! rather than wrapping or saturating, mirroring the existing
-//! `chelis_int_div_guard` / `integer division or remainder by zero` precedent
+//! `chelis_int_checked_divisor` / `division by zero` trap precedent
 //! (`spec/05-risc-primitives.md`). It must trap identically at every integer
 //! width; today i8/i16/i32 silently wrap while i64 saturates, because
 //! Rust's int->int `as` truncates while float->int `as` saturates.

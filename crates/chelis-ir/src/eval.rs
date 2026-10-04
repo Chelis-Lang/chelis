@@ -4106,7 +4106,7 @@ where
             //
             // chelis#550: integer operands trap on a zero divisor with the
             // shared diagnostic, mirroring the host evaluator (`host_ops`,
-            // i64 + trap) and the C backend (`chelis_int_div_guard`) so this
+            // i64 + trap) and the C backend (`chelis_int_checked_floor_div`) so this
             // reference lane fails closed instead of emitting `floor(x/0)`.
             // Float operands keep IEEE semantics (`floor(+inf) == +inf`,
             // never traps), per spec/05-risc-primitives.md §2.1. The integer
@@ -8000,8 +8000,8 @@ mod tests {
     // values are f64). #178 added `floor_div` / `trunc_div` but computed
     // `(a/b).floor()` / `.trunc()` with no zero-divisor trap, so an integer
     // divide by zero silently produced `floor(x/0) == ±inf` rather than
-    // halting. Spec §2.1 scopes the `integer division or remainder by zero`
-    // trap to BOTH the evaluator and the C backend; these pin that this lane
+    // halting. [05-OP-64] requires the `DivZero` trap in BOTH the
+    // evaluator and the C backend; these pin that this lane
     // now fails closed on integer operands, while float `floor_div` keeps the
     // IEEE no-trap semantics §2.1 also mandates.
 

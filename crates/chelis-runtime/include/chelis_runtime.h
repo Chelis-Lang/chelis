@@ -71,17 +71,6 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
     memcpy(&v, &bits, sizeof(double));
     return v;
 }
-/* Issue #387: portable integer division/remainder by-zero trap. The
- * evaluator halts with a clean diagnostic; the C backend must do the same
- * on every platform. Relying on the hardware fault is NOT portable: x86
- * raises SIGFPE on integer #DE, but ARM64 (e.g. macOS arm64) defines
- * integer division by zero to return a value and does NOT fault, so the
- * binary would silently compute a wrong answer -- the exact eval-vs-backend
- * divergence #387 exists to kill. Codegen calls this guard before every
- * INTEGER `div` / `mod`; it returns the divisor so the call composes inline
- * (`a / chelis_int_div_guard(b)`). Float division is IEEE-754 (`1.0/0.0 ==
- * inf`) and is never guarded. The message matches the evaluator's
- * `integer division or remainder by zero` exactly. */
 /* spec/04 section 4.7: output from preceding effects survives a later trap.
  * abort() need not flush C streams (notably on glibc). Preserve the original
  * failure even if a stream itself cannot be flushed. */
@@ -91,13 +80,6 @@ static inline void chelis_flush_and_abort(void) {
     abort();
 }
 
-static inline int64_t chelis_int_div_guard(int64_t divisor) {
-    if (divisor == 0) {
-        fprintf(stderr, "integer division or remainder by zero\n");
-        chelis_flush_and_abort();
-    }
-    return divisor;
-}
 /* chelis#729 Phase 3: exact signed-integer absolute value. The generated
  * caller supplies the declared width and the frozen C2 diagnostic produced
  * from chelis_types::dtype_semantics::NumericTrap. Checking the minimum
@@ -202,6 +184,25 @@ static inline int64_t chelis_int_checked_divisor(int64_t dividend, int64_t divis
     if (divisor == 0) chelis_numeric_trap(zero_message);
     if (dividend == minimum && divisor == -1) chelis_numeric_trap(overflow_message);
     return divisor;
+}
+
+/* spec/05 section 2.1 floor_div at a signed-integer width: the quotient rounded toward
+ * negative infinity. The divisor is checked before any C `/` or `%`, so a
+ * zero divisor raises the DivZero trap and MIN / -1 the Overflow trap instead
+ * of reaching C undefined behavior. Every target traps the same way; a
+ * hardware fault is not relied on (AArch64 integer division by zero does not
+ * fault). The correction cannot overflow: a nonzero remainder bounds the
+ * truncated quotient strictly inside the width. */
+static inline int64_t chelis_int_checked_floor_div(int64_t dividend, int64_t divisor,
+                                                   int bits, const char *zero_message,
+                                                   const char *overflow_message) {
+    int64_t quotient, remainder;
+    (void)chelis_int_checked_divisor(dividend, divisor, bits, zero_message,
+                                     overflow_message);
+    quotient = dividend / divisor;
+    remainder = dividend % divisor;
+    if (remainder != 0 && ((remainder < 0) != (divisor < 0))) quotient -= 1;
+    return quotient;
 }
 
 static inline int64_t chelis_checked_int_cast(int64_t value, int bits,

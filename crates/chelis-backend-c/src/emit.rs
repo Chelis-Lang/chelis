@@ -3314,8 +3314,8 @@ impl CEmitter {
         // x86 raises SIGFPE on integer #DE, but ARM64 (macOS arm64) defines
         // integer div-by-zero to return a value and does NOT fault, so the
         // binary would silently compute a wrong answer. Wrap the divisor in
-        // `chelis_int_div_guard`, which aborts with the same clean diagnostic
-        // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
+        // `chelis_int_checked_divisor`, which aborts with the same [04-NUM-9]
+        // trap the evaluator raises. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
         let checked_int =
             ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%" | "shl" | "shr");
@@ -3441,10 +3441,10 @@ impl CEmitter {
 
     /// chelis#178: floor division (round quotient toward -inf).
     ///
-    /// - Integer dtype: native `/` plus a remainder-sign correction —
-    ///   `q = a / b; r = a % b; out = q - (r != 0 && ((r < 0) != (b < 0)))`.
-    ///   The divisor is wrapped in the portable `chelis_int_div_guard` so a
-    ///   zero divisor traps identically to `div`/`mod`/`trunc_div`.
+    /// - Integer dtype: `chelis_int_checked_floor_div`, which checks the
+    ///   divisor before any C `/` or `%` and then applies the remainder-sign
+    ///   correction. A zero divisor and MIN / -1 raise the same [04-NUM-9]
+    ///   traps the evaluator raises, rather than C undefined behavior.
     /// - Float dtype: `floorf(a / b)` (f32) / `floor(a / b)` (f64) /
     ///   reduced-float via the f32 conversion path. IEEE division is not
     ///   guarded (`floor(+inf) == +inf`).
@@ -3462,12 +3462,25 @@ impl CEmitter {
         // apply the remainder-sign correction; for floats use the math fn.
         let floor_fn = if Self::is_f64(ty) { "floor" } else { "floorf" };
         let nan = self.nan_finalization;
+        let bits = if is_int {
+            Self::integer_width(ty.precision)
+        } else {
+            0
+        };
+        let zero = NumericTrap::DivZero {
+            op: "floor_div",
+            prim: ty.precision,
+        }
+        .to_string();
+        let overflow = NumericTrap::Overflow {
+            op: "floor_div",
+            prim: ty.precision,
+        }
+        .to_string();
         let elem_expr = |av: &str, bv: &str| -> String {
             if is_int {
                 format!(
-                    "({et})(({av} / chelis_int_div_guard((int64_t)({bv}))) - \
-                     ((((({av}) % chelis_int_div_guard((int64_t)({bv}))) != 0) && \
-                     (((({av}) % chelis_int_div_guard((int64_t)({bv}))) < 0) != (({bv}) < 0))) ? 1 : 0))"
+                    "({et})chelis_int_checked_floor_div((int64_t)({av}), (int64_t)({bv}), {bits}, {zero:?}, {overflow:?})"
                 )
             } else {
                 finalize_elem(nan, format!("{floor_fn}(({et})({av}) / ({et})({bv}))"), ty)

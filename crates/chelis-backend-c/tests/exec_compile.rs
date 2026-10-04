@@ -3585,12 +3585,12 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
 }
 
 // chelis#550 F2: a COMPILED floor_div zero-divisor trap. The existing
-// backend trap coverage was trunc_div-only; floor_div emits the SAME
-// portable `chelis_int_div_guard` and must abort identically. The divisor
+// backend trap coverage was trunc_div-only; floor_div emits the portable
+// `chelis_int_checked_floor_div` and must abort identically. The divisor
 // arrives through a runtime Load (`chelis_tensor_read_view(inputs[1]).data`), so gcc cannot
 // constant-fold the zero and elide the guard. Spec/05-risc-primitives.md
-// §2.1 scopes the `integer division or remainder by zero` trap to the C
-// backend (and the evaluator); this is the fail-closed end-to-end proof.
+// §2.1 and [04-NUM-9] give the C backend and the evaluator the same
+// `division by zero` trap; this is the fail-closed end-to-end proof.
 #[test]
 fn exec_floor_div_int_zero_divisor_traps() {
     let mut dag = Dag::new();
@@ -3627,9 +3627,9 @@ fn exec_floor_div_int_zero_divisor_traps() {
     )
     .unwrap();
     let src = &result.c_source;
-    // Emit-shape: floor_div must wrap the integer divisor in the portable guard.
+    // Emit-shape: integer floor_div must call the portable checked helper.
     assert!(
-        src.contains("chelis_int_div_guard("),
+        src.contains("chelis_int_checked_floor_div("),
         "integer floor_div must emit the portable zero-divisor guard (#550); \
          emitted C=\n{src}",
     );
@@ -3666,7 +3666,7 @@ int main() {{
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("integer division or remainder by zero"),
+        stderr.contains("numeric trap: division by zero in floor_div at i64"),
         "the C backend trap must emit the canonical diagnostic on stderr; \
          stderr={stderr:?}",
     );

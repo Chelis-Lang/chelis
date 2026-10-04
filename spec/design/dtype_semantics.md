@@ -2411,7 +2411,7 @@ this maintenance does not widen the HIP/Metal scope.
    target decision from structured rejection to the new ABI representation
    ([#714]); it does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
-   frozen strings (the `chelis_int_div_guard` pattern, generalized), and
+   frozen strings (the `chelis_int_checked_divisor` pattern, generalized), and
    f16/bf16 scalar C storage/rounding matching §C1 via exact `uint16_t`
    payloads and the same conversion helpers the WS-1 kernels use.
 3. **The generated print helper**: the emitted C tensor/scalar printers
