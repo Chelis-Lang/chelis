@@ -2228,6 +2228,9 @@ a new exact identity until classified by final authority.
 ### Retained Softmax composition source registration (#2990)
 
 `crates/chelis-ir/src/compositions.rs` joins the Phase 0 source universe.
+The concurrent text-parser registration is retained alongside it: the combined
+universe contains 83 Rust and eleven native sources, 94 in total. The
+source-list completeness and exact-path omission controls remain unchanged.
 It composes existing typed DAG nodes after AD and remaps ownership, spans,
 shape dependencies, result claims and roots; it introduces no representation
 carrier or untagged numeric seam. The source-universe contract test runs the

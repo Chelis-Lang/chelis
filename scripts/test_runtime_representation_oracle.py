@@ -1655,7 +1655,7 @@ class RedTeamRegressionTests(unittest.TestCase):
         native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
         self.assertIn(
-            "Eighty-two are Rust and eleven are C, C++, or Objective-C sources",
+            "Eighty-three are Rust and eleven are C, C++, or Objective-C sources",
             source,
         )
-        self.assertEqual((rust, native), (82, 11))
+        self.assertEqual((rust, native), (83, 11))
