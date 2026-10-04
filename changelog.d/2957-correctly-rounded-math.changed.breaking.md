@@ -30,6 +30,13 @@ What changes for existing programs:
   included, that does not honor the profile (for example one adding `-O0` or
   `-ffast-math`) fails the build with a diagnostic
   ([#2962](https://github.com/Chelis-Lang/chelis/issues/2962)).
+- Native builds need GCC 10 or later, or Clang 17 or later; on macOS, Xcode or
+  the Command Line Tools 16 or later. Before it runs the C compiler on the
+  program, `chelis build` checks the compiler with a canary that contains
+  every kernel, and the `sin` kernel calls `__builtin_roundeven`, which older
+  compilers lack. With Ubuntu 20.04's GCC 9, openSUSE Leap 15.6's GCC 7, or
+  any Xcode 15, every native C build fails until a newer compiler is selected;
+  see the install guide's native build prerequisites.
 - The serialized graph schema moves from 23 to 24.
 - HIP and Metal reject the transcendentals and `sqrt` at build time until the
   device lanes have correctly rounded kernels for them.

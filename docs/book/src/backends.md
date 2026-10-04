@@ -58,6 +58,8 @@ and Metal kernels through `newLibraryWithSource`. A native build does not execut
 the program or require a GPU to be present at build time.
 
 C compiler selection honors `CHELIS_CC`, then available platform compilers.
+The C compiler must be GCC 10 or later, or Clang 17 or later (Xcode 16 or
+later on macOS); see [Native build prerequisites](install.md#native-build-prerequisites).
 HIP honors `CHELIS_HIPCC` and otherwise uses `hipcc`; Metal honors
 `CHELIS_METAL_CXX` and otherwise uses `clang++`. Static libraries use
 `CHELIS_AR` or `ar`. Each override is one executable name or path, without

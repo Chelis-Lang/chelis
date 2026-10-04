@@ -133,3 +133,22 @@ Accelerate. Definitions-only builds also require `ar` from the native toolchain.
 HIP requires ROCm's `hipcc` and its libraries; Metal requires the macOS SDK and
 `clang++`. A compatible GPU is required when executing GPU work. See
 [Backends](backends.md) for compiler overrides and prerelease target limitations.
+
+The C compiler must be GCC 10 or later, or Clang 17 or later. On macOS that
+means Xcode or the Command Line Tools 16 or later; every Xcode 15 release is
+too old. Before it runs the C compiler on your program, `chelis build` checks
+the compiler by building and running a canary that contains every correctly
+rounded math kernel, and the `sin` kernel calls `__builtin_roundeven`, which
+older compilers lack. An older compiler therefore fails every native C build
+with "does not compile with the pinned floating-point profile" and an error
+that names `__builtin_roundeven`. `gcc --version` or `clang --version` shows
+which version you have. Where the default compiler is older, install a newer
+one and select it:
+
+- Ubuntu 20.04 (GCC 9): install `gcc-10` and set `CHELIS_CC=gcc-10`.
+- openSUSE Leap 15.6 (GCC 7): install `gcc13` and set `CHELIS_CC=gcc-13`.
+- macOS with Xcode 15 selected: select Xcode 16 or later with
+  `sudo xcode-select --switch /path/to/Xcode.app`, or update the Command Line
+  Tools to 16 or later. Naming that Xcode's `clang` in `CHELIS_CC` does not
+  work: native tools run without `SDKROOT`, so it cannot find the macOS SDK
+  headers.

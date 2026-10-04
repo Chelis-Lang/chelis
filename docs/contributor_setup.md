@@ -15,8 +15,11 @@ Install the test runner used by the gate and CI:
 cargo install cargo-nextest --locked
 ```
 
-The C backend needs a C compiler and a BLAS provider. On Linux, install
-GCC and OpenBLAS; Valgrind is useful for the optional leak tests:
+The C backend needs a C compiler and a BLAS provider. The compiler must be
+GCC 10 or later, or Clang 17 or later (Xcode 16 or later on macOS); see
+[Native build prerequisites](book/src/install.md#native-build-prerequisites).
+On Linux, install GCC and OpenBLAS; Valgrind is useful for the optional leak
+tests:
 
 ```sh
 # Fedora / RHEL
