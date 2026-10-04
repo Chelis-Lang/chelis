@@ -129,6 +129,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/anonymous_dims.rs",
     "crates/chelis-ir/src/axis_sources.rs",
     "crates/chelis-ir/src/capacity_key.rs",
+    "crates/chelis-ir/src/compositions.rs",
     "crates/chelis-ir/src/dag.rs",
     "crates/chelis-ir/src/eval.rs",
     "crates/chelis-ir/src/fuse.rs",
