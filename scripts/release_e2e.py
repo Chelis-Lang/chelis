@@ -12,6 +12,9 @@ writes `report.json` and every process log into a new evidence directory:
 - first-program: every command of the tag's own First Program page, as
   written, against the program that page defines.
 - eval: the evaluator's numbers for the softmax probe from the current book.
+- native: a scalar program built the way the release documents, through the
+  link line `chelis build` prints (0.18.x) or runs itself (later releases),
+  then executed.
 - smt: the tag's cvc5 discharge gate against the installed compiler.
 - canary: the tag's installed-artifact canary, which installs, builds, links,
   and executes the shipped C callable.
@@ -60,6 +63,11 @@ EVAL_PROBE = (
 )
 # softmax(relu([-1, 0, 1])) = [1, 1, e] / (2 + e)
 EVAL_RESULT = (0.21194, 0.21194, 0.57612)
+NATIVE_PROBE = (
+    "def half_sum(a: f32, b: f32) -> f32 = ((a + b) * 0.5)\n"
+    "result = half_sum(1.5, 2.25)\n"
+)
+NATIVE_RESULT = re.compile(r"result\s*=\s*1\.875\b")
 FLOAT = re.compile(r"-?[0-9]+\.[0-9]+(?:[eE][-+]?[0-9]+)?")
 MACOS_SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
 LINUX_LOADER = "/lib64/ld-linux-x86-64.so.2"
@@ -70,6 +78,7 @@ STEPS = (
     "install-offline",
     "first-program",
     "eval",
+    "native",
     "smt",
     "canary",
     "linkage",
@@ -444,6 +453,42 @@ class Proof:
             raise StepFailed(f"eval did not print {EVAL_RESULT}: {tail(evaluated)}")
         return f"softmax(relu([-1, 0, 1])) = {list(result)}"
 
+    def native(self) -> str:
+        home = self.require_offline_home()
+        work = self.evidence / "native"
+        work.mkdir()
+        (work / "app.ch").write_text(NATIVE_PROBE, encoding="utf-8")
+        shim = home / "bin" / "chelis"
+        env = self.env(CHELIS_HOME=home)
+        self.run("fmt", [shim, "fmt", "--inplace", "app.ch"], env=env, cwd=work)
+        _, built, _ = self.run(
+            "build",
+            [shim, "build", "app.ch", "--output", "out/"],
+            env=env,
+            cwd=work,
+            timeout=600,
+        )
+        program = work / "out" / "app"
+        how = "`chelis build` linked out/app"
+        if not program.is_file():
+            printed = [
+                line.removeprefix("Compile: ")
+                for line in built.splitlines()
+                if line.startswith("Compile: ")
+            ]
+            if not printed:
+                raise StepFailed(
+                    f"build wrote no out/app and no command: {tail(built)}"
+                )
+            self.run(
+                "compile", ["sh", "-c", printed[0]], env=env, cwd=work, timeout=600
+            )
+            how = f"ran the printed `{printed[0]}`"
+        _, output, _ = self.run("out-app", [program], env=env, cwd=work)
+        if NATIVE_RESULT.search(output) is None:
+            raise StepFailed(f"out/app printed {tail(output)!r}, not result = 1.875")
+        return f"{how}; out/app prints {output.strip()!r}"
+
     def smt(self) -> str:
         home = self.require_offline_home()
         chelis = home / "toolchains" / self.version / "bin" / "chelis"
@@ -590,6 +635,7 @@ def run(args: argparse.Namespace) -> int:
         ("install-offline", proof.install_offline, ("assets",)),
         ("first-program", proof.first_program, ("install-offline",)),
         ("eval", proof.eval, ("install-offline",)),
+        ("native", proof.native, ("install-offline",)),
         ("smt", proof.smt, ("install-offline",)),
         ("canary", proof.canary, ("assets",)),
         ("linkage", proof.linkage, ("install-offline",)),

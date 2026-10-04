@@ -107,10 +107,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # glibc 2.31, the floor the Linux build targets.
+          # glibc 2.31, the floor the Linux build targets. Bullseye's LTS has
+          # ended and its moving mirror 404s, so apt reads the immutable
+          # snapshot that scripts/ci_apt_get.py pins for the release build.
+          # Plain http: the base image has no CA bundle, and apt verifies the
+          # signed indices.
           - image: debian:11
             id: debian-11
-            prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
+            prepare: >-
+              rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources &&
+              printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/%s/20260901T000000Z/ %s main\n'
+              debian bullseye debian bullseye-updates debian-security bullseye-security > /etc/apt/sources.list &&
+              apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
           - image: ubuntu:20.04
             id: ubuntu-20.04
             prepare: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential ca-certificates
