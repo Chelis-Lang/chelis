@@ -303,8 +303,9 @@ boundary (spec/04 §1.1.1). The boundary rule is a language decision, so it belo
 spec/04: a `decimal128` or `decimal256` value whose exact value lies in the value set
 (whatever its declared scale) ingests as that exact `Decimal`; any other value fails
 `domain` and is never rounded; export to a declared `(p, s)` rounds only by an explicit
-`Rounding`; and an export whose rounded value needs more than `p - s` integer digits fails
-`domain`, naming the value and the declared `(p, s)`, and is never saturated or truncated.
+`Rounding`; and exporting `v` fails `domain` when `|round(v, s) · 10^s| >= 10^p`, where
+`round(v, s)` is `v` rounded to the declared scale by that mode, naming `v` and the declared
+`(p, s)`, and is never saturated or truncated.
 `Std.Io.Parquet` is a stub, so no conversion function is defined here.
 
 ## 11. What is absent, and where it lives
