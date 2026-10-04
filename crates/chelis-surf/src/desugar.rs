@@ -134,6 +134,8 @@ pub fn desugar_expr_in_program_scope(
                 message: error.to_string(),
             }
         })?;
+        let normalized_decls = crate::pipe_sugar::normalized_program(decls)?;
+        let decls = normalized_decls.as_slice();
         let normalized = crate::pipe_sugar::normalized_expression(expr)?;
         let expr = &normalized;
         let resolved_grad_indices =

@@ -218,3 +218,61 @@ fn long_generated_pipe_chain_desugars_without_native_stack_overflow() {
     assert_eq!(fmt.stdout, surf.stdout);
     assert_eq!(deep(&canonical).matches("(app ").count(), 1000);
 }
+
+#[test]
+fn opaque_property_injection_uses_normalized_callable_context() {
+    let dir = tempdir().unwrap();
+    for carried in ["f |> Hold", "Hold(f)"] {
+        for (predicate, expected_status) in
+            [("p.value >= 0.0", "passed"), ("p.value < 0.0", "failed")]
+        {
+            let source = format!(
+                "module Review.Probe\n\
+                 @opaque\n\
+                 @invariant(p) (p.value >= 0.0)\n\
+                 type Positive = | Positive {{value: f32}}\n\
+                 type Holder[a] = | Hold(a)\n\
+                 def f(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+                 held = {carried}\n\
+                 chosen = match held with {{ | Hold(g) => g }}\n\
+                 derivative = grad(chosen, wrt=x)\n\
+                 @property positive forall (p: Positive): ({predicate})\n"
+            );
+            let path = dir.path().join("property.ch");
+            fs::write(&path, source).unwrap();
+            let checked = run(&["check", path.to_str().unwrap()]);
+            assert!(checked.status.success(), "{checked:?}");
+            let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+            assert_eq!(checked["score"], 1.0);
+            assert!(checked["errors"].as_array().unwrap().is_empty());
+            let proved = run(&[
+                "prove",
+                "--json",
+                "--tier",
+                "fuzz-only",
+                "--samples",
+                "1",
+                path.to_str().unwrap(),
+            ]);
+            let records: Vec<serde_json::Value> = String::from_utf8(proved.stdout)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_str(line).expect("every stdout record is JSON"))
+                .collect();
+            let property = records
+                .iter()
+                .find(|record| record["kind"] == "property" && record["name"] == "positive")
+                .expect("named property result");
+            assert_eq!(property["status"], expected_status, "{carried}: {property}");
+            assert_eq!(property["proof_tier"], "fuzz");
+            assert_eq!(property["samples"], 1);
+            assert_eq!(proved.status.success(), expected_status == "passed");
+            let summary = records
+                .iter()
+                .find(|record| record["kind"] == "summary")
+                .expect("summary");
+            assert_eq!(summary["errors"], 0);
+        }
+    }
+}

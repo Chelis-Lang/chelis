@@ -53,6 +53,78 @@ fn transform_stages_use_the_same_callable_resolution_as_calls() {
     }
 }
 
+fn callable_context_source(carried: &str, selector: &str) -> String {
+    format!(
+        "type Holder[a] = | Hold(a)\n\
+         def f(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+         held = {carried}\n\
+         chosen = match held with {{ | Hold(g) => g }}\n\
+         out = grad(chosen, wrt={selector})\n"
+    )
+}
+
+#[test]
+fn contextual_declarations_normalize_before_callable_resolution() {
+    use chelis_deep::{DeepTag, ExprCarrier};
+    use chelis_surf::{ast::Decl, desugar::desugar_expr_in_program_scope};
+    let mut results = Vec::new();
+    for carried in ["f |> Hold", "Hold(f)"] {
+        let declarations = parse_str(&callable_context_source(carried, "x")).unwrap();
+        let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
+            panic!("output declaration");
+        };
+        let whole = desugar_program(&declarations).unwrap();
+        let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = whole.last().unwrap().carrier()
+        else {
+            panic!("output definition");
+        };
+        let contextual =
+            desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &[])
+                .expect("contextual pipe origins agree with whole-program origins");
+        let actual = print_canonical(&normalize_deep_for_surface_roundtrip(&[contextual]).unwrap());
+        let expected =
+            print_canonical(&normalize_deep_for_surface_roundtrip(&[children[1].clone()]).unwrap());
+        assert_eq!(actual, expected, "{carried}");
+        results.push(actual);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn contextual_normalization_preserves_selector_and_shadow_rejections() {
+    use chelis_surf::{
+        ast::Decl,
+        desugar::{DesugarError, desugar_expr_in_program_scope},
+    };
+    for carried in ["f |> Hold", "Hold(f)"] {
+        let declarations = parse_str(&callable_context_source(carried, "missing")).unwrap();
+        let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
+            panic!("output declaration");
+        };
+        for result in [
+            desugar_program(&declarations).map(|_| ()),
+            desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &[])
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(DesugarError::UnknownGradParameter { parameter, .. }) if parameter == "missing"),
+                "{carried}"
+            );
+        }
+        let declarations = parse_str(&callable_context_source(carried, "x")).unwrap();
+        let Decl::LetDef { value, .. } = declarations.last().unwrap() else {
+            panic!("output declaration");
+        };
+        assert!(
+            matches!(
+                desugar_expr_in_program_scope(&declarations[..declarations.len() - 1], value, &["chosen".into()]),
+                Err(DesugarError::UnresolvedGradTarget { target, .. }) if target == "chosen"
+            ),
+            "lexical shadow remains unresolved: {carried}"
+        );
+    }
+}
+
 #[test]
 fn every_mixed_operator_requires_grouping() {
     for operator in [

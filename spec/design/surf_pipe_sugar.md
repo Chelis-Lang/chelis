@@ -8,7 +8,9 @@ and spec/04 §7 application typing.
 The parser keeps authored `Expr::Pipe` with explicit stage syntax (call-first,
 callable, cast, copy or realize). The formatter reads that AST. Desugaring makes a
 Surf-to-Surf application tree before callable resolution or contextual literal
-typing. Each application carries the authored stage's span; carried values retain
+typing. Expression-context entry points also normalize their supplying declarations
+so constructor-carried callable origins agree with whole-program resolution.
+Each application carries the authored stage's span; carried values retain
 their own spans. No pipe origin metadata reaches Deep. Ordinary operators keep
 their existing sugar policy; the decompiler emits applications as calls and fixed
 operator builtins as operators.
@@ -51,7 +53,8 @@ cargo test -p tree-sitter-chelis pipes_require_explicit_grouping_at_every_operat
 
 These named suites together are the acceptance oracle: call/pipe equality before
 checking; guard family positive/negative parity; macro grouping; fmt fixed points;
-call-only decompilation; explicit old-Deep rejection; migration dtype evidence and
+call-only decompilation; contextual callable-origin and opaque-property injection
+parity; explicit old-Deep rejection; migration dtype evidence and
 batch failure; preserved cast values; authored type, arity and ownership spans and
 standalone build snippets; and a 1,000-stage generated-chain `deep` → `surf` → `fmt` regression. Linked
 multi-file build snippets require their source-file map; this change makes no
