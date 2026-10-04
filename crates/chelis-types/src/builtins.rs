@@ -2926,6 +2926,29 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    // [05-OP-47] and [05-OP-64] (chelis#3101): two read-only operands, each
+    // a scalar or a `&tensor[D, p]` (spec/05 section 1.3.1). The operands
+    // stay independent variables so the integer rule decides their
+    // agreement and names the cause of a refusal.
+    fn integer_binop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let lhs = vg.fresh_tvar();
+        let rhs = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            result_origin: None,
+            constraints: vec![],
+            tvars: vec![lhs, rhs, output],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(lhs)), borrowed(Type::Var(rhs))],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_triop(name: &str, env: &mut Env, vg: &mut VarGen) {
         let a = vg.fresh_tvar();
         let b = vg.fresh_tvar();
@@ -3220,18 +3243,18 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    generic_binop("mod", &mut env, &mut vg);
+    integer_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
     cmplt_sig("lt", &mut env, &mut vg);
     cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
-    generic_binop("bitand", &mut env, &mut vg);
-    generic_binop("bitor", &mut env, &mut vg);
-    generic_binop("bitxor", &mut env, &mut vg);
-    generic_binop("shl", &mut env, &mut vg);
-    generic_binop("shr", &mut env, &mut vg);
+    integer_binop("bitand", &mut env, &mut vg);
+    integer_binop("bitor", &mut env, &mut vg);
+    integer_binop("bitxor", &mut env, &mut vg);
+    integer_binop("shl", &mut env, &mut vg);
+    integer_binop("shr", &mut env, &mut vg);
 
     logical_binop("and", &mut env, &mut vg);
     logical_binop("or", &mut env, &mut vg);

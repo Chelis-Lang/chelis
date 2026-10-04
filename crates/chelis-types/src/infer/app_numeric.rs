@@ -784,11 +784,11 @@ pub(super) fn integer_binop_result_type(
     {
         let lhs = arg_tys
             .first()
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         let rhs = arg_tys
             .get(1)
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         match (&lhs, &rhs) {
             (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
@@ -854,11 +854,11 @@ pub(super) fn integer_binop_result_type(
     {
         let lhs = arg_tys
             .first()
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         let rhs = arg_tys
             .get(1)
-            .map(|ty| subst.apply(ty))
+            .map(|ty| type_for_readonly_check(ty, subst))
             .unwrap_or_else(|| vg.fresh_type());
         // chelis#1512: admissibility used to be two `matches!` disjunctions
         // folded into one boolean, which admitted an unresolved operand with no
@@ -955,21 +955,26 @@ fn integer_tensor_operands(
             CheckError::new(kind, with_node_provenance(node, message), vec![]),
         )
     };
+    // Every concrete tensor precision is decided before anything suspends. A
+    // caller that passes no suspension (the direct-operation pre-check in
+    // `app.rs`) reads any returned type as a rejection, so an inadmissible
+    // tensor beside an unresolved operand must be refused here rather than
+    // published as the call's result.
+    for operand in [lhs, rhs] {
+        if let Type::Tensor(_, TensorPrec::Concrete(prim)) = operand
+            && !prim.is_integer()
+        {
+            return refuse(
+                errors,
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "{fname} admits only signed-integer tensors, got {lhs} and {rhs} ([05-OP-47], [05-OP-64])"
+                ),
+            );
+        }
+    }
     match (lhs, rhs) {
         (Type::Tensor(_, left), Type::Tensor(_, right)) => {
-            for precision in [left, right] {
-                if let TensorPrec::Concrete(prim) = precision
-                    && !prim.is_integer()
-                {
-                    return refuse(
-                        errors,
-                        CheckErrorKind::PrecisionMismatch,
-                        format!(
-                            "{fname} admits only signed-integer tensors, got {lhs} and {rhs} ([05-OP-47], [05-OP-64])"
-                        ),
-                    );
-                }
-            }
             if let (TensorPrec::Concrete(left), TensorPrec::Concrete(right)) = (left, right)
                 && left != right
             {

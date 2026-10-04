@@ -224,6 +224,8 @@ fn eager_and_deferred_gates_agree_on_the_same_operand() {
         ("tensor[3, f32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
         ("&tensor[3, f32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
         ("f64", "cast_trunc(v, i32)", "i32"),
+        ("&tensor[3, f64]", "cast_trunc(v, i32)", "tensor[3, i32]"),
+        ("&tensor[3, i32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
     ];
     let mut divergences = Vec::new();
     for (ty, call, ret) in grid {
@@ -252,6 +254,61 @@ fn eager_and_deferred_gates_agree_on_the_same_operand() {
         "the deferred path must reach the same gate verdict as the eager one; \
          a divergence means some path sees a different type, which is every \
          defect this issue has had:\n{}",
+        divergences.join("\n")
+    );
+}
+
+/// chelis#3101: the integer binary operations read both tensor operands
+/// through a borrow ([05-OP-47], [05-OP-64]). A deferred call must reach the
+/// eager verdict for owned, borrowed and mixed operands, and for operands the
+/// operation refuses.
+#[test]
+fn integer_binary_operations_decide_deferred_as_eager() {
+    // (left, right, result)
+    let operands = [
+        ("tensor[3, i32]", "tensor[3, i32]", "tensor[3, i32]"),
+        ("&tensor[3, i32]", "&tensor[3, i32]", "tensor[3, i32]"),
+        ("&tensor[3, i32]", "tensor[3, i32]", "tensor[3, i32]"),
+        ("i32", "i32", "i32"),
+        ("tensor[3, f32]", "tensor[3, f32]", "tensor[3, f32]"),
+        ("&tensor[3, f32]", "&tensor[3, f32]", "tensor[3, f32]"),
+        ("f32", "f32", "f32"),
+        ("&tensor[3, i32]", "&tensor[3, i64]", "tensor[3, i32]"),
+    ];
+    let mut divergences = Vec::new();
+    for op in ["mod", "bitand", "bitor", "bitxor", "shl", "shr"] {
+        for (left, right, ret) in operands {
+            let eager = check_json(&format!(
+                "module Issue1489BinEager\n\
+                 def probe(a: {left}, b: {right}) -> {ret} = {op}(a, b)\n"
+            ));
+            // Each operand in turn is the lambda parameter, so its type is a
+            // variable when the operation's gate runs.
+            let deferred_left = check_json(&format!(
+                "module Issue1489BinDeferredLeft\n\
+                 def apply_it(f: ({left}) -> {ret}, a: {left}) -> {ret} = f(a)\n\
+                 def probe(a: {left}, b: {right}) -> {ret} = apply_it(fn (x) -> {op}(x, b), a)\n"
+            ));
+            let deferred_right = check_json(&format!(
+                "module Issue1489BinDeferredRight\n\
+                 def apply_it(f: ({right}) -> {ret}, b: {right}) -> {ret} = f(b)\n\
+                 def probe(a: {left}, b: {right}) -> {ret} = apply_it(fn (y) -> {op}(a, y), b)\n"
+            ));
+            let e = messages(&eager);
+            for (side, deferred) in [("left", deferred_left), ("right", deferred_right)] {
+                let d = messages(&deferred);
+                if e.is_empty() != d.is_empty() {
+                    divergences.push(format!(
+                        "  {op}({left}, {right}) -> {ret}, {side} deferred: eager {e:?} / deferred {d:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        divergences.is_empty(),
+        "an integer binary operation must decide a deferred operand as it \
+         decides an eager one:\n{}",
         divergences.join("\n")
     );
 }
@@ -318,31 +375,38 @@ fn a_chain_of_deferred_gates_agrees_with_the_eager_form() {
 ///
 /// This is the pin for the defect that killed two earlier revisions: the
 /// deferred path is only sound if it imposes exactly the eager path's
-/// constraints. A borrowed source is the sharpest probe, because `cast`
-/// rejects `&tensor` — so if the two paths disagree at all, they disagree
-/// here. They did: one revision peeled `Type::Ref` on the deferred path and not in the
-/// eager arm, so a borrowed source was rejected eagerly and accepted deferred,
-/// and the accepted program built.
+/// constraints. A borrowed source is the sharpest probe, because only the
+/// borrowed TENSOR reads through: one revision peeled `Type::Ref` on the
+/// deferred path and not in the eager arm, and a later one (chelis#3101)
+/// peeled it in the eager arm only. [05-OP-6] makes a tensor source a
+/// read-only `&tensor[D,p]` parameter, so a borrowed float tensor is admitted
+/// on both paths and a borrowed integer tensor is refused on both.
 #[test]
 fn a_deferred_cast_decides_as_the_eager_one_does() {
-    let eager = check_json(
-        "module Issue1489CastEager\n\
-         def probe(t: &tensor[3, f32]) -> tensor[3, i32] = cast_trunc(t, i32)\n",
-    );
-    let deferred = check_json(
-        "module Issue1489CastDeferred\n\
-         def apply_it(f: (&tensor[3, f32]) -> tensor[3, i32], t: &tensor[3, f32]) -> tensor[3, i32] = f(t)\n\
-         def probe(t: tensor[3, f32]) -> tensor[3, i32] = apply_it(fn (v) -> cast_trunc(v, i32), &t)\n",
-    );
-    assert!(
-        !messages(&eager).is_empty(),
-        "eager cast of a borrowed source is rejected; got a clean report"
-    );
-    assert!(
-        !messages(&deferred).is_empty(),
-        "a deferred cast must reject the same borrowed source the eager one \
-         rejects; accepting it means the two paths see different types"
-    );
+    for (precision, admitted) in [("f32", true), ("i32", false)] {
+        let eager = check_json(&format!(
+            "module Issue1489CastEager\n\
+             def probe(t: &tensor[3, {precision}]) -> tensor[3, i32] = cast_trunc(t, i32)\n"
+        ));
+        let deferred = check_json(&format!(
+            "module Issue1489CastDeferred\n\
+             def apply_it(f: (&tensor[3, {precision}]) -> tensor[3, i32], t: &tensor[3, {precision}]) -> tensor[3, i32] = f(t)\n\
+             def probe(t: tensor[3, {precision}]) -> tensor[3, i32] = apply_it(fn (v) -> cast_trunc(v, i32), &t)\n"
+        ));
+        for (path, report) in [("eager", &eager), ("deferred", &deferred)] {
+            assert_eq!(
+                messages(report).is_empty(),
+                admitted,
+                "{path} cast_trunc of &tensor[3, {precision}]: expected {}, got {:?}",
+                if admitted {
+                    "a clean report"
+                } else {
+                    "a rejection"
+                },
+                messages(report)
+            );
+        }
+    }
 }
 
 /// The measured regression shape for `cast`, which is 64% of the issue's

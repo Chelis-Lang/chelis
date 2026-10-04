@@ -998,6 +998,14 @@ impl Checker {
                     // forward (via the alias chain) to the underlying
                     // tuple source.  Treat the var argument as a borrow.
                     DeepTag::TupleGet => self.check_tuple_get(children, scope),
+                    // chelis#3101, [05-OP-63]: a cast's tensor source is a
+                    // read-only parameter (spec/05 section 1.3.1), so an
+                    // explicit borrow there is a read, as at a call argument.
+                    // The target and mode slots are types and selectors.
+                    DeepTag::Cast if children.first().and_then(borrow_inner).is_some() => {
+                        let inner = borrow_inner(&children[0]).expect("guarded above");
+                        self.check_borrow_arg(&children[0], inner, scope);
+                    }
                     _ => self.check_children_by_role(tag, children, scope),
                 }
             }
@@ -3318,6 +3326,12 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
             | "div"
             | "floor_div"
             | "trunc_div"
+            | "mod"
+            | "bitand"
+            | "bitor"
+            | "bitxor"
+            | "shl"
+            | "shr"
             | "and"
             | "or"
             | "matmul"

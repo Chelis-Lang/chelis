@@ -190,6 +190,11 @@ path = "tests/issue_2076_integer_tensor_binops.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_3101_borrowed_operands"
+path = "tests/issue_3101_borrowed_operands.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_3000_host_computed_comparisons"
 path = "tests/issue_3000_host_computed_comparisons.rs"
 required-features = ["ownership-ledger"]

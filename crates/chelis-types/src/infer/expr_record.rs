@@ -927,7 +927,11 @@ pub(super) fn infer_cast(
     };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let resolved = subst.apply(&expr_ty);
+    // chelis#3101, [05-OP-63] and [05-OP-6]: a cast's tensor source is a
+    // read-only `&tensor[D, p]` parameter (spec/05 section 1.3.1), so an
+    // explicit borrow reads as the owned tensor. Only a tensor is borrowed;
+    // any other `&` source keeps its refusal below.
+    let resolved = read_through_tensor_borrow(subst.apply(&expr_ty), subst);
 
     // Every target spelling first crosses the centralized resolver. Bare
     // primitive symbols are retained for historical compatibility; canonical
@@ -1229,12 +1233,25 @@ fn key_cast_source_error(source: &Type) -> Option<CheckError> {
     })
 }
 
+/// chelis#3101: a cast's tensor source is a read-only `&tensor[D, p]`
+/// parameter (spec/05 section 1.3.1), so an explicit borrow of a tensor reads
+/// as the tensor. Any other `&` source is kept, and refused by the caller.
+/// The eager cast and both suspended discharges read the source through this
+/// one function, so they cannot disagree about a borrowed source.
+fn read_through_tensor_borrow(source: Type, subst: &Subst) -> Type {
+    match source {
+        Type::Ref(inner) if matches!(subst.apply(&inner), Type::Tensor(..)) => subst.apply(&inner),
+        other => other,
+    }
+}
+
 pub(crate) fn cast_result_from_settled_source(
     resolved: Type,
     new_prec: Prim,
     mode: CastMode,
     subst: &Subst,
 ) -> Result<Type, Box<CheckError>> {
+    let resolved = read_through_tensor_borrow(resolved, subst);
     // spec/04 section 1.1: a key has no cast in either direction. The target
     // rules below refuse a key target; this refuses a key source, scalar or
     // tensor, before any target is considered. A suspended cast discharges
@@ -1330,7 +1347,7 @@ pub(crate) fn binder_cast_result_from_settled_source(
     target: TypeVar,
     subst: &Subst,
 ) -> Result<Type, Box<CheckError>> {
-    match resolved {
+    match read_through_tensor_borrow(resolved, subst) {
         // [05-OP-63]: a dtype change preserves every dimension. The
         // declaration's [04-DTYPE-2] bound is retained on the precision
         // variable and checked at each instantiation.
