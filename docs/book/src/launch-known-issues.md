@@ -1,16 +1,22 @@
 # Known core release issues
 
-Snapshot: 2026-10-03. This page lists the open issues tagged `scope:core` and
-`launch:p2` at that date. Each issue link supplies its reproducer, current scope,
-and implementation status. This is an inventory of reported limitations, not
-a claim that every affected program runs or that the release has passed its gates.
+Snapshot: 2026-10-04 (UTC). This page lists the open issues tagged `scope:core`
+and `launch:p2` at capture time. Each issue link supplies its reproducer,
+current scope, and implementation status. This is an inventory of reported
+limitations, not a claim that every affected program runs or that the release
+has passed its gates.
 
 The [launch ledger](https://github.com/Chelis-Lang/chelis/issues/1362) controls the
 release boundary. Published P2 issues may remain open at release only when they
 have no remaining `demo-path`, `freeze`, or `launch:required` obligation.
-#2379 affects two required pinned C Note receipt cases and still gates release.
-#1416 remains implementation work; its reviewed decision must land before its
-freeze and required modifiers clear. Listing either issue here does not clear a gate.
+The literal-construction decision for #1416 landed in
+[PR #3081](https://github.com/Chelis-Lang/chelis/pull/3081), clearing its decision
+modifiers while retaining the implementation follow-up. The bounded 13-case
+C Note/Sonar receipt passed in
+[PR #3095](https://github.com/Chelis-Lang/chelis/pull/3095), clearing #2379's
+`demo-path` modifier for that manifest. #2379's wider transform defect remains
+open. Neither resolution claims acceptance of unavailable Voyage captures or
+other programs outside the recorded manifest.
 
 For supported operations and explicit C exclusions, see [C support](c-support.md).
 The [live P2 query](https://github.com/Chelis-Lang/chelis/issues?q=is%3Aissue+is%3Aopen+label%3Ascope%3Acore+label%3Alaunch%3Ap2)
@@ -23,7 +29,7 @@ is current when issue state or labels differ from this dated snapshot.
 | [#679](https://github.com/Chelis-Lang/chelis/issues/679) | Surf grad lane: arange has no AD adjoint — computed index tensors re-materialize as F32 in backward (gather/scatter reject); Surf-lane sibling of #570/#601 | None of these modifiers |
 | [#906](https://github.com/Chelis-Lang/chelis/issues/906) | eval: stack-overflow abort on large flat list literals (~2-4k elements) — kills the literal-baking data path | None of these modifiers |
 | [#1225](https://github.com/Chelis-Lang/chelis/issues/1225) | Std.Io.Csv parse_line_chars recurses per character: a valid CSV line beyond the lane's stack budget crashes try_read_csv (eval ~4 KiB SIGABRT, compiled ~100 KiB SIGSEGV) | None of these modifiers |
-| [#1416](https://github.com/Chelis-Lang/chelis/issues/1416) | Std.Tensor.Construct rank-polymorphic reshape exports reject concrete tensors | `launch:required`, `freeze` |
+| [#1416](https://github.com/Chelis-Lang/chelis/issues/1416) | Std.Tensor.Construct rank-polymorphic reshape exports reject concrete tensors | None of these modifiers |
 | [#1489](https://github.com/Chelis-Lang/chelis/issues/1489) | `copy`, `cast`, `gather` and `concat` reject a not-yet-resolved type variable where ~71 other gates defer | None of these modifiers |
 | [#1639](https://github.com/Chelis-Lang/chelis/issues/1639) | Builtin aliases lose mixed scalar/tensor diagnostic ownership | None of these modifiers |
 | [#1748](https://github.com/Chelis-Lang/chelis/issues/1748) | C emission loses verified call authority for a named nullary callback | None of these modifiers |
@@ -45,7 +51,7 @@ is current when issue state or labels differ from this dated snapshot.
 | [#2307](https://github.com/Chelis-Lang/chelis/issues/2307) | Std.Io.Json recurses per character and per element: 1,209 bytes aborts chelis eval, and the compiled binary segfaults silently below a GPT-2 vocabulary | None of these modifiers |
 | [#2374](https://github.com/Chelis-Lang/chelis/issues/2374) | eval: correct local ascription on pad_sequences_to panics at verified local ascription producer | None of these modifiers |
 | [#2377](https://github.com/Chelis-Lang/chelis/issues/2377) | Eval/C disagree on insert-result guard ordering against an earlier trap | None of these modifiers |
-| [#2379](https://github.com/Chelis-Lang/chelis/issues/2379) | C scalar grad rejects a callee with local bindings although the equivalent direct expression builds | `demo-path` |
+| [#2379](https://github.com/Chelis-Lang/chelis/issues/2379) | C scalar grad rejects a callee with local bindings although the equivalent direct expression builds | None of these modifiers |
 | [#2418](https://github.com/Chelis-Lang/chelis/issues/2418) | chelis build refuses sum over a recursive tensor function's result (builtin sum on host emission), while check and eval accept | None of these modifiers |
 | [#2455](https://github.com/Chelis-Lang/chelis/issues/2455) | Exhaustiveness is not enforced for a nested wildcard (&#124; Some(_) alone) or for scalar matches: both check at score 1 and trap at run time | None of these modifiers |
 | [#2525](https://github.com/Chelis-Lang/chelis/issues/2525) | vmap silently unmaps a mapped extent operand (Expand size, SplitN count) instead of refusing the ragged result | None of these modifiers |
@@ -90,7 +96,6 @@ is current when issue state or labels differ from this dated snapshot.
 | [#2938](https://github.com/Chelis-Lang/chelis/issues/2938) | A tuple-element runtime extent fails on both lanes in any def with a declared tensor result | None of these modifiers |
 | [#2939](https://github.com/Chelis-Lang/chelis/issues/2939) | chelis build refuses sum over a non-recursive helper's tensor result (builtin sum on host emission), while check and eval accept | None of these modifiers |
 | [#2954](https://github.com/Chelis-Lang/chelis/issues/2954) | Inlined callees see the caller's dimension, precision and rank maps by name during lowering | None of these modifiers |
-| [#2973](https://github.com/Chelis-Lang/chelis/issues/2973) | eval clamp panics in Rust f64::clamp (exit 101) on lo > hi or a NaN bound where compiled C traps Domain | None of these modifiers |
 | [#2974](https://github.com/Chelis-Lang/chelis/issues/2974) | sum/mean/max_reduce/min_reduce/prod_reduce reject two positional axes on a concrete-rank tensor that spec/04 §4.5.3 admits (only count takes the multi-axis positional path) | None of these modifiers |
 | [#2977](https://github.com/Chelis-Lang/chelis/issues/2977) | uniform_like rejects an f64 template with f64 bounds and accepts f32 bounds instead, against [05-OP-8] | None of these modifiers |
 | [#2983](https://github.com/Chelis-Lang/chelis/issues/2983) | chelis eval rejects sum over an empty axis; [05-OP-30] and compiled C give exact zero | None of these modifiers |
@@ -98,7 +103,6 @@ is current when issue state or labels differ from this dated snapshot.
 | [#2986](https://github.com/Chelis-Lang/chelis/issues/2986) | to_list rejects every tensor of rank above one, contrary to [05-OP-57] | None of these modifiers |
 | [#2987](https://github.com/Chelis-Lang/chelis/issues/2987) | linear is unbound and cross_entropy's signature and result differ from spec/05 §3.4 and §4.3 | None of these modifiers |
 | [#2994](https://github.com/Chelis-Lang/chelis/issues/2994) | grad through cumsum is rejected in eval and C ("cumsum has no numeric IR lowering") at every float dtype | None of these modifiers |
-| [#2995](https://github.com/Chelis-Lang/chelis/issues/2995) | C build rejects nested grad and grad of an imported Std def at scalar f32 while the f16/bf16 programs build | None of these modifiers |
 | [#2999](https://github.com/Chelis-Lang/chelis/issues/2999) | tensor_scan rejects a tensor state ("element type must be a scalar primitive") that [05-OP-38] admits | None of these modifiers |
 | [#3000](https://github.com/Chelis-Lang/chelis/issues/3000) | Borrowed comparisons: where(lt(&x, &y), x, y) fails "operand type never determined", and lt(&x, &y) has no C tensor emission arm | None of these modifiers |
 | [#3012](https://github.com/Chelis-Lang/chelis/issues/3012) | Opaque-invariant validation depends on the entry module's import set, and misreports an in-module constant as not one | None of these modifiers |
@@ -109,3 +113,5 @@ is current when issue state or labels differ from this dated snapshot.
 | [#3038](https://github.com/Chelis-Lang/chelis/issues/3038) | chelis eval rejects a builtin-named definition in a package module that check and build accept (spec/04 §8.6) | None of these modifiers |
 | [#3044](https://github.com/Chelis-Lang/chelis/issues/3044) | sort on a bool tensor passes the checker: eval sorts it, compiled C fails at run time ([05-OP-53] admits arithmetic dtypes only) | None of these modifiers |
 | [#3079](https://github.com/Chelis-Lang/chelis/issues/3079) | Surf signed minimum literals reject the inner positive magnitude at their declared width | None of these modifiers |
+| [#3092](https://github.com/Chelis-Lang/chelis/issues/3092) | eval prints the first site value where compiled C traps a disagreeing later ascription under a rank-polymorphic (..r) signature | None of these modifiers |
+| [#3097](https://github.com/Chelis-Lang/chelis/issues/3097) | runtime_bundle_oracle runtime-mutation restore check depends on the ambient RUSTC_WRAPPER/incremental settings: same head fails without kache, passes with it | None of these modifiers |
