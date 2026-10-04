@@ -899,6 +899,11 @@ fn parity_comparator_rejects_missing_newline_and_invalid_rendering() {
 }
 
 #[test]
+fn parity_softmax_adjoint() {
+    drive_parity(&examples_root().join("softmax_adjoint.ch"), true);
+}
+
+#[test]
 fn parity_generic_host_permutation() {
     drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
 }
@@ -953,9 +958,4 @@ fn parity_literal_ascriptions() {
 #[test]
 fn parity_linspace() {
     drive_parity(&examples_root().join("linspace.ch"), true);
-}
-
-#[test]
-fn parity_softmax_adjoint() {
-    drive_parity(&examples_root().join("softmax_adjoint.ch"), true);
 }
