@@ -1043,18 +1043,16 @@ mod tests {
     #[test]
     fn chelis_2965_per_width_outcomes_of_the_float_contracts() {
         // Executed per-width verdicts of the shipped graph and the correctly
-        // rounded kernels. Reflection holds only at f64; normal_cdf is not
-        // monotone at f16.
+        // rounded kernels. Reflection holds only at f64: near zero `1 - N(x)`
+        // and `N(-x)` lie on different rounding grids at the narrower widths.
+        // The section 3.3 `Phi` graph is monotone at every width.
         let expected = [
             (NORMAL_CDF_RANGE, ["validated"; 4]),
             (
                 NORMAL_CDF_REFLECTION,
                 ["failed", "failed", "failed", "validated"],
             ),
-            (
-                NORMAL_CDF_MONOTONICITY,
-                ["failed", "validated", "validated", "validated"],
-            ),
+            (NORMAL_CDF_MONOTONICITY, ["validated"; 4]),
             (EXP_POSITIVITY, ["validated"; 4]),
             (EXP_MONOTONICITY, ["validated"; 4]),
             (LOG_MONOTONICITY, ["validated"; 4]),

@@ -16,7 +16,10 @@ What else changes:
   `erfc` with a correction for the rounding of `-x/sqrt(2)`. It stays within
   about one unit in the last place at f32 and f64, including the deep left tail.
 - `Std.Contracts.normal_cdf` calls `standard_normal_cdf`. It replaces the
-  Abramowitz-and-Stegun polynomial, so its values change at every width.
+  Abramowitz-and-Stegun polynomial, so its values change at every width. Its
+  `std.normal_cdf.monotonicity` contract now validates at f16 as well. The
+  reflection contract still fails at f16, bf16, and f32: near zero, `1 - N(x)`
+  and `N(-x)` round to different grids at those widths.
 - `silu`, `gelu`, and `gelu_tanh` return `-0.0` at `-inf` instead of NaN, and
   `+inf` at `+inf`. Every finite input keeps its result.
 - The wire DAG schema version is 25. A version-24 reader rejects a graph, which
