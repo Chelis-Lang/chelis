@@ -272,11 +272,14 @@ and all but `decimal_to_i64` also take a number of fractional places:
 `decimal_round(x, 2, RoundTiesToEven)`, `decimal_div(a, b, 10, RoundTiesToEven)`,
 `decimal_to_i64(x, RoundTowardZero)`, and `decimal_from_f64(x, 2,
 RoundTiesToEven)`, which rounds the float's exact binary value; `RejectInexact`
-fails instead of rounding. `decimal_to_f64` and `decimal_to_f32` are the one
-other conversion that drops precision, rounding once to nearest with ties to
-even. `decimal_to_string` writes the canonical text without an exponent, and
-`decimal_to_fixed_string(x, n)` writes exactly `n` fractional digits and never
-rounds. A failure reports `<function>: domain: <detail>` for an argument that
+fails instead of rounding. `decimal_to_f64`, `decimal_to_f32`,
+`decimal_to_f16`, and `decimal_to_bf16` are the other conversions that drop
+precision: each rounds the exact value once, to nearest with ties to even, so
+`decimal_to_f16(x)` can differ from casting `decimal_to_f32(x)` to `f16`, which
+rounds twice. A magnitude of 65520 or more is past f16's range and becomes the
+infinity of its sign. `decimal_to_string` writes the canonical text without an
+exponent, and `decimal_to_fixed_string(x, n)` writes exactly `n` fractional
+digits and never rounds. A failure reports `<function>: domain: <detail>` for an argument that
 denotes no value of its domain, including text or a float whose value lies
 outside the decimal range, or `<function>: overflow: <detail>` when the exact
 result of arithmetic lies outside that range or `decimal_to_i64`'s integer lies

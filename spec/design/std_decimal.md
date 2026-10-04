@@ -237,6 +237,8 @@ All callables are pure, outside AD, and have no accumulator.
 | `decimal_from_f64(x, scale, r)`, `try_decimal_from_f64` | the exact binary value of finite `x` rounded to a multiple of `10^-scale` by `r` | `domain` |
 | `decimal_to_f64(x)` | correctly rounded once, ties to even | never |
 | `decimal_to_f32(x)` | correctly rounded once, ties to even, directly | never |
+| `decimal_to_f16(x)` | correctly rounded once, ties to even, directly; infinity past the range | never |
+| `decimal_to_bf16(x)` | correctly rounded once, ties to even, directly | never |
 | `decimal_scale(x)` | canonical fractional digit count, 0..38 | never |
 | `decimal_add(a, b)`, `decimal_sub(a, b)`, `decimal_mul(a, b)` | exact | `overflow` |
 | `decimal_round(x, scale, r)` | `x` rounded to a multiple of `10^-scale` by `r` | `domain` |
@@ -262,13 +264,24 @@ inside [05-OP-59]'s grammar and `to_float` rounds it correctly, once, in both la
 value set lies strictly inside f64's normal range, so the result is always finite and
 nonzero for a nonzero decimal.
 
-**To f32.** `decimal_to_f32` rounds the exact value to f32 directly. Rounding to f64 first
-and then to f32 is double rounding and gives a different answer for some inputs (prior art
-§8). The algorithm uses Clinger's fast path where it applies (|c| ≤ 2^24 and a scale whose
-power of ten is exact in f32) and otherwise an exact bounded-limb quotient with a sticky
-remainder and ties to even. 10^-38 is below f32's smallest normal (about 1.18e-38), so the
-smallest decimals round to f32 subnormals; the exponent clamps at 2^-149. f64 may carry
-the already-rounded f32 value before the final exact `cast`.
+**To f32, f16 and bf16.** `decimal_to_f32`, `decimal_to_f16` and `decimal_to_bf16` round
+the exact value to their format directly. Rounding to a wider format first and then to the
+target is double rounding and gives a different answer for some inputs (prior art §8):
+`1.00048828125000001` lies just above the f16 tie between `1` and `1.0009765625`, but its
+f32 image is that tie exactly, which then goes to even, `1`. One algorithm serves all three
+formats, parameterized by the significand width (24, 11 or 8 bits) and the smallest
+subnormal (2^-149, 2^-24 or 2^-133). The correctly rounded f64 fixes the binary exponent,
+which is right on any coarser grid; the significand is then an exact bounded-limb quotient
+with a sticky remainder and ties to even, and f64 carries the already-rounded value before
+the final `cast`, which is exact for every finite result. 10^-38 is below the smallest
+normal of f32 and of bf16 (about 1.18e-38), so the smallest decimals round to subnormals of
+those formats, and below f16's smallest subnormal, so it rounds to zero there; a negative
+value that rounds to zero is negative zero, as IEEE 754 keeps the sign of an underflow.
+The value set lies within the finite range of f32 and bf16 but not of f16, whose largest
+finite value is 65504: a magnitude of at least 65520, the tie between 65504 and 2^16,
+rounds to the infinity of its sign, as IEEE 754 round-to-nearest overflows and as a cast
+to f16 does ([04-NUM-14]). The conversion never fails, since an infinite result is the
+format's answer for that value, not an error.
 
 **From f64.** `decimal_from_f64(x, s, r)` decomposes a finite `x` as `m · 2^e` with exact
 power-of-two scaling and an exact integral `cast`, then rounds `m · 2^e · 10^s` to an
@@ -289,8 +302,10 @@ The `decimal128` and `decimal256` dtype names stay reserved for the Arrow and Pa
 boundary (spec/04 §1.1.1). The boundary rule is a language decision, so it belongs in
 spec/04: a `decimal128` or `decimal256` value whose exact value lies in the value set
 (whatever its declared scale) ingests as that exact `Decimal`; any other value fails
-`domain` and is never rounded; and export to a declared `(p, s)` rounds only by an explicit
-`Rounding`. `Std.Io.Parquet` is a stub, so no conversion function is defined here.
+`domain` and is never rounded; export to a declared `(p, s)` rounds only by an explicit
+`Rounding`; and an export whose rounded value needs more than `p - s` integer digits fails
+`domain`, naming the value and the declared `(p, s)`, and is never saturated or truncated.
+`Std.Io.Parquet` is a stub, so no conversion function is defined here.
 
 ## 11. What is absent, and where it lives
 
@@ -359,9 +374,10 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
 ## 14. Verification
 
 - **Independent reference.** A Python reference built on `fractions.Fraction` implements
-  every rounding mode and both float roundings (53- and 24-bit, subnormal-aware) directly
-  on rationals. It does not use `numpy.float32(float)` or `decimal` division followed by
-  `quantize`, both of which double-round. A differential driver runs golden vectors
+  every rounding mode and the four float roundings (53-, 24-, 11- and 8-bit,
+  subnormal-aware, with f16 overflow to infinity) directly on rationals. It does not use
+  `numpy.float32(float)` or `decimal` division followed by `quantize`, both of which
+  double-round. A differential driver runs golden vectors
   (envelope boundaries, limb carry chains such as `999999999·10^k`, ties in every mode and
   sign, subnormal f32 results, parser edge cases, random values) through the evaluator and
   the compiled C lane and compares them exactly. Nightly CI runs the edge corpus,
@@ -371,10 +387,15 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   arguments with no primitive trap escaping (pull-request CI samples one argument per
   callable and extreme class), construction and inspection of `Decimal` outside the module
   rejected, removed names unexported, `grad` through `decimal_from_f64` rejected.
-- **Properties** for `chelis prove` at the fuzz tier, with `string`, `i64` and `f64`
-  binders: the text round trip, commutativity of `decimal_add`, `decimal_sub` inverting
-  it within range, `decimal_to_f64(decimal(t)) = to_float(t)`, idempotent rounding, and the
-  i64 round trip.
+- **Properties** for `chelis prove` at the fuzz tier, in
+  `packages/chelis-std/properties/decimal.ch`, with `string`, `i64` and `f64` binders
+  from which each property builds its decimals: the text round trip, commutativity of
+  `decimal_add`, `decimal_sub` inverting it (both over operands whose magnitudes sum to at
+  most the largest decimal at their wider scale, which keeps both results in range),
+  `decimal_to_f64(decimal(t)) = to_float(t)`, idempotent rounding, and the i64 round trip.
+  A `where` guard keeps only the inputs a law speaks about, so rejected samples are counted
+  rather than passed. `crates/chelis-cli/tests/std_decimal_properties.rs` runs them and a
+  deliberately false variant of each, which must fail.
 
 ## 15. Delivery and consumers
 
