@@ -522,11 +522,21 @@ fn infer_app_inner(
     if let Some(fname) = func_name.as_deref()
         && (INT_BINOPS.contains(&fname) || INT_SHIFT_OPS.contains(&fname))
         && arg_tys.iter().any(|ty| {
+            // [05-OP-64]: `mod` also admits floats (chelis#626).
             matches!(type_for_readonly_check(ty, subst),
-                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim))
+                    if !prim.is_integer() && !(fname == "mod" && prim.is_float()))
         })
         && let Some(rejected) = integer_binop_result_type(
-            node, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+            node,
+            Some(fname),
+            &arg_tys,
+            vg,
+            subst,
+            errors,
+            None,
+            &Type::Unit,
+            product,
         )
     {
         // Preserve the existing direct operation's diagnostic. Symbolic

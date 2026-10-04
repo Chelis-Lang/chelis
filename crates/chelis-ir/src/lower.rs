@@ -18821,7 +18821,9 @@ impl<'program> LowerCtx<'program> {
                     Some(IntBinOp::FloorDiv),
                     Some(FloatBinOp::FloorDiv),
                 )?,
-                RiscOp::Mod => numeric_binop(input0?, input1?, Some(IntBinOp::Rem), None)?,
+                RiscOp::Mod => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Rem), Some(FloatBinOp::Rem))?
+                }
                 RiscOp::TruncDiv => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }

@@ -2502,10 +2502,10 @@ pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
         | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
         | "reduce_window_mean" => Some(ActiveFloat),
         // [05-OP-64], [05-OP-47] and truncating division.
-        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        "trunc_div" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
         // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
         // and the arithmetic rows of spec/04 section 5.4.
-        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "mod" | "abs" | "floor" | "ceil" | "round"
         | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
         | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
         | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min"

@@ -3698,8 +3698,8 @@ path even though bare `round` under `grad` remains a structural
 > admitted unchanged.
 >
 > Domain: `add` and `mul` admit all active signed integers and floats; `div`
-> admits floats only; `floor_div` admits signed integers and floats;
-> `trunc_div` and `mod` admit signed integers only. Bool, string, mixed
+> admits floats only; `floor_div` and `mod` admit signed integers and
+> floats; `trunc_div` admits signed integers only. Bool, string, mixed
 > dtypes, implicit broadcasting, and reserved dtypes are type errors.
 > Arithmetic and storage finalization use [04-NUM-8]'s declared widths.
 >
@@ -3709,20 +3709,30 @@ path even though bare `round` under `grad` remains a structural
 > toward negative infinity; truncating division rounds toward zero. Integer
 > `mod` has the dividend's sign and equals `x - trunc_div(x,y)*y`
 > mathematically, without introducing intermediate overflow. Float floor
-> division is the own-width IEEE quotient followed by floor.
+> division is the own-width IEEE quotient followed by floor. Float `mod` is
+> the truncated remainder of C `fmod`, which is IEEE 754's remainder with
+> the quotient rounded toward zero, not the round-to-nearest-even
+> `remainder` operation: for finite `x` and nonzero finite `y` it is the
+> exact value `x - n*y` with `n` the integer part of `x/y`, so it has the
+> dividend's sign (a zero result keeps the dividend's signed zero), its
+> magnitude is less than `|y|`, and it is exactly representable at the
+> operand dtype with no rounding. `mod(x, y)` is NaN when `x` is infinite,
+> when `y` is zero, or when either operand is NaN, and is `x` when `x` is
+> finite and `y` is infinite. `f16` and `bf16` operands are computed at
+> `f32` and finalized once at the operand dtype, which is exact.
 >
 > Failure: Integer zero divisors trap DivZero under [04-NUM-9].
 > Unrepresentable signed arithmetic traps Overflow, including signed minimum
 > divided by -1 for `floor_div` and `trunc_div`. Remainder of signed minimum
 > by -1 is zero; the intermediate quotient need not be representable. Float
-> exceptional results follow [04-NUM-2]; no integer computation passes
-> through a float. Static failures are diagnosed when concrete, and runtime
+> exceptional results follow [04-NUM-2], and float `mod` never traps; no
+> integer computation passes through a float. Static failures are diagnosed when concrete, and runtime
 > failures use [04-NUM-9].
 >
 > Adjoint: For floats, add sends `(g,g)`, multiply sends `(g*y,g*x)`, and
 > divide sends `(g/y,-g*(x/y)/y)`, evaluated at the declared width. Integer
-> operations and the piecewise-constant floor, truncation, and remainder
-> operations structurally reject differentiation.
+> operations, the piecewise-constant floor and truncation operations, and
+> `mod` at every dtype structurally reject differentiation.
 >
 > Accumulator: None. Each primitive finalizes its own result; an algebraic
 > rewrite may not introduce another trap or change a float operation order.

@@ -166,7 +166,9 @@ fn borrowed_integer_mismatches_name_the_real_cause() {
         let floats = format!(
             "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = {op}(&x, &y)\n"
         );
-        assert!(!errors_of(&floats).is_empty(), "{op}: floats");
+        // [05-OP-64] admits float `mod` (chelis#626); the bitwise and shift
+        // operations stay integer-only.
+        assert_eq!(errors_of(&floats).is_empty(), op == "mod", "{op}: floats");
     }
 }
 
@@ -178,7 +180,9 @@ fn borrowed_cast_trunc_source_is_admitted() {
     assert!(errors.is_empty(), "{errors:?}");
     let wrong = "def f(x: tensor[3, i32]) -> tensor[3, i64] = cast_trunc(&x, i64)\n";
     assert!(
-        errors_of(wrong).iter().any(|m| m.contains("is not a float dtype")),
+        errors_of(wrong)
+            .iter()
+            .any(|m| m.contains("is not a float dtype")),
         "cast_trunc keeps its float-source rule through a borrow"
     );
 }

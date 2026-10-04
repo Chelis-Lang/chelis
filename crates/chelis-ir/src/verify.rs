@@ -2406,11 +2406,21 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
 
-                if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
-                    && !node.output_type.precision.is_integer()
+                if matches!(node.op, RiscOp::Bitwise(_)) && !node.output_type.precision.is_integer()
                 {
                     errors.push(format!(
                         "integer binary op at node {} requires an integer dtype",
+                        node.id.0
+                    ));
+                }
+                // [05-OP-64]: `mod` admits the signed integers and the floats
+                // (chelis#626).
+                if matches!(node.op, RiscOp::Mod)
+                    && !(node.output_type.precision.is_integer()
+                        || node.output_type.precision.is_float())
+                {
+                    errors.push(format!(
+                        "mod at node {} requires a signed-integer or float dtype",
                         node.id.0
                     ));
                 }
@@ -2438,7 +2448,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 .any(|(out, input)| !dims_compatible(out, input)))
                     {
                         errors.push(format!(
-                            "integer binary op at node {} output must match its input shape and dtype",
+                            "mod or bitwise op at node {} output must match its input shape and dtype",
                             node.id.0
                         ));
                     }

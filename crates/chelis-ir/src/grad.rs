@@ -45,6 +45,10 @@ pub enum AdRejectionReason {
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
     PiecewiseConstant,
+    /// The op's value jumps wherever its truncated quotient changes, so it
+    /// has no derivative there; [05-OP-64] rejects differentiating `mod` at
+    /// every dtype (chelis#626).
+    TruncatedQuotientJump,
     /// Bool logical operations are control predicates, not numeric
     /// arithmetic, and have no reverse-mode adjoint.
     LogicalOperation,
@@ -131,6 +135,12 @@ impl fmt::Display for AdError {
                     f,
                     "grad: {op} is non-differentiable (piecewise constant); \
                      remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::TruncatedQuotientJump => write!(
+                    f,
+                    "grad: {op} is non-differentiable (it jumps wherever its truncated \
+                     quotient changes, [05-OP-64]); remove it from the gradient path or wrap \
+                     it in a stop-gradient"
                 ),
                 AdRejectionReason::LogicalOperation => write!(
                     f,
@@ -529,7 +539,7 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
         RiscOp::Mod => {
             return Some(AdError::NotSupported {
                 op: "mod",
-                reason: AdRejectionReason::PiecewiseConstant,
+                reason: AdRejectionReason::TruncatedQuotientJump,
             });
         }
         RiscOp::TruncDiv => {

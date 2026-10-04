@@ -3349,6 +3349,12 @@ impl CEmitter {
                 if is_float && matches!(op, "+" | "-" | "*" | "/") {
                     return finalize_elem(nan, format!("({lhs}) {op} ({rhs})"), ty);
                 }
+                // [05-OP-64] float `mod` is C `fmod`, which is exact
+                // (chelis#626); only its NaN needs finalizing.
+                if is_float && op == "%" {
+                    let fmod = if Self::is_f64(ty) { "fmod" } else { "fmodf" };
+                    return finalize_elem(nan, format!("{fmod}({lhs}, {rhs})"), ty);
+                }
                 return format!("{lhs} {op} {rhs}");
             }
             let bits = Self::integer_width(ty.precision);
@@ -3617,8 +3623,13 @@ impl CEmitter {
                 format!("0.0f < __av ? {g_raw} : UINT16_C(0)")
             } else {
                 // The narrowing store finalizes any NaN to the dtype's
-                // canonical quiet NaN ([04-NUM-2]).
-                format!("{store}(__av {op} __bv)")
+                // canonical quiet NaN ([04-NUM-2]). Float `mod` is the exact
+                // `fmodf` at f32, so the one narrowing is exact (chelis#626).
+                if op == "%" {
+                    format!("{store}(fmodf(__av, __bv))")
+                } else {
+                    format!("{store}(__av {op} __bv)")
+                }
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);

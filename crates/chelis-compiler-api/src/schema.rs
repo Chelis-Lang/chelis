@@ -2512,9 +2512,12 @@ impl WireDag {
                     }
                 }
                 WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
+                    // [05-OP-64]: `mod` also admits the floats (chelis#626);
+                    // the bitwise operations stay integer-only ([05-OP-47]).
+                    let mod_op = matches!(node.op, WireRiscOp::Mod);
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
-                            .is_some_and(|prim| prim.is_integer())
+                            .is_some_and(|prim| prim.is_integer() || (mod_op && prim.is_float()))
                         || node.inputs.iter().any(|id| {
                             self.nodes[..index]
                                 .iter()
@@ -2535,7 +2538,7 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            "WireDag {:?} node {} requires two earlier inputs with its dtype and shape",
                             node.op, node.id
                         )));
                     }

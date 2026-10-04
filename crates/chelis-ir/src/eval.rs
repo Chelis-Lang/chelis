@@ -1088,7 +1088,8 @@ impl ElementwiseBinOp {
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
-            Self::TruncDiv | Self::Mod => None,
+            Self::Mod => Some(FloatBinOp::Rem),
+            Self::TruncDiv => None,
         }
     }
 }

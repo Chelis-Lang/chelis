@@ -467,7 +467,8 @@ pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
 }
 
 pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    numeric_binop(args, Some(IntBinOp::Rem), None)
+    // [05-OP-64]: float `mod` is C `fmod` (chelis#626).
+    numeric_binop(args, Some(IntBinOp::Rem), Some(FloatBinOp::Rem))
 }
 
 pub(super) fn eval_floor_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {

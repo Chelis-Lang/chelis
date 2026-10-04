@@ -185,6 +185,11 @@ path = "tests/issue_3029_scatter_replace_update_extents.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_626_float_mod"
+path = "tests/issue_626_float_mod.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2076_integer_tensor_binops"
 path = "tests/issue_2076_integer_tensor_binops.rs"
 required-features = ["ownership-ledger"]

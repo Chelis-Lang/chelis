@@ -189,6 +189,7 @@ impl CExpressionBuiltin {
             | Self::Mul
             | Self::Div
             | Self::FloorDiv
+            | Self::Mod
             | Self::Neg
             | Self::Sqrt
             | Self::Exp
@@ -210,7 +211,6 @@ impl CExpressionBuiltin {
             | Self::Max => Some(NanFinalization::Canonical),
             Self::Relu | Self::MinElem | Self::MaxElem => Some(NanFinalization::BitPreserving),
             Self::TruncDiv
-            | Self::Mod
             | Self::BitAnd
             | Self::BitOr
             | Self::BitXor
@@ -7859,6 +7859,12 @@ impl<'a> HostEmitter<'a> {
                         numeric_arg(1),
                     )],
                 ),
+                // [05-OP-64] float `mod` is C `fmod`, which is exact; the
+                // result is finalized below like every float arm (chelis#626).
+                CExpressionBuiltin::Mod if !is_integer_abi(&arg_vars[0].1) => EmittedExpr::call(
+                    float_math_function(ty, "fmod", "fmodf"),
+                    [numeric_arg(0), numeric_arg(1)],
+                ),
                 CExpressionBuiltin::Mod => EmittedExpr::conditional(
                     binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
                     EmittedExpr::integer(0),
@@ -8695,12 +8701,71 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{ind}        break;"));
             self.lines.push(format!("{ind}    }}"));
         }
+        if builtin == "mod" {
+            self.emit_float_mod_arms(target, lhs, rhs, &view, ind.as_str());
+        }
         self.emit_default_runtime_fail_arm_for(
             &format!("chelis_host_tensor_dtype({lhs})"),
-            &format!("integer elementwise {builtin}"),
+            &format!("elementwise {builtin}"),
         );
         self.lines.push(format!("{}}}", self.indent));
         self.end_tensor_write(&guard);
+    }
+
+    /// [05-OP-64] float `mod` arms for [`Self::assign_tensor_integer_elementwise`]:
+    /// C `fmod` at f64 and `fmodf` at f32, each finalized through
+    /// `fp_env::finalize_float`, and `fmodf` over the exact f32 widening of
+    /// f16 and bf16 with one narrowing store, which is exact because `fmod`
+    /// is (chelis#626).
+    fn emit_float_mod_arms(&mut self, target: &str, lhs: &str, rhs: &str, view: &str, ind: &str) {
+        let index_t = cast_prim_c_type(Prim::Int64);
+        for (dtype, prim) in [
+            (chelis_vocab::RuntimeDType::F32, Prim::F32),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64),
+            (chelis_vocab::RuntimeDType::F16, Prim::F16),
+            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
+        ] {
+            let elem_t = cast_prim_c_type(prim);
+            let l = format!("__lhs_data[i * {target}_lhs_step]");
+            let r = format!("__rhs_data[i * {target}_rhs_step]");
+            let value = match prim {
+                Prim::F32 => crate::fp_env::finalize_float(
+                    &format!("fmodf({l}, {r})"),
+                    false,
+                    crate::fp_env::NanFinalization::Canonical,
+                ),
+                Prim::F64 => crate::fp_env::finalize_float(
+                    &format!("fmod({l}, {r})"),
+                    true,
+                    crate::fp_env::NanFinalization::Canonical,
+                ),
+                Prim::F16 => format!(
+                    "chelis_f32_to_f16(fmodf(chelis_f16_to_f32({l}), chelis_f16_to_f32({r})))"
+                ),
+                _ => format!(
+                    "chelis_f32_to_bf16(fmodf(chelis_bf16_to_f32({l}), chelis_bf16_to_f32({r})))"
+                ),
+            };
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines
+                .push(format!("{ind}            __target_data[i] = {value};"));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
     }
 
     fn assign_tensor_binary_func_elementwise(

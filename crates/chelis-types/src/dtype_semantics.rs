@@ -583,6 +583,9 @@ pub enum FloatBinOp {
     Mul,
     Div,
     FloorDiv,
+    /// [05-OP-64] float `mod`: C `fmod`, the exact remainder with the
+    /// quotient truncated toward zero (Rust's float `%`).
+    Rem,
     Max,
     Min,
 }
@@ -609,6 +612,7 @@ impl FloatBinOp {
             Self::Mul => "mul",
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
+            Self::Rem => "mod",
             Self::Max => "max_elem",
             Self::Min => "min_elem",
         }
@@ -1079,6 +1083,7 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     };
@@ -1095,6 +1100,7 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     };
@@ -1916,7 +1922,8 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| {
             from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
         }),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
@@ -1934,7 +1941,8 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, f64::is_nan)
         }),
