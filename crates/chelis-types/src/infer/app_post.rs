@@ -48,87 +48,20 @@ pub(super) fn finish_unified_app(
         // evidence remain below. Every other registered aggregate uses only
         // the immutable decision API before ordinary dispatch can mutate types.
         if rule != builtins::AggregateRule::Concat {
-            let name = func_name
-                .as_deref()
-                .expect("registered aggregate has a name");
-            if arg_tys
-                .iter()
-                .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
-            {
-                return subst.apply(&ret_tv);
-            }
-            let operands = match rule {
-                builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
-                    if arg_tys.len() != 3 {
-                        return report_builtin_arity(
-                            errors,
-                            node,
-                            source_site,
-                            name,
-                            3,
-                            arg_tys.len(),
-                        );
-                    }
-                    let element = vg.fresh_type();
-                    if let Err(error) = unify(
-                        &arg_tys[2],
-                        &Type::Adt("List".to_string(), vec![element.clone()]),
-                        subst,
-                    ) {
-                        return report(errors, error.into());
-                    }
-                    // Invoke the callback with the initial accumulator. Its
-                    // result is an independent slot: equality with the next
-                    // accumulator belongs to the aggregate rule below.
-                    let callback_result = match unify_checked_call_contract(
-                        &kids[1],
-                        None,
-                        &arg_tys[0],
-                        &[arg_tys[1].clone(), element],
-                        None,
-                        vg,
-                        subst,
-                        errors,
-                        product,
-                    ) {
-                        Ok(result) => result,
-                        Err(rejected) => return rejected,
-                    };
-                    if rule == builtins::AggregateRule::Scan {
-                        vec![
-                            Type::Adt("List".to_string(), vec![arg_tys[1].clone()]),
-                            Type::Adt("List".to_string(), vec![callback_result]),
-                        ]
-                    } else {
-                        vec![arg_tys[1].clone(), callback_result]
-                    }
-                }
-                builtins::AggregateRule::Append
-                | builtins::AggregateRule::DictInsert
-                | builtins::AggregateRule::DictMerge
-                | builtins::AggregateRule::Concat => arg_tys.clone(),
-            };
-            match rule.decide(&operands, &ret_tv, subst) {
-                Ok(Some(equation)) => {
-                    subst.record_result_constraint(equation);
-                    return subst.apply(&ret_tv);
-                }
-                Ok(None) => {
-                    let name = func_name
-                        .as_deref()
-                        .expect("registered aggregate has a name");
-                    return UnresolvedOperandSite::new(node, kids, name, env).defer(
-                        &arg_tys,
-                        &ret_tv,
-                        product,
-                        ret_tv.clone(),
-                    );
-                }
-                Err(mut error) => {
-                    error.message = with_node_provenance(node, error.message);
-                    return report(errors, *error);
-                }
-            }
+            return finish_registered_aggregate(
+                rule,
+                source_site,
+                node,
+                kids,
+                &func_name,
+                &arg_tys,
+                &ret_tv,
+                env,
+                vg,
+                subst,
+                errors,
+                product,
+            );
         }
     }
     let mut result_ty = subst.apply(&ret_tv);
