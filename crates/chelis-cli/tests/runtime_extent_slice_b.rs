@@ -188,9 +188,9 @@ use tempfile::TempDir;
 
 use common::{authored_c_symbol, gcc_available, link_generated};
 
-/// Chelis#1482's remaining reproducer: a runtime-bound `shrink` under a
-/// symbolic signature, consumed by a composite elementwise lowering that
-/// still synthesizes anonymous-extent constants.
+/// Chelis#1482's reproducer: a runtime-bound `shrink` under a symbolic
+/// signature, consumed by a composite elementwise lowering that synthesizes
+/// anonymous-extent constants.
 const RUNTIME_BOUND_SHRINK_SIGMOID: &str = "module Repro.M1\n\
 sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
@@ -341,77 +341,49 @@ fn eval(path: &Path) -> std::process::Output {
 }
 
 /// Chelis#1482 / `runtime_extents.md` C4.3: sigmoid's synthesized constants
-/// still have a missing extent source and therefore produce the registered
-/// typed receipt, not the occurrence pass's internal compiler error or an
-/// input extent silently substituted for the real one.
-///
-/// Eval and the plain-symbolic control remain negative parity: the gap is the
-/// source-less synthesized constant under a runtime-bound result, not sigmoid
-/// or symbolic elementwise execution generally.
+/// record the activation's input as their shape source, so a runtime-bound
+/// `shrink` consumed by sigmoid builds, runs, and prints what `chelis eval`
+/// prints. Both lanes refused this program with the #1482 typed receipt
+/// while the constants had no extent source.
 #[test]
-fn runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt() {
+fn runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = fixture(&dir, "repro.ch", RUNTIME_BOUND_SHRINK_SIGMOID);
+    let out_dir = dir.path().join("repro-out");
 
-    let build = build_c(&path, &dir.path().join("repro-out"));
-    let stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    let build = build_c(&path, &out_dir);
     assert!(
-        !build.status.success(),
-        "the build must refuse rather than emit undeclared C: {stderr}"
+        build.status.success(),
+        "sigmoid over a runtime-bound shrink must build: {}",
+        String::from_utf8_lossy(&build.stderr)
     );
+    let linked = common::link_generated(&out_dir, "repro.c", "repro");
+    assert!(linked.success(), "generated sigmoid program must link");
+    let compiled = std::process::Command::new(out_dir.join("repro"))
+        .output()
+        .expect("compiled sigmoid program");
     assert!(
-        !stderr.contains("internal compiler error"),
-        "the ICE must be replaced by the receipt, not accompanied by it: {stderr}"
+        compiled.status.success(),
+        "compiled sigmoid program failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
     );
-    assert_eq!(
-        build.status.code(),
-        Some(1),
-        "a typed refusal exits 1, where the panic exited 101: {stderr}"
-    );
-    assert!(
-        stderr.contains("unsupported: "),
-        "the receipt carries the section C2 brand: {stderr}"
-    );
-    assert!(
-        stderr.contains("unimplemented chelis#1482"),
-        "the receipt cites the issue that owns the gap: {stderr}"
-    );
-    assert!(
-        stderr.contains("extent source(s) for"),
-        "the receipt names the axis that has no source: {stderr}"
-    );
-    assert!(
-        stderr.contains("(codegen:c)"),
-        "the receipt names the lane that refused: {stderr}"
-    );
-
-    // The eval lane refuses with the same typed receipt as C, exit 1, no
-    // panic. Before chelis#1277 B2h the host interpreter evaluated this
-    // program (it computes shapes from values and never sees the anonymous
-    // extent); B2h applies `f` through the kernel the C lane emits for it,
-    // so the DAG evaluator's cardinality check refuses exactly where C's
-    // does. That is B2h's eval-lane capability regression on chelis#1482,
-    // recorded there beside S2a's compiled-lane one; both lanes recover
-    // together when the const gains its extent source.
     let evaluated = eval(&path);
-    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
     assert!(
-        !evaluated.status.success(),
-        "eval refuses as C does through the routed kernel: {}",
-        String::from_utf8_lossy(&evaluated.stdout)
+        evaluated.status.success(),
+        "eval sigmoid program failed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
     );
     assert_eq!(
-        evaluated.status.code(),
-        Some(1),
-        "a typed refusal, not a panic: {stderr}"
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&evaluated.stdout),
+        "compiled and evaluated sigmoid must print the same bytes"
     );
-    assert!(!stderr.contains("internal compiler error"), "{stderr}");
-    assert!(stderr.contains("unsupported: "), "{stderr}");
-    assert!(stderr.contains("unimplemented chelis#1482"), "{stderr}");
-    assert!(stderr.contains("extent source(s) for"), "{stderr}");
     assert!(
-        stderr.contains("(runtime)"),
-        "the receipt names the lane that refused: {stderr}"
+        String::from_utf8_lossy(&evaluated.stdout).contains(
+            "out = tensor(shape=[4], data=[0.7310586, 0.11920292, 0.95257413, 0.98201376])"
+        ),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stdout)
     );
 
     // The control that decides how narrow the rule had to be: an

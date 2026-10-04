@@ -103,22 +103,45 @@ fn host_built_operands_run_at_every_integer_dtype() {
     }
 }
 
-/// The derived activations run on the C host lane's own f32 loop.
+/// chelis#1482: the derived activations run at every float dtype over a
+/// run-time extent. f32 stays on the C host lane's own loop; the others run
+/// in the tensor lane, whose synthesized constants take the activation's
+/// input as their shape source.
 #[test]
-fn host_built_operands_run_derived_activations_at_f32() {
-    assert_compiled_matches_eval("activations-f32", &program("f32", &[], ACTIVATIONS));
+fn derived_activations_over_a_run_time_extent_run_at_every_float_dtype() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        assert_compiled_matches_eval(
+            &format!("activations-{dtype}"),
+            &program(dtype, &[], ACTIVATIONS),
+        );
+    }
 }
 
-/// At every other float dtype a derived activation runs in the tensor lane,
-/// where its synthesized constants have no extent source over a run-time
-/// extent yet: the build refuses before emission with chelis#1482's typed
-/// receipt, never a program that aborts when run.
+/// The negative twin: an activation's result keeps its input's extent, so
+/// combining it with a tensor of another run-time length still fails on both
+/// lanes before any element is read.
 #[test]
-fn a_derived_activation_off_the_host_loop_is_refused_before_emission() {
-    for dtype in ["f16", "bf16", "f64"] {
-        let (_dir, reef_home, app) = make_app(&format!("issue-2734-activation-{dtype}"));
+fn an_activation_of_one_length_beside_another_still_fails_on_both_lanes() {
+    for dtype in ["f16", "f64"] {
+        let (_dir, reef_home, app) = make_app(&format!("issue-1482-mismatch-{dtype}"));
         let main = app.join("src/main.ch");
-        write_file(&main, &program(dtype, &[], &["sigmoid"]));
+        write_file(
+            &main,
+            &format!(
+                "module Demo.Main\nx = add(sigmoid(cast({LHS}, {dtype})), cast(to_tensor(range(1i64, 4i64)), {dtype}))\n"
+            ),
+        );
+        let evaluated = chelis(
+            &reef_home,
+            &app,
+            &["eval", "--file", main.to_str().unwrap()],
+        );
+        let stderr = String::from_utf8_lossy(&evaluated.stderr);
+        assert!(!evaluated.status.success(), "{dtype}: eval accepted");
+        assert!(
+            stderr.contains("tensor shapes must match for elementwise op"),
+            "{dtype}: eval: {stderr}"
+        );
         let out = app.join("out");
         let built = chelis(
             &reef_home,
@@ -132,15 +155,17 @@ fn a_derived_activation_off_the_host_loop_is_refused_before_emission() {
                 out.to_str().unwrap(),
             ],
         );
-        let stderr = String::from_utf8_lossy(&built.stderr);
-        assert_eq!(built.status.code(), Some(1), "{dtype}: {stderr}");
         assert!(
-            stderr.contains("unimplemented chelis#1482") && stderr.contains("(codegen:c)"),
-            "{dtype}: {stderr}"
+            built.status.success(),
+            "{dtype}: {}",
+            String::from_utf8_lossy(&built.stderr)
         );
+        let ran = StdCommand::new(out.join("main")).output().unwrap();
+        let stderr = String::from_utf8_lossy(&ran.stderr);
+        assert!(!ran.status.success(), "{dtype}: the executable accepted");
         assert!(
-            !out.join("main").exists(),
-            "{dtype}: no executable is emitted"
+            stderr.contains("elementwise operand shape mismatch"),
+            "{dtype}: executable: {stderr}"
         );
     }
 }
