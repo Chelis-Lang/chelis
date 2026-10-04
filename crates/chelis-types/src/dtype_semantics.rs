@@ -47,8 +47,8 @@
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_abi::failure::{NumericTrapKind, NumericTrapLine};
 use chelis_deep::NamedCastMode;
-use chelis_vocab::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
 pub const NUMERIC_TRAP_PREFIX: &str = NumericTrapLine::PREFIX;

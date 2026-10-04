@@ -322,29 +322,19 @@ macro_rules! runtime_fail {
     }};
 }
 
-/// Fail with an [04-NUM-9] trap line rendered by the formatter every lane
-/// shares, then optionally one detail line. The trap line itself never
-/// carries a prefix or suffix.
+/// Fail with an [04-NUM-9] trap line rendered by
+/// `chelis_abi::failure::NumericTrapLine`, the formatter every lane shares.
+/// The line carries no prefix or suffix; a failure with context renders
+/// through a `chelis_abi::failure` renderer, which puts the context first.
 macro_rules! numeric_trap {
     ($kind:ident, $op:expr, $dtype:expr) => {
         runtime_fail!(
             "{}",
-            chelis_vocab::NumericTrapLine {
-                kind: chelis_vocab::NumericTrapKind::$kind,
+            chelis_abi::failure::NumericTrapLine {
+                kind: chelis_abi::failure::NumericTrapKind::$kind,
                 op: $op,
                 dtype: $dtype,
             }
-        )
-    };
-    ($kind:ident, $op:expr, $dtype:expr, $($detail:tt)+) => {
-        runtime_fail!(
-            "{}\n{}",
-            chelis_vocab::NumericTrapLine {
-                kind: chelis_vocab::NumericTrapKind::$kind,
-                op: $op,
-                dtype: $dtype,
-            },
-            format_args!($($detail)+)
         )
     };
 }

@@ -1,16 +1,82 @@
 //! The text of language failures that every lane reports identically.
 //!
-//! `chelis eval`'s interpreters and the compiled runtime all render these
-//! failures through this module, so the lanes cannot drift. A trap ends in
-//! the [04-NUM-9] line `numeric trap: domain in <op> at i64`, whose `<prim>`
-//! slot is `i64` because the guard finalizes an extent or an index
-//! (spec/04-type-system.md section 4.7); the context line before it names
-//! the disagreeing sources and the values observed.
+//! `chelis eval`'s interpreters, the checker's numeric kernels and the
+//! compiled runtime all render these failures through this module, so the
+//! lanes cannot drift. [`NumericTrapLine`] is the one renderer of the
+//! [04-NUM-9] line `numeric trap: <kind> in <op> at <prim>`. A failure with
+//! context ends in that line: the context lines before it name the
+//! disagreeing sources and the values observed. A runtime extent or index
+//! guard's `<prim>` slot is `i64`, because the guard finalizes an extent or
+//! an index (spec/04-type-system.md section 4.7).
+
+use std::fmt;
+
+/// The closed set of [04-NUM-9] numeric-trap kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NumericTrapKind {
+    /// An integer result outside the declared dtype's range.
+    Overflow,
+    /// An input or result outside the operation's or dtype's domain.
+    Domain,
+    /// Integer division or remainder by a zero divisor.
+    DivZero,
+}
+
+impl NumericTrapKind {
+    pub const ALL: [Self; 3] = [Self::Overflow, Self::Domain, Self::DivZero];
+
+    /// The kind's frozen spelling inside a trap line.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overflow => "overflow",
+            Self::Domain => "domain",
+            Self::DivZero => "division by zero",
+        }
+    }
+}
+
+/// One [04-NUM-9] numeric-trap line: `numeric trap: <kind> in <op> at <dtype>`.
+///
+/// Every lane renders its trap lines through this one formatter, so the
+/// evaluator and the compiled runtime cannot drift apart. The line has no
+/// prefix or suffix; any context is a separate line before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumericTrapLine<'a> {
+    pub kind: NumericTrapKind,
+    /// The canonical name of the primitive that raised the trap.
+    pub op: &'a str,
+    /// The canonical name of the dtype the primitive was finalizing to.
+    pub dtype: &'a str,
+}
+
+impl NumericTrapLine<'_> {
+    /// The frozen prefix every trap line begins with.
+    pub const PREFIX: &'static str = "numeric trap: ";
+    /// The frozen separator before the raising primitive's name.
+    pub const OPERATION_SEPARATOR: &'static str = " in ";
+    /// The frozen separator before the dtype's name.
+    pub const DTYPE_SEPARATOR: &'static str = " at ";
+}
+
+impl fmt::Display for NumericTrapLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}",
+            Self::PREFIX,
+            self.kind.as_str(),
+            Self::OPERATION_SEPARATOR,
+            self.op,
+            Self::DTYPE_SEPARATOR,
+            self.dtype
+        )
+    }
+}
 
 /// The [04-NUM-9] line of a `Domain` trap in `op` that finalizes an extent,
 /// an index or a count, so its `<prim>` slot is `i64`.
 pub fn domain_trap_line_at_i64(op: &str) -> String {
-    format!("numeric trap: domain in {op} at i64")
+    domain_trap_line(op, "i64")
 }
 
 fn render_shape(shape: &[i64]) -> String {
@@ -211,7 +277,12 @@ pub fn domain_guard(op: &str, context: &str) -> String {
 /// dtype of the quantity its guard finalizes, spelled canonically (`f32`,
 /// `i64`, ...).
 pub fn domain_trap_line(op: &str, prim: &str) -> String {
-    format!("numeric trap: domain in {op} at {prim}")
+    NumericTrapLine {
+        kind: NumericTrapKind::Domain,
+        op,
+        dtype: prim,
+    }
+    .to_string()
 }
 
 /// `char_code` received a string that is not exactly one Unicode scalar
@@ -338,6 +409,40 @@ pub fn list_index_out_of_bounds(index: i64, len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{NumericTrapKind, NumericTrapLine};
+
+    /// [04-NUM-9]: the closed trap kinds and the one line every lane renders.
+    #[test]
+    fn numeric_trap_lines_are_closed_and_frozen() {
+        let expected = [
+            (
+                NumericTrapKind::Overflow,
+                "numeric trap: overflow in floor_div at i8",
+            ),
+            (
+                NumericTrapKind::Domain,
+                "numeric trap: domain in floor_div at i8",
+            ),
+            (
+                NumericTrapKind::DivZero,
+                "numeric trap: division by zero in floor_div at i8",
+            ),
+        ];
+        assert_eq!(
+            NumericTrapKind::ALL.to_vec(),
+            expected.iter().map(|(kind, _)| *kind).collect::<Vec<_>>()
+        );
+        for (kind, line) in expected {
+            let rendered = NumericTrapLine {
+                kind,
+                op: "floor_div",
+                dtype: "i8",
+            }
+            .to_string();
+            assert_eq!(rendered, line);
+        }
+    }
+
     use super::{
         list_index_out_of_bounds, negative_target_extent, operand_shape_disagreement,
         reshape_element_count_disagreement, sparse_index_out_of_bounds,

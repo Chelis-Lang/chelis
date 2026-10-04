@@ -1001,6 +1001,7 @@ name = "chelis-types"
 version = "0.18.12"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-crmath",
  "chelis-deep",
  "chelis-macros",

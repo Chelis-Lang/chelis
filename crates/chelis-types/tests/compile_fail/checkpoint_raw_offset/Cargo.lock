@@ -89,6 +89,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-abi"
+version = "0.18.12"
+dependencies = [
+ "chelis-vocab",
+]
+
+[[package]]
 name = "chelis-crmath"
 version = "0.18.12"
 dependencies = [
@@ -119,6 +126,7 @@ dependencies = [
 name = "chelis-types"
 version = "0.18.12"
 dependencies = [
+ "chelis-abi",
  "chelis-crmath",
  "chelis-deep",
  "chelis-pred",

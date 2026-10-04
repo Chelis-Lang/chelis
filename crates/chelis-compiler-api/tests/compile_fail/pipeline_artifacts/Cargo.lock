@@ -350,6 +350,7 @@ dependencies = [
 name = "chelis-types"
 version = "0.18.12"
 dependencies = [
+ "chelis-abi",
  "chelis-crmath",
  "chelis-deep",
  "chelis-pred",
