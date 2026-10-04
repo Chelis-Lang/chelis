@@ -46,48 +46,6 @@ pub(super) fn json_number_token_len(bytes: &[u8]) -> Result<usize, (usize, &'sta
     Ok(i)
 }
 
-pub(super) fn round_to_f64_impl(x: f64, places: i64) -> Result<f64, String> {
-    round_to_places(places)?;
-    if !x.is_finite() {
-        return Ok(x);
-    }
-    match chelis_types::observation::round_element_to_decimal_places(
-        chelis_types::ElementRef::F64(x),
-        places as usize,
-    ) {
-        chelis_types::ElementRef::F64(value) => Ok(value),
-        _ => unreachable!("the sealed f64 formatter preserves its variant"),
-    }
-}
-
-pub(super) fn round_to_f32_impl(x: f32, places: i64) -> Result<f32, String> {
-    round_to_places(places)?;
-    if !x.is_finite() {
-        return Ok(x);
-    }
-    match chelis_types::observation::round_element_to_decimal_places(
-        chelis_types::ElementRef::F32(x),
-        places as usize,
-    ) {
-        chelis_types::ElementRef::F32(value) => Ok(value),
-        _ => unreachable!("the sealed f32 formatter preserves its variant"),
-    }
-}
-
-fn round_to_places(places: i64) -> Result<(), String> {
-    if !(0..=100).contains(&places) {
-        let reason = if places < 0 {
-            "negative decimal places are not supported"
-        } else {
-            "beyond 100 fractional digits every finite f64/f32 is already exact"
-        };
-        return Err(format!(
-            "round_to: places must be in 0..=100, got {places} ({reason})"
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,12 +55,5 @@ mod tests {
         assert_eq!(json_number_token_len(b"-12.5e+2"), Ok(8));
         assert!(json_number_token_len(b".5").is_err());
         assert!(json_number_token_len(b"01").is_ok());
-    }
-
-    #[test]
-    fn round_to_keeps_own_width_and_ties_to_even() {
-        assert_eq!(round_to_f64_impl(0.125, 2).unwrap(), 0.12);
-        assert_eq!(round_to_f64_impl(0.375, 2).unwrap(), 0.38);
-        assert_eq!(round_to_f32_impl(0.125, 2).unwrap(), 0.12_f32);
     }
 }

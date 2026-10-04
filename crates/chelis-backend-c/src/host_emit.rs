@@ -7800,6 +7800,21 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-OP-1]: the runtime's one decimal rounding, over the exact
+            // tagged carriers of the operand and `places`.
+            "round_to" => {
+                let call = format!(
+                    "chelis_round_to({}, {})",
+                    scalar_carrier_expr(&arg_vars[0].0, &arg_vars[0].1)?,
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                );
+                self.lines.push(format!(
+                    "{}{target} = {};",
+                    self.indent,
+                    scalar_carrier_value_expr(&call, ty)?
+                ));
+                return Ok(());
+            }
             // spec/05 §2.6: the runtime's one `process_run` definition,
             // shared with the evaluator.
             "process_run" => {

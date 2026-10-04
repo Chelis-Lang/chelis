@@ -441,6 +441,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
       "flags": [
         "numeric-op"

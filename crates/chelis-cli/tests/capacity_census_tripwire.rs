@@ -753,6 +753,13 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
+        &[],
+        "[05-OP-1]",
+        "performs decimal rounding at"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
         &["numeric-op"],
         "[05-OP-32]",

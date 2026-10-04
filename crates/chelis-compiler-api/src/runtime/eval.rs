@@ -4424,12 +4424,14 @@ impl<'a> EvalContext<'a> {
                 let places = expect_int_arg(args, 1)?;
                 match args.first() {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
-                        let rounded =
-                            super::numeric_text::round_to_f64_impl(payload.as_f64_lossy(), places)?;
+                        let rounded = chelis_runtime::host_round::round_to_f64(
+                            payload.as_f64_lossy(),
+                            places,
+                        )?;
                         Ok(RuntimeValue::float64(rounded))
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
-                        let rounded = super::numeric_text::round_to_f32_impl(
+                        let rounded = chelis_runtime::host_round::round_to_f32(
                             payload.as_f64_lossy() as f32,
                             places,
                         )?;

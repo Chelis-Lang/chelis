@@ -11,7 +11,6 @@ These identities come directly from the compiler's two exclusion rosters. Eval a
 | Identity | Entry route | Eval/test | C | Rejection scope | Supported alternative |
 |---|---|---|---|---|---|
 | `tensor_scan` | builtin | Available | Rejected | Whole checked program | Use eval/test, or rewrite the recurrence with supported tensor primitives. |
-| `round_to` | builtin | Available | Rejected | Whole lowered host program | No equivalent compiled builtin; specify decimal rounding explicitly using admitted arithmetic, or use eval. |
 | `parse_csv` | builtin | Available | Rejected | Whole lowered host program | Stdlib route: `Std.Io.Csv.read_csv` / `try_read_csv` returns `List[Dict[string,string]]`; use `len`, `dict_keys`, `dict_get`, and explicit string-to-number conversion. This changes the document representation; it is not a drop-in builtin alias. |
 | `to_csv` | builtin | Available | Rejected | Whole lowered host program | Stdlib route: `Std.Io.Csv.to_csv` / `write_csv` accepts string-valued rows; convert numeric fields explicitly. |
 | `csv_f64s` | builtin | Available | Rejected | Whole lowered host program | Stdlib route: `Std.Io.Csv.read_csv` / `try_read_csv` returns `List[Dict[string,string]]`; use `len`, `dict_keys`, `dict_get`, and explicit string-to-number conversion. This changes the document representation; it is not a drop-in builtin alias. |

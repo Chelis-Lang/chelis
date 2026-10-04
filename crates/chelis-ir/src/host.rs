@@ -3646,7 +3646,6 @@ fn host_program_call_name_sites<T>(
 /// [`find_eval_only_host_builtin`], sharing this one list so the two
 /// gates cannot drift (chelis#891 review finding 13).
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
-    "round_to",
     // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
     // carrier is evaluator-only. Compiled structured I/O lives in the
     // source-defined Std.Io modules instead.

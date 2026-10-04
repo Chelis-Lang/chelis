@@ -100,33 +100,6 @@ impl ElementRef {
     }
 }
 
-/// Round one sealed float element to a decimal-place boundary while keeping
-/// its storage width. This is [05-OP-1]'s formatting-dependent operation,
-/// centralized beside [`format_element`] so runtime consumers cannot grow a
-/// second Rust numeric formatter. Integer, bool, and half-width callers are
-/// rejected by the checked builtin boundary before reaching this helper.
-pub fn round_element_to_decimal_places(value: ElementRef, places: usize) -> ElementRef {
-    match value {
-        ElementRef::F32(value) => ElementRef::F32(round_via_decimal_text(value, places)),
-        ElementRef::F64(value) => ElementRef::F64(round_via_decimal_text(value, places)),
-        other => panic!(
-            "round_element_to_decimal_places: expected an f32/f64 sealed element, got {}",
-            other.dtype().name()
-        ),
-    }
-}
-
-fn round_via_decimal_text<T>(value: T, places: usize) -> T
-where
-    T: std::fmt::Display + std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    let text = format!("{value:.places$}");
-    text.parse::<T>().unwrap_or_else(|error| {
-        panic!("sealed decimal formatter emitted an unparsable token `{text}`: {error}")
-    })
-}
-
 /// THE printed form of one element ([05-OBS-1..2]). Exhaustive over
 /// [`Prim`] with no `_` arm (`spec/design/loud_unsupported.md` §C4.1).
 ///
@@ -442,22 +415,6 @@ mod tests {
     // -----------------------------------------------------------------
     // format_element per dtype: positive rows.
     // -----------------------------------------------------------------
-
-    #[test]
-    fn sealed_decimal_rounding_preserves_width_and_ties_to_even() {
-        assert_eq!(
-            round_element_to_decimal_places(ElementRef::F64(0.125), 2),
-            ElementRef::F64(0.12)
-        );
-        assert_eq!(
-            round_element_to_decimal_places(ElementRef::F64(0.375), 2),
-            ElementRef::F64(0.38)
-        );
-        assert_eq!(
-            round_element_to_decimal_places(ElementRef::F32(2.675), 2),
-            ElementRef::F32(2.67)
-        );
-    }
 
     #[test]
     fn integers_print_as_integers_at_every_width() {

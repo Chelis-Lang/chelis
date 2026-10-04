@@ -25,6 +25,7 @@ pub mod dtype_header;
 mod element;
 pub mod host_clock;
 pub mod host_process;
+pub mod host_round;
 mod ieee_narrow;
 mod list;
 mod metadata;
@@ -7600,6 +7601,29 @@ pub unsafe extern "C" fn chelis_clock_wall_read() -> *mut chelis_tuple {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_clock_monotonic_read() -> *mut chelis_tuple {
     clock_read_tuple(host_clock::ClockOperation::Monotonic)
+}
+
+/// [05-OP-1] `round_to` in compiled host code over tagged scalars: the
+/// operand's own dtype selects the width, and `places` is any signed integer
+/// dtype. The evaluator calls the same [`host_round`] definitions.
+#[no_mangle]
+pub extern "C" fn chelis_round_to(x: chelis_scalar, places: chelis_scalar) -> chelis_scalar {
+    let places_dtype = validate_scalar(places, "round_to places");
+    let places_value = match places_dtype {
+        RuntimeDType::I8 => i64::from(places.bits as u8 as i8),
+        RuntimeDType::I16 => i64::from(places.bits as u16 as i16),
+        RuntimeDType::I32 => i64::from(places.bits as u32 as i32),
+        RuntimeDType::I64 => i64::from_ne_bytes(places.bits.to_ne_bytes()),
+        other => runtime_fail!("Domain: round_to places must be a signed integer, got {other:?}"),
+    };
+    let rounded = match validate_scalar(x, "round_to operand") {
+        RuntimeDType::F64 => host_round::round_to_f64(f64::from_bits(x.bits), places_value)
+            .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits())),
+        RuntimeDType::F32 => host_round::round_to_f32(f32::from_bits(x.bits as u32), places_value)
+            .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(value.to_bits()))),
+        other => runtime_fail!("Domain: round_to operand must be f64 or f32, got {other:?}"),
+    };
+    rounded.unwrap_or_else(|message| runtime_fail!("{message}"))
 }
 
 /// `process_run` in compiled host code: the `(exit_code, stdout, stderr)`

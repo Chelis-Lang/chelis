@@ -48,8 +48,6 @@ def route_metadata(name: str) -> str:
     """Reviewed route decisions; unknown source additions require a decision."""
     if name == "tensor_scan":
         return "Use eval/test, or rewrite the recurrence with supported tensor primitives."
-    if name == "round_to":
-        return "No equivalent compiled builtin; specify decimal rounding explicitly using admitted arithmetic, or use eval."
     if name in {"parse_csv", "csv_f64s", "csv_ints", "csv_strs", "csv_nrows", "csv_cols", "csv_f64", "csv_int", "csv_str"}:
         return "Stdlib route: `Std.Io.Csv.read_csv` / `try_read_csv` returns `List[Dict[string,string]]`; use `len`, `dict_keys`, `dict_get`, and explicit string-to-number conversion. This changes the document representation; it is not a drop-in builtin alias."
     if name == "to_csv":

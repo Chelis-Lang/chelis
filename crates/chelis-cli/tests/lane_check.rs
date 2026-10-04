@@ -83,8 +83,9 @@ fn evaluation_failure_is_a_typed_error_not_a_skip() {
 #[test]
 fn c_only_refusal_is_a_build_error_not_an_inferred_skip() {
     let dir = tempdir().unwrap();
-    let program = dir.path().join("eval_only.ch");
-    fs::write(&program, "rounded = round_to(1.234f64, cast(2, i32))\n").unwrap();
+    // A compiled-lane refusal owned by chelis#1059: tensor rendering.
+    let program = dir.path().join("c_refused.ch");
+    fs::write(&program, "rendered = to_string(to_tensor([1.0f32]))\n").unwrap();
     let (code, records) = gate(&program);
     assert_eq!(code, 2, "{records:?}");
     assert_eq!(records[0]["stage"], "build", "{records:?}");
