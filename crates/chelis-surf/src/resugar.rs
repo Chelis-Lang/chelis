@@ -2815,6 +2815,16 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         }
         T::Block => {
             at_least(&node, 1)?;
+            // A typed single-expression block carries a checking ascription.
+            // Its caller preserves that outer type (or consumes it as a let
+            // annotation); the operand's nested checks remain independent.
+            if node.meta.ty().is_some()
+                && node.children.len() == 1
+                && let DeepExpr::Node(operand, _) = &node.children[0]
+                && (operand.tag() == T::Lit || operand.meta().ty().is_some())
+            {
+                return resugar_expression_inner(&node.children[0]);
+            }
             Ok(Expr::Do(
                 node.children
                     .iter()
