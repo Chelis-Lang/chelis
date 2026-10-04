@@ -3911,10 +3911,10 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
 }
 
 /// The top-level names whose signature the desugarer reads as a declared
-/// tensor type (`spec/02-surf-syntax.md` §P10b): a value signature (position
-/// 1) and a function result (position 3). A bare bracket literal there is a
-/// tensor literal, so a resugared value prints against the declaration its
-/// re-desugaring will see.
+/// tensor type (`spec/02-surf-syntax.md` §P10b): a value signature
+/// (position 1) and a function result (position 3). A bare bracket literal
+/// there is a tensor literal, so a resugared value prints against the
+/// declaration its re-desugaring will see.
 #[derive(Default)]
 struct DeclaredTensors {
     values: BTreeSet<String>,
