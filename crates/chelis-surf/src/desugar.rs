@@ -2048,7 +2048,9 @@ impl DesugarCtx {
                 // whose declared type is a tensor type. Narrow numeric
                 // literals in `value` to the tensor element type.
                 let body = tensor_element_prim_name(t)
-                    .and_then(|prec| self.desugar_adopting_tensor_literal(value, &prec, true, &[]))
+                    .and_then(|prec| {
+                        self.desugar_adopting_tensor_literal(value, Adoption::Declared(&prec), &[])
+                    })
                     .unwrap_or_else(|| self.desugar_expr(value));
                 vec![
                     node(DeepTag::Defsig, vec![sym(name), desugar_type(t)]),
@@ -2081,7 +2083,9 @@ impl DesugarCtx {
                 let body = self
                     .top_level_binding_tensor_prec
                     .get(name)
-                    .and_then(|prec| self.desugar_adopting_tensor_literal(value, prec, true, &[]))
+                    .and_then(|prec| {
+                        self.desugar_adopting_tensor_literal(value, Adoption::Declared(prec), &[])
+                    })
                     .unwrap_or_else(|| self.desugar_expr(value));
                 self.current_type_binders.replace(restore_binders);
                 vec![node(DeepTag::Def, vec![sym(name), body])]
@@ -2310,7 +2314,9 @@ impl DesugarCtx {
             .as_ref()
             .and_then(tensor_element_prim_name)
             .or_else(|| self.top_level_fn_result_tensor_prec.get(name).cloned())
-            .and_then(|prec| self.desugar_adopting_tensor_literal(body, &prec, true, &body_scope))
+            .and_then(|prec| {
+                self.desugar_adopting_tensor_literal(body, Adoption::Declared(&prec), &body_scope)
+            })
             .unwrap_or_else(|| self.desugar_expr_with_scope(body, &body_scope));
         self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
@@ -2718,15 +2724,7 @@ impl DesugarCtx {
                 )
             }
 
-            Expr::Pipe(head, stages, _) => {
-                let mut children = vec![self.desugar_expr_with_scope(head, local_fn_params)];
-                children.extend(
-                    stages
-                        .iter()
-                        .map(|expr| self.desugar_pipe_stage(expr, local_fn_params)),
-                );
-                node(DeepTag::Pipe, children)
-            }
+            Expr::Pipe(head, stages, _) => self.desugar_pipe(head, stages, local_fn_params),
 
             Expr::If(cond, then_e, else_e, _) => node(
                 DeepTag::If,
@@ -2834,7 +2832,13 @@ impl DesugarCtx {
                 let binder_is_declared = binder.is_some();
                 let binder_bound = binder.flatten();
                 let tensor_literal = (*mode != CastMode::Trunc)
-                    .then(|| self.desugar_adopting_tensor_literal(e, prec, false, local_fn_params))
+                    .then(|| {
+                        self.desugar_adopting_tensor_literal(
+                            e,
+                            Adoption::Cast(prec),
+                            local_fn_params,
+                        )
+                    })
                     .flatten();
                 let inner = match (tensor_literal, e.as_ref()) {
                     (Some(tensor_literal), _) => tensor_literal,
@@ -3102,7 +3106,11 @@ impl DesugarCtx {
                         .as_ref()
                         .and_then(tensor_element_prim_name)
                         .and_then(|prec| {
-                            self.desugar_adopting_tensor_literal(&binding.value, &prec, true, &[])
+                            self.desugar_adopting_tensor_literal(
+                                &binding.value,
+                                Adoption::Declared(&prec),
+                                &[],
+                            )
                         })
                         .unwrap_or_else(|| self.desugar_expr(&binding.value));
                     if let Some(ty) = &binding.ty {
@@ -3419,23 +3427,21 @@ impl DesugarCtx {
         self.top_level_fn_tensor_param_prec.get(name)
     }
 
-    /// Desugar a tensor literal that stands in a §5.6 adopting position with
-    /// element type `prec_name`. A bare bracket literal is one only where its
-    /// own declaration states the tensor type (`declared`, positions 1 and
-    /// 3); an intrinsic `to_tensor([...])` call is one in every adopting
-    /// position. Any other expression is not a tensor literal and yields
-    /// `None`.
+    /// Desugar a tensor literal standing in a §5.6 adopting position. A bare
+    /// bracket literal is one only where its own declaration states the tensor
+    /// type (positions 1 and 3); an intrinsic `to_tensor([...])` call, and its
+    /// pipe spelling `[...] |> to_tensor`, is one in every adopting position.
+    /// Any other expression is not a tensor literal and yields `None`.
     fn desugar_adopting_tensor_literal(
         &self,
         value: &Expr,
-        prec_name: &str,
-        declared: bool,
+        adoption: Adoption<'_>,
         local_fn_params: &[String],
     ) -> Option<deep::Expr> {
         match value {
-            Expr::List(items, _) if declared => {
-                Some(self.desugar_list_as_tensor_literal(items, prec_name, local_fn_params))
-            }
+            Expr::List(items, _) if matches!(adoption, Adoption::Declared(_)) => Some(
+                self.desugar_list_as_tensor_literal(items, adoption.precision(), local_fn_params),
+            ),
             Expr::Apply(function, arguments, span)
                 if self.is_intrinsic_tensor_constructor(function)
                     && matches!(arguments.as_slice(), [Expr::List(_, _)]) =>
@@ -3443,23 +3449,137 @@ impl DesugarCtx {
                 let [Expr::List(items, list_span)] = arguments.as_slice() else {
                     unreachable!("a tensor constructor call has one bracket-literal argument")
                 };
-                let items: Vec<deep::Expr> = items
-                    .iter()
-                    .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
-                    .collect();
                 Some(attach_span_metadata(
                     node(
                         DeepTag::App,
                         vec![
                             attach_span_metadata(dvar("to_tensor"), expr_span(function)),
-                            attach_span_metadata(desugar_list_literal(&items), *list_span),
+                            self.desugar_adopted_chain(
+                                items,
+                                *list_span,
+                                adoption,
+                                local_fn_params,
+                            ),
                         ],
                     ),
                     *span,
                 ))
             }
+            Expr::Pipe(head, stages, span) => match (head.as_ref(), stages.as_slice()) {
+                (Expr::List(items, list_span), [constructor])
+                    if self.is_intrinsic_tensor_constructor(constructor) =>
+                {
+                    Some(attach_span_metadata(
+                        node(
+                            DeepTag::Pipe,
+                            vec![
+                                self.desugar_adopted_chain(
+                                    items,
+                                    *list_span,
+                                    adoption,
+                                    local_fn_params,
+                                ),
+                                self.desugar_expr_with_scope(constructor, local_fn_params),
+                            ],
+                        ),
+                        *span,
+                    ))
+                }
+                _ => None,
+            },
             _ => None,
         }
+    }
+
+    /// The `Cons`/`Nil` chain of a tensor literal's elements, adopted for its
+    /// position.
+    fn desugar_adopted_chain(
+        &self,
+        items: &[Expr],
+        list_span: Span,
+        adoption: Adoption<'_>,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let items: Vec<deep::Expr> = items
+            .iter()
+            .map(|item| {
+                self.desugar_tensor_literal_item(item, adoption.precision(), local_fn_params)
+            })
+            .collect();
+        attach_span_metadata(desugar_list_literal(&items), list_span)
+    }
+
+    /// A pipe denotes its nested call: `x |> f(y)` is `f(x, y)` and
+    /// `x |> cast(p)` is `cast(x, p)`. A tensor literal a pipe feeds to a stage
+    /// therefore adopts exactly as that call's argument does (§5.6), whether
+    /// it is the head (`to_tensor([...]) |> s`) or the head and a constructor
+    /// stage (`[...] |> to_tensor |> s`).
+    fn desugar_pipe(&self, head: &Expr, stages: &[Expr], local_fn_params: &[String]) -> deep::Expr {
+        let receiver = |index: usize| {
+            stages
+                .get(index)
+                .and_then(|stage| self.pipe_stage_operand_adoption(stage))
+        };
+        let adopted_head = match (head, stages) {
+            (Expr::List(items, list_span), [constructor, ..])
+                if self.is_intrinsic_tensor_constructor(constructor) =>
+            {
+                receiver(1).map(|adoption| {
+                    self.desugar_adopted_chain(items, *list_span, adoption, local_fn_params)
+                })
+            }
+            _ => receiver(0).and_then(|adoption| {
+                self.desugar_adopting_tensor_literal(head, adoption, local_fn_params)
+            }),
+        };
+        let mut children = vec![
+            adopted_head.unwrap_or_else(|| self.desugar_expr_with_scope(head, local_fn_params)),
+        ];
+        children.extend(
+            stages
+                .iter()
+                .map(|stage| self.desugar_pipe_stage(stage, local_fn_params)),
+        );
+        node(DeepTag::Pipe, children)
+    }
+
+    /// The §5.6 adoption a pipe stage gives the value it receives: a cast
+    /// stage adopts at its target (position 4), and a call stage passes the
+    /// value as the first argument of the callee it names (position 2).
+    fn pipe_stage_operand_adoption<'e>(&'e self, stage: &'e Expr) -> Option<Adoption<'e>> {
+        match stage {
+            Expr::Lambda(params, body, _) if is_first_argument_pipe_lambda(stage) => {
+                let is_param =
+                    |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &params[0].name);
+                match body.as_ref() {
+                    Expr::Cast(operand, prec, mode, _)
+                        if is_param(operand) && *mode != CastMode::Trunc =>
+                    {
+                        Some(Adoption::Cast(
+                            canonical_primitive_name(prec).unwrap_or(prec),
+                        ))
+                    }
+                    Expr::Apply(function, arguments, _)
+                        if arguments.first().is_some_and(is_param) =>
+                    {
+                        self.first_parameter_adoption(function)
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Apply(function, arguments, _) if !arguments.is_empty() => {
+                self.first_parameter_adoption(function)
+            }
+            Expr::Var(..) => self.first_parameter_adoption(stage),
+            _ => None,
+        }
+    }
+
+    fn first_parameter_adoption<'e>(&'e self, callee: &Expr) -> Option<Adoption<'e>> {
+        self.declared_callee_tensor_params(callee)?
+            .first()?
+            .as_deref()
+            .map(Adoption::Parameter)
     }
 
     /// Desugar a single entry of a contextual tensor literal. Numeric
@@ -3575,6 +3695,29 @@ fn fold_unary_minus_int(value: i64) -> i64 {
     value.checked_neg().unwrap_or(i64::MIN)
 }
 
+/// Where a tensor literal stands in a §5.6 adopting position, with the element
+/// dtype it adopts there.
+#[derive(Clone, Copy)]
+enum Adoption<'a> {
+    /// Positions 1 and 3: the literal's own binding or function result
+    /// declares the tensor type, so a bare bracket literal converts too.
+    Declared(&'a str),
+    /// Position 2: the callee's declared tensor parameter.
+    Parameter(&'a str),
+    /// Position 4: the cast target.
+    Cast(&'a str),
+}
+
+impl<'a> Adoption<'a> {
+    fn precision(self) -> &'a str {
+        match self {
+            Self::Declared(precision) | Self::Parameter(precision) | Self::Cast(precision) => {
+                precision
+            }
+        }
+    }
+}
+
 /// Whether an unsuffixed literal binds at a tensor literal's element type
 /// `prec_name`: an integer literal at an integer or float primitive, a float
 /// literal only at a float primitive (`spec/04-type-system.md` §5.6). A
@@ -3611,7 +3754,11 @@ impl DesugarCtx {
                     .and_then(|v| v.get(i))
                     .and_then(|opt| opt.as_deref());
                 prec.and_then(|prec_name| {
-                    self.desugar_adopting_tensor_literal(arg, prec_name, false, local_fn_params)
+                    self.desugar_adopting_tensor_literal(
+                        arg,
+                        Adoption::Parameter(prec_name),
+                        local_fn_params,
+                    )
                 })
                 .unwrap_or_else(|| self.desugar_expr_with_scope(arg, local_fn_params))
             })

@@ -2817,7 +2817,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Pipe => {
             at_least(&node, 2)?;
             Ok(Expr::Pipe(
-                Box::new(resugar_expression_inner(&node.children[0])?),
+                Box::new(resugar_pipe_head(&node)?),
                 node.children[1..]
                     .iter()
                     .map(resugar_pipe_stage)
@@ -4271,12 +4271,7 @@ fn adopting_tensor_call_items(
     let [function, chain] = node.children else {
         return Ok(None);
     };
-    if variable_name(function) != Some("to_tensor")
-        || node_ref(function)?.meta.ty().is_some()
-        || declared_tensors()
-            .bound_constructor_references
-            .contains(&(function as *const DeepExpr as usize))
-    {
+    if !is_intrinsic_constructor(function) {
         return Ok(None);
     }
     resugar_adopting_items(chain, precision)
@@ -4290,14 +4285,126 @@ fn resugar_adopting_tensor_call(
     precision: &str,
 ) -> Result<Option<Expr>, ResugarError> {
     let node = node_ref(expr)?;
-    let Some(items) = adopting_tensor_call_items(&node, precision, false)? else {
+    if let Some(items) = adopting_tensor_call_items(&node, precision, false)? {
+        return Ok(Some(Expr::Apply(
+            Box::new(resugar_expression_inner(&node.children[0])?),
+            vec![Expr::List(items, node_ref(&node.children[1])?.span)],
+            node.span,
+        )));
+    }
+    resugar_adopting_tensor_pipe(&node, precision, false)
+}
+
+/// Resugars the pipe spelling `[...] |> to_tensor` of a tensor literal standing
+/// in an adopting position with element type `precision`.
+fn resugar_adopting_tensor_pipe(
+    node: &NodeRef<'_>,
+    precision: &str,
+    binding_typed: bool,
+) -> Result<Option<Expr>, ResugarError> {
+    if node.tag != DeepTag::Pipe || (node.meta.ty().is_some() && !binding_typed) {
+        return Ok(None);
+    }
+    let [chain, constructor] = node.children else {
         return Ok(None);
     };
-    Ok(Some(Expr::Apply(
-        Box::new(resugar_expression_inner(&node.children[0])?),
-        vec![Expr::List(items, node_ref(&node.children[1])?.span)],
+    if !is_intrinsic_constructor(constructor) {
+        return Ok(None);
+    }
+    let Some(items) = resugar_adopting_items(chain, precision)? else {
+        return Ok(None);
+    };
+    Ok(Some(Expr::Pipe(
+        Box::new(Expr::List(items, node_ref(chain)?.span)),
+        vec![resugar_pipe_stage(constructor)?],
         node.span,
     )))
+}
+
+/// Whether a `var` names the intrinsic `to_tensor` rather than a binding of it.
+fn is_intrinsic_constructor(expr: &DeepExpr) -> bool {
+    variable_name(expr) == Some("to_tensor")
+        && node_ref(expr).is_ok_and(|node| node.meta.ty().is_none())
+        && !declared_tensors()
+            .bound_constructor_references
+            .contains(&(expr as *const DeepExpr as usize))
+}
+
+/// The element dtype a pipe stage gives the value it receives (§5.6): a
+/// checked cast stage's primitive target (position 4), or the declared first
+/// parameter of the top-level callee a call stage names (position 2). This
+/// mirrors the desugarer's reading of a pipe as its nested call.
+fn pipe_stage_operand_precision(stage: &DeepExpr) -> Option<String> {
+    let node = node_ref(stage).ok()?;
+    if node.tag == DeepTag::Var {
+        return first_parameter_precision(stage);
+    }
+    if node.tag != DeepTag::Fn || node.meta.surf_pipe_stage().is_none() {
+        return None;
+    }
+    let [params, body] = node.children else {
+        return None;
+    };
+    let param = node_ref(params)
+        .ok()
+        .filter(|params| params.tag == DeepTag::Params && params.children.len() == 1)
+        .and_then(|params| parameter_name(&params.children[0]))?;
+    let body = node_ref(body).ok()?;
+    let is_param = |expr: &DeepExpr| variable_name(expr) == Some(param.as_str());
+    match body.tag {
+        DeepTag::Cast
+            if body.children.first().is_some_and(is_param)
+                && cast_mode_of(body.children) == Ok(CastMode::Checked) =>
+        {
+            body.children
+                .get(1)
+                .and_then(primitive_type_name)
+                .map(str::to_string)
+        }
+        DeepTag::App if body.children.get(1).is_some_and(is_param) => {
+            first_parameter_precision(&body.children[0])
+        }
+        _ => None,
+    }
+}
+
+fn first_parameter_precision(callee: &DeepExpr) -> Option<String> {
+    let declared = declared_tensors();
+    if declared
+        .local_references
+        .contains(&(callee as *const DeepExpr as usize))
+    {
+        return None;
+    }
+    declared
+        .parameters
+        .get(variable_name(callee)?)?
+        .first()?
+        .clone()
+}
+
+/// Resugars a pipe's head. A pipe denotes its nested call, so a tensor literal
+/// it feeds to a stage prints for the dtype that stage gives its operand, as
+/// the desugarer adopts it: `to_tensor([...]) |> s`, or `[...] |> to_tensor |> s`
+/// whose head and constructor stage form the literal.
+fn resugar_pipe_head(node: &NodeRef<'_>) -> Result<Expr, ResugarError> {
+    let head = &node.children[0];
+    if let Some(constructor) = node.children.get(1)
+        && is_intrinsic_constructor(constructor)
+    {
+        if let Some(precision) = node.children.get(2).and_then(pipe_stage_operand_precision)
+            && let Some(items) = resugar_adopting_items(head, &precision)?
+        {
+            return Ok(Expr::List(items, node_ref(head)?.span));
+        }
+        return resugar_expression_inner(head);
+    }
+    if let Some(precision) = node.children.get(1).and_then(pipe_stage_operand_precision)
+        && let Some(literal) = resugar_adopting_tensor_call(head, &precision)?
+    {
+        return Ok(literal);
+    }
+    resugar_expression_inner(head)
 }
 
 /// Resugars a binding value, or a function body, whose own declaration states
@@ -4315,6 +4422,9 @@ fn resugar_declared_tensor_value(
     let node = node_ref(expr)?;
     if let Some(items) = adopting_tensor_call_items(&node, precision, binding_typed)? {
         return Ok(Some(Expr::List(items, node.span)));
+    }
+    if let Some(pipe) = resugar_adopting_tensor_pipe(&node, precision, binding_typed)? {
+        return Ok(Some(pipe));
     }
     let Some(items) = untyped_chain_items(expr, binding_typed) else {
         return Ok(None);
