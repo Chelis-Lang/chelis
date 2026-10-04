@@ -93,65 +93,221 @@ fn exact_integer_reference_covers_rounding_ties_and_i64_limits() {
     }
 }
 
+// Keep the small all-width matrix under its original identity. The larger
+// cases run separately so every case retains the same per-element oracle
+// without one test consuming the hosted nextest timeout.
 #[test]
 fn every_linspace_element_agrees_with_exact_rational_reference() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
-        let (_dir, reef, app) = common::make_app("issue-2992-linspace");
-        for count in [2u64, 3, 257, 258, 300, 2049, 2050, 2051, 4097] {
-            let endpoints = [(0.0, 1.0), (-2.0, 3.0), (3.0, -1.0)];
-            let mut source =
-                String::from("module Demo.Main\nimport Std.Tensor.Construct (linspace)\n");
-            for (i, (start, stop)) in endpoints.iter().enumerate() {
-                source.push_str(&format!("xs_{i} = linspace({start:.1}{dtype}, {stop:.1}{dtype}, {count}i64)\nobserved_{i} = map(fn (value) -> print(value), to_list(xs_{i}))\n"));
-            }
-            common::write_file(&app.join("src/main.ch"), &source);
-            let evaluated = Command::cargo_bin("chelis")
-                .unwrap()
-                .env("CHELIS_STYLE_GATE_DISABLE", "1")
-                .env("CHELIS_REEF_HOME", &reef)
-                .current_dir(&app)
-                .args(["eval", "--file", "src/main.ch"])
-                .output()
-                .unwrap();
-            assert!(evaluated.status.success(), "{dtype}/{count}: {evaluated:?}");
-            let stdout = String::from_utf8(evaluated.stdout).unwrap();
-            let compiled = common::build_and_run_app(&reef, &app, "main");
-            assert_eq!(compiled, stdout, "lane observations {dtype}/{count}");
-            // Per-element scalar prints supply complete observations even when
-            // the ordinary human tensor rendering abbreviates a large root.
-            let observations: Vec<f64> = stdout
-                .lines()
-                .filter_map(|line| line.parse().ok())
-                .collect();
-            assert_eq!(
-                observations.len(),
-                endpoints.len() * count as usize,
-                "complete observations {dtype}/{count}"
-            );
-            for (i, (start, stop)) in endpoints.iter().enumerate() {
-                let actual = &observations[i * count as usize..(i + 1) * count as usize];
-                for (index, value) in actual.iter().enumerate() {
-                    let expected = if index == 0 {
-                        *start
-                    } else if index == count as usize - 1 {
-                        *stop
-                    } else {
-                        let weight = exact_weight(index as u64, count - 1, dtype);
-                        stored(
-                            dtype,
-                            start + stored(dtype, stored(dtype, stop - start) * weight),
-                        )
-                    };
-                    assert_eq!(
-                        stored(dtype, *value).to_bits(),
-                        expected.to_bits(),
-                        "{dtype}/{count}/{i}/{index}: {value} != {expected}"
-                    );
-                }
+        assert_linspace_elements(dtype, &[2, 3]);
+    }
+}
+
+fn assert_linspace_elements(dtype: &str, counts: &[u64]) {
+    let (_dir, reef, app) = common::make_app("issue-2992-linspace");
+    for &count in counts {
+        let endpoints = [(0.0, 1.0), (-2.0, 3.0), (3.0, -1.0)];
+        let mut source = String::from("module Demo.Main\nimport Std.Tensor.Construct (linspace)\n");
+        for (i, (start, stop)) in endpoints.iter().enumerate() {
+            source.push_str(&format!("xs_{i} = linspace({start:.1}{dtype}, {stop:.1}{dtype}, {count}i64)\nobserved_{i} = map(fn (value) -> print(value), to_list(xs_{i}))\n"));
+        }
+        common::write_file(&app.join("src/main.ch"), &source);
+        let evaluated = Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env("CHELIS_REEF_HOME", &reef)
+            .current_dir(&app)
+            .args(["eval", "--file", "src/main.ch"])
+            .output()
+            .unwrap();
+        assert!(evaluated.status.success(), "{dtype}/{count}: {evaluated:?}");
+        let stdout = String::from_utf8(evaluated.stdout).unwrap();
+        let compiled = common::build_and_run_app(&reef, &app, "main");
+        assert_eq!(compiled, stdout, "lane observations {dtype}/{count}");
+        // Per-element scalar prints supply complete observations even when
+        // the ordinary human tensor rendering abbreviates a large root.
+        let observations: Vec<f64> = stdout
+            .lines()
+            .filter_map(|line| line.parse().ok())
+            .collect();
+        assert_eq!(
+            observations.len(),
+            endpoints.len() * count as usize,
+            "complete observations {dtype}/{count}"
+        );
+        for (i, (start, stop)) in endpoints.iter().enumerate() {
+            let actual = &observations[i * count as usize..(i + 1) * count as usize];
+            for (index, value) in actual.iter().enumerate() {
+                let expected = if index == 0 {
+                    *start
+                } else if index == count as usize - 1 {
+                    *stop
+                } else {
+                    let weight = exact_weight(index as u64, count - 1, dtype);
+                    stored(
+                        dtype,
+                        start + stored(dtype, stored(dtype, stop - start) * weight),
+                    )
+                };
+                assert_eq!(
+                    stored(dtype, *value).to_bits(),
+                    expected.to_bits(),
+                    "{dtype}/{count}/{i}/{index}: {value} != {expected}"
+                );
             }
         }
     }
 }
+
+macro_rules! linspace_matrix_case {
+    ($name:ident, $dtype:literal, $count:literal) => {
+        #[test]
+        fn $name() {
+            assert_linspace_elements($dtype, &[$count]);
+        }
+    };
+}
+
+linspace_matrix_case!(
+    linspace_f16_257_matches_every_exact_rational_element,
+    "f16",
+    257
+);
+linspace_matrix_case!(
+    linspace_f16_258_matches_every_exact_rational_element,
+    "f16",
+    258
+);
+linspace_matrix_case!(
+    linspace_f16_300_matches_every_exact_rational_element,
+    "f16",
+    300
+);
+linspace_matrix_case!(
+    linspace_f16_2049_matches_every_exact_rational_element,
+    "f16",
+    2049
+);
+linspace_matrix_case!(
+    linspace_f16_2050_matches_every_exact_rational_element,
+    "f16",
+    2050
+);
+linspace_matrix_case!(
+    linspace_f16_2051_matches_every_exact_rational_element,
+    "f16",
+    2051
+);
+linspace_matrix_case!(
+    linspace_f16_4097_matches_every_exact_rational_element,
+    "f16",
+    4097
+);
+linspace_matrix_case!(
+    linspace_bf16_257_matches_every_exact_rational_element,
+    "bf16",
+    257
+);
+linspace_matrix_case!(
+    linspace_bf16_258_matches_every_exact_rational_element,
+    "bf16",
+    258
+);
+linspace_matrix_case!(
+    linspace_bf16_300_matches_every_exact_rational_element,
+    "bf16",
+    300
+);
+linspace_matrix_case!(
+    linspace_bf16_2049_matches_every_exact_rational_element,
+    "bf16",
+    2049
+);
+linspace_matrix_case!(
+    linspace_bf16_2050_matches_every_exact_rational_element,
+    "bf16",
+    2050
+);
+linspace_matrix_case!(
+    linspace_bf16_2051_matches_every_exact_rational_element,
+    "bf16",
+    2051
+);
+linspace_matrix_case!(
+    linspace_bf16_4097_matches_every_exact_rational_element,
+    "bf16",
+    4097
+);
+linspace_matrix_case!(
+    linspace_f32_257_matches_every_exact_rational_element,
+    "f32",
+    257
+);
+linspace_matrix_case!(
+    linspace_f32_258_matches_every_exact_rational_element,
+    "f32",
+    258
+);
+linspace_matrix_case!(
+    linspace_f32_300_matches_every_exact_rational_element,
+    "f32",
+    300
+);
+linspace_matrix_case!(
+    linspace_f32_2049_matches_every_exact_rational_element,
+    "f32",
+    2049
+);
+linspace_matrix_case!(
+    linspace_f32_2050_matches_every_exact_rational_element,
+    "f32",
+    2050
+);
+linspace_matrix_case!(
+    linspace_f32_2051_matches_every_exact_rational_element,
+    "f32",
+    2051
+);
+linspace_matrix_case!(
+    linspace_f32_4097_matches_every_exact_rational_element,
+    "f32",
+    4097
+);
+linspace_matrix_case!(
+    linspace_f64_257_matches_every_exact_rational_element,
+    "f64",
+    257
+);
+linspace_matrix_case!(
+    linspace_f64_258_matches_every_exact_rational_element,
+    "f64",
+    258
+);
+linspace_matrix_case!(
+    linspace_f64_300_matches_every_exact_rational_element,
+    "f64",
+    300
+);
+linspace_matrix_case!(
+    linspace_f64_2049_matches_every_exact_rational_element,
+    "f64",
+    2049
+);
+linspace_matrix_case!(
+    linspace_f64_2050_matches_every_exact_rational_element,
+    "f64",
+    2050
+);
+linspace_matrix_case!(
+    linspace_f64_2051_matches_every_exact_rational_element,
+    "f64",
+    2051
+);
+linspace_matrix_case!(
+    linspace_f64_4097_matches_every_exact_rational_element,
+    "f64",
+    4097
+);
 
 #[test]
 fn linspace_rejects_invalid_counts_endpoints_and_dtypes() {
