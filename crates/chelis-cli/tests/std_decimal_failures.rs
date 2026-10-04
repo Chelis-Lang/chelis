@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command as StdCommand;
 
-const IMPORTS: &str = "import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)\nimport Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)";
+const IMPORTS: &str = "import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_to_f16, decimal_to_bf16, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)\nimport Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)";
 
 const HELPERS: &str = "def i64_minimum() -> i64 = sub(-9223372036854775807i64, 1i64)\ndef zeros(count: i64) -> string = fold(fn (acc: string, unused: i64) -> string_concat(acc, \"0\"), \"\", range(0i64, count))\ndef reached[q](value: q) -> string = \"reached\"\n";
 
@@ -545,6 +545,11 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
     for value in VALUES {
         cases.push(("decimal_to_f64", format!("decimal_to_f64({})", dec(value))));
         cases.push(("decimal_to_f32", format!("decimal_to_f32({})", dec(value))));
+        cases.push(("decimal_to_f16", format!("decimal_to_f16({})", dec(value))));
+        cases.push((
+            "decimal_to_bf16",
+            format!("decimal_to_bf16({})", dec(value)),
+        ));
     }
     let operands = [
         MAX,
@@ -650,6 +655,8 @@ fn extreme_canary_cases() -> Vec<(&'static str, String)> {
     }
     cases.push(("decimal_to_f64", format!("decimal_to_f64({})", dec(tiny))));
     cases.push(("decimal_to_f32", format!("decimal_to_f32({})", dec(tiny))));
+    cases.push(("decimal_to_f16", format!("decimal_to_f16({})", dec(MAX))));
+    cases.push(("decimal_to_bf16", format!("decimal_to_bf16({})", dec(tiny))));
     for (function, left, right) in [
         ("decimal_add", MAX, MAX),
         ("decimal_sub", MAX, tiny),

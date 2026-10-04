@@ -9,7 +9,7 @@ use common::{build_and_run_app, gcc_available, make_app, write_file};
 /// A program over every `Std.Decimal` callable whose every root is a
 /// canonical value ([05-OP-76]).
 const DECIMAL_ACCEPTANCE_PROGRAM: &str = r#"module Demo.Main
-import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
+import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_to_f16, decimal_to_bf16, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
 import Std.Rounding (Rounding, RoundTowardZero, RoundTiesToEven, RejectInexact)
 def shown(value: Option[Decimal]) -> string =
   match value with {
@@ -32,6 +32,9 @@ ingested = decimal_to_string(decimal_from_f64(0.1f64, 2i64, RoundTiesToEven))
 try_ingested = shown(try_decimal_from_f64(0.1f64, 2i64, RejectInexact))
 double = decimal_to_f64(decimal("0.1"))
 single = decimal_to_f32(decimal("0.1"))
+half = decimal_to_f16(decimal("0.1"))
+half_overflow = decimal_to_f16(decimal("65520"))
+brain = decimal_to_bf16(decimal("0.1"))
 scale = decimal_scale(decimal("1.50"))
 total = decimal_to_string(decimal_add(decimal("0.1"), decimal("0.2")))
 difference = decimal_to_string(decimal_sub(decimal("1.00"), decimal("0.90")))
@@ -72,6 +75,9 @@ fn reef_std_decimal_callables_evaluate_exactly() {
         "try_ingested = none",
         "double = 0.1",
         "single = 0.1",
+        "half = 0.1",
+        "half_overflow = inf",
+        "brain = 0.1",
         "scale = 1",
         "total = 0.3",
         "difference = 0.1",

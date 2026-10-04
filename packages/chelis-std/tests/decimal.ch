@@ -1,5 +1,5 @@
 module Std.Tests.Decimal
-import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
+import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_to_f16, decimal_to_bf16, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
 import Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)
 import Std.Test (assert_eq, assert_true, assert_false)
 -- Self-tests for [05-OP-76]. Expected values come from exact rational
@@ -24,6 +24,9 @@ def divided(a: string, b: string, places: i64, mode: Rounding) -> string = shown
 def narrowed(text: string, mode: Rounding) -> string = shown_int(try_decimal_to_i64(decimal(text), mode))
 def ingested(value: f64, places: i64, mode: Rounding) -> string = shown(try_decimal_from_f64(value, places, mode))
 def single(text: string) -> f64 = cast(decimal_to_f32(decimal(text)), f64)
+def binary16(text: string) -> f64 = cast(decimal_to_f16(decimal(text)), f64)
+def bfloat16(text: string) -> f64 = cast(decimal_to_bf16(decimal(text)), f64)
+def infinity() -> f64 = div(1.0f64, 0.0f64)
 -- The value set and canonical form.
 def test_canonical_form_drops_trailing_zeros() -> unit ! { Test } = {
   _ = assert_eq(parsed("1.50"), "1.5", "1.50 is 1.5")
@@ -387,6 +390,58 @@ def test_to_f32_differs_from_double_rounding() -> unit ! { Test } = {
   _ = assert_false(eq(single("1.000000059604644775390625000001"), 1.0f64), "the direct rounding is not 1")
   _ = assert_eq(cast(decimal_to_f64(decimal("16777215.4999999999")), f32), 16777216.0f32, "through f64 a value below a tie lands on it")
   assert_false(eq(single("16777215.4999999999"), 16777216.0f64), "the direct rounding stays below")
+}
+def test_to_f16_rounds_once() -> unit ! { Test } = {
+  _ = assert_eq(binary16("0.1"), 0.0999755859375f64, "0.1")
+  _ = assert_eq(binary16("-0.3"), neg(0.300048828125f64), "-0.3")
+  _ = assert_eq(binary16("2049"), 2048.0f64, "2^11 + 1 ties to even")
+  _ = assert_eq(binary16("2051"), 2052.0f64, "2^11 + 3 ties to even")
+  _ = assert_eq(binary16("1.00048828125"), 1.0f64, "an exact tie to even below")
+  _ = assert_eq(binary16("1.00146484375"), 1.001953125f64, "an exact tie to even above")
+  _ = assert_eq(binary16("1.00048828125000001"), 1.0009765625f64, "just above a tie")
+  _ = assert_eq(binary16("1.00048828124999999"), 1.0f64, "just below a tie")
+  _ = assert_eq(binary16("65504"), 65504.0f64, "the largest finite f16")
+  _ = assert_eq(binary16("65519.99999999999999"), 65504.0f64, "just below the overflow threshold")
+  assert_eq(binary16("0"), 0.0f64, "zero")
+}
+def test_to_f16_overflows_to_infinity() -> unit ! { Test } = {
+  _ = assert_eq(binary16("65520"), infinity(), "the tie at the overflow threshold goes to infinity")
+  _ = assert_eq(binary16("-65520"), neg(infinity()), "negative overflow")
+  _ = assert_eq(binary16("99999999999999999999999999999999999999"), infinity(), "the maximum")
+  assert_eq(binary16("-99999999999999999999999999999999999999"), neg(infinity()), "the minimum")
+}
+def test_to_f16_subnormals_and_signed_zero() -> unit ! { Test } = {
+  _ = assert_eq(binary16("0.000000059604644775390625"), 5.960464477539063e-8f64, "the smallest subnormal")
+  _ = assert_eq(binary16("0.0000000298023223876953125"), 0.0f64, "half the smallest subnormal ties to zero")
+  _ = assert_eq(binary16("0.0000000298023223876953125000001"), 5.960464477539063e-8f64, "just above half the smallest subnormal")
+  _ = assert_eq(binary16("0.000060975551605224609375"), 0.00006097555160522461f64, "the largest subnormal")
+  _ = assert_eq(binary16("0.00006103515625"), 0.00006103515625f64, "the smallest normal")
+  _ = assert_eq(binary16("1e-38"), 0.0f64, "10^-38 rounds to zero")
+  _ = assert_eq(to_string(decimal_to_f16(decimal("-1e-38"))), "-0.0", "-10^-38 rounds to negative zero")
+  _ = assert_eq(to_string(decimal_to_f16(decimal("-0.0000000298023223876953125"))), "-0.0", "a negative tie at zero keeps its sign")
+  assert_eq(to_string(decimal_to_f16(decimal("0"))), "0.0", "zero is positive")
+}
+def test_to_bf16_rounds_once() -> unit ! { Test } = {
+  _ = assert_eq(bfloat16("0.1"), 0.10009765625f64, "0.1")
+  _ = assert_eq(bfloat16("257"), 256.0f64, "2^8 + 1 ties to even")
+  _ = assert_eq(bfloat16("259"), 260.0f64, "2^8 + 3 ties to even")
+  _ = assert_eq(bfloat16("1.00390625"), 1.0f64, "an exact tie to even below")
+  _ = assert_eq(bfloat16("1.01171875"), 1.015625f64, "an exact tie to even above")
+  _ = assert_eq(bfloat16("1.00390625000000001"), 1.0078125f64, "just above a tie")
+  _ = assert_eq(bfloat16("99999999999999999999999999999999999999"), 9.969209968386869e37f64, "the maximum is finite")
+  _ = assert_eq(bfloat16("-99999999999999999999999999999999999999"), neg(9.969209968386869e37f64), "the minimum is finite")
+  _ = assert_eq(bfloat16("1e-38"), 1.0010069081221042e-38f64, "10^-38 is subnormal")
+  _ = assert_eq(bfloat16("-1e-38"), neg(1.0010069081221042e-38f64), "-10^-38 is subnormal")
+  _ = assert_eq(bfloat16("2e-38"), 2.0020138162442084e-38f64, "2 * 10^-38 is normal")
+  assert_eq(bfloat16("0"), 0.0f64, "zero")
+}
+def test_to_f16_and_bf16_differ_from_double_rounding() -> unit ! { Test } = {
+  _ = assert_eq(cast(cast(decimal_to_f32(decimal("1.00048828125000001")), f16), f64), 1.0f64, "through f32 the value lands on an f16 tie")
+  _ = assert_false(eq(binary16("1.00048828125000001"), 1.0f64), "the direct f16 rounding is not 1")
+  _ = assert_eq(cast(cast(decimal_to_f32(decimal("65519.99999999999999")), f16), f64), infinity(), "through f32 the value lands on the overflow tie")
+  _ = assert_false(eq(binary16("65519.99999999999999"), infinity()), "the direct f16 rounding stays finite")
+  _ = assert_eq(cast(cast(decimal_to_f32(decimal("1.00390625000000001")), bf16), f64), 1.0f64, "through f32 the value lands on a bf16 tie")
+  assert_false(eq(bfloat16("1.00390625000000001"), 1.0f64), "the direct bf16 rounding is not 1")
 }
 def test_from_f64_is_exact_then_rounded() -> unit ! { Test } = {
   _ = assert_eq(ingested(0.1f64, 2i64, RoundTiesToEven), "0.1", "0.1 to cents")

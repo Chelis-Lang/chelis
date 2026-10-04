@@ -11,12 +11,15 @@ directly to that exact rational:
 - a decimal rounding (`decimal_round`, `decimal_div`, `decimal_from_f64`,
   `decimal_to_i64`) scales the rational by `10^n`, splits it into its floor and
   a remainder in `[0, 1)`, and chooses the multiple by the §5 table;
-- a binary rounding (`decimal_to_f64`, `decimal_to_f32`) finds the exponent of
-  the rational's leading bit, fixes the unit in the last place at
-  `2^(e - p + 1)` for precision `p` (53 or 24) but never below the smallest
-  subnormal (`2^-1074` or `2^-149`), and rounds the scaled rational to the
-  nearest integer with ties to even. No value passes through another float
-  format on the way.
+- a binary rounding (`decimal_to_f64`, `decimal_to_f32`, `decimal_to_f16`,
+  `decimal_to_bf16`) finds the exponent of the rational's leading bit, fixes the
+  unit in the last place at `2^(e - p + 1)` for precision `p` (53, 24, 11 or 8)
+  but never below the smallest subnormal (`2^-1074`, `2^-149`, `2^-24` or
+  `2^-133`), and rounds the scaled rational to the nearest integer with ties to
+  even. A result past the format's largest finite value is the infinity of the
+  value's sign, which only f16 reaches, and a nonzero value that rounds to zero
+  is the zero of its sign. No value passes through another float format on the
+  way.
 
 A `Decimal` is its canonical `(coefficient, scale)` pair. Failures raise
 `DecimalError`, whose `function` and `kind` the contract determines. The
@@ -60,6 +63,8 @@ TOKEN = re.compile(r"(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?", 
 # Binary interchange formats: (significand precision, exponent field width).
 F64 = (53, 11)
 F32 = (24, 8)
+F16 = (11, 5)
+BF16 = (8, 8)
 
 
 # Why a call fails, one name per pinned message shape.
@@ -479,6 +484,30 @@ def decimal_to_f32_bits(x: Decimal) -> int:
 def decimal_to_f32(x: Decimal) -> float:
     """The f32 result as the Python float of the same exact value."""
     return float(round_binary(x.value, F32))
+
+
+def nearest_bits(q: Fraction, fmt: tuple[int, int], negative: bool) -> int:
+    """The encoding of `q` rounded once to `fmt` under round-to-nearest, ties to even.
+
+    Past the largest finite value the result is the infinity of the sign, as
+    IEEE 754 overflows under round-to-nearest; `negative` gives a zero result
+    its sign.
+    """
+    precision, exponent_bits = fmt
+    fraction_bits = precision - 1
+    try:
+        rounded = round_binary(q, fmt)
+    except OverflowError:
+        return (int(negative) << (exponent_bits + fraction_bits)) | ((2**exponent_bits - 1) << fraction_bits)
+    return binary_bits(rounded, fmt, negative=negative)
+
+
+def decimal_to_f16_bits(x: Decimal) -> int:
+    return nearest_bits(x.value, F16, x.coefficient < 0)
+
+
+def decimal_to_bf16_bits(x: Decimal) -> int:
+    return nearest_bits(x.value, BF16, x.coefficient < 0)
 
 
 def text_bits(text: str, fmt: tuple[int, int]) -> int | None:

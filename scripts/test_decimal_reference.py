@@ -6,15 +6,18 @@ evidence it does not share code with: a second reading of the §5 rounding table
 that compares the two neighbouring multiples, Python's `decimal` module where
 its results are exact (a `ROUND_05UP` intermediate one digit past the quantum
 before the one final rounding, never two roundings to nearest), Python's
-correctly rounded `float(Fraction)` for f64, and for f32 a nearest-neighbour
-search over the encodings around the value. Each accepting check has a
-rejecting partner.
+correctly rounded `float(Fraction)` for f64, for f32 a nearest-neighbour
+search over the encodings around the value, and for f16 and bf16 a search over
+every finite encoding of the format. Each accepting check has a rejecting
+partner.
 """
 
 from __future__ import annotations
 
+import bisect
 import decimal as pydecimal
 from fractions import Fraction
+import functools
 import math
 import random
 import struct
@@ -123,6 +126,42 @@ def f32_by_search(q: Fraction) -> int:
     best = candidates[0]
     assert len(candidates) < 2 or candidates[1][0] != best[0] or best[1] == 0
     return best[2]
+
+
+# The 16-bit formats: (format, decoder of a positive finite encoding, sign bit,
+# infinity's encoding).
+REDUCED = {
+    "f16": (ref.F16, lambda bits: struct.unpack("<e", struct.pack("<H", bits))[0], 0x8000, 0x7C00),
+    "bf16": (ref.BF16, lambda bits: struct.unpack("<f", struct.pack("<I", bits << 16))[0], 0x8000, 0x7F80),
+}
+
+
+@functools.cache
+def reduced_magnitudes(name: str) -> tuple[list[Fraction], list[int]]:
+    """Every finite nonnegative magnitude of the format in ascending order with its
+    encoding, then `2^(emax+1)` standing for infinity: rounding to nearest with an
+    unbounded exponent reaches that value exactly when IEEE 754 overflows."""
+    fmt, decode, _sign, infinity = REDUCED[name]
+    values = [Fraction(decode(bits)) for bits in range(infinity)]
+    values.append(Fraction(2) ** (2 ** (fmt[1] - 1)))
+    return values, list(range(infinity + 1))
+
+
+def reduced_by_search(q: Fraction, name: str) -> int:
+    """The f16 or bf16 encoding nearest `q`, ties to the even encoding, by bisection over
+    every finite magnitude; a zero result takes the sign of `q`."""
+    values, encodings = reduced_magnitudes(name)
+    sign = REDUCED[name][2] if q < 0 else 0
+    magnitude = abs(q)
+    at = bisect.bisect_left(values, magnitude)
+    if at < len(values) and values[at] == magnitude:
+        return encodings[at] | sign
+    if at == len(values):
+        return encodings[-1] | sign
+    below, above = at - 1, at
+    gap = (magnitude - values[below]) - (values[above] - magnitude)
+    chosen = below if gap < 0 or (gap == 0 and encodings[below] % 2 == 0) else above
+    return encodings[chosen] | sign
 
 
 class ValueSet(unittest.TestCase):
@@ -568,6 +607,64 @@ class BinaryRounding(unittest.TestCase):
         # Only ±10^-38 of the value set lies below f32's smallest normal 2^-126.
         self.assertLess(Fraction(1, 10**38), Fraction(2) ** -126)
         self.assertGreater(Fraction(2, 10**38), Fraction(2) ** -126)
+
+    def test_f16_and_bf16_match_a_search_over_every_encoding(self) -> None:
+        rng = random.Random(SEED + 9)
+        values = [random_decimal(rng) for _ in range(3000)]
+        values += [d(t) for t in (MAX_TEXT, MIN_TEXT, TINY_TEXT, "-" + TINY_TEXT, "0", "0.1", "-0.3", "65504",
+                                  "65519.99999999999999", "65520", "-65520", "65536", "2049", "2051", "257", "259",
+                                  "1.00048828125000001", "1.00390625000000001", "0.0000000298023223876953125",
+                                  "-0.0000000298023223876953125", "0.0000000298023223876953125000001")]
+        for x in values:
+            with self.subTest(x=ref.decimal_to_string(x)):
+                self.assertEqual(ref.decimal_to_f16_bits(x), reduced_by_search(x.value, "f16"))
+                self.assertEqual(ref.decimal_to_bf16_bits(x), reduced_by_search(x.value, "bf16"))
+
+    def test_the_search_rejects_a_wrong_neighbour(self) -> None:
+        # The search is a real oracle: the encoding beside the reference's differs from it.
+        for text in ("0.1", "1.00048828125000001", "65519.99999999999999"):
+            x = d(text)
+            self.assertNotEqual(ref.decimal_to_f16_bits(x) + 1, reduced_by_search(x.value, "f16"))
+            self.assertNotEqual(ref.decimal_to_bf16_bits(x) - 1, reduced_by_search(x.value, "bf16"))
+
+    def test_f16_overflows_to_infinity_and_bf16_never_does(self) -> None:
+        self.assertEqual(ref.decimal_to_f16_bits(d("65504")), 0x7BFF)
+        self.assertEqual(ref.decimal_to_f16_bits(d("65519.99999999999999")), 0x7BFF)
+        # 65520 is the tie between 65504 and 2^16, whose even significand carries it past the range.
+        self.assertEqual(ref.decimal_to_f16_bits(d("65520")), 0x7C00)
+        self.assertEqual(ref.decimal_to_f16_bits(d("-65520")), 0xFC00)
+        self.assertEqual(ref.decimal_to_f16_bits(d(MAX_TEXT)), 0x7C00)
+        self.assertEqual(ref.decimal_to_f16_bits(d(MIN_TEXT)), 0xFC00)
+        self.assertEqual(ref.decimal_to_bf16_bits(d(MAX_TEXT)), 0x7E96)
+        self.assertEqual(ref.decimal_to_bf16_bits(d(MIN_TEXT)), 0xFE96)
+        self.assertLess(Fraction(10**38), (2 - Fraction(2) ** -7) * Fraction(2) ** 127)
+
+    def test_f16_subnormals_and_signed_zero(self) -> None:
+        self.assertEqual(ref.decimal_to_f16_bits(d("0.000000059604644775390625")), 0x0001)
+        # Half the smallest subnormal ties to the even neighbour, zero; just above it rounds up.
+        self.assertEqual(ref.decimal_to_f16_bits(d("0.0000000298023223876953125")), 0x0000)
+        self.assertEqual(ref.decimal_to_f16_bits(d("0.0000000298023223876953125000001")), 0x0001)
+        self.assertEqual(ref.decimal_to_f16_bits(d("-0.0000000298023223876953125")), 0x8000)
+        self.assertEqual(ref.decimal_to_f16_bits(d(TINY_TEXT)), 0x0000)
+        self.assertEqual(ref.decimal_to_f16_bits(d("-" + TINY_TEXT)), 0x8000)
+        self.assertEqual(ref.decimal_to_f16_bits(ref.ZERO), 0x0000)
+        self.assertEqual(ref.decimal_to_f16_bits(d("0.000060975551605224609375")), 0x03FF)
+        self.assertEqual(ref.decimal_to_f16_bits(d("0.00006103515625")), 0x0400)
+        # bf16 shares f32's exponent range, so 10^-38 is a bf16 subnormal, not zero.
+        self.assertEqual(ref.decimal_to_bf16_bits(d(TINY_TEXT)), 0x006D)
+        self.assertEqual(ref.decimal_to_bf16_bits(d("-" + TINY_TEXT)), 0x806D)
+        self.assertEqual(ref.decimal_to_bf16_bits(d("2e-38")) >> 7, 1)
+
+    def test_f16_and_bf16_round_directly_not_through_f32(self) -> None:
+        for name, text, direct, through in (("f16", "1.00048828125000001", 0x3C01, 0x3C00),
+                                            ("f16", "65519.99999999999999", 0x7BFF, 0x7C00),
+                                            ("bf16", "1.00390625000000001", 0x3F81, 0x3F80)):
+            with self.subTest(text=text):
+                x = d(text)
+                fmt = REDUCED[name][0]
+                via_f32 = ref.nearest_bits(ref.round_binary(x.value, ref.F32), fmt, False)
+                self.assertEqual(ref.decimal_to_f16_bits(x) if name == "f16" else ref.decimal_to_bf16_bits(x), direct)
+                self.assertEqual(via_f32, through)
 
     def test_zero_and_extremes(self) -> None:
         self.assertEqual(ref.decimal_to_f64_bits(ref.ZERO), 0)
