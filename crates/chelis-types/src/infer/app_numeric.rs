@@ -825,6 +825,11 @@ pub(super) fn integer_binop_result_type(
             (Type::Error(_), _) | (_, Type::Error(_)) => {
                 return Some(lhs);
             }
+            (Type::Tensor(..), _) | (_, Type::Tensor(..)) => {
+                return integer_tensor_operands(
+                    node, fname, &lhs, &rhs, arg_tys, subst, errors, suspension, result_ty, product,
+                );
+            }
             _ => {
                 return reject(
                     errors,
@@ -897,6 +902,14 @@ pub(super) fn integer_binop_result_type(
             {
                 return Some(lhs);
             }
+            (Type::Error(_), Type::Tensor(..)) | (Type::Tensor(..), Type::Error(_)) => {
+                return Some(lhs);
+            }
+            (Type::Tensor(..), _) | (_, Type::Tensor(..)) => {
+                return integer_tensor_operands(
+                    node, fname, &lhs, &rhs, arg_tys, subst, errors, suspension, result_ty, product,
+                );
+            }
             _ => {
                 return reject(
                     errors,
@@ -917,4 +930,81 @@ pub(super) fn integer_binop_result_type(
     }
 
     None
+}
+
+/// [05-OP-64] and [05-OP-47]: `mod` and the bitwise and shift operations over
+/// tensors take two same-shaped tensors of one active signed-integer dtype
+/// and return that tensor type. There is no broadcasting, so a scalar beside a
+/// tensor is a type error.
+#[allow(clippy::too_many_arguments)]
+fn integer_tensor_operands(
+    node: &DeepNode,
+    fname: &str,
+    lhs: &Type,
+    rhs: &Type,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
+) -> Option<Type> {
+    let refuse = |errors: &mut DiagnosticSink<'_>, kind: CheckErrorKind, message: String| {
+        reject(
+            errors,
+            CheckError::new(kind, with_node_provenance(node, message), vec![]),
+        )
+    };
+    match (lhs, rhs) {
+        (Type::Tensor(_, left), Type::Tensor(_, right)) => {
+            for precision in [left, right] {
+                if let TensorPrec::Concrete(prim) = precision
+                    && !prim.is_integer()
+                {
+                    return refuse(
+                        errors,
+                        CheckErrorKind::PrecisionMismatch,
+                        format!(
+                            "{fname} admits only signed-integer tensors, got {lhs} and {rhs} ([05-OP-47], [05-OP-64])"
+                        ),
+                    );
+                }
+            }
+            if let (TensorPrec::Concrete(left), TensorPrec::Concrete(right)) = (left, right)
+                && left != right
+            {
+                return refuse(
+                    errors,
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "{fname} requires both tensor operands to have one dtype, got {} and {} ([05-OP-47], [05-OP-64])",
+                        left.name(),
+                        right.name()
+                    ),
+                );
+            }
+            if let Err(error) = unify(lhs, rhs, subst) {
+                return reject(errors, error.into());
+            }
+            Some(subst.apply(lhs))
+        }
+        // The other operand is not known to be a tensor yet: decide once it
+        // binds, as the scalar arms do.
+        (Type::Tensor(..), Type::Var(_)) | (Type::Var(_), Type::Tensor(..)) => {
+            if let Some(site) = suspension {
+                site.register(arg_tys, result_ty, subst, product);
+            }
+            Some(match lhs {
+                Type::Tensor(..) => lhs.clone(),
+                _ => rhs.clone(),
+            })
+        }
+        _ => refuse(
+            errors,
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "{fname} does not admit a scalar beside a tensor, got {lhs} and {rhs}: both operands are scalars or both are same-shaped tensors, with no broadcasting ([05-OP-47], [05-OP-64])"
+            ),
+        ),
+    }
 }

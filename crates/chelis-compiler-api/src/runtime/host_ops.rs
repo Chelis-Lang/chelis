@@ -488,8 +488,27 @@ pub(super) fn bitwise_binop(
                 .map_err(|error| error.to_string())?;
             Ok(RuntimeValue::from_scalar_value(value))
         }
+        // chelis#2076, [05-OP-47]: two same-shaped tensors of one signed
+        // integer dtype, element by element with the scalar rule.
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            if lhs.value.shape != rhs.value.shape {
+                let render = |shape: &[usize]| {
+                    let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
+                    format!("[{}]", extents.join(", "))
+                };
+                return Err(format!(
+                    "tensor shapes must match for elementwise op, got {} vs {}",
+                    render(&lhs.value.shape),
+                    render(&rhs.value.shape)
+                ));
+            }
+            let storage =
+                chelis_types::bitwise_tensor(op, lhs.value.storage(), rhs.value.storage())
+                    .map_err(|error| error.to_string())?;
+            Ok(tensor_result(lhs, storage))
+        }
         other => Err(format!(
-            "bitwise op expects integer scalar args, got {other:?}"
+            "bitwise op expects two integer scalars or two integer tensors, got {other:?}"
         )),
     }
 }

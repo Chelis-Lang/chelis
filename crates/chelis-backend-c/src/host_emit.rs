@@ -6985,6 +6985,24 @@ impl<'a> HostEmitter<'a> {
                     );
                     return Ok(());
                 }
+                // chelis#2076: `mod` and the bitwise and shift operations
+                // over two tensors computed on the host apply the scalar rule
+                // element by element after the same operand agreement check
+                // ([05-OP-47], [05-OP-64]).
+                "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_integer_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        name,
+                    );
+                    return Ok(());
+                }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
                         target,
@@ -8600,6 +8618,86 @@ impl<'a> HostEmitter<'a> {
         self.emit_default_runtime_fail_arm_for(
             &format!("chelis_host_tensor_dtype({lhs})"),
             &format!("elementwise comparison ({})", comparison.c_operator()),
+        );
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+    }
+
+    /// Apply an integer `mod`, bitwise or shift operation to two agreeing
+    /// signed-integer tensors element by element, with the scalar lane's
+    /// rule: `mod` traps a zero divisor and gives 0 for a -1 divisor, and a
+    /// shift goes through the declared-width runtime helper, which traps a
+    /// negative count. The default arm is reached only by a dtype the checker
+    /// refuses.
+    fn assign_tensor_integer_elementwise(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        builtin: &str,
+    ) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
+        self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
+        self.lines.push(format!(
+            "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
+            self.indent
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}switch (chelis_host_tensor_dtype({lhs})) {{",
+            self.indent
+        ));
+        let index_t = cast_prim_c_type(Prim::Int64);
+        let ind = self.indent.clone();
+        for (dtype, prim, width) in [
+            (chelis_vocab::RuntimeDType::I8, Prim::Int8, 8),
+            (chelis_vocab::RuntimeDType::I16, Prim::Int16, 16),
+            (chelis_vocab::RuntimeDType::I32, Prim::Int32, 32),
+            (chelis_vocab::RuntimeDType::I64, Prim::Int64, 64),
+        ] {
+            let elem_t = cast_prim_c_type(prim);
+            let l = format!("__lhs_data[i * {target}_lhs_step]");
+            let r = format!("__rhs_data[i * {target}_rhs_step]");
+            let value = match builtin {
+                "mod" => {
+                    let zero = NumericTrap::DivZero { op: "mod", prim }.to_string();
+                    let overflow = NumericTrap::Overflow { op: "mod", prim }.to_string();
+                    format!(
+                        "({r} == -1) ? 0 : ({l} % ({elem_t})chelis_int_checked_divisor({l}, {r}, {width}, {zero:?}, {overflow:?}))"
+                    )
+                }
+                "bitand" => format!("{l} & {r}"),
+                "bitor" => format!("{l} | {r}"),
+                "bitxor" => format!("{l} ^ {r}"),
+                "shl" => format!("chelis_int_shl({l}, {r}, {width})"),
+                "shr" => format!("chelis_int_shr({l}, {r}, {width})"),
+                other => unreachable!("not an integer elementwise builtin: {other}"),
+            };
+            self.lines
+                .push(format!("{ind}    case {}: {{", dtype.c_macro()));
+            self.lines.push(format!(
+                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
+            ));
+            self.lines.push(format!(
+                "{ind}        for ({index_t} i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines.push(format!(
+                "{ind}            __target_data[i] = ({elem_t})({value});"
+            ));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+        self.emit_default_runtime_fail_arm_for(
+            &format!("chelis_host_tensor_dtype({lhs})"),
+            &format!("integer elementwise {builtin}"),
         );
         self.lines.push(format!("{}}}", self.indent));
         self.end_tensor_write(&guard);
