@@ -843,9 +843,10 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
     cases
 }
 
-/// Runs `cases` and requires each to succeed or fail under its function's
-/// `domain` or `overflow` message, and the cases to include both outcomes.
-fn check_extreme_cases(dir_name: &str, cases: &[(&'static str, String)]) {
+/// Runs `cases` as one `chelis test` suite and requires each to succeed or
+/// fail under its function's `domain` or `overflow` message; returns how many
+/// verdicts the suite reported and how many of them failed.
+fn run_extreme_batch(dir_name: &str, cases: &[(&'static str, String)]) -> (usize, usize) {
     let expressions: Vec<(String, String)> = cases
         .iter()
         .enumerate()
@@ -864,17 +865,56 @@ fn check_extreme_cases(dir_name: &str, cases: &[(&'static str, String)]) {
             );
         }
     }
+    (outcomes.len(), failures)
+}
+
+/// Requires the cases, together, to include both accepted and rejected
+/// extremes.
+fn assert_both_outcomes(failures: usize, cases: usize) {
     assert!(
-        failures > 0 && failures < cases.len(),
-        "the sweep must exercise both accepted and rejected extremes ({failures} of {})",
-        cases.len()
+        failures > 0 && failures < cases,
+        "the sweep must exercise both accepted and rejected extremes ({failures} of {cases})"
     );
 }
 
-/// The full sweep runs nightly; the canary below runs on every pull request.
+/// Runs `cases` as one suite and requires both outcomes among them.
+fn check_extreme_cases(dir_name: &str, cases: &[(&'static str, String)]) {
+    let (_, failures) = run_extreme_batch(dir_name, cases);
+    assert_both_outcomes(failures, cases.len());
+}
+
+/// The full sweep's case count, so a shrunken case list cannot pass.
+const EXTREME_CASES: usize = 344;
+
+/// Cases per `chelis test` suite. The suite's 600 s budget bounds one batch,
+/// not the whole sweep (chelis#3142). A suite's time grows quadratically in
+/// its test count (chelis#3144), so the batch is capped by count as well as
+/// by time: at most 50 cases, seven batches, each well inside about 150 s on
+/// the nightly runner at the 6.4-7x slowdown chelis#3005 measured.
+const EXTREME_BATCH_CASES: usize = 50;
+
+/// The full sweep runs nightly in bounded batches; the canary below runs on
+/// every pull request. Every case runs, and the totals are asserted here.
 #[test]
 fn std_datetime_extreme_arguments_raise_no_primitive_trap() {
-    check_extreme_cases("datetime-extremes-2859", &extreme_cases());
+    let cases = extreme_cases();
+    assert_eq!(
+        cases.len(),
+        EXTREME_CASES,
+        "the sweep makes every extreme call"
+    );
+    let (verdicts, failures) = cases
+        .chunks(EXTREME_BATCH_CASES)
+        .enumerate()
+        .map(|(batch, chunk)| run_extreme_batch(&format!("datetime-extremes-2859-{batch}"), chunk))
+        .fold((0, 0), |(verdicts, failures), (v, f)| {
+            (verdicts + v, failures + f)
+        });
+    assert_eq!(
+        verdicts, EXTREME_CASES,
+        "the batches together report one verdict per extreme call"
+    );
+    assert_both_outcomes(failures, cases.len());
 }
 
 /// The per-pull-request slice of the full sweep: the first case of each
