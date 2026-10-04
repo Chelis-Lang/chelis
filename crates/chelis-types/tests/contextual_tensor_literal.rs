@@ -241,7 +241,8 @@ fn position_3_fn_return_tensor_f64_narrows_body_literals() {
 
 #[test]
 fn position_2_call_with_tensor_f64_param_narrows_arg_literals() {
-    let src = "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f(to_tensor([1.0, 2.0, 3.0]))";
+    let src =
+        "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f(to_tensor([1.0, 2.0, 3.0]))";
     let (printed, result) = pipeline(src);
     assert!(
         result.errors.is_empty(),
@@ -436,6 +437,49 @@ fn negative_bare_brackets_in_positions_2_and_4_stay_lists() {
         assert!(
             !result.errors.is_empty(),
             "{src}: a List is not a tensor, got (no errors)"
+        );
+    }
+}
+
+#[test]
+fn position_4_float_literals_keep_their_float_source_under_an_integer_target() {
+    // A decimal cannot bind at an integer type, so under `cast(_, i32)` the
+    // float literals keep the f32 default and the checked cast converts them
+    // (§5.6, [04-NUM-14]); an integer literal adopts the integer target.
+    let (printed, result) = pipeline("xs = cast(to_tensor([1.5, 2.5]), i32)");
+    assert!(result.errors.is_empty(), "{}", errors_summary(&result));
+    assert!(
+        contains_lit_with_prim(&printed, "f32"),
+        "{}",
+        printed.join("\n")
+    );
+    assert!(
+        !contains_lit_with_prim(&printed, "i32"),
+        "{}",
+        printed.join("\n")
+    );
+    let (printed, result) = pipeline("xs = cast(to_tensor([1, 2]), i8)");
+    assert!(result.errors.is_empty(), "{}", errors_summary(&result));
+    assert!(
+        contains_lit_with_prim(&printed, "i8"),
+        "{}",
+        printed.join("\n")
+    );
+}
+
+#[test]
+fn negative_an_adopted_tensor_literal_is_range_checked_at_the_target() {
+    // [04-LIT-2]: the literal binds at the adopted dtype, so 300 is rejected
+    // at i8 exactly as the scalar `cast(300, i8)` is.
+    for src in ["xs = cast(to_tensor([300, 1]), i8)", "xs = cast(300, i8)"] {
+        let (_, result) = pipeline(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.message.contains("out of range")),
+            "{src}: {}",
+            errors_summary(&result)
         );
     }
 }

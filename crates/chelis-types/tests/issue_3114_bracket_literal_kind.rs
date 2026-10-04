@@ -20,6 +20,7 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_program;
 use chelis_surf::parser::parse_str;
 use chelis_surf::resugar::{normalize_deep_for_surface_roundtrip, resugar_program};
+use chelis_types::infer::infer_program;
 
 const PRELUDE: &str = "a = 1.5f64\nmacro half() = 1.5\nmacro minus_half() = neg(1.5)\n";
 
@@ -44,7 +45,8 @@ enum Declared {
     Nothing,
     List,
     Tensor,
-    Alias,
+    TensorAlias,
+    ListAlias,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -189,16 +191,37 @@ fn tensor_conversions(normalized: &str) -> usize {
     normalized.matches("(var {} to_tensor)").count()
 }
 
+enum Expected {
+    /// The literal is converted this many times.
+    Conversions(usize),
+    /// A bare literal under a tensor alias stays a `List` and the checker
+    /// rejects it as one.
+    RejectedAsList,
+}
+
 /// Checks one program and returns a failure description, if any.
-fn check(source: &str, expected_conversions: Option<usize>) -> Option<String> {
+fn check(source: &str, expected: Expected) -> Option<String> {
     let original = deep(source);
     let original_text = normalized(&original);
-    if let Some(expected) = expected_conversions {
-        let actual = tensor_conversions(&original_text);
-        if actual != expected {
+    let actual = tensor_conversions(&original_text);
+    match expected {
+        Expected::Conversions(expected) if actual != expected => {
             return Some(format!(
                 "kind: expected {expected} tensor conversion(s), found {actual}\n{source}{original_text}"
             ));
+        }
+        Expected::Conversions(_) => {}
+        Expected::RejectedAsList => {
+            let errors = infer_program(&original).errors;
+            let rejected_as_list = errors
+                .iter()
+                .any(|error| error.message.contains("List") && error.message.contains("tensor["));
+            if actual != 0 || !rejected_as_list {
+                return Some(format!(
+                    "a bare literal under a tensor alias must stay a List that the checker \
+                     rejects: {actual} conversion(s), errors {errors:?}\n{source}"
+                ));
+            }
         }
     }
     let resugared = match resugar_program(&original) {
@@ -220,7 +243,8 @@ fn declared_type(declared: Declared, nested: bool) -> Option<&'static str> {
         (Declared::List, true) => Some("List[List[f64]]"),
         (Declared::Tensor, false) => Some("tensor[2, f64]"),
         (Declared::Tensor, true) => Some("tensor[2, 2, f64]"),
-        (Declared::Alias, _) => Some("V"),
+        (Declared::TensorAlias, _) => Some("V"),
+        (Declared::ListAlias, _) => Some("L"),
     }
 }
 
@@ -234,16 +258,17 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
         .chain(std::iter::once((NESTED_FORM, true)));
     for ((form, literal), nested) in forms {
         let alias = if nested {
-            "type V = tensor[2, 2, f64]\n"
+            "type V = tensor[2, 2, f64]\ntype L = List[List[f64]]\n"
         } else {
-            "type V = tensor[2, f64]\n"
+            "type V = tensor[2, f64]\ntype L = List[f64]\n"
         };
         for position in POSITIONS {
             for declared in [
                 Declared::Nothing,
                 Declared::List,
                 Declared::Tensor,
-                Declared::Alias,
+                Declared::TensorAlias,
+                Declared::ListAlias,
             ] {
                 for spelling in [Spelling::Bare, Spelling::ToTensor] {
                     let written = match spelling {
@@ -258,12 +283,20 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
                     let tensor = spelling == Spelling::ToTensor
                         || (position.declares_kind && declared == Declared::Tensor);
                     // The desugarer reads a declaration's spelling, so a bare
-                    // literal under a tensor alias is not yet converted
-                    // (chelis#3114). Only the round trip is asserted there.
-                    let expected = (!(position.declares_kind
-                        && declared == Declared::Alias
-                        && spelling == Spelling::Bare))
-                        .then_some(if tensor { position.occurrences } else { 0 });
+                    // literal under a tensor alias stays a List, which the
+                    // checker rejects loudly (chelis#3114). Resolving only
+                    // local aliases would make the kind depend on where the
+                    // alias is declared; the typed-phase decision is
+                    // chelis#3122. A change that accepts these rows must
+                    // settle that decision, not pass unnoticed.
+                    let expected = if position.declares_kind
+                        && declared == Declared::TensorAlias
+                        && spelling == Spelling::Bare
+                    {
+                        Expected::RejectedAsList
+                    } else {
+                        Expected::Conversions(if tensor { position.occurrences } else { 0 })
+                    };
                     cases += 1;
                     if let Some(failure) = check(&source, expected) {
                         failures.push(format!(
@@ -275,7 +308,7 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
             }
         }
     }
-    assert!(cases > 600, "the matrix shrank to {cases} cases");
+    assert!(cases > 1000, "the matrix shrank to {cases} cases");
     assert!(
         failures.is_empty(),
         "{} of {cases} cases failed:\n\n{}",

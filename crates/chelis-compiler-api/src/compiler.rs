@@ -9088,7 +9088,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     #[test]
     fn issue_864_cast_constructed_f64_root_agrees_with_host_value() {
         let source = "module M.Main\n\
-            def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
+            def mk() -> tensor[2, f64] = cast(to_tensor([0.1f32, 0.3f32]), f64)\n\
             shown = print(mk())\n\
             troot = mk()\n";
 

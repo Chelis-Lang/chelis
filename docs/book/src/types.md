@@ -89,11 +89,11 @@ A prior consuming call such as `realize(x)` still makes a later read of `x` an
 error. Comparisons require matching dimensions and dtypes; borrowing does not
 permit implicit broadcasting or promotion.
 
-A local `to_tensor` binding that would capture the conversion of a
-tensor-typed binding's bracket literal is refused with a source location.
-Rename the binding to use a tensor literal there. An explicit call to the
-local function is an ordinary call: its bracket argument stays a `List` and
-adopts no dtype.
+A local `to_tensor` binding or parameter that would capture the conversion
+of a bracket literal under its declared tensor type is refused with a source
+location. Rename the binding to use a tensor literal there. An explicit call
+to the local function is an ordinary call: its bracket argument stays a
+`List` and adopts no dtype.
 
 ### Scalar ascriptions
 
