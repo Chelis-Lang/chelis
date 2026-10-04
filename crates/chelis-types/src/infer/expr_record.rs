@@ -1420,6 +1420,28 @@ pub(super) fn cast_result_from_source(
                 DeferredOperandGate::Cast {
                     target: new_prec,
                     mode,
+                    borrowed: false,
+                    result: Box::new(result.clone()),
+                    location: TypeDiagnosticLocation::from_expr(site),
+                },
+            );
+            result
+        }
+        // chelis#3101: `&v` over a still-unresolved `v` (a lambda parameter)
+        // is no settled source either. It suspends on `v`, and discharge
+        // decides the type the eager `borrow` arm gives `&settled` through the
+        // same function the eager arm calls.
+        Type::Ref(inner) if matches!(subst.apply(&inner), Type::Var(_)) => {
+            let Type::Var(source_var) = subst.apply(&inner) else {
+                unreachable!("guarded above");
+            };
+            let result = vg.fresh_type();
+            subst.record_deferred_tensor_operand(
+                source_var,
+                DeferredOperandGate::Cast {
+                    target: new_prec,
+                    mode,
+                    borrowed: true,
                     result: Box::new(result.clone()),
                     location: TypeDiagnosticLocation::from_expr(site),
                 },

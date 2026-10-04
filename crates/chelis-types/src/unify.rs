@@ -448,9 +448,15 @@ pub(crate) enum DeferredOperandGate {
     /// precision, the mode, and the result variable the call returned, which
     /// discharge unifies against once `cast`'s own decision function is called
     /// with the settled source type.
+    ///
+    /// `borrowed` records that the source was `&v` over the unresolved `v`
+    /// (chelis#3101). Discharge then decides the type the eager `borrow` arm
+    /// gives `&settled` ([`crate::infer::expr::settled_borrow_type`]), as the
+    /// eager cast would see it.
     Cast {
         target: crate::types::Prim,
         mode: chelis_deep::CastMode,
+        borrowed: bool,
         result: Box<Type>,
         location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
@@ -693,14 +699,25 @@ impl DeferredOperandGate {
             Self::Cast {
                 target,
                 mode,
+                borrowed,
                 ref result,
                 ..
             } => {
+                let source = if borrowed {
+                    match crate::infer::expr::settled_borrow_type(resolved.clone()) {
+                        Some(source) => source,
+                        // The eager `borrow` arm refuses this operand and the
+                        // eager cast then sees an error type and adds nothing.
+                        // The deferred borrow's own recheck
+                        // (`validate_deferred_borrow_vars`) reports that
+                        // refusal here, so the cast adds nothing either.
+                        None => return,
+                    }
+                } else {
+                    resolved.clone()
+                };
                 match crate::infer::expr_record::cast_result_from_settled_source(
-                    resolved.clone(),
-                    target,
-                    mode,
-                    subst,
+                    source, target, mode, subst,
                 ) {
                     Ok(settled) => {
                         self.reconcile_result(result, settled, subst);
@@ -2071,6 +2088,9 @@ impl Subst {
                 return true;
             };
             let decision = match gate {
+                // A borrowed source is decided only once it binds, as the
+                // eager `borrow` arm decides it (chelis#3101).
+                DeferredOperandGate::Cast { borrowed: true, .. } => None,
                 DeferredOperandGate::Cast { target, mode, .. } => {
                     crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode)
                 }

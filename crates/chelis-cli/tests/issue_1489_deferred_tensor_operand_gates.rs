@@ -226,6 +226,18 @@ fn eager_and_deferred_gates_agree_on_the_same_operand() {
         ("f64", "cast_trunc(v, i32)", "i32"),
         ("&tensor[3, f64]", "cast_trunc(v, i32)", "tensor[3, i32]"),
         ("&tensor[3, i32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
+        // chelis#3101: a borrow of the parameter itself, `&v`, is a borrow of
+        // a still-unresolved variable on the deferred path.
+        ("tensor[3, f32]", "cast(&v, f64)", "tensor[3, f64]"),
+        ("f32", "cast(&v, f64)", "f64"),
+        ("tensor[3, f32]", "cast_saturate(&v, i16)", "tensor[3, i16]"),
+        (
+            "tensor[3, bool]",
+            "cast_saturate(&v, i16)",
+            "tensor[3, i16]",
+        ),
+        ("tensor[3, i32]", "cast_wrap(&v, i8)", "tensor[3, i8]"),
+        ("tensor[3, f32]", "cast_wrap(&v, i8)", "tensor[3, i8]"),
     ];
     let mut divergences = Vec::new();
     for (ty, call, ret) in grid {
