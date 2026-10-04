@@ -220,14 +220,13 @@ fn assert_exact_tagged_c_callers(stem: &str, source: &str) {
             assert!(call.contains("CHELIS_DTYPE_I64"), "{call}");
         }
         "scalar_string_foundation" => {
-            let calls = source
-                .lines()
-                .filter(|line| line.contains("chelis_parse_scalar("))
-                .collect::<Vec<_>>();
+            // `to_int` and `to_float` lower to [05-OP-59]'s own entries, never
+            // to [05-OP-31]'s scalar-carrier parse (chelis#2870).
+            exact_call("chelis_to_int(");
+            exact_call("chelis_to_float(");
             assert!(
-                calls.iter().any(|line| line.contains("CHELIS_DTYPE_I64"))
-                    && calls.iter().any(|line| line.contains("CHELIS_DTYPE_F64")),
-                "[scalar_string_foundation] parse calls must carry both exact result dtypes:\n{source}"
+                !source.contains("chelis_parse_scalar("),
+                "[scalar_string_foundation] to_int/to_float must not lower to the scalar-carrier parse:\n{source}"
             );
         }
         "tensor_structural_ops" => {

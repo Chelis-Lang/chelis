@@ -7928,14 +7928,11 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::ToInt => EmittedExpr::call(
-                    "chelis_parse_scalar",
-                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_I64")],
-                ),
-                CExpressionBuiltin::ToFloat => EmittedExpr::call(
-                    "chelis_parse_scalar",
-                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_F64")],
-                ),
+                // [05-OP-59]'s parsers, not [05-OP-31]'s scalar-carrier
+                // `chelis_parse_scalar`, whose trimming, special spellings and
+                // overflow refusal belong to a different contract.
+                CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_to_int", [arg(0)]),
+                CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_to_float", [arg(0)]),
                 CExpressionBuiltin::TensorToScalar => match ty {
                     HostType::Float64 => EmittedExpr::call(
                         "chelis_host_scalar_as_float",

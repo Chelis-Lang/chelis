@@ -3222,6 +3222,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         atom: "[05-OP-31]",
         authority_anchor: "parsing accepts a strict\n> decimal superset",
     },
+    // The language parsers, distinct from the scalar-carrier parse above: each
+    // returns an owned option whose Some child is a tagged i64 or f64 scalar.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option * chelis_to_int ( chelis_string text ) ;",
+            &[],
+        ),
+        atom: "[05-OP-59]",
+        authority_anchor: "`to_int(text: string)->Option[i64]`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option * chelis_to_float ( chelis_string text ) ;",
+            &[],
+        ),
+        atom: "[05-OP-59]",
+        authority_anchor: "`to_float(text:\n> string)->Option[f64]`",
+    },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,

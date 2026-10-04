@@ -33,6 +33,7 @@ use metadata::{
 };
 mod ownership_ledger;
 pub mod public_headers;
+pub mod text_parse;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
@@ -4505,6 +4506,31 @@ pub unsafe extern "C" fn chelis_parse_scalar(
         Some(value) => new_option(Some(chelis_value_box_scalar(value)), "chelis_parse_scalar"),
         None => new_option(None, "chelis_parse_scalar"),
     }
+}
+
+/// [05-OP-59] `to_int` for compiled programs. The language builtin is not the
+/// scalar-carrier parse of `chelis_parse_scalar`; both lanes share
+/// [`text_parse::to_int`].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_to_int(text: chelis_string) -> *mut chelis_option {
+    let parsed = text_parse::to_int(&string_value(text).value).map(|value| {
+        chelis_value_box_scalar(chelis_scalar_from_bits(
+            CHELIS_DTYPE_I64,
+            u64::from_ne_bytes(value.to_ne_bytes()),
+        ))
+    });
+    new_option(parsed, "chelis_to_int")
+}
+
+/// [05-OP-59] `to_float` for compiled programs: a finite spelling that
+/// overflows f64 yields a signed infinity, not `None`. Both lanes share
+/// [`text_parse::to_float`].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_to_float(text: chelis_string) -> *mut chelis_option {
+    let parsed = text_parse::to_float(&string_value(text).value).map(|value| {
+        chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
+    });
+    new_option(parsed, "chelis_to_float")
 }
 
 #[no_mangle]

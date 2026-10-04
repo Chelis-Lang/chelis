@@ -3754,14 +3754,14 @@ impl<'a> EvalContext<'a> {
             ))),
             "to_int" => {
                 let value = expect_string_arg(args, 0)?;
-                Ok(match value.trim().parse::<i64>() {
-                    Ok(parsed) => RuntimeValue::Adt {
+                Ok(match chelis_runtime::text_parse::to_int(&value) {
+                    Some(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
                         source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::int64(parsed)].into(),
                         field_names: None,
                     },
-                    Err(_) => RuntimeValue::Adt {
+                    None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
                         source_name: "None".to_string(),
                         fields: Vec::new().into(),
@@ -3771,14 +3771,14 @@ impl<'a> EvalContext<'a> {
             }
             "to_float" => {
                 let value = expect_string_arg(args, 0)?;
-                Ok(match value.trim().parse::<f64>() {
-                    Ok(parsed) => RuntimeValue::Adt {
+                Ok(match chelis_runtime::text_parse::to_float(&value) {
+                    Some(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
                         source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::float64(parsed)].into(),
                         field_names: None,
                     },
-                    Err(_) => RuntimeValue::Adt {
+                    None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
                         source_name: "None".to_string(),
                         fields: Vec::new().into(),
