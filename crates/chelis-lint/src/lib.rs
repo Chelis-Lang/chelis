@@ -505,7 +505,9 @@ mod tests {
     use tempfile::tempdir;
 
     /// chelis#3108: parallel entry checking returns exactly the serial result,
-    /// in walk order, even when later entries finish first.
+    /// in walk order, even when later entries finish first. The worker count
+    /// comes from `available_parallelism`; on a one-core runner the helper
+    /// takes its serial path and this test does not exercise parallel order.
     #[test]
     fn parallel_entry_checks_match_serial_order() {
         let entries: Vec<walker::Entry> = (0..64)

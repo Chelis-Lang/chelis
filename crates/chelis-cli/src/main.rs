@@ -12812,6 +12812,7 @@ impl TypedRewriteGate {
         accepted
     }
 
+    #[cfg(test)]
     fn pipeline_runs(&self) -> usize {
         self.files.values().map(|stats| stats.pipeline_runs).sum()
     }
