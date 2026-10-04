@@ -14,7 +14,8 @@
 //! replays that narrowed a binder (chelis#2537).
 //!
 //! Every program is asserted on both checker ingresses (chelis#1107), and each
-//! rejection has an accepted twin that differs only in the operand's type.
+//! rejection has an accepted control. Gather also requires a literal axis
+//! under [05-AXIS-2], so its positive control uses that static spelling.
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
@@ -374,7 +375,25 @@ fn an_unresolved_axis_is_constrained_to_i32() {
                 report.errors
             );
         }
-        accepts(&program.replace("0i64)", &format!("{valid})")));
+        let correctly_typed = program.replace("0i64)", &format!("{valid})"));
+        if call.starts_with("gather(") {
+            // [05-AXIS-2]: the lambda parameter remains a variable even
+            // when its application supplies a literal. Its i32 constraint
+            // is necessary but does not establish gather's static geometry.
+            rejects_with(
+                &correctly_typed,
+                &["gather axis must be an i32 integer constant", "[05-AXIS-2]"],
+            );
+            accepts(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i32)",
+            );
+            rejects_with(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i64)",
+                &["gather argument 3 (axis)", "expected i32, got i64"],
+            );
+        } else {
+            accepts(&correctly_typed);
+        }
     }
 }
 

@@ -2112,6 +2112,26 @@ pub(super) fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)>
     }
 }
 
+/// Gather's static spelling must not hide a float-valued intermediate cast.
+/// Keep this admission rule separate from the broader dimension readers.
+pub(super) fn gather_axis_has_integer_casts(expr: &deep::Expr) -> bool {
+    stack_guard!("gather_axis_has_integer_casts", expr, false);
+    if let Some((inner, target)) = peel_cast(expr) {
+        return [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64]
+            .into_iter()
+            .any(|prim| is_target_ty(target, prim))
+            && gather_axis_has_integer_casts(inner);
+    }
+    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+        && kids
+            .first()
+            .is_some_and(|callee| is_builtin_var(callee, "neg"))
+    {
+        return kids.get(1).is_some_and(gather_axis_has_integer_casts);
+    }
+    extract_int_literal(expr).is_some()
+}
+
 /// Treat `(t-prim {} <name>)` as the target type marker emitted by
 /// `cast(..., i64)` etc. Returns true iff the marker matches `prim`.
 pub(super) fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {

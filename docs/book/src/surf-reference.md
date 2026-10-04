@@ -214,6 +214,15 @@ sorted_values = sort(diag, 0).0
 sorted_indices = sort(diag, 0).1
 ```
 
+`gather` determines its result shape from the selected axis, so its i32 axis
+must be a literal or an integer-cast-wrapped literal, including negative
+axes. Variables, helper calls and other computed expressions are rejected
+at checking, even if they return a constant. `sort` preserves the input
+shape and accepts computed i32 axes; invalid runtime axes trap in both
+execution lanes. Negative axes count from the end. These rules are
+specified by [05-AXIS-2] in `spec/05-risc-primitives.md`; reductions,
+`expand` and `insert` retain their static constant-or-named-axis rule.
+
 When projecting through nested tuples, group the inner numeric projection so
 the next suffix cannot merge with it as a float:
 

@@ -902,10 +902,27 @@ pub(super) fn finish_unified_app(
                 {
                     return err;
                 }
+                let Some(raw_axis) = kids
+                    .get(3)
+                    .filter(|axis| gather_axis_has_integer_casts(axis))
+                    .and_then(extract_int_for_dim)
+                else {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_node_provenance(
+                                node,
+                                "gather axis must be an i32 integer constant (a literal or an integer-cast-wrapped literal); variables and helper calls cannot determine the result shape [05-AXIS-2]".to_string(),
+                            ),
+                            vec![],
+                        ),
+                    );
+                };
                 let route = ShapeRoute::Gather {
                     op: "gather".to_string(),
                     indices: Box::new(type_for_readonly_check(&arg_tys[1], subst)),
-                    raw_axis: kids.get(3).and_then(extract_int_for_dim),
+                    raw_axis: Some(raw_axis),
                     updates: None,
                     mode: None,
                 };

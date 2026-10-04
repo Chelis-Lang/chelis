@@ -6137,6 +6137,12 @@ pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
 /// `cast`-axis fix must not lose the `-1` axis form that `softmax(x, -1)`
 /// (and the SDPA grad path) depend on.
 pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
+    // An integer cast can contain the negative-literal App carrier, notably
+    // cast(-1i64, i32). Recurse through the axis reader so that carrier keeps
+    // the same static interpretation as an outer negation.
+    if let ExprCarrier::DecodedNode(DeepTag::Cast, _, kids) = expr.carrier() {
+        return extract_int_axis(kids.first()?);
+    }
     if let Some(n) = extract_int_for_dim(expr) {
         return Some(n);
     }
@@ -6154,7 +6160,7 @@ pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
         && let Some(inner) = kids.get(1)
         && let Some(n) = extract_int_axis(inner)
     {
-        return Some(-n);
+        return n.checked_neg();
     }
     None
 }
