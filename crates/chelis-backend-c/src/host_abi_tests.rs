@@ -527,7 +527,7 @@ fn manifest_root_clone_terminal_and_consume_emit_in_verified_order_once() {
 #[test]
 fn loop_source_release_is_emitted_after_the_loop_not_on_each_back_edge() {
     let verified = verified_host_from_source(
-        "xs = [1i64, 2i64]\n\
+        "xs: List[i64] = [1i64, 2i64]\n\
          ys = map(fn (v: i64) -> v, xs)\n",
     );
     let emitted = crate::codegen_host_program(&verified, "loop_exit_release")

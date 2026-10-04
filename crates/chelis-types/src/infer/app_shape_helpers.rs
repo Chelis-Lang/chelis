@@ -74,6 +74,37 @@ pub(super) fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usiz
     Some(out)
 }
 
+/// Preserve a proved shape conflict separately from an unknown runtime
+/// shape. [05-OP-57] requires known inconsistent children to reject.
+pub(super) fn static_to_tensor_shape_status(expr: &deep::Expr) -> Result<Option<Vec<usize>>, ()> {
+    stack_guard!("static_to_tensor_shape_status", expr, Ok(None));
+    let Some(elements) = collect_cons_chain_for_shape(expr) else {
+        return Ok(extract_numeric_leaf_for_shape(expr).map(|()| Vec::new()));
+    };
+    let mut inner_shape = None;
+    let mut all_known = true;
+    for element in &elements {
+        match static_to_tensor_shape_status(element)? {
+            Some(shape) => {
+                if inner_shape
+                    .as_ref()
+                    .is_some_and(|previous| previous != &shape)
+                {
+                    return Err(());
+                }
+                inner_shape = Some(shape);
+            }
+            None => all_known = false,
+        }
+    }
+    if !all_known {
+        return Ok(None);
+    }
+    let mut shape = vec![elements.len()];
+    shape.extend(inner_shape.unwrap_or_default());
+    Ok(Some(shape))
+}
+
 /// Collect a `Cons(head, Cons(head, ..., Nil))` chain into a vector
 /// of head expressions. Returns `None` if the chain isn't closed by
 /// `Nil` or contains a non-Cons app. Local helper for

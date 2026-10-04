@@ -184,11 +184,11 @@ def test_vectorized_forms_cover_horizon_edges() -> unit ! { Test } = {
   _ = assert_eq(to_list(dates_is_business_day(single, days_of(20458i64, 1i64))), [true], "a one-day horizon")
   _ = assert_eq(to_list(dates_business_day_count(single, dates_from_epoch_days(to_tensor([20458i64, 20459i64])), dates_from_epoch_days(to_tensor([20459i64, 20458i64])))), [1i64, -1i64], "to and from the day after a one-day horizon")
   everything = business_calendar(weekdays(), map(fn (x: i64) -> date_from_epoch_day(x), [-4371587i64, -4371584i64, 2932896i64, 2932893i64]), date_from_epoch_day(-4371587i64), date_from_epoch_day(2932896i64))
-  edges = [-4371587i64, -4371586i64, -4371585i64, -4371584i64, 2932893i64, 2932894i64, 2932895i64, 2932896i64]
+  edges: List[i64] = [-4371587i64, -4371586i64, -4371585i64, -4371584i64, 2932893i64, 2932894i64, 2932895i64, 2932896i64]
   edge_dates = map(fn (x: i64) -> date_from_epoch_day(x), edges)
   _ = assert_eq(to_list(dates_is_business_day(everything, dates_from_epoch_days(to_tensor(edges)))), map(fn (d: Date) -> is_business_day(everything, d), edge_dates), "flags at both ends of the range")
   starts = take(edges, 4i64)
-  ends = [2932893i64, 2932894i64, 2932895i64, 2932896i64]
+  ends: List[i64] = [2932893i64, 2932894i64, 2932895i64, 2932896i64]
   _ = assert_eq(to_list(dates_epoch_days(dates_business_day_offset(everything, dates_from_epoch_days(to_tensor(starts)), to_tensor([1i64, 1i64, 1i64, 1i64]), RollStartForward))), map(fn (x: i64) -> date_epoch_day(business_day_offset(everything, date_from_epoch_day(x), 1i64, RollStartForward)), starts), "offsets forward from the start of the range")
   _ = assert_eq(to_list(dates_epoch_days(dates_business_day_offset(everything, dates_from_epoch_days(to_tensor(ends)), to_tensor([-1i64, -1i64, -1i64, -1i64]), RollStartBackward))), map(fn (x: i64) -> date_epoch_day(business_day_offset(everything, date_from_epoch_day(x), -1i64, RollStartBackward)), ends), "offsets backward from the end of the range")
   assert_eq(to_list(dates_business_day_count(everything, days_of(-4371587i64, 1i64), days_of(2932896i64, 1i64))), [business_day_count(everything, date_from_epoch_day(-4371587i64), date_from_epoch_day(2932896i64))], "the whole range")
@@ -204,9 +204,9 @@ def test_vectorized_forms_answer_repeated_and_holiday_days() -> unit ! { Test } 
   _ = assert_eq(to_list(dates_is_business_day(cal, dates_from_epoch_days(to_tensor(days)))), map(fn (d: Date) -> is_business_day(cal, d), dates), "flags")
   rolls = [Following, Preceding, ModifiedFollowing, ModifiedPreceding]
   _ = assert_eq(map(fn (r: BusinessDayRoll) -> to_list(dates_epoch_days(dates_business_day_roll(cal, dates_from_epoch_days(to_tensor(days)), r))), rolls), map(fn (r: BusinessDayRoll) -> scalar_days(map(fn (d: Date) -> business_day_roll(cal, d, r), dates)), rolls), "rolls")
-  offsets = [1i64, -1i64, 2i64, 1i64, 0i64, -2i64, 3i64, 0i64, 1i64, -3i64, 5i64]
+  offsets: List[i64] = [1i64, -1i64, 2i64, 1i64, 0i64, -2i64, 3i64, 0i64, 1i64, -3i64, 5i64]
   _ = assert_eq(to_list(dates_epoch_days(dates_business_day_offset(cal, dates_from_epoch_days(to_tensor(days)), to_tensor(offsets), RollStartForward))), scalar_days(map(fn (pair: (Date, i64)) -> business_day_offset(cal, pair.0, pair.1, RollStartForward), zip(dates, offsets))), "offsets")
-  ends = [20456i64, 20473i64, 20473i64, 20819i64, 20474i64, 20811i64, 20473i64, 20456i64, 20812i64, 20473i64, 20473i64]
+  ends: List[i64] = [20456i64, 20473i64, 20473i64, 20819i64, 20474i64, 20811i64, 20473i64, 20456i64, 20812i64, 20473i64, 20473i64]
   assert_eq(to_list(dates_business_day_count(cal, dates_from_epoch_days(to_tensor(days)), dates_from_epoch_days(to_tensor(ends)))), map(fn (pair: (Date, i64)) -> business_day_count(cal, pair.0, date_from_epoch_day(pair.1)), zip(dates, ends)), "counts between repeated and holiday days")
 }
 def test_vectorized_forms_do_not_answer_holidays_as_business_days() -> unit ! { Test } = {

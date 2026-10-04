@@ -168,7 +168,7 @@ fn shared_line<'a>(stdout: &'a str, name: &str) -> &'a str {
 //    checked allocator, silent use-after-free otherwise.
 // ---------------------------------------------------------------------------
 
-const CAPTURED_COPY: &str = "g = [1i64, 2i64]\n\
+const CAPTURED_COPY: &str = "g: List[i64] = [1i64, 2i64]\n\
 def my_take() -> i64 = {\n\
   y = g\n\
   len(y)\n\
