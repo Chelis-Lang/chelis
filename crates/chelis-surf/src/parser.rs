@@ -430,6 +430,19 @@ impl Parser {
             .map(|token| &token.kind)
     }
 
+    /// The record-update operator and delimited device handler share `with`.
+    /// Use the actual update introducer in both parsing and the pipe guard.
+    fn starts_record_update(&self, start: usize) -> bool {
+        let mut kinds = self
+            .tokens
+            .iter()
+            .skip(start)
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .map(|token| &token.kind);
+        matches!(kinds.next(), Some(TokenKind::With))
+            && matches!(kinds.next(), Some(TokenKind::LBrace))
+    }
+
     fn find_top_level_token(&self, wanted: TokenKind) -> Option<usize> {
         let mut paren = 0usize;
         let mut bracket = 0usize;
@@ -1988,9 +2001,7 @@ impl Parser {
                 continue;
             }
 
-            if *self.peek() == TokenKind::With
-                && self.peek_significant_after(1) == Some(&TokenKind::LBrace)
-            {
+            if self.starts_record_update(self.pos) {
                 let start = expression_span(&lhs);
                 self.advance();
                 let fields = self.parse_record_fields()?;
@@ -2112,10 +2123,10 @@ impl Parser {
                 | TokenKind::Bang
                 | TokenKind::Amp
                 | TokenKind::Colon
-                | TokenKind::With
                 | TokenKind::If
                 | TokenKind::Match
                 | TokenKind::Fn => mixed = true,
+                TokenKind::With if self.starts_record_update(index - 1) => mixed = true,
                 _ => {}
             }
         }

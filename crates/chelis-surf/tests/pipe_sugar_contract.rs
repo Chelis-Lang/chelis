@@ -10,6 +10,58 @@ fn meaning(source: &str) -> String {
 }
 
 #[test]
+fn delimited_handlers_are_atoms_while_record_updates_require_grouping() {
+    for (pipe, call) in [
+        (
+            "with device(\"cpu\") { x } |> f",
+            "f(with device(\"cpu\") { x })",
+        ),
+        (
+            "(with device(\"cpu\") { x }) |> f",
+            "f(with device(\"cpu\") { x })",
+        ),
+        (
+            "x |> with device(\"cpu\") { f }",
+            "(with device(\"cpu\") { f })(x)",
+        ),
+        (
+            "x |> (with device(\"cpu\") { f })",
+            "(with device(\"cpu\") { f })(x)",
+        ),
+    ] {
+        let source = format!("out = {pipe}\n");
+        let expected = meaning(&format!("out = {call}\n"));
+        assert_eq!(meaning(&source), expected, "{pipe}");
+        let formatted = format_source(&source).unwrap();
+        assert_eq!(meaning(&formatted), expected, "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+    for expression in [
+        "r with { a: x } |> f",
+        "r with\n{ a: x } |> f",
+        "x |> r with { a: f }",
+        "with device(\"cpu\") { a + b |> f }",
+        "with device(\"cpu\") x |> f",
+        "with unknown(\"cpu\") { x } |> f",
+    ] {
+        assert!(
+            parse_str(&format!("out = {expression}\n")).is_err(),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "(r with { a: x }) |> f",
+        "x |> (r with { a: f })",
+        "with device(\"cpu\") { (a + b) |> f } |> g",
+    ] {
+        let source = format!("out = {expression}\n");
+        let formatted = format_source(&source).unwrap();
+        assert_eq!(meaning(&source), meaning(&formatted));
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+#[test]
 fn every_named_cast_stage_preserves_its_mode_and_rejects_a_mismatched_descriptor() {
     use chelis_deep::{CastMode, NamedCastMode};
     use chelis_surf::ast::{Decl, Expr, PipeStageSyntax};

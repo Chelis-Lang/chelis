@@ -235,6 +235,31 @@ mod tests {
 
     #[test]
     fn pipes_require_explicit_grouping_at_every_operator_family() {
+        for source in [
+            "out = with device(\"cpu\") { x } |> f\n",
+            "out = (with device(\"cpu\") { x }) |> f\n",
+            "out = x |> with device(\"cpu\") { f }\n",
+            "out = x |> (with device(\"cpu\") { f })\n",
+            "out = (r with { a: x }) |> f\n",
+            "out = x |> (r with { a: f })\n",
+            "out = (x |> f) with { a: y }\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+            let formatted = chelis_surf::format::format_source(source).unwrap();
+            assert_surf_parser_parity(&formatted, true);
+            assert_eq!(
+                chelis_surf::format::format_source(&formatted).unwrap(),
+                formatted
+            );
+        }
+        for source in [
+            "out = r with { a: x } |> f\n",
+            "out = x |> r with { a: f }\n",
+            "out = with device(\"cpu\") { a + b |> f }\n",
+            "out = with device(\"cpu\") x |> f\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
         for op in [
             "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||",
         ] {

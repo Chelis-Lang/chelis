@@ -360,7 +360,7 @@ module.exports = grammar({
       prec.right(
         PREC.recordUpdate,
         seq(
-          field("value", $.expression),
+          field("value", $._open_form_expression),
           "with",
           "{",
           commaSep1(choice($.record_field, $.record_pun)),

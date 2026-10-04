@@ -18,6 +18,70 @@ fn deep(path: &Path) -> String {
 }
 
 #[test]
+fn device_handler_operands_survive_check_eval_fmt_and_decompilation() {
+    use chelis_compiler_api::schema::ExecutionValue;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("handler.ch");
+    for expression in [
+        "with device(\"cpu\") { 3i32 } |> inc",
+        "(with device(\"cpu\") { 3i32 }) |> inc",
+        "3i32 |> with device(\"cpu\") { inc }",
+        "3i32 |> (with device(\"cpu\") { inc })",
+        "inc(with device(\"cpu\") { 3i32 })",
+        "(with device(\"cpu\") { inc })(3i32)",
+    ] {
+        fs::write(
+            &path,
+            format!("def inc(x: i32) -> i32 = x + 1i32\nout = {expression}\n"),
+        )
+        .unwrap();
+        let formatted = run(&["fmt", path.to_str().unwrap()]);
+        assert!(formatted.status.success(), "{expression}: {formatted:?}");
+        fs::write(&path, &formatted.stdout).unwrap();
+        let again = run(&["fmt", path.to_str().unwrap()]);
+        assert!(again.status.success(), "{expression}: {again:?}");
+        assert_eq!(again.stdout, formatted.stdout);
+        let checked = run(&["check", path.to_str().unwrap()]);
+        assert!(checked.status.success(), "{expression}: {checked:?}");
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(report["score"], 1.0);
+        assert_eq!(report["errors"], serde_json::json!([]));
+        let evaluated = run(&["eval", "--json", "--file", path.to_str().unwrap()]);
+        assert!(evaluated.status.success(), "{expression}: {evaluated:?}");
+        let report: serde_json::Value = serde_json::from_slice(&evaluated.stdout).unwrap();
+        let roots = report["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 1);
+        let ExecutionValue::Scalar { value } =
+            serde_json::from_value(roots[0]["value"].clone()).unwrap()
+        else {
+            panic!("expected tagged scalar")
+        };
+        assert_eq!(value.get().prim().name(), "i32");
+        assert_eq!(value.get().as_f64_lossy(), 4.0);
+        let dp = dir.path().join("handler.dp");
+        fs::write(&dp, deep(&path)).unwrap();
+        let surface = run(&["surf", dp.to_str().unwrap()]);
+        assert!(surface.status.success(), "{surface:?}");
+        fs::write(&path, &surface.stdout).unwrap();
+        let canonical = run(&["fmt", path.to_str().unwrap()]);
+        assert!(canonical.status.success(), "{canonical:?}");
+        assert_eq!(canonical.stdout, surface.stdout);
+    }
+    for expression in [
+        "3i32 with { a: 1i32 } |> inc",
+        "with device(\"cpu\") { 3i32 + 1i32 |> inc }",
+        "with device(\"cpu\") 3i32 |> inc",
+    ] {
+        fs::write(&path, format!("out = {expression}\n")).unwrap();
+        let rejected = run(&["check", path.to_str().unwrap()]);
+        assert!(!rejected.status.success(), "{expression}: {rejected:?}");
+        let report: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(report["components"]["parse"], 0.0);
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn named_cast_pipe_stages_preserve_values_and_rejected_dtype_pairs() {
     use chelis_compiler_api::schema::ExecutionValue;
     let dir = tempdir().unwrap();

@@ -22,6 +22,8 @@ in `pipe_sugar_contract` compare normalized expanded Deep for both spellings.
 
 The guard checks each expression's top-level token range, skipping matched
 delimiters. It rejects mixing with non-pipe operators and open-ended forms.
+The parser and guard share the `with { ... }` record-update discriminator;
+`with device(...) { ... }` is a delimited operand, including in either pipe position.
 Migration alone can parse the previous grouping, and prints parentheses for that
 AST rather than guessing from precedence in the new grammar. The Surf tree-sitter
 grammar enforces the same guard. The Deep tree-sitter grammar describes generic
@@ -53,6 +55,8 @@ cargo test -p tree-sitter-chelis pipes_require_explicit_grouping_at_every_operat
 
 These named suites together are the acceptance oracle: call/pipe equality before
 checking; guard family positive/negative parity; macro grouping; fmt fixed points;
+delimited-handler seed/stage parser/tree agreement and executable value parity
+with record-update and malformed-handler rejection controls;
 call-only decompilation; contextual callable-origin and opaque-property injection
 parity; explicit old-Deep rejection; migration dtype evidence and
 batch failure; preserved cast values; authored type, arity and ownership spans and
