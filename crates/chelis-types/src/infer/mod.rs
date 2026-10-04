@@ -138,6 +138,7 @@ mod static_int;
 mod static_value;
 mod type_derivation;
 mod validate;
+mod validate_core_transform;
 mod vmap_extent;
 
 use annotate::*;
@@ -184,6 +185,7 @@ pub use static_int::fold_static_int_expr;
 use static_value::*;
 use type_derivation::*;
 use validate::*;
+use validate_core_transform::*;
 use vmap_extent::*;
 
 pub use checked::{
