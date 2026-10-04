@@ -41,11 +41,12 @@ lengths.
   It becomes a tensor only through `to_tensor([1.0, 2.0, 3.0])`, which has type
   `tensor[3, f32]`, or where its own binding or function result declares a
   tensor type, as in `xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Nested brackets
-  supply a tensor's dimensions. A tensor parameter or a `cast` never converts
-  a bracket literal, so write `f(to_tensor([1.0, 2.0]))` and
-  `cast(to_tensor([1.1, 2.2]), f64)`; there the unsuffixed elements adopt the
-  parameter's or the target's dtype. Explicit suffixes remain exact; mixed
-  dtypes and ragged tensor literals are rejected.
+  supply a tensor's dimensions, and the declaration gives the unsuffixed
+  elements its element dtype. A tensor parameter or a `cast` never converts a
+  bracket literal, and `to_tensor` keeps each element's suffix or default, so
+  write `f(to_tensor([1.0f64, 2.0f64]))` for an `f64` tensor argument:
+  `cast(to_tensor([1.1, 2.2]), f64)` widens `f32` values. Explicit suffixes
+  remain exact; mixed dtypes and ragged tensor literals are rejected.
 
 An empty list supplies no element values from which to determine a tensor's
 dtype. Give the list an element type before converting it:
@@ -93,7 +94,7 @@ A local `to_tensor` binding or parameter that would capture the conversion
 of a bracket literal under its declared tensor type is refused with a source
 location. Rename the binding to use a tensor literal there. An explicit call
 to the local function is an ordinary call: its bracket argument stays a
-`List` and adopts no dtype.
+`List`.
 
 ### Scalar ascriptions
 

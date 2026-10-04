@@ -4,8 +4,9 @@
 //! `spec/02-surf-syntax.md` §P10b and `spec/04-type-system.md` §5.6: an
 //! unannotated bracket literal is a `List` whatever its element spelling; a
 //! tensor literal is `to_tensor([...])` or a bare literal under its own
-//! declared tensor type; and the bracket-literal argument of a `to_tensor`
-//! call in an adopting position takes that position's dtype.
+//! declared tensor type, which also gives its literals the element dtype; and
+//! the argument of a `to_tensor` call is an ordinary `List` whose literals
+//! keep their suffix or the literal default.
 #[path = "common/mod.rs"]
 mod common;
 use assert_cmd::Command;
@@ -137,17 +138,19 @@ fn unannotated_bracket_literals_are_lists_in_every_lane_and_after_resugaring() {
     }
 }
 
+/// A bare bracket literal under its own declared tensor type, and a
+/// `to_tensor` call whose elements carry their suffix, keep the declared
+/// dtype's exact bits in both lanes and through `chelis surf` (chelis#3080).
 #[test]
-fn a_tensor_literal_in_an_adopting_position_keeps_its_bits_through_resugaring() {
+fn a_declared_or_suffixed_tensor_literal_keeps_its_bits_through_resugaring() {
     const EXACT: [&str; 2] = ["3ff199999999999a", "400199999999999a"];
     for (index, declarations) in [
-        // chelis#3080: the cast silently rounded through f32.
-        "values = cast(to_tensor([1.1, 2.2]), f64)\n",
-        "def ident(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = ident(to_tensor([1.1, 2.2]))\n",
+        "values = cast(to_tensor([1.1f64, 2.2f64]), f64)\n",
+        "def ident(x: tensor[2, f64]) -> tensor[2, f64] = x\nvalues = ident(to_tensor([1.1f64, 2.2f64]))\n",
         "def make() -> tensor[2, f64] = [1.1, 2.2]\nvalues = make()\n",
         "sig make: i32 -> tensor[2, f64]\ndef make(n) = [1.1, 2.2]\nvalues = make(1)\n",
         "values: tensor[2, f64] = [1.1, 2.2]\n",
-        "values: tensor[2, f64] = to_tensor([1.1, 2.2])\n",
+        "values: tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n",
         "def make() -> tensor[2, f64] = {\n  inner: tensor[2, f64] = [1.1, 2.2]\n  inner\n}\nvalues = make()\n",
     ]
     .into_iter()
@@ -180,6 +183,8 @@ fn a_tensor_literal_in_an_adopting_position_keeps_its_bits_through_resugaring() 
     }
 }
 
+/// A cast or a callee's tensor parameter never converts a bare bracket
+/// literal: it is a `List`.
 #[test]
 fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
     for (index, declarations) in [
@@ -206,4 +211,18 @@ fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
             "{declarations} must be rejected as a List: {report}"
         );
     }
+    // A `to_tensor` argument is an ordinary List: under an f64 cast its
+    // unsuffixed decimals keep the f32 default, so the suffix is what keeps
+    // the value.
+    let directory = tempdir().expect("tempdir");
+    common::write_file(
+        &directory.path().join("wrapped.ch"),
+        "values = cast(to_tensor([1.1, 2.2]), f64)\n",
+    );
+    let report = eval_json(directory.path(), "wrapped.ch");
+    assert_eq!(
+        f64_bits(&root(&report, "values")["value"]),
+        ["3ff19999a0000000", "40019999a0000000"],
+        "{report}"
+    );
 }

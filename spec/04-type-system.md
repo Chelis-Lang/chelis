@@ -2157,40 +2157,38 @@ and Deep (`spec/03-deep-syntax.md` §6.4).
 ### 5.6 Contextual Tensor-Literal Inference
 
 A bracket literal is a `List`, whatever its elements and wherever it stands. A
-tensor literal is the bracket-literal argument of a `to_tensor` call, or a bare
-bracket literal whose own binding or function result declares a tensor type
-(`spec/02-surf-syntax.md` §P10b); no other context converts a bracket literal.
+**tensor literal** is a bare bracket literal whose own binding or function
+result declares a tensor type (`spec/02-surf-syntax.md` §P10b): the declaration
+converts it, and no other context does. A `to_tensor` call converts its
+argument, which is an ordinary `List`: its numeric literals bind at their
+suffix or the §5.3 default, so `to_tensor([1.1f64, 2.2f64])` is a
+`tensor[2, f64]` and `to_tensor([1.1, 2.2])` a `tensor[2, f32]` wherever the
+call stands.
 
-When a tensor literal appears in a position with a **known element type**, the
-numeric literals in the tensor body adopt that element type instead of the
-literal default in §5.3. The closed set of "known-element-type" positions is
-exactly:
+A position with a **known element type** gives a literal that dtype instead of
+the literal default in §5.3. The closed set of such positions is exactly:
 
-1. the right-hand side of a binding whose declared type is a tensor type, e.g.
-   `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
-2. the corresponding argument position of a call whose callee has a declared
-   signature whose parameter at that position is a tensor type, e.g.
-   `f(to_tensor([1.0, 2.0, 3.0]))` where `f : tensor[3, f64] -> ...`
-3. the body expression of a function with a declared return type that is a
-   tensor type, when the body is a tensor literal
-4. the first argument of a `cast(literal, p)` expression, where `p` is a
-   precision type literal or a dtype-bounded type binder
-   ([04-DTYPE-2]) — the literal body adopts `p`
+- **Position 1**: the right-hand side of a binding whose declared type is a
+  tensor type, when the right-hand side is a tensor literal, e.g.
+  `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Its numeric literals adopt the
+  element type.
+- **Position 3**: the body of a function whose declared return type is a
+  tensor type, when the body is a tensor literal. Its numeric literals adopt
+  the element type.
+- **Position 4**: the first argument of a `cast(literal, p)` expression, where
+  the literal is a bare scalar numeric literal and `p` is a precision type
+  literal or a dtype-bounded type binder ([04-DTYPE-2]). The literal adopts
+  `p`.
 
-The bracket-literal argument of a `to_tensor` call that stands in one of these
-positions takes that position's element type, exactly as a bare bracket
-literal in position 1 or 3 does: `cast(to_tensor([1.1, 2.2]), f64)` binds both
-decimals at `f64` and does not round them through the `f32` default. The kind
-is fixed in positions 2 and 4: a callee's tensor parameter or a `cast` never
-converts a bare bracket literal, which stays a `List` there. A call through a
-lexical binding that shadows `to_tensor` is an ordinary call and adopts
-nothing.
+A callee's declared parameter type and a `cast` never make a bracket literal a
+tensor: a bare bracket literal passed as an argument or cast stays a `List`,
+and a tensor argument or tensor cast operand is a `to_tensor` call whose
+elements carry the dtype they keep, e.g. `cast(to_tensor([1.1f64, 2.2f64]), p)`.
 
-Position 4 applies to a **bare scalar numeric literal** as well as to a
-tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
-at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
-`f32` default and then widen (which would yield the f32-truncation value
-`1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
+Position 4 adopts a **bare scalar numeric literal**. `cast(1.1, f64)` binds
+the decimal `1.1` at `f64` — exactly `0x3ff199999999999a` — it does NOT
+narrow to the §5.3 `f32` default and then widen (which would yield the
+f32-truncation value `1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
 at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
 work. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
 finiteness checks apply at `p`: `cast(2147483648, i32)` is still a range
@@ -2207,19 +2205,18 @@ float source type because a decimal cannot bind at an integer type; the
 explicit cast then applies [04-NUM-14], accepting only a finite integral
 value in range and trapping `Domain` on a fractional value.
 
-The set is closed on purpose. Positions 1–3 adopt **tensor-literal
+The set is closed on purpose. Positions 1 and 3 adopt **tensor-literal
 bodies** only: a tensor's element type is a single property of the value,
-stated once in its type, and the body is bulk data — a per-element suffix
-on a thousand-element weights literal is noise that buries the one
-element that differs. Position 4 adopts a **bare scalar**, but its target
-dtype is spelled at the site and the position exists for
-**expressibility**, not convenience: without it `cast(3000000000, i64)`
-cannot be written at all, and `cast(1.1, f64)` would round through the
-`f32` default. What no position does is adopt a **list literal, or a
-scalar against a remote callee signature** — position 2 reaches through a
-signature, but only into a tensor body — and none should be added for
-ergonomics alone. A structural argument — a shape list, a bounds pair, a
-stride step — is program rather than payload, and under
+stated once in the declaration that makes the bracket literal a tensor, and
+the body is bulk data — a per-element suffix on a thousand-element weights
+literal is noise that buries the one element that differs. Position 4 adopts
+a **bare scalar**, but its target dtype is spelled at the site and the
+position exists for **expressibility**, not convenience: without it
+`cast(3000000000, i64)` cannot be written at all, and `cast(1.1, f64)` would
+round through the `f32` default. What no position does is adopt a **list
+literal, or reach through a remote callee signature**, and none should be
+added for ergonomics alone. A structural argument — a shape list, a bounds
+pair, a stride step — is program rather than payload, and under
 `spec/05-risc-primitives.md` [05-DIM-1] its dtype states which KIND of
 quantity it is: an extent is `i64` and an axis is `i32`, so a
 context-inferred `[2, 2]` would hide exactly the distinction the dtype
@@ -2228,16 +2225,16 @@ agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
 context-dependent literals is paid on every audit.
 
-Outside this closed set, numeric literals in a tensor body fall back to the
-§5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
+Outside this closed set, numeric literals keep the §5.3 literal defaults:
+integer literals to `i32`, float literals to `f32`.
 
 A tensor literal with mixed-suffix entries is well-formed only if every
 suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
 `f32`-context is a type error: the f64-suffixed literal at index 1 has an
 explicit dtype that disagrees with the surrounding `f32` element type.
 
-The tensor literal `to_tensor([1, 2, 3])` in an unannotated position evaluates
-to `tensor[3, i32]`, not `tensor[3, i64]`, and a bare `[1, 2, 3]` there is a
+`to_tensor([1, 2, 3])` in an unannotated position evaluates to
+`tensor[3, i32]`, not `tensor[3, i64]`, and a bare `[1, 2, 3]` there is a
 `List i32`. The fallback to the §5.3 default is the spec contract; no stage
 may silently widen it.
 

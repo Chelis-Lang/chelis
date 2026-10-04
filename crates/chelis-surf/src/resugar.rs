@@ -10,7 +10,7 @@ use chelis_deep::annotations::{
     BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
 };
 use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
-use chelis_deep::{CastMode, DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
 use std::collections::BTreeMap;
@@ -2700,7 +2700,10 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 return Ok(operator);
             }
             let function = resugar_expression_inner(&node.children[0])?;
-            let arguments = resugar_call_arguments(&node.children[0], &node.children[1..], 0)?;
+            let arguments = node.children[1..]
+                .iter()
+                .map(resugar_expression_inner)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Apply(Box::new(function), arguments, node.span))
         }
         T::Cast => {
@@ -2732,11 +2735,6 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
             {
                 resugar_literal_with_default_suffix(literal)?
-            } else if mode == CastMode::Checked
-                && let Some(precision) = precision_target
-                && let Some(tensor) = resugar_adopting_tensor_call(&node.children[0], precision)?
-            {
-                tensor
             } else {
                 resugar_expression_inner(&node.children[0])?
             };
@@ -3790,8 +3788,10 @@ fn resugar_call_first_stage_application(
         return Ok(None);
     }
     let function = resugar_expression_inner(&application.children[0])?;
-    let arguments =
-        resugar_call_arguments(&application.children[0], &application.children[2..], 1)?;
+    let arguments = application.children[2..]
+        .iter()
+        .map(resugar_expression_inner)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(Expr::Apply(
         Box::new(function),
         arguments,
@@ -3911,14 +3911,13 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
 
 /// Declared tensor element dtypes that the desugarer reads from top-level
 /// signatures by name (`spec/02-surf-syntax.md` §P10b): a value signature
-/// (position 1), a function result (position 3) and each function parameter
-/// (position 2). A resugared tensor literal prints against the contexts its
-/// re-desugaring will see.
+/// (position 1) and a function result (position 3). A bare bracket literal
+/// there is a tensor literal, so a resugared value prints against the
+/// declaration its re-desugaring will see.
 #[derive(Default)]
 struct DeclaredTensors {
     values: BTreeMap<String, String>,
     results: BTreeMap<String, String>,
-    parameters: BTreeMap<String, Vec<Option<String>>>,
 }
 
 impl DeclaredTensors {
@@ -3949,21 +3948,11 @@ impl DeclaredTensors {
             let Ok(function) = node_ref(ty) else {
                 continue;
             };
-            let Some((result, parameters)) = (function.tag == DeepTag::TFn)
-                .then(|| function.children.split_last())
-                .flatten()
-            else {
-                continue;
-            };
-            if let Some(precision) = tensor_element_precision(result) {
+            if function.tag == DeepTag::TFn
+                && let Some(result) = function.children.last()
+                && let Some(precision) = tensor_element_precision(result)
+            {
                 self.results.insert(name.to_string(), precision.to_string());
-            }
-            let parameters: Vec<Option<String>> = parameters
-                .iter()
-                .map(|parameter| tensor_element_precision(parameter).map(str::to_string))
-                .collect();
-            if parameters.iter().any(Option::is_some) {
-                self.parameters.insert(name.to_string(), parameters);
             }
         }
     }
@@ -4079,15 +4068,9 @@ fn resugar_adopting_item(item: &DeepExpr, precision: &str) -> Result<Expr, Resug
 fn resugar_adopting_literal(node: NodeRef<'_>, precision: &str) -> Result<Expr, ResugarError> {
     let literal_precision = node.meta.ty().map(|v| v.expression()).and_then(type_name);
     if literal_precision != Some(precision) {
-        let integer = matches!(node.children, [DeepExpr::Atom(Atom::Int(_), _)]);
-        // A literal that cannot bind at `precision` re-derives its default,
-        // exactly as outside an adopting position.
-        let spelling = if crate::desugar::literal_adopts_tensor_element(integer, precision) {
-            SuffixSpelling::Every
-        } else {
-            SuffixSpelling::Authored
-        };
-        return resugar_literal_impl(node, spelling);
+        // An unsuffixed literal here would bind at `precision`, so a literal
+        // of another dtype keeps every suffix.
+        return resugar_literal_impl(node, SuffixSpelling::Every);
     }
     let literal = resugar_literal(node)?;
     let unsuffixed =
@@ -4124,24 +4107,6 @@ fn adopting_tensor_call_items(
         return Ok(None);
     }
     resugar_adopting_items(chain, precision)
-}
-
-/// Resugars a `to_tensor([...])` call standing in an adopting position whose
-/// element type is `precision`: a call argument (position 2) or a `cast`
-/// operand (position 4), where only that spelling is a tensor literal.
-fn resugar_adopting_tensor_call(
-    expr: &DeepExpr,
-    precision: &str,
-) -> Result<Option<Expr>, ResugarError> {
-    let node = node_ref(expr)?;
-    let Some(items) = adopting_tensor_call_items(&node, precision, false)? else {
-        return Ok(None);
-    };
-    Ok(Some(Expr::Apply(
-        Box::new(resugar_expression_inner(&node.children[0])?),
-        vec![Expr::List(items, node_ref(&node.children[1])?.span)],
-        node.span,
-    )))
 }
 
 /// Resugars a binding value, or a function body, whose own declaration states
@@ -4185,33 +4150,6 @@ fn resugar_declared_value(expr: &DeepExpr, precision: Option<&str>) -> Result<Ex
             .map_or_else(|| resugar_expression_inner(expr), Ok),
         None => resugar_expression_inner(expr),
     }
-}
-
-/// Resugars call arguments, printing a `to_tensor([...])` argument at a
-/// declared tensor parameter of a top-level function for that parameter's
-/// dtype (position 2). `first_parameter` is the parameter index of the first
-/// argument, which is 1 when a pipe stage supplies the first.
-fn resugar_call_arguments(
-    function: &DeepExpr,
-    arguments: &[DeepExpr],
-    first_parameter: usize,
-) -> Result<Vec<Expr>, ResugarError> {
-    let declared = declared_tensors();
-    let parameters = variable_name(function).and_then(|name| declared.parameters.get(name));
-    arguments
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            let precision = parameters
-                .and_then(|parameters| parameters.get(first_parameter + index))
-                .and_then(Option::as_deref);
-            match precision {
-                Some(precision) => resugar_adopting_tensor_call(argument, precision)?
-                    .map_or_else(|| resugar_expression_inner(argument), Ok),
-                None => resugar_expression_inner(argument),
-            }
-        })
-        .collect()
 }
 
 fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarError> {

@@ -85,16 +85,22 @@ fn lexical_tensor_constructor_capture_is_a_loud_refusal() {
     }
 }
 
+/// A cast or a callee's parameter type never makes a bracket literal a tensor,
+/// so the argument of a `to_tensor` call there is an ordinary `List`: its
+/// literals bind at their suffix or the literal default, whether the call
+/// names the intrinsic or a lexical binding (spec/04-type-system.md §5.6).
 #[test]
-fn a_shadowed_to_tensor_call_is_an_ordinary_call_that_adopts_nothing() {
-    // The intrinsic call in a cast adopts the target dtype.
-    let intrinsic = deep("result = cast(to_tensor([1.5, 2.5]), f64)\n");
-    assert!(intrinsic.contains("(t-prim {} f64)} 1.5)"), "{intrinsic}");
-    // A lexical `to_tensor` is the author's function: its List argument keeps
-    // the literal default.
-    let shadowed = deep(
+fn a_to_tensor_argument_is_an_ordinary_list_whose_literals_keep_their_dtypes() {
+    for source in [
+        "result = cast(to_tensor([1.5, 2.5]), f64)\n",
+        "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nresult = take(to_tensor([1.5, 2.5]))\n",
         "def sample(to_tensor: List[f32] -> tensor[2, f32]) -> tensor[2, f64] = cast(to_tensor([1.5, 2.5]), f64)\n",
-    );
-    assert!(shadowed.contains("(t-prim {} f32)} 1.5)"), "{shadowed}");
-    assert!(!shadowed.contains("(t-prim {} f64)} 1.5)"), "{shadowed}");
+    ] {
+        let deep = deep(source);
+        assert!(deep.contains("(t-prim {} f32)} 1.5)"), "{source}{deep}");
+        assert!(!deep.contains("(t-prim {} f64)} 1.5)"), "{source}{deep}");
+    }
+    // A suffix states the element dtype at the construction site.
+    let suffixed = deep("result = cast(to_tensor([1.5f64, 2.5f64]), f64)\n");
+    assert!(suffixed.contains("(t-prim {} f64)} 1.5)"), "{suffixed}");
 }

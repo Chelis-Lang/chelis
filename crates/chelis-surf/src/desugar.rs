@@ -87,8 +87,8 @@ pub fn desugar_program_with_context(
             message: error.to_string(),
         }
     })?;
-    let resolution = GradSelectorResolver::resolve_program_with_context(decls, context)?;
-    let ctx = DesugarCtx::new(decls, resolution);
+    let resolved_grad_indices = GradSelectorResolver::resolve_program_with_context(decls, context)?;
+    let ctx = DesugarCtx::new(decls, resolved_grad_indices);
     Ok(decls
         .iter()
         .flat_map(|decl| ctx.desugar_decl(decl))
@@ -100,8 +100,8 @@ pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
 }
 
 pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
-    let resolution = GradSelectorResolver::resolve_expression(expr)?;
-    Ok(DesugarCtx::with_resolution(resolution).desugar_expr(expr))
+    let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
+    Ok(DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr))
 }
 
 /// Desugar an expression using the declarations that establish its callable
@@ -121,23 +121,14 @@ pub fn desugar_expr_in_program_scope(
             message: error.to_string(),
         }
     })?;
-    let resolution = GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
-    Ok(DesugarCtx::new(decls, resolution).desugar_expr_with_scope(expr, bound_names))
+    let resolved_grad_indices =
+        GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
+    Ok(DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names))
 }
 
 #[derive(Default)]
 struct DesugarCtx {
     resolved_grad_indices: Vec<(usize, Vec<i64>)>,
-    /// Per-function tensor element types declared in the function's
-    /// signature, indexed by parameter position. `None` for non-tensor
-    /// parameters or parameters with no declared type.
-    ///
-    /// Used by the contextual tensor-literal inference rule
-    /// (`spec/02-surf-syntax.md` §P10b, `spec/04-type-system.md` §5.6),
-    /// position 2: the corresponding argument position of a call whose
-    /// callee has a declared signature with a tensor parameter at that
-    /// position.
-    top_level_fn_tensor_param_prec: UnordMap<String, Vec<Option<String>>>,
     /// Names that carry an explicit standalone `sig`/signature declaration
     /// (`Decl::Sig`). When a `def` of the same name also has inline
     /// annotations, `desugar_fun_def` would otherwise synthesize a second
@@ -152,12 +143,9 @@ struct DesugarCtx {
     /// Standalone value signatures supply binding literal context just as
     /// inline annotations do. List signatures still preserve List values.
     top_level_binding_tensor_prec: UnordMap<String, String>,
-    /// Standalone function signatures supply a declared tensor result to a
-    /// bare bracket-literal body just as an inline result type does
-    /// (position 3).
+    /// Standalone function signatures declare a tensor result for a bare
+    /// bracket-literal body just as an inline result type does (position 3).
     top_level_fn_result_tensor_prec: UnordMap<String, String>,
-    /// `to_tensor([...])` calls through a lexical `to_tensor`, by source span.
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -217,8 +205,7 @@ impl DesugarCtx {
         desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true)
     }
 
-    fn new(decls: &[Decl], resolution: LexicalResolution) -> Self {
-        let mut top_level_fn_tensor_param_prec = UnordMap::new();
+    fn new(decls: &[Decl], resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
         let mut explicit_sig_names = UnordSet::new();
         let mut top_level_binding_tensor_prec = UnordMap::new();
         let mut top_level_fn_result_tensor_prec = UnordMap::new();
@@ -226,7 +213,6 @@ impl DesugarCtx {
         let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
-                collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
                 if let Decl::Sig { name, ty, .. } = d
                     && let Some(precision) = tensor_element_prim_name(ty)
@@ -247,12 +233,10 @@ impl DesugarCtx {
             });
         }
         Self {
-            resolved_grad_indices: resolution.grad_indices,
-            top_level_fn_tensor_param_prec,
+            resolved_grad_indices,
             explicit_sig_names,
             top_level_binding_tensor_prec,
             top_level_fn_result_tensor_prec,
-            shadowed_tensor_constructor_calls: resolution.shadowed_tensor_constructor_calls,
             def_effects,
             next_destructure_temp: std::cell::Cell::new(0),
             declared_type_binders,
@@ -260,10 +244,9 @@ impl DesugarCtx {
         }
     }
 
-    fn with_resolution(resolution: LexicalResolution) -> Self {
+    fn with_resolved_grad_indices(resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
         Self {
-            resolved_grad_indices: resolution.grad_indices,
-            shadowed_tensor_constructor_calls: resolution.shadowed_tensor_constructor_calls,
+            resolved_grad_indices,
             ..Self::default()
         }
     }
@@ -383,23 +366,10 @@ impl CallableScope {
     }
 }
 
-/// What the lexical pre-pass establishes before Deep construction.
-#[derive(Default)]
-struct LexicalResolution {
-    grad_indices: Vec<(usize, Vec<i64>)>,
-    /// Source spans of the `to_tensor([...])` calls made through a lexical
-    /// binding named `to_tensor`. Such a call is an ordinary call, so its
-    /// argument adopts no contextual dtype (`spec/02-surf-syntax.md` §P10b).
-    /// Spans, not node addresses, identify the calls because pipe stages are
-    /// desugared from cloned expressions.
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
-}
-
 #[derive(Default)]
 struct GradSelectorResolver {
     globals: CallableScope,
     resolved: Vec<(usize, Vec<i64>)>,
-    shadowed_tensor_constructor_calls: UnordSet<(usize, usize)>,
     /// Functions whose standalone `sig` declares a tensor result, so that a
     /// bare bracket-literal body receives a synthesized conversion.
     tensor_result_signatures: UnordSet<String>,
@@ -417,7 +387,7 @@ impl GradSelectorResolver {
     fn resolve_program_with_context(
         decls: &[Decl],
         context: &[deep::Expr],
-    ) -> Result<LexicalResolution, DesugarError> {
+    ) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
         let mut resolver = Self::default();
         resolver.preseed_deep_function_origins(context);
         resolver.seed_deep_origins(context);
@@ -427,14 +397,7 @@ impl GradSelectorResolver {
         for decl in decls {
             resolver.visit_decl(decl)?;
         }
-        Ok(resolver.into_resolution())
-    }
-
-    fn into_resolution(self) -> LexicalResolution {
-        LexicalResolution {
-            grad_indices: self.resolved,
-            shadowed_tensor_constructor_calls: self.shadowed_tensor_constructor_calls,
-        }
+        Ok(resolver.resolved)
     }
 
     fn preseed_deep_function_origins(&mut self, exprs: &[deep::Expr]) {
@@ -497,17 +460,17 @@ impl GradSelectorResolver {
         }
     }
 
-    fn resolve_expression(expr: &Expr) -> Result<LexicalResolution, DesugarError> {
+    fn resolve_expression(expr: &Expr) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
         let mut resolver = Self::default();
         resolver.visit_expr(expr, &CallableScope::default())?;
-        Ok(resolver.into_resolution())
+        Ok(resolver.resolved)
     }
 
     fn resolve_expression_in_program(
         decls: &[Decl],
         expr: &Expr,
         bound_names: &[String],
-    ) -> Result<LexicalResolution, DesugarError> {
+    ) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
         let mut resolver = Self::default();
         for decl in decls {
             resolver.seed_function_origins(decl);
@@ -520,7 +483,7 @@ impl GradSelectorResolver {
             scope.bind(name.clone(), CallableOrigin::Unknown);
         }
         resolver.visit_expr(expr, &scope)?;
-        Ok(resolver.into_resolution())
+        Ok(resolver.resolved)
     }
 
     fn seed_function_origins(&mut self, decl: &Decl) {
@@ -648,13 +611,7 @@ impl GradSelectorResolver {
         let ordinary = match expr {
             Expr::Lit(..) | Expr::Constructor(..) => CallableOrigin::NonCallable,
             Expr::Var(name, _) => scope.lookup(name),
-            Expr::Apply(function, arguments, span) => {
-                if is_tensor_constructor_call(function, arguments)
-                    && scope.values.contains_key("to_tensor")
-                {
-                    self.shadowed_tensor_constructor_calls
-                        .insert(span_key(*span));
-                }
+            Expr::Apply(function, arguments, _) => {
                 self.visit_expr(function, scope)?;
                 let payloads = arguments
                     .iter()
@@ -1909,47 +1866,6 @@ fn collect_def_effects(decl: &Decl, out: &mut UnordMap<String, Vec<EffectExpr>>)
     }
 }
 
-/// Collect per-position tensor element-prim names from each top-level
-/// function's declared signature. Used by the contextual tensor-literal
-/// inference rule (spec §P10b / §5.6) to narrow numeric literals in
-/// argument positions whose declared parameter type is a tensor.
-///
-/// `Decl::Sig` (a separate signature declaration) is also collected so
-/// `sig f: tensor[3, f64] -> ...` followed by an untyped `def f` participates.
-fn collect_top_level_fn_tensor_param_prec(
-    decl: &Decl,
-    out: &mut UnordMap<String, Vec<Option<String>>>,
-) {
-    match decl {
-        Decl::FunDef { name, params, .. } => {
-            let entry: Vec<Option<String>> = params
-                .iter()
-                .map(|p| p.ty.as_ref().and_then(tensor_element_prim_name))
-                .collect();
-            // Only insert if at least one parameter has a tensor element
-            // type — otherwise an entry would still be returned but with
-            // all-None which the lookup harmlessly ignores. Cheap
-            // pre-filter to keep the map sparse.
-            if entry.iter().any(Option::is_some) {
-                out.insert(name.clone(), entry);
-            }
-        }
-        Decl::Sig {
-            name,
-            ty: TypeExpr::Arrow(args, _ret, _),
-            ..
-        } => {
-            // sig f: A -> B -> C is a flat Arrow; collect each non-return
-            // arrow position.
-            let entry: Vec<Option<String>> = args.iter().map(tensor_element_prim_name).collect();
-            if entry.iter().any(Option::is_some) {
-                out.insert(name.clone(), entry);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Return the precision name (e.g. `"f64"`, `"i32"`) for a tensor type
 /// expression, or `None` for any other shape. Tensor type expressions in
 /// Surf carry the spelling and exact token span in `TensorPrecision`.
@@ -2019,9 +1935,12 @@ impl DesugarCtx {
                 // Position 1 (spec §P10b / §5.6): RHS of a let-binding
                 // whose declared type is a tensor type. Narrow numeric
                 // literals in `value` to the tensor element type.
-                let body = tensor_element_prim_name(t)
-                    .and_then(|prec| self.desugar_adopting_tensor_literal(value, &prec, true, &[]))
-                    .unwrap_or_else(|| self.desugar_expr(value));
+                let body = match (tensor_element_prim_name(t), value) {
+                    (Some(prec), Expr::List(items, _)) => {
+                        self.desugar_list_as_tensor_literal(items, &prec, &[])
+                    }
+                    _ => self.desugar_expr(value),
+                };
                 vec![
                     node(DeepTag::Defsig, vec![sym(name), desugar_type(t)]),
                     node(DeepTag::Def, vec![sym(name), body]),
@@ -2050,11 +1969,12 @@ impl DesugarCtx {
                         .cloned()
                         .unwrap_or_default(),
                 );
-                let body = self
-                    .top_level_binding_tensor_prec
-                    .get(name)
-                    .and_then(|prec| self.desugar_adopting_tensor_literal(value, prec, true, &[]))
-                    .unwrap_or_else(|| self.desugar_expr(value));
+                let body = match (self.top_level_binding_tensor_prec.get(name), value) {
+                    (Some(precision), Expr::List(items, _)) => {
+                        self.desugar_list_as_tensor_literal(items, precision, &[])
+                    }
+                    _ => self.desugar_expr(value),
+                };
                 self.current_type_binders.replace(restore_binders);
                 vec![node(DeepTag::Def, vec![sym(name), body])]
             }
@@ -2268,9 +2188,10 @@ impl DesugarCtx {
         let params_node = node(DeepTag::Params, param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
         // Position 3 (spec §P10b / §5.6): body expression of a function
-        // whose declared return type, inline or in its standalone `sig`, is
-        // a tensor type and whose body is itself a tensor literal. Narrow
-        // numeric literals in `body` to the tensor element type.
+        // whose declared return type is a tensor type and whose body is
+        // itself a tensor literal. Narrow numeric literals in `body` to
+        // the tensor element type. The declared result may come from the
+        // `def` or from its standalone `sig`.
         // Binder scope controls `t-var` cast targets and literal adoption.
         let restore_binders = self.current_type_binders.replace(
             self.declared_type_binders
@@ -2278,12 +2199,16 @@ impl DesugarCtx {
                 .cloned()
                 .unwrap_or_default(),
         );
-        let desugared_body = ret_ty
+        let declared_result = ret_ty
             .as_ref()
             .and_then(tensor_element_prim_name)
-            .or_else(|| self.top_level_fn_result_tensor_prec.get(name).cloned())
-            .and_then(|prec| self.desugar_adopting_tensor_literal(body, &prec, true, &body_scope))
-            .unwrap_or_else(|| self.desugar_expr_with_scope(body, &body_scope));
+            .or_else(|| self.top_level_fn_result_tensor_prec.get(name).cloned());
+        let desugared_body = match (declared_result, body) {
+            (Some(prec), Expr::List(items, _)) => {
+                self.desugar_list_as_tensor_literal(items, &prec, &body_scope)
+            }
+            _ => self.desugar_expr_with_scope(body, &body_scope),
+        };
         self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
@@ -2772,15 +2697,12 @@ impl DesugarCtx {
                 // target node: both denote the same primitive under §P10a.
                 let prec = canonical_primitive_name(prec).unwrap_or(prec);
                 // Position 4 (spec §P10b / §5.6): first argument of a
-                // `cast(literal, p)` expression. When the inner is an
-                // intrinsic `to_tensor([...])` call, narrow its numeric
-                // entries to `p`. The outer `cast` then becomes a no-op
-                // precision-confirm at the type level (tensor[N, p] cast
-                // to p), which `infer_cast` accepts because the precision
-                // matches. A bare bracket literal stays a List here.
+                // `cast(literal, p)` expression. A cast never makes a bracket
+                // literal a tensor: a bare bracket literal here is a `List`,
+                // and the argument of a `to_tensor` call is an ordinary
+                // `List` whose literals keep their own dtypes.
                 //
-                // Issue #308: the same position-4 rule applies to a bare
-                // scalar numeric literal. `cast(1.1, f64)` binds the
+                // Issue #308: a bare scalar numeric literal adopts `p`. `cast(1.1, f64)` binds the
                 // decimal `1.1` AT f64 — it is NOT "narrow to the §5.3
                 // f32 default, then widen", which materializes the
                 // f32-truncation signature `1.100000023841858` in every
@@ -2796,24 +2718,19 @@ impl DesugarCtx {
                 // The [05-OP-6] truncating rung takes NONE of this: its
                 // target is an integer width and its source must stay a
                 // float, so adopting a literal at the target would turn
-                // `cast_trunc(to_tensor([1.9]), i32)` into an i32 tensor and
-                // make the truncating cast a type error on its own
-                // argument.
+                // `cast_trunc(1.9, i32)` into an i32 literal and make the
+                // truncating cast a type error on its own argument.
                 let binder = self.current_type_binder(prec);
                 // `binder` is consulted again below for the unbounded case, so
                 // the bound is cloned out rather than moved.
                 let binder_is_unbounded = matches!(binder, Some(None));
                 let binder_is_declared = binder.is_some();
                 let binder_bound = binder.flatten();
-                let tensor_literal = (*mode != CastMode::Trunc)
-                    .then(|| self.desugar_adopting_tensor_literal(e, prec, false, local_fn_params))
-                    .flatten();
-                let inner = match (tensor_literal, e.as_ref()) {
-                    (Some(tensor_literal), _) => tensor_literal,
+                let inner = match e.as_ref() {
                     _ if *mode == CastMode::Trunc => {
                         self.desugar_expr_with_scope(e, local_fn_params)
                     }
-                    (None, other) => {
+                    other => {
                         let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
                         // A signed direct `lit` is the unambiguous carrier only
                         // when the Surf syntax is eligible for adoption, or when
@@ -3069,14 +2986,15 @@ impl DesugarCtx {
                     // top-level form. Module-level LetDef and
                     // block-level let bindings are both let-bindings
                     // per §5.6 enumerated position 1.
-                    let value = binding
-                        .ty
-                        .as_ref()
-                        .and_then(tensor_element_prim_name)
-                        .and_then(|prec| {
-                            self.desugar_adopting_tensor_literal(&binding.value, &prec, true, &[])
-                        })
-                        .unwrap_or_else(|| self.desugar_expr(&binding.value));
+                    let value = match (
+                        binding.ty.as_ref().and_then(tensor_element_prim_name),
+                        &binding.value,
+                    ) {
+                        (Some(prec), Expr::List(items, _)) => {
+                            self.desugar_list_as_tensor_literal(items, &prec, &[])
+                        }
+                        _ => self.desugar_expr(&binding.value),
+                    };
                     if let Some(ty) = &binding.ty {
                         let value = with_metadata_value(
                             inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
@@ -3311,38 +3229,32 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
 // ---------------------------------------------------------------------------
 //
 // A bracket literal is a List. It is a tensor literal only as the argument
-// of an intrinsic `to_tensor` call, or as a bare literal whose own binding
-// or function result declares a tensor type; no other context or element
-// spelling selects the kind. When a tensor literal appears in a position
-// with a known element type, the numeric literals in the body adopt that
-// element type instead of the §5.3 / §P10 literal default (i32 for integer
-// literals, f32 for float literals).
+// of a `to_tensor` call, an ordinary call whose literals keep their own
+// dtypes, or as a bare literal whose own binding or function result declares
+// a tensor type; no other context or element spelling selects the kind.
 //
-// The closed set of "known-element-type" positions is exactly four,
-// per spec §5.6:
+// The declaration that converts a bare bracket literal also gives its
+// numeric literals their element type instead of the §5.3 / §P10 literal
+// default (i32 for integer literals, f32 for float literals), per spec §5.6:
 //
 //   1. RHS of a `let`-binding whose declared type is a tensor type
 //      `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
-//   2. Argument position of a call whose callee has a declared signature
-//      with a tensor parameter at that position
-//      `f(to_tensor(xs))` where `f : tensor[3, f64] -> ...`
 //   3. Body expression of a function with a declared return type that is
-//      a tensor type, when the body is itself a tensor literal
-//   4. First argument of an explicit `cast(literal, p)`
+//      a tensor type, when the body is itself a bare bracket literal
 //
-// In positions 1 and 3 the declaration converts a bare bracket literal; in
-// positions 2 and 4 the kind is fixed and only `to_tensor([...])` is a
-// tensor literal. A `to_tensor([...])` argument adopts in all four.
+// A callee's parameter type or a cast never makes a bracket literal a tensor;
+// spec §5.6 position 4 adopts only a bare scalar (see the `Expr::Cast` arm
+// above).
 //
-// Outside this closed set, numeric literals fall back to the §5.3 / §P10
-// defaults; this is the WS-0 / D1 default and is implemented by
-// `desugar_literal` above.
+// Everywhere else, numeric literals keep the §5.3 / §P10 defaults; this is
+// the WS-0 / D1 default and is implemented by `desugar_literal` above.
 //
-// The helpers here emit a `to_tensor` call wrapping a `Cons/Nil` chain
-// whose numeric literal entries carry the contextual element type instead
-// of the default. Non-literal entries (variables, function calls, ...) pass
-// through unchanged; type unification at `Cons`/`to_tensor` will reject
-// them if their inferred type does not match the contextual element type.
+// The helpers here transform `Expr::List` into a `to_tensor` call wrapping
+// a `Cons/Nil` chain whose numeric literal entries carry the contextual
+// element type instead of the default. Non-literal entries (variables,
+// function calls, ...) pass through unchanged; type unification at
+// `Cons`/`to_tensor` will reject them if their inferred type does not
+// match the contextual element type.
 //
 // Future agents reading this code: do NOT silently extend the closed
 // set. Adding new positions (e.g. "any context where a tensor type might
@@ -3371,51 +3283,6 @@ impl DesugarCtx {
         node(DeepTag::App, vec![dvar("to_tensor"), list])
     }
 
-    /// Desugar a tensor literal that stands in a §5.6 adopting position with
-    /// element type `prec_name`. A bare bracket literal is one only where its
-    /// own declaration states the tensor type (`declared`, positions 1 and
-    /// 3); an intrinsic `to_tensor([...])` call is one in every adopting
-    /// position. Any other expression is not a tensor literal and yields
-    /// `None`.
-    fn desugar_adopting_tensor_literal(
-        &self,
-        value: &Expr,
-        prec_name: &str,
-        declared: bool,
-        local_fn_params: &[String],
-    ) -> Option<deep::Expr> {
-        match value {
-            Expr::List(items, _) if declared => {
-                Some(self.desugar_list_as_tensor_literal(items, prec_name, local_fn_params))
-            }
-            Expr::Apply(function, arguments, span)
-                if is_tensor_constructor_call(function, arguments)
-                    && !self
-                        .shadowed_tensor_constructor_calls
-                        .contains(&span_key(*span)) =>
-            {
-                let [Expr::List(items, list_span)] = arguments.as_slice() else {
-                    unreachable!("a tensor constructor call has one bracket-literal argument")
-                };
-                let items: Vec<deep::Expr> = items
-                    .iter()
-                    .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
-                    .collect();
-                Some(attach_span_metadata(
-                    node(
-                        DeepTag::App,
-                        vec![
-                            attach_span_metadata(dvar("to_tensor"), expr_span(function)),
-                            attach_span_metadata(desugar_list_literal(&items), *list_span),
-                        ],
-                    ),
-                    *span,
-                ))
-            }
-            _ => None,
-        }
-    }
-
     /// Desugar a single entry of a contextual tensor literal. Numeric
     /// literals are narrowed to the contextual element prim. Nested
     /// `Expr::List` entries (rank > 1) recurse with the same element
@@ -3428,9 +3295,8 @@ impl DesugarCtx {
         prec_name: &str,
         local_fn_params: &[String],
     ) -> deep::Expr {
-        // Every element keeps its source location for diagnostics.
-        let desugared = match item {
-            Expr::Lit(Literal::Int(n), _) if literal_adopts_tensor_element(true, prec_name) => {
+        match item {
+            Expr::Lit(Literal::Int(n), _) => {
                 let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
                 let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
                 let meta = if float_typed {
@@ -3444,16 +3310,14 @@ impl DesugarCtx {
                     vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
                 )
             }
-            Expr::Lit(Literal::Float(f), _) if literal_adopts_tensor_element(false, prec_name) => {
-                node_meta(
-                    DeepTag::Lit,
-                    numeric_literal_meta(
-                        node(DeepTag::TPrim, vec![sym(prec_name)]),
-                        LiteralStyle::Unsuffixed,
-                    ),
-                    vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
-                )
-            }
+            Expr::Lit(Literal::Float(f), _) => node_meta(
+                DeepTag::Lit,
+                numeric_literal_meta(
+                    node(DeepTag::TPrim, vec![sym(prec_name)]),
+                    LiteralStyle::Unsuffixed,
+                ),
+                vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+            ),
             // RT-2 fixup P2: the surface parser turns `-128` into
             // `Unary(Neg, Lit(Int(128)))`. In a contextual tensor
             // literal position we fold the sign into the literal so
@@ -3462,7 +3326,7 @@ impl DesugarCtx {
             // raw inner literal (`128`, which overflows i8 max).
             // The same applies to negative float literals.
             Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
-                Expr::Lit(Literal::Int(n), _) if literal_adopts_tensor_element(true, prec_name) => {
+                Expr::Lit(Literal::Int(n), _) => {
                     let value = fold_unary_minus_int(*n);
                     let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
                     let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
@@ -3477,20 +3341,15 @@ impl DesugarCtx {
                         vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
                     )
                 }
-                Expr::Lit(Literal::Float(f), _)
-                    if literal_adopts_tensor_element(false, prec_name) =>
-                {
-                    node_meta(
-                        DeepTag::Lit,
-                        numeric_literal_meta(
-                            node(DeepTag::TPrim, vec![sym(prec_name)]),
-                            LiteralStyle::Unsuffixed,
-                        ),
-                        vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
-                    )
-                }
-                // Non-literal `neg` operand, or a literal that cannot
-                // bind at the element type, falls through to the
+                Expr::Lit(Literal::Float(f), _) => node_meta(
+                    DeepTag::Lit,
+                    numeric_literal_meta(
+                        node(DeepTag::TPrim, vec![sym(prec_name)]),
+                        LiteralStyle::Unsuffixed,
+                    ),
+                    vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
+                ),
+                // Non-literal `neg` operand falls through to the
                 // standard desugar; the type checker will validate
                 // the resulting expression's type against the
                 // contextual element type via the Cons unification
@@ -3512,8 +3371,7 @@ impl DesugarCtx {
             // Anything else: normal desugar. Type unification at Cons
             // will catch a mismatch.
             other => self.desugar_expr_with_scope(other, local_fn_params),
-        };
-        attach_span_metadata(desugared, expr_span(item))
+        }
     }
 }
 
@@ -3529,66 +3387,15 @@ fn fold_unary_minus_int(value: i64) -> i64 {
     value.checked_neg().unwrap_or(i64::MIN)
 }
 
-/// Whether an unsuffixed literal binds at a tensor literal's element type
-/// `prec_name`: an integer literal at an integer or float primitive, a float
-/// literal only at a float primitive (`spec/04-type-system.md` §5.6). A
-/// literal that cannot bind there, including under a dtype binder, keeps its
-/// §5.3 default and the checker reports any mismatch.
-pub(crate) fn literal_adopts_tensor_element(integer: bool, prec_name: &str) -> bool {
-    let float = matches!(prec_name, "f16" | "bf16" | "f32" | "f64");
-    let int = matches!(prec_name, "i8" | "i16" | "i32" | "i64");
-    float || (integer && int)
-}
-
-/// Whether a call is spelled `to_tensor([...])`: the constructor name applied
-/// to one bracket literal. Whether the name is the intrinsic is lexical.
-fn is_tensor_constructor_call(function: &Expr, arguments: &[Expr]) -> bool {
-    matches!(function, Expr::Var(name, _) if name == "to_tensor")
-        && matches!(arguments, [Expr::List(_, _)])
-}
-
-fn span_key(span: Span) -> (usize, usize) {
-    (span.offset, span.len)
-}
-
 impl DesugarCtx {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
-        // Position 2 (spec §P10b / §5.6): if the callee is a top-level
-        // function with a declared signature whose i-th parameter is a
-        // tensor type with element prim P, and the i-th argument is an
-        // intrinsic `to_tensor([...])` call, narrow the literal entries to
-        // P. A bare bracket literal stays a List here.
-        //
-        // The callee must be a `Var` for the lookup to apply — function
-        // values from local bindings, partial applications, and lambda
-        // returns do not carry a declared signature at desugar time.
-        // The type checker still validates non-direct-call positions
-        // through the standard `Cons`/`to_tensor` element-type
-        // unification path; the contextual narrowing here is the
-        // ergonomic affordance for the named-callee case.
-        let callee_param_prec: Option<&Vec<Option<String>>> =
-            if let Expr::Var(callee_name, _) = func {
-                self.top_level_fn_tensor_param_prec.get(callee_name)
-            } else {
-                None
-            };
-
-        let desugared_args: Vec<deep::Expr> = args
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                let prec = callee_param_prec
-                    .and_then(|v| v.get(i))
-                    .and_then(|opt| opt.as_deref());
-                prec.and_then(|prec_name| {
-                    self.desugar_adopting_tensor_literal(arg, prec_name, false, local_fn_params)
-                })
-                .unwrap_or_else(|| self.desugar_expr_with_scope(arg, local_fn_params))
-            })
-            .collect();
-
+        // A callee's declared parameter type never makes a bracket-literal
+        // argument a tensor (spec §5.6): the argument desugars as written.
         let mut children = vec![self.desugar_expr_with_scope(func, local_fn_params)];
-        children.extend(desugared_args);
+        children.extend(
+            args.iter()
+                .map(|arg| self.desugar_expr_with_scope(arg, local_fn_params)),
+        );
         node(DeepTag::App, children)
     }
 }

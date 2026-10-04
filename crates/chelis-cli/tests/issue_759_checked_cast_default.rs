@@ -196,11 +196,9 @@ fn tensor_int_narrowing_in_range_is_exact() {
 
 #[test]
 fn tensor_int_narrowing_out_of_range_traps_overflow_not_wrap() {
-    // Pre-rework: wrapped two's-complement to 44 on this surface. The suffix
-    // keeps an i32 source: an unsuffixed `300` would adopt the cast target and
-    // be rejected as a literal out of i8 range (spec/04-type-system.md §5.6).
+    // Pre-rework: wrapped two's-complement to 44 on this surface.
     assert_cast_traps(
-        "cast(to_tensor([300i32]), i8)",
+        "cast(to_tensor([300]), i8)",
         "overflow",
         "i8",
         "tensor_i2i_overflow",
@@ -265,11 +263,9 @@ fn scalar_cast_to_bool_works_under_the_strict_rule() {
 
 #[test]
 fn casts_to_float_targets_finalize_and_never_trap() {
-    // f16 overflow goes to inf per IEEE ([04-NUM-2]), not a trap. The suffix
-    // casts a finite f32 value: an unsuffixed decimal would adopt f16 and be
-    // rejected as a literal that rounds to infinity there (spec/04 §5.6).
+    // f16 overflow goes to inf per IEEE ([04-NUM-2]), not a trap.
     assert_eq!(
-        eval_lane_str("cast(to_tensor([1000000.0f32]), f16)").expect("f16 overflow eval"),
+        eval_lane_str("cast(to_tensor([1000000.0]), f16)").expect("f16 overflow eval"),
         "tensor(shape=[1], data=[inf])"
     );
     // i64 above 2^53 to f64 is the lossy-by-design direction ([04-NUM-6]).
@@ -607,7 +603,7 @@ fn c_tensor_int_narrowing_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300i32]), i8)\n\
+    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300]), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "c_checked_cast_i2i").expect("C lane");
     assert!(

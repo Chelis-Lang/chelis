@@ -149,14 +149,14 @@ Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `f
 rejects the resulting source diff. Malformed separators, a redundant leading zero on an
 integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
 
-A tensor literal's unsuffixed elements can adopt a known element type when the literal
-is assigned to a tensor-typed binding, passed to a declared tensor parameter, or used
-as a declared tensor return body. An unsuffixed literal passed directly to `cast`
-adopts the cast target, including a bare numeric scalar. A tensor parameter or a `cast`
-never turns a bracket literal into a tensor, so those positions take the `to_tensor`
-spelling: `f(to_tensor([1.0, 2.0]))` and `cast(to_tensor([1.1, 2.2]), f64)`. These are
-the only adoption positions: an unannotated `to_tensor([1, 2, 3])` uses `i32` elements,
-while a structural list such as the window sizes above needs explicit `i64` elements.
+A bare bracket literal's unsuffixed elements adopt the declared element type when its
+own tensor-typed binding or declared tensor return body makes it a tensor. An unsuffixed
+scalar passed directly to `cast` adopts the cast target. These are the only adoption
+positions. A tensor parameter or a `cast` never turns a bracket literal into a tensor,
+and `to_tensor` keeps each element's suffix or default, so a tensor argument states its
+element dtype: `f(to_tensor([1.0f64, 2.0f64]))`. An unannotated `to_tensor([1, 2, 3])`
+uses `i32` elements, and a structural list such as the window sizes above needs
+explicit `i64` elements.
 
 ## Operators
 

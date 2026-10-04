@@ -101,20 +101,17 @@ fn formatting_the_alias_is_idempotent() {
 
 /// [02-P10b]: the alias must reach literal metadata, not just the signature.
 /// Regression: before normalization at contextual ingress these emit t-prim iN.
+/// A declared tensor type is the only context that makes a bracket literal a
+/// tensor, so these are the declared positions 1 and 3.
 #[test]
-fn contextual_tensor_literals_normalize_aliases_in_all_four_positions() {
+fn contextual_tensor_literals_normalize_aliases_in_declared_positions() {
     for name in ["i8", "i16", "i32", "i64"] {
         for source in [
             format!("xs: tensor[2, {name}] = [1, -2]\n"),
-            format!(
-                "def f(x: tensor[2, {name}]) -> tensor[2, {name}] = x\nr = f(to_tensor([1, -2]))\n"
-            ),
+            format!("sig xs: tensor[2, {name}]\nxs = [1, -2]\n"),
             format!("def f() -> tensor[2, {name}] = [1, -2]\n"),
-            format!("xs = cast(to_tensor([1, -2]), {name})\n"),
+            format!("sig f: i32 -> tensor[2, {name}]\ndef f(n) = [1, -2]\n"),
             format!("def f() = {{\n  xs: tensor[2, {name}] = [1, -2]\n  xs\n}}\n"),
-            format!(
-                "sig f: tensor[2, {name}] -> tensor[2, {name}]\ndef f(x) = x\nr = f(to_tensor([1, -2]))\n"
-            ),
         ] {
             let deep = deep_of(&source);
             assert!(

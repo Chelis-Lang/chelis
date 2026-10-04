@@ -1064,7 +1064,7 @@ fn eval_f64_cast_tensor_root_renders_stored_width() {
     let cases = [
         (
             "f32 tensor widened as a tensor",
-            "cast(to_tensor([0.1f32, 0.3f32]), f64)",
+            "cast(to_tensor([0.1, 0.3]), f64)",
         ),
         (
             "f32-suffixed leaves widened as scalars",

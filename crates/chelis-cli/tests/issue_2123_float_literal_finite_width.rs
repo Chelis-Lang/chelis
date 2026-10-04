@@ -176,7 +176,8 @@ fn rounding_to_zero_is_ordinary_rounding_not_a_rejection() {
 
 #[test]
 fn every_contextual_position_holds_the_literal_to_the_adopted_width() {
-    // §5.6 positions 1, 3, 2 and 4, and an integer element bound at f16.
+    // §5.6 positions 1 and 3, a scalar in position 4, and an integer element
+    // bound at f16.
     assert_rejected(
         "def t() -> tensor[2, f16] = {\n  xs: tensor[2, f16] = [1.0, 70000.0]\n  xs\n}\n",
         "let_binding.ch",
@@ -188,19 +189,8 @@ fn every_contextual_position_holds_the_literal_to_the_adopted_width() {
         &["f16"],
     );
     assert_rejected(
-        "def g(xs: tensor[2, f16]) -> tensor[2, f16] = xs\n\
-         def h() -> tensor[2, f16] = g(to_tensor([1.0, 70000.0]))\n",
-        "call_argument.ch",
-        &["f16"],
-    );
-    assert_rejected(
         "def c() -> f16 = cast(70000.0, f16)\n",
         "cast_operand.ch",
-        &["f16"],
-    );
-    assert_rejected(
-        "def c() -> tensor[2, f16] = cast(to_tensor([1.0, 70000.0]), f16)\n",
-        "tensor_cast_operand.ch",
         &["f16"],
     );
     assert_rejected(
