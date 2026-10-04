@@ -1568,8 +1568,8 @@ before chelis#1909 and rejected it with the wrong diagnostic after).
 The lowerer bound the accumulator to a synthesized variable, so a callee's own
 shape source stopped resolving and the lanes disagreed
 (`pipe.bare_name_stage.expand_source.{eval,c}`, and
-`pipe.bare_name_stage.lint_fix.c` for the same program as `chelis lint --fix`
-writes it). `chelis_deep::pipe::fold_pipes` states the sentence once, over
+`pipe.bare_name_stage.lint_fix.c` for the same pipe spelling of a direct call
+taken through the real style path). `chelis_deep::pipe::fold_pipes` states the sentence once, over
 every checker entry's input, and each of those passes lost its own pipe arm
 rather than gaining a rule.
 

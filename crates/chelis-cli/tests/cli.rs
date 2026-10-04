@@ -7860,6 +7860,45 @@ fn lint_keep_preserves_no_em_dash_fix_but_still_reports_error() {
 }
 
 #[test]
+fn lint_allow_suppresses_surf_diagnostic() {
+    // `//` is not a Surf comment (#2853), so a directive makes the file
+    // unparseable; the lint still reads it and suppresses the named rule.
+    let dir = tempdir().expect("tempdir");
+    let reported = dir.path().join("reported.ch");
+    let allowed = dir.path().join("allowed.ch");
+    write_file(&reported, "def bad_Name(x: f32) -> f32 = x\n");
+    write_file(
+        &allowed,
+        "def bad_Name(x: f32) -> f32 = x // chelis-lint: allow surf-value-snake-case\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "lint",
+            "--rule",
+            "surf-value-snake-case",
+            reported.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("surf-value-snake-case"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "lint",
+            "--fix",
+            "--rule",
+            "surf-value-snake-case",
+            allowed.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("surf-value-snake-case").not());
+}
+
+#[test]
 fn lint_no_em_dash_blocks_check_and_can_fix_clause_case() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("message.rs");
