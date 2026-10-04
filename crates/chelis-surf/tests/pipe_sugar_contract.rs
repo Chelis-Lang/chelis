@@ -376,6 +376,43 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
 }
 
 #[test]
+fn migration_validates_compacting_stage_annotations_before_erasure() {
+    for (stage, body) in [
+        ("f(y)", "(app {} (var {} f) (var {} p) (var {} y))"),
+        ("cast(f64)", "(cast {} (var {} p) (t-prim {} f64))"),
+        ("copy", "(copy {} (var {} p))"),
+        ("realize", "(realize {} (var {} p))"),
+    ] {
+        let source = format!("out = x |> {stage}\n");
+        let previous = |metadata: &str| {
+            format!(
+                "(def {{}} out (pipe {{}} (var {{}} x) (fn {{{metadata}, surf_pipe_stage: \"call-first\"}} (params {{}} p) {body})))"
+            )
+        };
+        let migrated =
+            chelis_surf::pipe_migration::prepare(&source, &previous("span: \"surf:11..20\""))
+                .unwrap();
+        assert_eq!(
+            meaning(&migrated.source),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+        );
+        for (metadata, key) in [
+            ("span: true", "span"),
+            ("span: \"a\", span: \"b\"", "span"),
+            ("type: true", "type"),
+            ("surf_literal_style: \"unsuffixed\"", "surf_literal_style"),
+            ("surf_binding_type: \"inferred\"", "surf_binding_type"),
+        ] {
+            let error = match chelis_surf::pipe_migration::prepare(&source, &previous(metadata)) {
+                Ok(_) => panic!("accepted malformed {key} on compacting stage {stage}"),
+                Err(error) => error,
+            };
+            assert!(error.contains(key), "{stage}: {error}");
+        }
+    }
+}
+
+#[test]
 fn migration_preserves_trailing_lambda_and_conditional_grouping() {
     for (source, previous) in [
         (

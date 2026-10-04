@@ -317,6 +317,44 @@ fn migration_requires_old_dtype_evidence_and_checks_the_entire_batch_before_writ
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("no literal dtype"));
     assert_eq!(fs::read_to_string(&first).unwrap(), source);
+
+    for (metadata, key) in [
+        ("span: true", "span"),
+        ("span: \"a\", span: \"b\"", "span"),
+        ("type: true", "type"),
+        ("surf_literal_style: \"unsuffixed\"", "surf_literal_style"),
+        ("surf_binding_type: \"inferred\"", "surf_binding_type"),
+    ] {
+        let malformed = receipt.replace(
+            "(fn {surf_pipe_stage:",
+            &format!("(fn {{{metadata}, surf_pipe_stage:"),
+        );
+        fs::write(&baseline, format!(
+            "#!{}\nimport sys\nfrom pathlib import Path\nsys.stdout.write({malformed:?} if Path(sys.argv[-1]).name == 'second.ch' else {receipt:?})\n",
+            python.trim()
+        )).unwrap();
+        fs::write(&first, source).unwrap();
+        fs::write(&second, source).unwrap();
+        let rejected = run(&[
+            args.as_slice(),
+            &[
+                "--inplace",
+                first.to_str().unwrap(),
+                second.to_str().unwrap(),
+            ],
+        ]
+        .concat());
+        assert!(
+            !rejected.status.success(),
+            "accepted malformed {key}: {rejected:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(key),
+            "{rejected:?}"
+        );
+        assert_eq!(fs::read_to_string(&first).unwrap(), source);
+        assert_eq!(fs::read_to_string(&second).unwrap(), source);
+    }
 }
 
 #[test]

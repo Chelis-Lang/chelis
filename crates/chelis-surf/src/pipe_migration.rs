@@ -150,6 +150,9 @@ fn raw_metadata(
 }
 
 fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
+    // Compaction erases the historical wrapper, so admit its annotations on
+    // the real owner before any branch can discard malformed evidence.
+    let metadata = node_metadata(&stage, false)?;
     if head(&stage) == Some("fn")
         && let Some([params, body]) = kids(&stage)
         && head(params) == Some("params")
@@ -177,7 +180,6 @@ fn fold_stage(mut stage: RawExpr, carried: RawExpr) -> Result<RawExpr, String> {
         }
     }
     let span = stage.span();
-    let metadata = node_metadata(&stage, false)?;
     let span_metadata = raw_metadata(metadata.span_id().cloned().map(MetadataValue::Span), span)?;
     if let RawExpr::List(items, _) = &mut stage
         && let Some(RawExpr::Map(entries, _)) = items.get_mut(1)
