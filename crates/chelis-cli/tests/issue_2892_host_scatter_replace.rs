@@ -180,11 +180,22 @@ fn eval_file_rejects_a_runtime_index_outside_the_axis() {
     let dir = tempdir().expect("tempdir");
     let scatter_replace_mode = SCATTER_MODE_OUT_OF_RANGE.replace("MODE", "replace");
     let scatter_add_mode = SCATTER_MODE_OUT_OF_RANGE.replace("MODE", "add");
-    for (name, source, index) in [
-        ("runtime_out_of_range", RUNTIME_OUT_OF_RANGE, 3),
-        ("runtime_negative", RUNTIME_NEGATIVE, -1),
-        ("scatter_replace_mode", scatter_replace_mode.as_str(), 3),
-        ("scatter_add_mode", scatter_add_mode.as_str(), 3),
+    // [05-SPARSE-1]: a `Domain` trap in the primitive that names the mode.
+    for (name, source, op, index) in [
+        (
+            "runtime_out_of_range",
+            RUNTIME_OUT_OF_RANGE,
+            "scatter_replace",
+            3,
+        ),
+        ("runtime_negative", RUNTIME_NEGATIVE, "scatter_replace", -1),
+        (
+            "scatter_replace_mode",
+            scatter_replace_mode.as_str(),
+            "scatter_replace",
+            3,
+        ),
+        ("scatter_add_mode", scatter_add_mode.as_str(), "scatter", 3),
     ] {
         let out = eval_file(dir.path(), name, source);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -194,7 +205,10 @@ fn eval_file_rejects_a_runtime_index_outside_the_axis() {
             String::from_utf8_lossy(&out.stdout)
         );
         assert!(
-            stderr.contains(&format!("scatter index {index} out of bounds")),
+            stderr.contains(&format!(
+                "{op} index {index} out of bounds at axis 0 of extent 3\n\
+                 numeric trap: domain in {op} at i64"
+            )),
             "{name}: eval must report scatter's own bounds failure\nstderr: {stderr}"
         );
     }

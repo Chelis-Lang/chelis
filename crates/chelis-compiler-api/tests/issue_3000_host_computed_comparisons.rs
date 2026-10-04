@@ -197,16 +197,14 @@ fn host_computed_comparisons_of_different_lengths_fail_in_both_lanes() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        refused.contains("tensor comparison expects matching tensor shape"),
-        "{refused}"
-    );
+    // spec/04-type-system.md section 4.7: one `Domain` trap in `eq`, with
+    // the same context line, in both lanes.
+    let trap = "eq operands disagree at axis 0: lhs [4] has 4, rhs [2] has 2\n\
+                numeric trap: domain in eq at i64";
+    assert!(refused.contains(trap), "{refused}");
     let generated = ownership_support::emit(&source(&LENGTHS_DIFFER), LENGTHS_DIFFER.name);
     let stderr = ownership_support::run_failure_stderr(&generated, "");
-    assert!(
-        stderr.contains("elementwise operand shape mismatch"),
-        "{stderr}"
-    );
+    assert!(stderr.contains(trap), "{stderr}");
 }
 
 /// Operands that fail evaluate in source order: with both operands failing

@@ -1190,6 +1190,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_elementwise_shape_trap ( const char * op , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
       "flags": []
     },

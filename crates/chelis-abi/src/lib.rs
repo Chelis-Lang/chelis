@@ -3,6 +3,7 @@
 //! Metadata validates finite descriptor arithmetic, never tensor payloads.
 //! Raw generated packets are transport and do not confer validated ownership.
 
+pub mod failure;
 pub mod metadata;
 pub mod render;
 mod schema;

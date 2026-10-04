@@ -1663,11 +1663,12 @@ directly, `host_lane_positive_rank_mismatch_traps_before_indexing`,
 `host_lane_matching_shapes_still_compute` control; and four `chelis-cli` tests
 in `issue_1484_host_lane_rank_guard`, which run the three programs recorded in
 [#1484] through `chelis build --target c` and the host linker and assert that
-each aborts with the guard text where `chelis eval` reports a shape mismatch,
-plus the `issue_1484_matching_rank_host_lane_still_runs` control. Each of the
+each exits with status 1 and the same `Domain` trap `chelis eval` reports
+(spec/04-type-system.md section 4.7), plus the `issue_1484_matching_rank_host_lane_still_runs` control. Each of the
 six rejection tests was confirmed red on the pre-fix tree, three of them by the
-compiled binary printing values instead of aborting. `grep -c 'rank mismatch'
-crates/chelis-backend-c/src/host_emit.rs` now returns non-zero, locked by
+compiled binary printing values instead of failing. `host_emit.rs` routes both
+the rank and the shape disagreement through the runtime's
+`chelis_elementwise_shape_trap`, locked by
 `sibling_sweep_host_emit_carries_the_elementwise_rank_guard`.
 
 #### What PP5 does not establish

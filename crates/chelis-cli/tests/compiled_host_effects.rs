@@ -388,6 +388,7 @@ fn run(status: i32, stdout: &str, failure: &str) -> parity::LaneRun {
         status: Some(status),
         stdout: stdout.to_string(),
         failure: failure.to_string(),
+        context: String::new(),
     }
 }
 
@@ -429,6 +430,24 @@ fn the_comparator_rejects_each_named_divergence() {
     assert!(
         !parity::lanes_agree(&failing, &run(1, "before\n", "assert failed")),
         "a changed failure message"
+    );
+    let with_context = |context: &str| parity::LaneRun {
+        context: context.to_string(),
+        ..run(1, "", "numeric trap: domain in add at i64")
+    };
+    assert!(
+        !parity::lanes_agree(
+            &with_context("add operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3"),
+            &with_context("Domain: add operand shape mismatch"),
+        ),
+        "a changed trap context"
+    );
+    assert_eq!(
+        parity::failure_context(
+            "error: add operands disagree\nnumeric trap: domain in add at i64\n"
+        ),
+        parity::failure_context("add operands disagree\nnumeric trap: domain in add at i64\n"),
+        "the presentation prefix alone is not a context divergence"
     );
     assert_eq!(
         parity::eval_failure_body("before\nerror: assert failed: flag\n"),
@@ -563,5 +582,78 @@ fn round_to_matches_eval_for_every_float_dtype_and_places() {
             run.stdout.contains(expected),
             "missing `{expected}`: {run:?}"
         );
+    }
+}
+// ---------------------------------------------------------------------------
+// [04-NUM-10] language failures end a compiled program as they end eval
+// ---------------------------------------------------------------------------
+
+/// A runtime disagreement between elementwise operand shapes is a `Domain`
+/// trap in the operation (spec/04-type-system.md section 4.7), an index
+/// outside a sparse axis is a `Domain` trap in the sparse primitive
+/// ([05-SPARSE-1], spec/05 section 3.5), and an index outside a List fails
+/// loudly ([05-OP-54]). Each failure ends both lanes with status 1, the same
+/// context and failure line, and the output before it; no compiled failure
+/// aborts.
+#[test]
+fn language_failures_exit_like_eval() {
+    let runtime_list = |items: &str| format!("map(fn (i: i64) -> {items}, range(0i64, 2i64))");
+    for (name, body, context, failure) in [
+        (
+            "shape",
+            "a = to_tensor(map(fn (i: i64) -> 1.0f32, range(0i64, 2i64)))\n\
+             b = to_tensor(map(fn (i: i64) -> 1.0f32, range(0i64, 3i64)))\n\
+             c = add(a, b)\n"
+                .to_string(),
+            "add operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
+            "numeric trap: domain in add at i64",
+        ),
+        (
+            "compare",
+            "a = to_tensor(map(fn (i: i64) -> 1i64, range(0i64, 3i64)))\n\
+             b = to_tensor(map(fn (i: i64) -> 1i64, range(0i64, 2i64)))\n\
+             c = lt(a, b)\n"
+                .to_string(),
+            "lt operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2",
+            "numeric trap: domain in lt at i64",
+        ),
+        (
+            "gather",
+            format!(
+                "t = to_tensor([1i64, 2i64, 3i64])\ng = gather(t, to_tensor({}), 0i32)\n",
+                runtime_list("add(i, 2i64)")
+            ),
+            "gather index 3 out of bounds at axis 0 of extent 3",
+            "numeric trap: domain in gather at i64",
+        ),
+        (
+            "index",
+            "xs = [1i64, 2i64]\ny = index(xs, add(1i64, 4i64))\n".to_string(),
+            "",
+            "index 5 out of bounds for list of len 2",
+        ),
+        (
+            "take",
+            "k = sub(tensor_to_scalar(sum(to_tensor([1i64, 1i64]), 0)), 5i64)\n\
+             ys = take([1i64, 2i64], k)\n"
+                .to_string(),
+            "",
+            "take requires non-negative count, got -3",
+        ),
+        (
+            "tensor_index",
+            "k = tensor_to_scalar(sum(to_tensor([2i64, 3i64]), 0))\n\
+             t = to_tensor(index([[1.0f32], [2.0f32]], k))\n"
+                .to_string(),
+            "",
+            "index 5 out of bounds for list of len 2",
+        ),
+    ] {
+        let source = format!("before = print(\"before\")\n{body}");
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(run.failure, failure, "{name}: {run:?}");
+        assert_eq!(run.stdout, "before\n", "{name}: {run:?}");
+        assert_eq!(run.context, context, "{name}: {run:?}");
     }
 }

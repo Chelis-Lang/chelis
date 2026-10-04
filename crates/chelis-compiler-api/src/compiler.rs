@@ -5981,6 +5981,30 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
 mod eval_trap_classification_tests {
     use super::*;
 
+    /// The shared failure renderings in `chelis_abi::failure` end in one
+    /// canonical [04-NUM-9] line, so eval classifies them as numeric traps;
+    /// the List index failure is not a trap.
+    #[test]
+    fn shared_failure_renderings_classify_as_their_lanes_report_them() {
+        for message in [
+            chelis_abi::failure::operand_shape_disagreement("add", &[2], &[3]),
+            chelis_abi::failure::operand_shape_disagreement("lt", &[2, 3], &[3]),
+            chelis_abi::failure::sparse_index_out_of_bounds("scatter_elements", -1, 1, 4),
+        ] {
+            let error = eval_stage_error(message.clone(), true);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::NumericTrap,
+                "{message}"
+            );
+        }
+        let error = eval_stage_error(chelis_abi::failure::list_index_out_of_bounds(5, 2), true);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::EvalError
+        );
+    }
+
     #[test]
     fn canonical_trap_line_becomes_a_typed_eval_diagnostic() {
         for message in [

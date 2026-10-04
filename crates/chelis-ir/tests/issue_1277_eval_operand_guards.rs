@@ -82,8 +82,9 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
     })
     .expect_err("[4] against [3] must be rejected");
     assert!(
-        err.contains("tensor shapes must match for elementwise op, got [4] vs [3]"),
-        "the interpreter's phrase, so both eval paths and the tests agree: {err}"
+        err == "add operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3\n\
+                numeric trap: domain in add at i64",
+        "the shared rendering, so every lane and the tests agree: {err}"
     );
 }
 

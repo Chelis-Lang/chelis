@@ -4,8 +4,8 @@
 //! Each lane runs the same source in its own fresh working directory, so a
 //! program that writes files observes only its own effects. Two lanes agree
 //! when they print the same stdout, exit with the same status, and report the
-//! same failure message. The comparison is modulo exactly one presentation
-//! difference: `chelis eval` prefixes a failure with `error: `, while a
+//! same failure message and the context line before it. The comparison is
+//! modulo exactly one presentation difference: `chelis eval` prefixes a failure with `error: `, while a
 //! compiled executable prints the message alone.
 
 // Each including test binary uses only the helpers its lane needs.
@@ -25,6 +25,10 @@ pub struct LaneRun {
     pub stdout: String,
     /// The failure message with lane presentation removed; empty on success.
     pub failure: String,
+    /// The stderr line before the failure message, which carries a trap's
+    /// context (spec/04-type-system.md section 4.7), with lane presentation
+    /// removed; empty on success or when the failure is one line.
+    pub context: String,
 }
 
 fn chelis() -> Command {
@@ -54,6 +58,18 @@ pub fn compiled_failure_body(stderr: &str) -> String {
     stderr.lines().last().unwrap_or_default().to_string()
 }
 
+/// The context line of a failing lane's stderr: the line before its last,
+/// without eval's presentation prefix.
+pub fn failure_context(stderr: &str) -> String {
+    let lines = stderr.lines().collect::<Vec<_>>();
+    let Some(line) = lines.len().checked_sub(2).map(|index| lines[index]) else {
+        return String::new();
+    };
+    line.strip_prefix(EVAL_FAILURE_PREFIX)
+        .unwrap_or(line)
+        .to_string()
+}
+
 /// Runs `source` under `chelis eval --file` in a fresh directory.
 pub fn eval_lane(source: &str, name: &str) -> LaneRun {
     let dir = tempdir().expect("tempdir");
@@ -71,6 +87,11 @@ pub fn eval_lane(source: &str, name: &str) -> LaneRun {
             String::new()
         } else {
             eval_failure_body(&stderr)
+        },
+        context: if output.status.success() {
+            String::new()
+        } else {
+            failure_context(&stderr)
         },
     }
 }
@@ -111,10 +132,15 @@ pub fn compiled_lane(source: &str, name: &str) -> LaneRun {
         } else {
             compiled_failure_body(&stderr)
         },
+        context: if output.status.success() {
+            String::new()
+        } else {
+            failure_context(&stderr)
+        },
     }
 }
 
-/// The parity rule: the same stdout, exit status, and failure body.
+/// The parity rule: the same stdout, exit status, failure body, and context.
 pub fn lanes_agree(eval: &LaneRun, compiled: &LaneRun) -> bool {
     eval == compiled
 }

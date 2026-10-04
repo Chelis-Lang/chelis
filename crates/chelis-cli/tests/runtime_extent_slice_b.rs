@@ -2538,7 +2538,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("numel mismatch"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the chelis#616 numel abort: {out}"
     );
 }
@@ -2592,7 +2592,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("reshape expects"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the evaluator's own numel check: {out}"
     );
 }
@@ -8428,6 +8428,12 @@ cast(p64, f32)\n\
 }\n\
 out = prices(to_tensor([1.0f32, 2.0f32, 3.0f32]), 5.0f32)\n";
 
+/// A reshape whose target and input disagree on the element count is a
+/// `Domain` trap in `reshape` (spec/04-type-system.md section 4.7), rendered
+/// identically by both lanes.
+const RESHAPE_COUNT_TRAP: &str =
+    "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64";
+
 /// staged.dynamic_to_tensor.vmap_column.{eval,c}
 ///
 /// EVIDENTIARY STATUS: regression test on both lanes. On `08e46ebe6`
@@ -8461,14 +8467,11 @@ fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
         .replace("tensor[1, f64]", "tensor[2, f64]");
     let (eval_ok, eval_error) = eval_result(&dir, "invalid_column.ch", &invalid);
     assert!(
-        !eval_ok && eval_error.contains("reshape expects 6 elements but tensor has 3"),
+        !eval_ok && eval_error.contains(RESHAPE_COUNT_TRAP),
         "{eval_error}"
     );
     let (c_ok, c_error) = c_run_result(&dir, "invalid_column_c", &invalid);
-    assert!(
-        !c_ok && c_error.contains("Domain: chelis_tensor_check_reshape reshape numel mismatch: target 6 but tensor has 3 elements"),
-        "{c_error}"
-    );
+    assert!(!c_ok && c_error.contains(RESHAPE_COUNT_TRAP), "{c_error}");
 }
 
 // ---------------------------------------------------------------------------

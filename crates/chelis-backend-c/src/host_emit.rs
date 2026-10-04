@@ -2007,17 +2007,16 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     );
     out.push("}".to_string());
     out.push(
-        "static void chelis_host_require_elementwise_agreement(const chelis_tensor *lhs, const chelis_tensor *rhs, const char *target_label, const char *lhs_label, const char *rhs_label) {"
+        "static void chelis_host_require_elementwise_agreement(const char *op, const chelis_tensor *lhs, const chelis_tensor *rhs) {"
             .to_string(),
     );
     out.push("    int32_t lhs_rank = chelis_tensor_rank(lhs);".to_string());
     out.push("    int32_t rhs_rank = chelis_tensor_rank(rhs);".to_string());
     out.push("    if (lhs_rank > 0 && rhs_rank > 0 && lhs_rank != rhs_rank) {".to_string());
-    out.push(
-        "        fprintf(stderr, \"chelis: elementwise operand rank mismatch at host value %s (%s vs %s): %d vs %d\\n\", target_label, lhs_label, rhs_label, lhs_rank, rhs_rank);"
-            .to_string(),
-    );
-    out.push("        abort();".to_string());
+    // spec/04-type-system.md section 4.7: a runtime shape disagreement is a
+    // `Domain` trap in the operation, which the runtime renders as the
+    // evaluators do before exiting with status 1 ([04-NUM-10]).
+    out.push("        chelis_elementwise_shape_trap(op, lhs, rhs);".to_string());
     out.push("    }".to_string());
     out.push("    if (lhs_rank == rhs_rank) {".to_string());
     out.push("        for (int32_t axis = 0; axis < lhs_rank; ++axis) {".to_string());
@@ -2025,11 +2024,7 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
         "            if (chelis_tensor_shape(lhs, axis) != chelis_tensor_shape(rhs, axis)) {"
             .to_string(),
     );
-    out.push(
-        "                fprintf(stderr, \"chelis: elementwise operand shape mismatch at host value %s (%s vs %s) axis %d\\n\", target_label, lhs_label, rhs_label, axis);"
-            .to_string(),
-    );
-    out.push("                abort();".to_string());
+    out.push("                chelis_elementwise_shape_trap(op, lhs, rhs);".to_string());
     out.push("            }".to_string());
     out.push("        }".to_string());
     out.push("    }".to_string());
@@ -7004,6 +6999,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "+",
@@ -7018,6 +7014,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "-",
@@ -7032,6 +7029,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "*",
@@ -7046,6 +7044,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "/",
@@ -7100,6 +7099,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         if name == "and" { "&&" } else { "||" },
@@ -8844,7 +8844,7 @@ impl<'a> HostEmitter<'a> {
     /// every operand through the TARGET's index vector applied to that
     /// operand's strides. An operand whose runtime rank or shape disagrees is
     /// therefore read partially or out of bounds, SILENTLY, where the
-    /// evaluator rejects with "tensor shapes must match for elementwise op".
+    /// evaluator traps `Domain` in the operation (spec/04 section 4.7).
     /// An elementwise call one of whose operands carries an IO effect is
     /// lowered here rather than through the tensor DAG, so before this guard
     /// existed such a call reached codegen with no operand comparison in
@@ -8852,18 +8852,18 @@ impl<'a> HostEmitter<'a> {
     ///
     /// Scope, and the reason it is not simply "ranks must be equal":
     /// `spec/05-risc-primitives.md` §1.2 forbids implicit rank extension, so
-    /// two positive ranks that differ are always a defect and abort. A rank-0
+    /// two positive ranks that differ always trap. A rank-0
     /// operand is the backend's own scalar-input representation, not source
     /// broadcasting, and keeps its established meaning. At equal positive
     /// rank the shapes are compared axis by axis, which is what §2.4 already
     /// requires of the tensor-DAG lane.
     ///
-    /// The message wording is the DAG guard's, so one grep over the emitted C
-    /// finds either lane; the emitted result and operand variable names
-    /// locate the site inside a generated translation unit.
-    fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
+    /// `op` is the canonical operation name the trap line carries; the
+    /// runtime's `chelis_elementwise_shape_trap` renders the context and trap
+    /// lines through the evaluators' own function, as the DAG guard does.
+    fn emit_elementwise_operand_guard(&mut self, op: &str, lhs: &str, rhs: &str) {
         self.lines.push(format!(
-            "{}chelis_host_require_elementwise_agreement({lhs}, {rhs}, \"{target}\", \"{lhs}\", \"{rhs}\");",
+            "{}chelis_host_require_elementwise_agreement(\"{op}\", {lhs}, {rhs});",
             self.indent
         ));
     }
@@ -8881,8 +8881,15 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
-    fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+    fn assign_tensor_binary_elementwise(
+        &mut self,
+        target: &str,
+        name: &str,
+        lhs: &str,
+        rhs: &str,
+        op: &str,
+    ) {
+        self.emit_elementwise_operand_guard(name, lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -8911,7 +8918,7 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         comparison: ElementwiseComparison,
     ) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_operand_guard(comparison.name(), lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -9227,7 +9234,7 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         func: BinaryElementwiseFunc,
     ) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_operand_guard(func.label(), lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -9866,6 +9873,22 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    /// Emit input-contract assertions for a BLAS summary: nonnull, dtype,
+    /// rank, and per-axis dim checks.
+    ///
+    /// Every check here is an internal invariant and stays `abort()`; none is
+    /// a language failure with a `chelis eval` counterpart. The summary
+    /// replaces a call to the helper whose input types are `input_tys`, and
+    /// `remap_*_summary_to_params` admits it only when each argument's host
+    /// type equals the helper's input type. A host tensor's runtime extents
+    /// equal its host type by construction, because every producer is
+    /// guarded under spec/04-type-system.md section 4.7: the function-entry
+    /// interface guards (`entry_walk::tensor_metadata_checks` and the DAG
+    /// entry validation in `emit.rs`) and the result-claim guards
+    /// (`emit_result_claim_guard`). A literal axis is fixed by those guards,
+    /// and a symbolic axis is a declared binder of the enclosing function,
+    /// checked by its interface guard before the body runs. A failure here is
+    /// therefore a lowering bug, so the check reports it as one.
     fn emit_blas_summary_contract(
         &mut self,
         summary: &HostBlasMatmulSummary,
@@ -10061,6 +10084,20 @@ impl<'a> HostEmitter<'a> {
     /// `emit_blas_summary_contract` so summary-derived sparse
     /// codepaths fail loudly on the same shape mismatches the BLAS
     /// path catches.
+    ///
+    /// Every check here is an internal invariant and stays `abort()`; none is
+    /// a language failure with a `chelis eval` counterpart. The summary
+    /// replaces a call to the helper whose input types are `input_tys`, and
+    /// `remap_*_summary_to_params` admits it only when each argument's host
+    /// type equals the helper's input type. A host tensor's runtime extents
+    /// equal its host type by construction, because every producer is
+    /// guarded under spec/04-type-system.md section 4.7: the function-entry
+    /// interface guards (`entry_walk::tensor_metadata_checks` and the DAG
+    /// entry validation in `emit.rs`) and the result-claim guards
+    /// (`emit_result_claim_guard`). A literal axis is fixed by those guards,
+    /// and a symbolic axis is a declared binder of the enclosing function,
+    /// checked by its interface guard before the body runs. A failure here is
+    /// therefore a lowering bug, so the check reports it as one.
     fn emit_sparse_summary_contract(
         &mut self,
         summary: &HostSparseOpSummary,
@@ -12868,6 +12905,18 @@ impl ElementwiseComparison {
             "eq" => Self::Equal,
             "neq" => Self::NotEqual,
             other => unreachable!("`{other}` is not an element-wise comparison"),
+        }
+    }
+
+    /// The canonical builtin name a trap in this comparison carries.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Less => "lt",
+            Self::LessEqual => "lte",
+            Self::Greater => "gt",
+            Self::GreaterEqual => "gte",
+            Self::Equal => "eq",
+            Self::NotEqual => "neq",
         }
     }
 

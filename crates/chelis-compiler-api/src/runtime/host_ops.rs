@@ -318,6 +318,30 @@ pub(super) fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// spec/04-type-system.md section 4.7 over the host interpreter's `usize`
+/// shapes: the shared rendering every lane reports for operands of `op` whose
+/// shapes disagree.
+fn operand_shape_disagreement(op: &str, lhs: &[usize], rhs: &[usize]) -> String {
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    chelis_abi::failure::operand_shape_disagreement(op, &exact(lhs), &exact(rhs))
+}
+
+/// [05-SPARSE-1]: the shared `Domain` rendering for an index outside the
+/// selected axis.
+fn sparse_index_failure(op: &str, index: i64, axis: usize, extent: usize) -> String {
+    chelis_abi::failure::sparse_index_out_of_bounds(
+        op,
+        index,
+        axis,
+        i64::try_from(extent).unwrap_or(i64::MAX),
+    )
+}
+
 fn tensor_result(
     template: &RuntimeTensorValue,
     storage: chelis_types::TensorStorage,
@@ -355,9 +379,16 @@ pub(super) fn numeric_binop(
         }
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             if lhs.value.shape != rhs.value.shape {
-                return Err(format!(
-                    "tensor shapes must match for elementwise op, got {:?} vs {:?}",
-                    lhs.value.shape, rhs.value.shape
+                // spec/04-type-system.md section 4.7: a `Domain` trap in the
+                // operation, which every float form names when it has one.
+                let op = float_op
+                    .map(FloatBinOp::name)
+                    .or(int_op.map(IntBinOp::name))
+                    .ok_or("numeric op names no kernel")?;
+                return Err(operand_shape_disagreement(
+                    op,
+                    &lhs.value.shape,
+                    &rhs.value.shape,
                 ));
             }
             let storage = if lhs.precision.is_integer() && rhs.precision.is_integer() {
@@ -533,12 +564,15 @@ fn comparison_scalar(value: &RuntimeValue) -> Option<ScalarValue> {
 }
 
 pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    compare_runtime(args, CompareOp::Eq)
+    compare_runtime(args, CompareOp::Eq, "eq")
 }
 
+/// `name` is the builtin the program called, which a trap names; `lt` and
+/// `cmplt` share one kernel.
 pub(super) fn compare_runtime(
     args: &[RuntimeValue],
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(lhs), Some(rhs))
@@ -558,7 +592,7 @@ pub(super) fn compare_runtime(
             _ => Err("ordered comparison does not accept string args".to_string()),
         },
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-            tensor_compare_value(lhs, rhs, op).map(RuntimeValue::Tensor)
+            tensor_compare_value(lhs, rhs, op, name).map(RuntimeValue::Tensor)
         }
         // A scalar beside a tensor. These two arms used to broadcast the
         // scalar and return a `tensor[D, bool]`. chelis#1506 makes the form a
@@ -595,17 +629,23 @@ fn mixed_comparison_surface_error() -> String {
 pub(super) fn ordered_compare(
     args: &[RuntimeValue],
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeValue, String> {
-    compare_runtime(args, op)
+    compare_runtime(args, op, name)
 }
 
 pub(super) fn tensor_compare_value(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeTensorValue, String> {
     if lhs.value.shape != rhs.value.shape {
-        return Err("tensor comparison expects matching tensor shape".to_string());
+        return Err(operand_shape_disagreement(
+            name,
+            &lhs.value.shape,
+            &rhs.value.shape,
+        ));
     }
     let storage = compare_tensors(op, lhs.value.storage(), rhs.value.storage())
         .map_err(|error| error.to_string())?;
@@ -652,6 +692,7 @@ pub(super) fn bool_unop(
 pub(super) fn tensor_bool_binop(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
+    name: &str,
     op: impl Fn(bool, bool) -> bool,
 ) -> Result<RuntimeTensorValue, String> {
     if lhs.precision != Prim::Bool || rhs.precision != Prim::Bool {
@@ -662,9 +703,10 @@ pub(super) fn tensor_bool_binop(
         ));
     }
     if lhs.value.shape != rhs.value.shape {
-        return Err(format!(
-            "tensor bool op expects matching shapes, got {:?} vs {:?}",
-            lhs.value.shape, rhs.value.shape
+        return Err(operand_shape_disagreement(
+            name,
+            &lhs.value.shape,
+            &rhs.value.shape,
         ));
     }
     let data = lhs
@@ -2227,16 +2269,29 @@ pub(super) fn tensor_reshape_value(
     tensor: &RuntimeTensorValue,
     shape: &[RuntimeValue],
 ) -> Result<RuntimeTensorValue, String> {
+    // spec/04-type-system.md section 4.7: a negative target extent fails the
+    // non-negativity guard, a `Domain` trap in `reshape`.
+    for (axis, value) in shape.iter().enumerate() {
+        if let RuntimeValue::Scalar(payload) = value
+            && payload.dtype().is_integer()
+            && payload.as_i64() < 0
+        {
+            return Err(chelis_abi::failure::negative_target_extent(
+                "reshape",
+                axis,
+                payload.as_i64(),
+            ));
+        }
+    }
     let new_shape = expect_int_list(shape, "reshape")?;
     let expected = new_shape
         .iter()
         .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
         .ok_or_else(|| "reshape target shape overflows usize".to_string())?;
     if expected != tensor.value.len() {
-        return Err(format!(
-            "reshape expects {} elements but tensor has {}",
-            expected,
-            tensor.value.len()
+        return Err(chelis_abi::failure::reshape_element_count_disagreement(
+            u64::try_from(expected).unwrap_or(u64::MAX),
+            u64::try_from(tensor.value.len()).unwrap_or(u64::MAX),
         ));
     }
     // reuse_* contract: reshape is element-preserving (section C3); the
@@ -2309,7 +2364,12 @@ pub(super) fn tensor_gather_value(
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
         let value = index_values[index_linear];
         if value < 0 || value as usize >= tensor.value.shape[axis] {
-            return Err(format!("gather index {value} out of bounds at axis {axis}"));
+            return Err(sparse_index_failure(
+                "gather",
+                value,
+                axis,
+                tensor.value.shape[axis],
+            ));
         }
         src_index.push(value as usize);
         src_index.extend_from_slice(&out_index[axis + indices.value.shape.len()..]);
@@ -2357,8 +2417,16 @@ pub(super) fn tensor_scatter_value(
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
         let value = index_values[index_linear];
         if value < 0 || value as usize >= base.value.shape[axis] {
-            return Err(format!(
-                "scatter index {value} out of bounds at axis {axis}"
+            let op = if mode == "replace" {
+                "scatter_replace"
+            } else {
+                "scatter"
+            };
+            return Err(sparse_index_failure(
+                op,
+                value,
+                axis,
+                base.value.shape[axis],
             ));
         }
         out_index.push(value as usize);
@@ -2426,8 +2494,11 @@ pub(super) fn tensor_scatter_elements_value(
     for (linear, &value) in index_values.iter().enumerate() {
         let coord = linear_to_indices(linear, &updates.value.shape);
         if value < 0 || value as usize >= data.value.shape[axis] {
-            return Err(format!(
-                "scatter_elements index {value} out of bounds at axis {axis}"
+            return Err(sparse_index_failure(
+                "scatter_elements",
+                value,
+                axis,
+                data.value.shape[axis],
             ));
         }
         let mut out_index = coord.clone();
@@ -2464,12 +2535,19 @@ pub(super) fn tensor_where_value(
     // selects. A branch selected nowhere is neither read nor shape-checked.
     let then_selected = cond_mask.iter().any(|flag| *flag != 0);
     let else_selected = cond_mask.contains(&0);
-    let shape_error =
-        || "where expects condition and both branches to have identical shape".to_string();
+    // spec/04-type-system.md section 4.7: a disagreement is a `Domain` trap
+    // in `where`, comparing the condition with a branch as the C guard does.
+    let shape_error = |branch: &RuntimeTensorValue| {
+        operand_shape_disagreement("where", &cond.value.shape, &branch.value.shape)
+    };
     match (then_selected, else_selected) {
-        (true, false) if cond.value.shape != then_tensor.value.shape => return Err(shape_error()),
+        (true, false) if cond.value.shape != then_tensor.value.shape => {
+            return Err(shape_error(then_tensor));
+        }
         (true, false) => return Ok(then_tensor.clone()),
-        (false, true) if cond.value.shape != else_tensor.value.shape => return Err(shape_error()),
+        (false, true) if cond.value.shape != else_tensor.value.shape => {
+            return Err(shape_error(else_tensor));
+        }
         (false, true) => return Ok(else_tensor.clone()),
         (false, false) => {
             return Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
@@ -2479,10 +2557,11 @@ pub(super) fn tensor_where_value(
         }
         (true, true) => {}
     }
-    if cond.value.shape != then_tensor.value.shape
-        || then_tensor.value.shape != else_tensor.value.shape
-    {
-        return Err(shape_error());
+    if cond.value.shape != then_tensor.value.shape {
+        return Err(shape_error(then_tensor));
+    }
+    if cond.value.shape != else_tensor.value.shape {
+        return Err(shape_error(else_tensor));
     }
     // reuse_* contract: `where` selects existing elements from the two
     // branches (section C3, element-preserving). Start from the then

@@ -150,6 +150,12 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-export",
+        "chelis_runtime.h: void chelis_elementwise_shape_trap ( const char * op , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
         "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
         &[],
     ),

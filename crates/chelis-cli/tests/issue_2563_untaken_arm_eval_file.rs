@@ -999,7 +999,8 @@ def main() -> tensor[*, f32] = {
   pick(to_tensor({c}), a, b)
 }
 ";
-    let shape_error = "where expects condition and both branches to have identical shape";
+    // spec/04-type-system.md section 4.7: a `Domain` trap in `where`.
+    let shape_error = "numeric trap: domain in where at i64";
     let directory = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
     for (index, (condition, expected)) in [
@@ -1077,15 +1078,15 @@ fn a_condition_shaped_unlike_its_selected_branch_is_refused_in_eval_file_and_c()
     for (index, (row, source)) in rows.iter().enumerate() {
         let stem = format!("where_selected_{index}");
         let h = h_file(directory.path(), &stem, source);
-        let h_refused = h.as_ref().is_err_and(|stderr| {
-            stderr.contains("where expects condition and both branches to have identical shape")
-        });
+        let h_refused = h
+            .as_ref()
+            .is_err_and(|stderr| stderr.contains("where operands disagree"));
         if !h_refused {
             failures.push(format!("{row}, H: {h:?}"));
         }
         let c = c_file(directory.path(), &stem, source);
         let c_refused = c.as_ref().is_err_and(|stderr| {
-            !stderr.starts_with("build: ") && stderr.contains("elementwise operand shape mismatch")
+            !stderr.starts_with("build: ") && stderr.contains("operands disagree at axis")
         });
         if !c_refused {
             failures.push(format!("{row}, C: {c:?}"));

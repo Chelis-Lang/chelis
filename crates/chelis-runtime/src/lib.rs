@@ -2584,9 +2584,11 @@ fn validate_reshape_metadata(input: &ShapeMetadata, target: &ShapeMetadata, cont
     metadata_or_fail(target.bytes().allocation(), context);
     if target.elements() != input.elements() {
         runtime_fail!(
-            "Domain: {context} reshape numel mismatch: target {} but tensor has {} elements",
-            target.elements().get(),
-            input.elements().get()
+            "{}",
+            chelis_abi::failure::reshape_element_count_disagreement(
+                target.elements().get().unsigned_abs(),
+                input.elements().get().unsigned_abs()
+            )
         );
     }
 }
@@ -3666,9 +3668,17 @@ pub unsafe extern "C" fn chelis_sparse_data_index(
     selected: chelis_scalar,
 ) -> i64 {
     let p = sparse_plan(plan);
+    let selected = affine_scalar(selected, p.op);
+    let axis = p.metadata.axis();
+    let extent = p.metadata.base().shape()[axis];
+    if selected < 0 || selected >= extent {
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::sparse_index_out_of_bounds(p.op, selected, axis, extent)
+        );
+    }
     affine_result(
-        p.metadata
-            .data_index(affine_scalar(linear, p.op), affine_scalar(selected, p.op)),
+        p.metadata.data_index(affine_scalar(linear, p.op), selected),
         p.op,
     )
 }
@@ -4989,7 +4999,16 @@ pub unsafe extern "C" fn chelis_list_from_values(
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_index(list: *const chelis_list, index: i64) -> chelis_value {
     if list.is_null() || index < 0 || index >= (*list).live().len() as i64 {
-        runtime_fail!("list index out of bounds");
+        // One rendering serves every lane ([05-OP-54]).
+        let len = if list.is_null() {
+            0
+        } else {
+            (*list).live().len()
+        };
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::list_index_out_of_bounds(index, len)
+        );
     }
     chelis_value_clone((*list).live()[index as usize])
 }
@@ -5151,7 +5170,10 @@ pub unsafe extern "C" fn chelis_list_take(
     count: i64,
 ) -> *mut chelis_list {
     if count < 0 {
-        runtime_fail!("take requires non-negative count");
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::list_argument_negative("take", "count", count)
+        );
     }
     let items = if list.is_null() {
         Vec::new()
@@ -5176,7 +5198,10 @@ pub unsafe extern "C" fn chelis_list_drop(
         // the reader to the one-argument linearity consume of [05-OP-67],
         // and would disagree with the eval lane's wording for the same
         // program.
-        runtime_fail!("skip requires non-negative count");
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::list_argument_negative("skip", "count", count)
+        );
     }
     if list.is_null() || count as usize >= (*list).live().len() {
         return chelis_list_empty();
@@ -5213,7 +5238,10 @@ pub unsafe extern "C" fn chelis_list_drop_owned(
         // The cloning entry point's diagnostic, for the reason recorded
         // there: the user wrote `skip`, not this symbol and not
         // [05-OP-67]'s one-argument `drop`.
-        runtime_fail!("skip requires non-negative count");
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::list_argument_negative("skip", "count", count)
+        );
     }
     if list.is_null() {
         return chelis_list_drop(list, count);
@@ -6161,7 +6189,15 @@ pub unsafe extern "C" fn chelis_tensor_gather(
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
         if gathered < 0 || gathered >= (*tensor).shape()[axis_i] {
-            runtime_fail!("gather index {gathered} out of bounds");
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::sparse_index_out_of_bounds(
+                    "gather",
+                    gathered,
+                    axis_i,
+                    (*tensor).shape()[axis_i]
+                )
+            );
         }
         src_index[src_pos] = gathered;
         src_pos += 1;
@@ -6306,7 +6342,19 @@ unsafe fn tensor_scatter(
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
         if gathered < 0 || gathered >= (*base).shape()[axis_i] {
-            runtime_fail!("scatter index {gathered} out of bounds");
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::sparse_index_out_of_bounds(
+                    if add_mode {
+                        "scatter"
+                    } else {
+                        "scatter_replace"
+                    },
+                    gathered,
+                    axis_i,
+                    (*base).shape()[axis_i]
+                )
+            );
         }
         out_index[out_pos] = gathered;
         out_pos += 1;
@@ -7627,6 +7675,26 @@ unsafe fn assertion_shape(tensor: *const chelis_tensor) -> Vec<usize> {
         .iter()
         .map(|extent| usize::try_from(*extent).unwrap_or_else(|_| runtime_fail!("negative extent")))
         .collect()
+}
+
+/// A runtime disagreement between the shapes of `op`'s operands is a
+/// `Domain` trap in `op` (spec/04-type-system.md section 4.7), not a compiler
+/// invariant: the binary reports the evaluators' rendering and exits with
+/// status 1 ([04-NUM-10]).
+#[no_mangle]
+pub unsafe extern "C" fn chelis_elementwise_shape_trap(
+    op: *const c_char,
+    lhs: *const chelis_tensor,
+    rhs: *const chelis_tensor,
+) {
+    if op.is_null() || lhs.is_null() || rhs.is_null() {
+        runtime_fail!("chelis internal error: null elementwise shape trap operand");
+    }
+    let op = CStr::from_ptr(op).to_string_lossy();
+    runtime_fail!(
+        "{}",
+        chelis_abi::failure::operand_shape_disagreement(&op, (*lhs).shape(), (*rhs).shape())
+    );
 }
 
 /// [05-HOST-1] `tensor_scan` over a tensor state in compiled host code:

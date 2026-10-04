@@ -17616,7 +17616,7 @@ impl<'program> LowerCtx<'program> {
             if raw < 0 {
                 let argument = if name == "index" { "index" } else { "count" };
                 raise_fatal_lowering_error(
-                    format!("{name} requires non-negative {argument}, got {raw}"),
+                    chelis_abi::failure::list_argument_negative(name, argument, raw),
                     Some(count_arg.span()),
                     count_arg.span_id().map(ToOwned::to_owned),
                 );
@@ -17625,7 +17625,7 @@ impl<'program> LowerCtx<'program> {
             return match name {
                 "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
                     raise_fatal_lowering_error(
-                        format!("index {raw} out of bounds for list of len {}", items.len()),
+                        chelis_abi::failure::list_index_out_of_bounds(raw, items.len()),
                         Some(count_arg.span()),
                         count_arg.span_id().map(ToOwned::to_owned),
                     )

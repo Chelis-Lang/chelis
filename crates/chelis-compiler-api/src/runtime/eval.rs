@@ -3576,12 +3576,12 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Bool(equal == (name == "eq")))
             }
             "eq" => compare_eq(args),
-            "neq" => compare_runtime(args, CompareOp::Ne),
-            "cmplt" => ordered_compare(args, CompareOp::Lt),
-            "lt" => ordered_compare(args, CompareOp::Lt),
-            "gt" => ordered_compare(args, CompareOp::Gt),
-            "gte" => ordered_compare(args, CompareOp::Gte),
-            "lte" => ordered_compare(args, CompareOp::Lte),
+            "neq" => compare_runtime(args, CompareOp::Ne, "neq"),
+            "cmplt" => ordered_compare(args, CompareOp::Lt, "cmplt"),
+            "lt" => ordered_compare(args, CompareOp::Lt, "lt"),
+            "gt" => ordered_compare(args, CompareOp::Gt, "gt"),
+            "gte" => ordered_compare(args, CompareOp::Gte, "gte"),
+            "lte" => ordered_compare(args, CompareOp::Lte, "lte"),
             "uniform_like" => {
                 let key = expect_key_arg(args, 0, "uniform_like")?;
                 let template = expect_tensor_arg(args, 1)?;
@@ -3605,13 +3605,13 @@ impl<'a> EvalContext<'a> {
             // would hide.
             "and" => match (args.first(), args.get(1)) {
                 (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-                    tensor_bool_binop(lhs, rhs, |a, b| a && b).map(RuntimeValue::Tensor)
+                    tensor_bool_binop(lhs, rhs, "and", |a, b| a && b).map(RuntimeValue::Tensor)
                 }
                 _ => bool_binop(args, |lhs, rhs| lhs && rhs),
             },
             "or" => match (args.first(), args.get(1)) {
                 (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-                    tensor_bool_binop(lhs, rhs, |a, b| a || b).map(RuntimeValue::Tensor)
+                    tensor_bool_binop(lhs, rhs, "or", |a, b| a || b).map(RuntimeValue::Tensor)
                 }
                 _ => bool_binop(args, |lhs, rhs| lhs || rhs),
             },
@@ -3735,12 +3735,10 @@ impl<'a> EvalContext<'a> {
             "index" => {
                 let list = expect_list_arg(args, 0)?;
                 let index = expect_int_arg(args, 1)?;
-                if index < 0 {
-                    return Err(format!("index requires non-negative index, got {index}"));
-                }
-                list.get(index as usize).cloned().ok_or_else(|| {
-                    format!("index {index} out of bounds for list of len {}", list.len())
-                })
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|position| list.get(position).cloned())
+                    .ok_or_else(|| chelis_abi::failure::list_index_out_of_bounds(index, list.len()))
             }
             "append" => {
                 let mut list = expect_list_arg(args, 0)?;
@@ -3769,7 +3767,9 @@ impl<'a> EvalContext<'a> {
                 let list = expect_list_arg(args, 0)?;
                 let count = expect_int_arg(args, 1)?;
                 if count < 0 {
-                    return Err(format!("take requires non-negative count, got {count}"));
+                    return Err(chelis_abi::failure::list_argument_negative(
+                        "take", "count", count,
+                    ));
                 }
                 Ok(RuntimeValue::List(
                     list.iter().take(count as usize).cloned().collect(),
@@ -3779,7 +3779,9 @@ impl<'a> EvalContext<'a> {
                 let list = expect_list_arg(args, 0)?;
                 let count = expect_int_arg(args, 1)?;
                 if count < 0 {
-                    return Err(format!("skip requires non-negative count, got {count}"));
+                    return Err(chelis_abi::failure::list_argument_negative(
+                        "skip", "count", count,
+                    ));
                 }
                 Ok(RuntimeValue::List(
                     list.iter().skip(count as usize).cloned().collect(),

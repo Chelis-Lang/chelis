@@ -1221,18 +1221,20 @@ impl CEmitter {
         if (all_static && statically_compatible) || agreement.members().len() < 2 {
             return;
         }
-        let id = node.id.0;
+        // spec/04-type-system.md section 4.7: a disagreement is a `Domain`
+        // trap in the operation, rendered by the runtime as every evaluator
+        // renders it.
+        let op = chelis_ir::grad::risc_op_name(&node.op);
         for (left_index, left) in agreement.members().iter().enumerate() {
             let a = left.0;
             for right in &agreement.members()[left_index + 1..] {
                 let b = right.0;
                 self.line(&format!(
                     "if (t{a}_rank != t{b}_rank) {{ \
-                     fprintf(stderr, \"chelis: elementwise operand rank mismatch at node {id}: %d vs %d\\n\", \
-                     t{a}_rank, t{b}_rank); abort(); }} \
+                     chelis_elementwise_shape_trap(\"{op}\", t{a}, t{b}); }} \
                      if (t{a}_rank == t{b}_rank) {{ for (int __d = 0; __d < t{a}_rank; __d++) {{ \
-                     if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ fprintf(stderr, \"chelis: \
-                     elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
+                     if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ \
+                     chelis_elementwise_shape_trap(\"{op}\", t{a}, t{b}); \
                      }} }} }}"
                 ));
             }
@@ -8120,10 +8122,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.before_inactive_zeros_branch(id, |emitter| {
             emitter.emit_runtime_dim_sites(id, &extents);
         });
+        // spec/04-type-system.md section 4.7: a negative target extent fails
+        // the non-negativity guard, a `Domain` trap in `reshape`, rendered as
+        // `chelis_abi::failure::negative_target_extent` renders it for eval.
         for (axis, extent) in &extents {
             self.line(&format!(
-                "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
-                 must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
+                "if (({extent}) < 0) {{ fprintf(stderr, \"reshape target extent at axis {axis} \
+                 is negative: %lld\\n\", (long long)({extent})); \
+                 chelis_numeric_trap(\"numeric trap: domain in reshape at i64\"); }}"
             ));
             self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
         }

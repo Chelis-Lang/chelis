@@ -239,6 +239,11 @@ const COLUMN_LENGTHS_DIFFER: Case = Case {
     run: "def run(xs: List[i64], ys: List[i64]) -> List[i64] = to_list(gap(1i64, col(to_tensor(xs)), col(to_tensor(ys))))\nresult = run([1i64, 2i64], [5i64, 3i64, 4i64])\n",
 };
 
+/// spec/04-type-system.md section 4.7: the disagreeing columns are one
+/// `Domain` trap, rendered identically by both lanes.
+const COLUMN_LENGTHS_TRAP: &str = "operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+                                   numeric trap: domain in";
+
 fn request(source: &str) -> EvalRequest {
     EvalRequest {
         source_kind: SourceKind::Surf,
@@ -334,8 +339,8 @@ fn a_declared_binder_with_two_lengths_still_fails_in_both_lanes() {
     failures.extend(
         check_negative(
             &COLUMN_LENGTHS_DIFFER,
-            "tensor shapes must match for elementwise op, got [3] vs [2]",
-            "elementwise operand shape mismatch",
+            COLUMN_LENGTHS_TRAP,
+            COLUMN_LENGTHS_TRAP,
         )
         .err(),
     );

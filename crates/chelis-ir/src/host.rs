@@ -11603,16 +11603,30 @@ fn try_lower_general_list_grad_app(
                 });
                 let cond = HostExpr::new(HostExprKind::Builtin {
                     name: "lt".to_string(),
-                    args: vec![value, HostExpr::new(HostExprKind::Int(0))],
+                    args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                     ty: HostTypeTerm::Bool,
+                });
+                // The shared rendering's prefix, then the value: every lane
+                // reports the same text ([05-OP-54]).
+                let message = HostExpr::new(HostExprKind::Builtin {
+                    name: "string_concat".to_string(),
+                    args: vec![
+                        HostExpr::new(HostExprKind::String(
+                            chelis_abi::failure::list_argument_negative_prefix(operation, argument),
+                        )),
+                        HostExpr::new(HostExprKind::Builtin {
+                            name: "to_string".to_string(),
+                            args: vec![value],
+                            ty: HostTypeTerm::String,
+                        }),
+                    ],
+                    ty: HostTypeTerm::String,
                 });
                 body = HostExpr::new(HostExprKind::If {
                     cond: Box::new(cond),
                     then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
                         name: "fail".to_string(),
-                        args: vec![HostExpr::new(HostExprKind::String(format!(
-                            "{operation} requires non-negative {argument}"
-                        )))],
+                        args: vec![message],
                         ty: result_ty.clone(),
                     })),
                     else_expr: Box::new(body),
@@ -11642,7 +11656,9 @@ fn try_lower_general_list_grad_app(
                 let message = HostExpr::new(HostExprKind::Builtin {
                     name: "string_concat".to_string(),
                     args: vec![
-                        HostExpr::new(HostExprKind::String("index ".to_string())),
+                        HostExpr::new(HostExprKind::String(
+                            chelis_abi::failure::LIST_INDEX_PREFIX.to_string(),
+                        )),
                         HostExpr::new(HostExprKind::Builtin {
                             name: "string_concat".to_string(),
                             args: vec![
@@ -11655,7 +11671,7 @@ fn try_lower_general_list_grad_app(
                                     name: "string_concat".to_string(),
                                     args: vec![
                                         HostExpr::new(HostExprKind::String(
-                                            " out of bounds for list of len ".to_string(),
+                                            chelis_abi::failure::LIST_INDEX_LEN_INFIX.to_string(),
                                         )),
                                         HostExpr::new(HostExprKind::Builtin {
                                             name: "to_string".to_string(),
