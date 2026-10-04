@@ -13,6 +13,7 @@ each must change an expected output of the canary.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Sequence
 import contextlib
 from fractions import Fraction
@@ -402,6 +403,23 @@ class Generator(unittest.TestCase):
         self.assertTrue(set(harness.f32_midpoint_witnesses(4)) <= corpus_floats)
         self.assertIn(ref.decimal_to_string(ref.decimal(harness.TINY_TEXT)), corpus_floats)
 
+    def test_f16_and_bf16_witnesses_separate_direct_rounding_from_rounding_through_f32(self) -> None:
+        witnesses = harness.reduced_midpoint_witnesses(8)
+        disagree = Counter()
+        for text in witnesses:
+            x = ref.decimal(text)
+            for name, fmt, direct in (("f16", ref.F16, ref.decimal_to_f16_bits), ("bf16", ref.BF16, ref.decimal_to_bf16_bits)):
+                disagree[name] += direct(x) != through_f32(fmt)(x)
+        # Each format's witnesses are half the list, and every other one disagrees.
+        for name in ("f16", "bf16"):
+            self.assertGreaterEqual(disagree[name], len(witnesses) // 8, name)
+        corpus_floats = {c.args[0] for c in CORPUS.cases if c.row == "row_floats"}
+        self.assertTrue(set(harness.reduced_midpoint_witnesses(4)) <= corpus_floats)
+        self.assertTrue(set(harness.REDUCED_FLOAT_EDGES) <= corpus_floats)
+        # The f16 range ends inside the corpus: a finite value just below 65520, infinity at it.
+        self.assertEqual(ref.decimal_to_f16_bits(ref.decimal("65519.99999999999999")), 0x7BFF)
+        self.assertEqual(ref.decimal_to_f16_bits(ref.decimal("65520")), 0x7C00)
+
     def test_the_eval_and_c_runner_sees_every_program_on_both_lanes(self) -> None:
         runner = FakeRunner()
         selected = programs()[:5]
@@ -642,6 +660,22 @@ def f32_through_f64(x: ref.Decimal) -> int:
     return struct.unpack("<I", struct.pack("<f", ref.decimal_to_f64(x)))[0]
 
 
+def through_f32(fmt: tuple[int, int]):
+    """A conversion to `fmt` that rounds the f32 result instead of the exact value."""
+    def convert(x: ref.Decimal) -> int:
+        return ref.nearest_bits(ref.round_binary(x.value, ref.F32), fmt, x.coefficient < 0)
+    return convert
+
+
+def f16_saturating(x: ref.Decimal, exact=ref.decimal_to_f16_bits) -> int:
+    """An f16 conversion that clamps an overflow to the largest finite value of its sign."""
+    bits = exact(x)
+    return bits - 1 if bits & 0x7FFF == 0x7C00 else bits
+
+
+BINARY_FORMATS = (("f64", ref.F64), ("f32", ref.F32), ("f16", ref.F16), ("bf16", ref.BF16))
+
+
 def unpadded_text(x: ref.Decimal) -> str:
     """`decimal_to_string` printing each limb below the top without its leading zeros."""
     magnitude = abs(x.coefficient)
@@ -673,9 +707,13 @@ CANARY_DEFECTS: dict[str, dict[str, dict[str, object]]] = {
         name: rounding(name, "RejectInexact", as_mode="RoundTowardZero") for name in MODE_CALLABLES
         if name != "decimal_round"},
     "every binary conversion tie broken toward zero, away from zero, toward positive or toward negative": {
-        f"f{width} {tie}": binary_rounding(fmt, tie)
-        for width, fmt in ((64, ref.F64), (32, ref.F32)) for tie in WRONG_TIES},
+        f"{name} {tie}": binary_rounding(fmt, tie) for name, fmt in BINARY_FORMATS for tie in WRONG_TIES},
     "every f32 conversion rounding through f64": {"through f64": {"decimal_to_f32_bits": f32_through_f64}},
+    "every f16 or bf16 conversion rounding through f32": {
+        "f16 through f32": {"decimal_to_f16_bits": through_f32(ref.F16)},
+        "bf16 through f32": {"decimal_to_bf16_bits": through_f32(ref.BF16)}},
+    "every f16 overflow saturating at the largest finite value instead of rounding to infinity": {
+        "saturating": {"decimal_to_f16_bits": f16_saturating}},
     "every long division taking at most one quotient-digit correction, or none": {
         f"{n} corrections": quotient(long_division(n)) for n in (1, 0)},
 }
@@ -686,7 +724,7 @@ CONTROLS: dict[str, dict[str, object]] = {
     "product": product(operator.mul),
     "long division": quotient(long_division(2)),
     "exact division": quotient(divmod),
-    **{f"f{width} ties to even": binary_rounding(fmt, "to even") for width, fmt in ((64, ref.F64), (32, ref.F32))},
+    **{f"{name} ties to even": binary_rounding(fmt, "to even") for name, fmt in BINARY_FORMATS},
     **{f"{name} {mode} ties {tie}": rounding(name, mode, tie=tie) for name in MODE_CALLABLES
        for mode, tie in (("RoundTiesToEven", "to even"), ("RoundTiesToAway", "away from zero"))},
 }

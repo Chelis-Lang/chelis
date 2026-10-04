@@ -255,6 +255,8 @@ typing rule, not an unconstrained output type variable.
 | `decimal::decimal_round` | `(Decimal,i64,Rounding)->Decimal` |
 | `decimal::decimal_scale` | `(Decimal)->i64` |
 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_to_bf16` | `(Decimal)->bf16` |
+| `decimal::decimal_to_f16` | `(Decimal)->f16` |
 | `decimal::decimal_to_f32` | `(Decimal)->f32` |
 | `decimal::decimal_to_f64` | `(Decimal)->f64` |
 | `decimal::decimal_to_fixed_string` | `(Decimal,i64)->string` |

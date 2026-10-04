@@ -1435,10 +1435,11 @@ reason = "recursive composite cotangent parity compiles and executes generated C
 tracking_issue = "chelis#1293"
 
 # The complete Std.Decimal differential corpus and extreme-argument sweep take
-# minutes each on a loaded package-expansion shard, and the sweep can reach the
-# 600-second `chelis test` suite timeout there. Pull-request CI runs a canary of
-# each instead, in the same targets, and the targets' other tests in full;
-# docs/manual_gates.md has the command that runs both complete tests on demand.
+# minutes each on a loaded package-expansion shard; the sweep runs as batches of
+# at most 48 `chelis test` cases so the suite timeout bounds a batch
+# (chelis#3142). Pull-request CI runs a canary of each instead, in the same
+# targets, and the targets' other tests in full; docs/manual_gates.md has the
+# command that runs both complete tests on demand.
 [[test_exclusion]]
 package = "chelis-cli"
 target = "std_decimal_oracle"
@@ -1456,8 +1457,18 @@ name = "std_decimal_extreme_arguments_raise_no_primitive_trap"
 workflow = "heavy-e2e.yml"
 job = "module-oracles"
 cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "the Std.Decimal extreme-argument sweep evaluates 308 calls in one chelis test suite"
+reason = "the Std.Decimal extreme-argument sweep evaluates 324 calls in seven chelis test runs of at most 48 (chelis#3142)"
 tracking_issue = "chelis#2794"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_properties"
+name = "std_decimal_properties_pass_at_the_default_samples_and_their_false_variants_fail"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "chelis prove compiles the linked program for every sample, guard and shrink step (chelis#3117), so a hundred samples of six Std.Decimal properties and six refutations take tens of CPU minutes; std_decimal_property_canary_passes_and_its_false_variants_fail runs per pull request"
+tracking_issue = "chelis#2946"
 
 [[test_exclusion]]
 package = "chelis-cli"

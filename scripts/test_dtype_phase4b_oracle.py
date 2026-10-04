@@ -2143,11 +2143,13 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 281)
-        self.assertEqual(len(set(rows)), 281)
+        self.assertEqual(len(rows), 283)
+        self.assertEqual(len(set(rows)), 283)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
+            "decimal::decimal_to_f16",
+            "decimal::decimal_to_bf16",
             "io/json::json_bigint",
             "io/json::load_json",
             "datetime::date_lt",
@@ -2988,6 +2990,10 @@ class ContractValidationTests(unittest.TestCase):
             (
                 "correctly rounded once to the target\n> format with ties to even",
                 "rounded to the target format by the host",
+            ),
+            (
+                "rounds to the infinity of `x`'s sign",
+                "fails `overflow`",
             ),
         )
         for old, new in mutations:

@@ -32,7 +32,8 @@ Every printed line must belong to a binding of the program.
 
 Profiles: the default corpus is the edge corpus nightly CI runs (envelope
 boundaries, limb boundaries and carry chains, removable zeros, i64 boundaries, ties in
-every mode and sign, subnormal and double-rounding f32 witnesses, long divisions
+every mode and sign, subnormal and double-rounding f32, f16 and bf16 witnesses,
+f16 overflow, long divisions
 that need the quotient digit's second correction or its clamp, the parser's
 accepted and rejected spellings, and seeded random values, which take one
 rounding mode per scale in rotation); `--large` adds many more seeded random
@@ -95,7 +96,7 @@ REPO = Path(__file__).resolve().parent.parent
 DECIMAL_NAMES = (
     "Decimal", "decimal", "try_decimal", "decimal_to_string", "decimal_to_fixed_string", "decimal_from_i64",
     "decimal_to_i64", "try_decimal_to_i64", "decimal_from_f64", "try_decimal_from_f64", "decimal_to_f64",
-    "decimal_to_f32", "decimal_scale", "decimal_add", "decimal_sub", "decimal_mul", "decimal_round", "decimal_div",
+    "decimal_to_f32", "decimal_to_f16", "decimal_to_bf16", "decimal_scale", "decimal_add", "decimal_sub", "decimal_mul", "decimal_round", "decimal_div",
     "try_decimal_div", "decimal_lt", "decimal_lte", "decimal_gt", "decimal_gte",
 )
 ROUNDING_NAMES = ("Rounding", *ROUNDINGS)
@@ -157,12 +158,9 @@ class FloatBits:
     bits: int
 
     def __str__(self) -> str:
-        width = 64 if self.fmt == ref.F64 else 32
-        if self.fmt == ref.F64:
-            shown = repr(struct.unpack("<d", struct.pack("<Q", self.bits))[0])
-        else:
-            shown = repr(struct.unpack("<f", struct.pack("<I", self.bits))[0])
-        return f"f{width}:{self.bits:#x}({shown})"
+        names = {ref.F64: "f64", ref.F32: "f32", ref.F16: "f16", ref.BF16: "bf16"}
+        shown = special_text(self) or repr(float(ref.bits_value(self.bits, self.fmt)))
+        return f"{names[self.fmt]}:{self.bits:#x}({shown})"
 
 
 Element = str | FloatBits
@@ -246,8 +244,11 @@ def row(name: str, params: Sequence[str], lines: Sequence[str], expect: Callable
 row("row_parse", ["string"], ["[opt_text(try_decimal(p0))]"], lambda t: [opt_text(ref.try_decimal(t))])
 row("row_text", ["string"], ["x = decimal(p0)", "[decimal_to_string(x), to_string(decimal_scale(x))]"],
     lambda t: text_and_scale(d(t)))
-row("row_floats", ["string"], ["x = decimal(p0)", "[to_string(decimal_to_f64(x)), to_string(decimal_to_f32(x))]"],
-    lambda t: [FloatBits(ref.F64, ref.decimal_to_f64_bits(d(t))), FloatBits(ref.F32, ref.decimal_to_f32_bits(d(t)))])
+row("row_floats", ["string"],
+    ["x = decimal(p0)", "[to_string(decimal_to_f64(x)), to_string(decimal_to_f32(x)), "
+     "to_string(decimal_to_f16(x)), to_string(decimal_to_bf16(x))]"],
+    lambda t: [FloatBits(ref.F64, ref.decimal_to_f64_bits(d(t))), FloatBits(ref.F32, ref.decimal_to_f32_bits(d(t))),
+               FloatBits(ref.F16, ref.decimal_to_f16_bits(d(t))), FloatBits(ref.BF16, ref.decimal_to_bf16_bits(d(t)))])
 row("row_fixed", ["string", "i64"], ["[decimal_to_fixed_string(decimal(p0), p1)]"],
     lambda t, n: [ref.decimal_to_fixed_string(d(t), n)])
 row("row_from_i64", ["i64"], ["x = decimal_from_i64(p0)", "[decimal_to_string(x), to_string(decimal_scale(x))]"],
@@ -537,7 +538,7 @@ class Corpus:
             self.outcome(category, "decimal", "row_text", (text,), lambda: d(text))
 
     def value(self, category: str, text: str) -> None:
-        """A valid decimal's parse, text, scale, and both float conversions."""
+        """A valid decimal's parse, text, scale, and every float conversion."""
         d(text)
         self.add(category, "row_parse", (text,))
         self.add(category, "row_text", (text,))
@@ -648,6 +649,14 @@ FLOAT_EDGES = ["2e-38", "-2e-38", "0.0691026858985424", "-0.0691026858985424", "
                "9007199254740995", "-9007199254740993", "18014398509481986", "16777217", "16777219", "-16777217",
                "1.000000059604644775390625", "1.000000178813934326171875", "0.1", "0.2", "0.3", "1e37", "3.4e37",
                "123456789.123456789", "0.00000000000000000000000000000000000117"]
+# f16's overflow threshold 65520 (the tie between its largest finite value
+# 65504 and 2^16, whose even significand carries it to infinity) and the values
+# beside it; its smallest subnormal 2^-24, half of it, its largest subnormal and
+# smallest normal; and ties to even below and above in f16 and in bf16.
+REDUCED_FLOAT_EDGES = ["65504", "65519.99999999999999", "65520", "-65520", "65520.00000000000001", "65536", "2049",
+                       "2051", "-2049", "257", "259", "-259", "0.000000059604644775390625",
+                       "0.0000000298023223876953125", "-0.0000000298023223876953125",
+                       "0.0000000298023223876953125000001", "0.000060975551605224609375", "0.00006103515625"]
 
 
 def f32_midpoint_witnesses(count: int) -> list[str]:
@@ -664,6 +673,31 @@ def f32_midpoint_witnesses(count: int) -> list[str]:
     for e, delta in offsets:
         for k in range(count):
             midpoint = (2 * (2**23 + k) + 1) * ref.Fraction(2) ** (e - 24)
+            for value in (midpoint - delta, midpoint + delta):
+                x = ref.canonical(value)
+                if x is not None:
+                    out.append(ref.decimal_to_string(x))
+    return out
+
+
+def reduced_midpoint_witnesses(count: int) -> list[str]:
+    """Decimals just either side of f16 and bf16 midpoints, closer to them than half an f32 unit.
+
+    A midpoint of precision `p` in the binade `[2^e, 2^(e+1))` is
+    `(2m+1)·2^(e-p)`, with `p` 11 for f16 and 8 for bf16. Rounding a value just
+    beside it to f32 lands exactly on the midpoint, whose tie then goes to the
+    even neighbour, so a conversion through f32 disagrees with the direct
+    rounding on every other `m`. Each offset is below half an f32 unit at its
+    binade and keeps the value inside the value set.
+    """
+    offsets = ((ref.F16, 0, ref.Fraction(1, 10**20)), (ref.F16, -14, ref.Fraction(1, 10**30)),
+               (ref.F16, 10, ref.Fraction(1, 10**15)), (ref.BF16, 0, ref.Fraction(1, 10**20)),
+               (ref.BF16, -20, ref.Fraction(1, 10**36)), (ref.BF16, 40, ref.Fraction(1, 10**5)),
+               (ref.BF16, 100, ref.Fraction(1)), (ref.BF16, 125, ref.Fraction(1)))
+    out = []
+    for (precision, _bits), e, delta in offsets:
+        for k in range(count):
+            midpoint = (2 * (2 ** (precision - 1) + k) + 1) * ref.Fraction(2) ** (e - precision)
             for value in (midpoint - delta, midpoint + delta):
                 x = ref.canonical(value)
                 if x is not None:
@@ -825,7 +859,8 @@ def build_corpus(large: bool = False) -> Corpus:
 
     pools = {
         "envelope": ENVELOPE, "limbs": LIMBS, "removable_zeros": REMOVABLE, "i64_edges": I64_EDGES, "ties": TIES,
-        "float_edges": FLOAT_EDGES + f32_midpoint_witnesses(8 * scale),
+        "float_edges": FLOAT_EDGES + f32_midpoint_witnesses(8 * scale) + REDUCED_FLOAT_EDGES
+        + reduced_midpoint_witnesses(4 * scale),
         "random": [random_text(rng) for _ in range(200 * scale)],
     }
     for category, texts in pools.items():
@@ -969,9 +1004,12 @@ def build_canary_corpus() -> Corpus:
     - one callable's RejectInexact rounding toward zero instead of failing, on every input
     - every binary conversion tie broken toward zero, away from zero, toward positive or toward negative
     - every f32 conversion rounding through f64
+    - every f16 or bf16 conversion rounding through f32
+    - every f16 overflow saturating at the largest finite value instead of rounding to infinity
     - every long division taking at most one quotient-digit correction, or none
 
-    The binary conversions are `decimal_to_f64` and `decimal_to_f32`. The
+    The binary conversions are `decimal_to_f64`, `decimal_to_f32`,
+    `decimal_to_f16` and `decimal_to_bf16`. The
     rounding classes hold for every callable that takes a mode, except that a
     `RejectInexact` rounding of an inexact value is a failure, which the canary
     does not run: it meets that of `decimal_to_i64`, `decimal_from_f64` and
@@ -986,8 +1024,11 @@ def build_canary_corpus() -> Corpus:
                                              *f32_midpoint_witnesses(1)[:2]])):
         for text in texts:
             corpus.value(category, text)
-    # Halfway cases of f64 and of f32 whose even neighbour is the larger.
-    for text in ("9007199254740995", "16777219"):
+    # Halfway cases of f64 and of f32 whose even neighbour is the larger; ties of
+    # f16 and of bf16 to an even neighbour below and above; and a value beside an
+    # f16 and a bf16 midpoint that rounding through f32 moves onto it.
+    for text in ("9007199254740995", "16777219", "2049", "2051", "257", "259", "1.00048828125000001",
+                 "1.00390625000000001"):
         corpus.add("float_edges", "row_floats", (text,))
     for category, texts in (("parse_accepted", ["1e-0005"]), ("parse_malformed", ["+1", "1e"]),
                             ("parse_outside", ["1e38", "1e-39"])):

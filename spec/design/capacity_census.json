@@ -2940,6 +2940,20 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_bf16: (t-fn {} (t-adt {} Decimal) (t-prim {} bf16))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_f16: (t-fn {} (t-adt {} Decimal) (t-prim {} f16))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "decimal::decimal_to_f32: (t-fn {} (t-adt {} Decimal) (t-prim {} f32))",
       "flags": [
         "float-carrier"
