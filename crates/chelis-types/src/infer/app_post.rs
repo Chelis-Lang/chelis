@@ -242,6 +242,7 @@ pub(super) fn finish_unified_app(
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
+                    vg,
                     subst,
                     errors,
                 );
@@ -847,6 +848,7 @@ pub(super) fn finish_unified_app(
                     &equation,
                     &type_for_readonly_check(&arg_tys[1], subst),
                     &type_for_readonly_check(&arg_tys[2], subst),
+                    SumResultSlot::Fresh(vg),
                     subst,
                 ) {
                     Ok(result) => result,
@@ -1001,7 +1003,13 @@ pub(super) fn finish_unified_app(
                 match cumsum_operand {
                     Type::Tensor(dims, precision) => {
                         return match default_sum_result_precision("cumsum", &precision, subst) {
-                            Ok(result) => Type::Tensor(dims, result),
+                            Ok(result) => publish_sum_result(
+                                "cumsum",
+                                dims,
+                                result,
+                                SumResultSlot::Fresh(vg),
+                                subst,
+                            ),
                             Err(message) => report(
                                 errors,
                                 CheckError::new(

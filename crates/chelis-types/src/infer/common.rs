@@ -555,7 +555,7 @@ pub(crate) fn decide_shape_route(
         );
         return result;
     }
-    match shape_route_result(&route, operand, subst) {
+    match shape_route_result(&route, operand, SumResultSlot::Fresh(vg), subst) {
         Ok((result, updates)) => {
             if let Some(expected_updates) = updates
                 && let crate::unify::ShapeRoute::Gather {
@@ -602,9 +602,13 @@ pub(crate) fn decide_shape_route(
 /// Returns `(result type, updates obligation)`. The updates unification is the
 /// caller's because discharge runs inside unification while the eager arm has
 /// a `&mut Subst`; the DECISION of what updates must equal is here.
+///
+/// A `trace` whose result precision waits on an inference variable publishes
+/// a type from `slot`, gated to the decided result ([`publish_sum_result`]).
 pub(crate) fn shape_route_result(
     route: &crate::unify::ShapeRoute,
     operand: &Type,
+    slot: SumResultSlot<'_>,
     subst: &Subst,
 ) -> Result<(Type, Option<Type>), String> {
     use crate::unify::ShapeRoute;
@@ -645,7 +649,10 @@ pub(crate) fn shape_route_result(
         } => {
             let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
             let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
-            Ok((infer_trace_result_type(operand, axis1, axis2, subst)?, None))
+            Ok((
+                infer_trace_result_type(operand, axis1, axis2, slot, subst)?,
+                None,
+            ))
         }
     }
 }
@@ -711,6 +718,7 @@ pub(super) fn infer_trace_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    slot: SumResultSlot<'_>,
     subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
@@ -727,9 +735,9 @@ pub(super) fn infer_trace_result_type(
         .enumerate()
         .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
         .collect();
-    Ok(Type::Tensor(
-        out_dims,
-        default_sum_result_precision("trace", precision, subst)?,
+    let precision = default_sum_result_precision("trace", precision, subst)?;
+    Ok(publish_sum_result(
+        "trace", out_dims, precision, slot, subst,
     ))
 }
 
@@ -745,6 +753,7 @@ pub(super) fn infer_einsum_result_type(
     equation: &str,
     left: &Type,
     right: &Type,
+    slot: SumResultSlot<'_>,
     subst: &Subst,
 ) -> Result<Type, String> {
     let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
@@ -817,10 +826,19 @@ pub(super) fn infer_einsum_result_type(
             })?;
         dims.push(dim.clone());
     }
-    Ok(Type::Tensor(
-        dims,
-        default_sum_result_precision("einsum", precision, subst)?,
-    ))
+    let precision = default_sum_result_precision("einsum", precision, subst)?;
+    Ok(publish_sum_result("einsum", dims, precision, slot, subst))
+}
+
+/// How a `sum`-family call's result precision stands when the call is checked.
+pub(super) enum SumResultPrecision {
+    /// The result precision is known now.
+    Decided(TensorPrec),
+    /// The operand's precision is an inference variable whose dtypes have no
+    /// single result. The call publishes its own result type and a
+    /// [`crate::unify::DeferredOperandGate::SumResult`] decides it once the
+    /// variable binds, or at the declaration boundary.
+    Pending(TypeVar),
 }
 
 /// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an
@@ -828,43 +846,97 @@ pub(super) fn infer_einsum_result_type(
 /// `cumsum`, `trace`, `einsum`). i8 and i16 widen to i32; a dtype with no
 /// default accumulator, such as bool, is rejected.
 ///
-/// A precision variable denotes every dtype it admits ([04-INF-6]), so the
-/// result must be one type at all of them. It is the variable itself when
-/// `sum_result` keeps every member (a float, i32 or i64 bound), and one
-/// concrete dtype when it maps every member there (`{i8, i16}` gives i32).
-/// Otherwise the variable is narrowed to the members `sum_result` keeps and
-/// published: an authored `Int`, `Numeric` or unbounded binder is then
-/// rejected at its declaration, and a variable inference may still bind
-/// rejects i8, i16 and bool when it binds.
+/// Over a precision variable the result is decided now when one type covers
+/// every dtype the variable admits ([`bound_sum_result_precision`]).
+/// Otherwise it waits for the variable: inference may still bind it (a hole,
+/// or a lambda parameter's precision), and an authored binder is decided at
+/// the declaration boundary over every dtype its bound admits ([04-INF-6]).
 pub(super) fn default_sum_result_precision(
     op: &str,
     precision: &TensorPrec,
     subst: &Subst,
-) -> Result<TensorPrec, String> {
-    let variable = match precision {
-        TensorPrec::Concrete(prim) => {
-            return prim
-                .default_reduce_sum_result_precision()
-                .map(TensorPrec::Concrete)
-                .map_err(|message| {
-                    format!(
-                        "{op} expects a tensor precision with a default sum accumulator, got {}; {message}",
-                        prim.name()
-                    )
-                });
+) -> Result<SumResultPrecision, String> {
+    match precision {
+        TensorPrec::Concrete(prim) => settled_sum_result_precision(op, &Type::Prim(*prim))
+            .map(|result| SumResultPrecision::Decided(TensorPrec::Concrete(result))),
+        TensorPrec::Var(variable) => Ok(match bound_sum_result_precision(op, *variable, subst) {
+            Ok(result) => SumResultPrecision::Decided(result),
+            Err(_) => SumResultPrecision::Pending(*variable),
+        }),
+    }
+}
+
+/// Where a waiting `sum`-family result gets the type it publishes.
+pub(crate) enum SumResultSlot<'a> {
+    /// The checked call: publish `dims` at a fresh precision variable, so a
+    /// consumer sees the result's shape before its precision is decided.
+    Fresh(&'a mut VarGen),
+    /// A deferred decision: publish the type the call already handed out.
+    Existing(&'a Type),
+}
+
+/// The result tensor a `sum`-family call publishes: `dims` at the decided
+/// precision, or, while the precision waits, a type from `slot` with a gate
+/// that unifies `dims` at the decided precision into it later.
+pub(super) fn publish_sum_result(
+    op: &str,
+    dims: Vec<Dim>,
+    precision: SumResultPrecision,
+    slot: SumResultSlot<'_>,
+    subst: &Subst,
+) -> Type {
+    match precision {
+        SumResultPrecision::Decided(precision) => Type::Tensor(dims, precision),
+        SumResultPrecision::Pending(variable) => {
+            let published = match slot {
+                SumResultSlot::Fresh(vg) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Var(vg.fresh_tvar()))
+                }
+                SumResultSlot::Existing(published) => published.clone(),
+            };
+            subst.record_deferred_tensor_operand(
+                variable,
+                crate::unify::DeferredOperandGate::SumResult {
+                    op: op.to_string(),
+                    dims,
+                    result: Box::new(published.clone()),
+                },
+            );
+            published
         }
-        TensorPrec::Var(variable) => *variable,
-    };
-    let no_single_result = |bound: &str| {
-        format!(
-            "{op} over a tensor whose precision is a type variable has no single result dtype: \
-             its result is sum_result(p, default(p)) (spec/04-type-system.md §5.7.1), \
-             the variable denotes every dtype {bound} admits ([04-INF-6]), and \
-             sum_result does not give one dtype across them; bound the variable to \
-             `Float`, or to dtypes that share one sum_result, or cast the operand to a \
-             concrete dtype"
-        )
-    };
+    }
+}
+
+/// `sum_result(p, default(p))` for a settled precision.
+pub(crate) fn settled_sum_result_precision(op: &str, resolved: &Type) -> Result<Prim, String> {
+    match resolved {
+        Type::Prim(prim) => prim
+            .default_reduce_sum_result_precision()
+            .map_err(|message| {
+                format!(
+                    "{op} expects a tensor precision with a default sum accumulator, so that its \
+                 result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+                 got {}; {message}",
+                    prim.name()
+                )
+            }),
+        other => Err(format!(
+            "{op} expects a tensor precision with a default sum accumulator, so that its \
+             result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+             got {other}"
+        )),
+    }
+}
+
+/// `sum_result(p, default(p))` over every dtype the precision variable admits
+/// ([04-INF-6]): the variable itself when sum_result keeps each one (a
+/// float, i32 or i64 bound), one concrete dtype when it maps them all there
+/// (`{i8, i16}` gives i32), and otherwise no single type.
+pub(crate) fn bound_sum_result_precision(
+    op: &str,
+    variable: TypeVar,
+    subst: &Subst,
+) -> Result<TensorPrec, String> {
     let restriction = subst.tvar_restriction(variable);
     let members = Prim::ACTIVE_FLOATS
         .into_iter()
@@ -881,40 +953,25 @@ pub(super) fn default_sum_result_precision(
         .zip(&results)
         .all(|(member, result)| *result == Some(*member))
     {
-        return Ok(precision.clone());
+        return Ok(TensorPrec::Var(variable));
     }
     if let Some((Some(first), rest)) = results.split_first()
         && rest.iter().all(|result| *result == Some(*first))
     {
         return Ok(TensorPrec::Concrete(*first));
     }
-    // No one type covers the variable's dtypes. Constrain it to those at which
-    // sum_result is the variable itself and publish the variable. A variable
-    // inference may still bind (a hole, or an operand an operation has only
-    // constrained to some numeric value) then rejects i8, i16 and bool as a
-    // precision mismatch rather than typing i32 data at i8. An authored binder
-    // that this narrows is rejected at its declaration ([04-INF-6],
-    // [04-DTYPE-2]).
-    let identity = members
-        .iter()
-        .zip(&results)
-        .filter(|(member, result)| **result == Some(**member))
-        .map(|(member, _)| *member)
-        .collect::<Vec<_>>();
-    if identity.is_empty() {
-        let bound = match restriction {
-            Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
-            None => "an unbounded variable".to_string(),
-        };
-        return Err(no_single_result(&bound));
-    }
-    subst
-        .narrow_tvar_restriction(
-            variable,
-            TypeVarRestriction::ActiveSet(PrimSet::from_members(identity)),
-        )
-        .map(|()| precision.clone())
-        .map_err(|error| format!("{op}: {}", error.message))
+    let bound = match restriction {
+        Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
+        None => "an unbounded variable".to_string(),
+    };
+    Err(format!(
+        "{op} over a tensor whose precision is a type variable has no single result dtype: \
+         its result is sum_result(p, default(p)) (spec/04-type-system.md §5.7.1), \
+         the variable denotes every dtype {bound} admits ([04-INF-6]), and \
+         sum_result does not give one dtype across them; bound the variable to \
+         `Float`, or to dtypes that share one sum_result, or cast the operand to a \
+         concrete dtype"
+    ))
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the

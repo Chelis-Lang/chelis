@@ -164,7 +164,10 @@ use app_tensor::*;
 use binder_literal::*;
 use checked::*;
 use common::*;
-pub(crate) use common::{decide_shape_route, shape_route_result};
+pub(crate) use common::{
+    SumResultSlot, bound_sum_result_precision, decide_shape_route, settled_sum_result_precision,
+    shape_route_result,
+};
 use declaration_close::*;
 use declaration_collect::*;
 use declaration_graph::*;

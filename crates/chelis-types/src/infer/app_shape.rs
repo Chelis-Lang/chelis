@@ -100,6 +100,7 @@ pub(super) fn infer_reduction_app(
         &kids[1..],
         &arg_tys,
         &result_ty,
+        vg,
         subst,
         errors,
     )

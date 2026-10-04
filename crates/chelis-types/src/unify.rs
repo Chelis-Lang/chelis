@@ -491,6 +491,19 @@ pub(crate) enum DeferredOperandGate {
         route: ShapeRoute,
         result: Box<Type>,
     },
+    /// A `sum`-family result (`sum`, `cumsum`, `trace`, `einsum`) over a
+    /// tensor whose precision is still an inference variable whose dtypes
+    /// have no single `sum_result(p, default(p))` (spec/04 §5.7.1). Keyed on
+    /// that precision variable. When it binds, discharge decides the result
+    /// precision with the same function the eager arm calls and unifies the
+    /// result tensor, at `dims`, into the type the call published. A variable
+    /// still unbound at the declaration boundary is decided over its bound
+    /// there ([`Subst::decide_pending_sum_results`]).
+    SumResult {
+        op: String,
+        dims: Vec<crate::types::Dim>,
+        result: Box<Type>,
+    },
 }
 
 pub(crate) type CollectionContractId = u64;
@@ -598,7 +611,8 @@ impl DeferredOperandGate {
             Self::Copy { result, .. }
             | Self::Cast { result, .. }
             | Self::CastToBinder { result, .. }
-            | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
+            | Self::ShapeRoute { result, .. }
+            | Self::SumResult { result, .. } => Some(result.as_ref()),
             Self::HostSlot { .. } => None,
         }
     }
@@ -608,7 +622,7 @@ impl DeferredOperandGate {
             Self::Copy { location, .. }
             | Self::Cast { location, .. }
             | Self::CastToBinder { location, .. } => location.as_ref(),
-            Self::HostSlot { .. } | Self::ShapeRoute { .. } => None,
+            Self::HostSlot { .. } | Self::ShapeRoute { .. } | Self::SumResult { .. } => None,
         }
     }
 
@@ -625,6 +639,7 @@ impl DeferredOperandGate {
             Self::Cast { .. } => "tensor or numeric/bool scalar".to_string(),
             Self::CastToBinder { .. } => "numeric or bool scalar".to_string(),
             Self::HostSlot { description, .. } => description.clone(),
+            Self::SumResult { .. } => "a dtype with a default sum accumulator".to_string(),
         }
     }
 
@@ -721,7 +736,12 @@ impl DeferredOperandGate {
                 ref route,
                 ref result,
             } => {
-                match crate::infer::shape_route_result(route, resolved, subst) {
+                match crate::infer::shape_route_result(
+                    route,
+                    resolved,
+                    crate::infer::SumResultSlot::Existing(result),
+                    subst,
+                ) {
                     Ok((settled, updates)) => {
                         // The updates equation `scatter` imposes is part of the
                         // arm, not of the helper. Replaying only the helper
@@ -757,6 +777,26 @@ impl DeferredOperandGate {
                     }
                 }
             }
+            Self::SumResult {
+                ref op,
+                ref dims,
+                ref result,
+            } => match crate::infer::settled_sum_result_precision(op, resolved) {
+                Ok(precision) => {
+                    self.reconcile_result(
+                        result,
+                        Type::Tensor(dims.clone(), TensorPrec::Concrete(precision)),
+                        subst,
+                    );
+                }
+                Err(message) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: crate::errors::CheckError::new(
+                        crate::errors::CheckErrorKind::TypeMismatch,
+                        message,
+                        Vec::new(),
+                    ),
+                }),
+            },
         }
     }
 
@@ -783,6 +823,10 @@ impl DeferredOperandGate {
             Self::ShapeRoute { route, .. } => {
                 format!("{} expects tensor input, got {subject}", route.op())
             }
+            Self::SumResult { op, .. } => format!(
+                "{op} has no single sum_result(p, default(p)) (spec/04-type-system.md \
+                 section 5.7.1) for precision {subject}"
+            ),
         }
     }
 
@@ -793,6 +837,7 @@ impl DeferredOperandGate {
             Self::Cast { .. } | Self::CastToBinder { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
             Self::ShapeRoute { route, .. } => route.op(),
+            Self::SumResult { op, .. } => op,
         }
     }
 
@@ -806,9 +851,10 @@ impl DeferredOperandGate {
         use crate::errors::CheckErrorKind as Kind;
         match self {
             Self::Cast { .. } | Self::CastToBinder { .. } => Kind::CastNonTensor,
-            Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
-                Kind::TypeMismatch
-            }
+            Self::Copy { .. }
+            | Self::HostSlot { .. }
+            | Self::ShapeRoute { .. }
+            | Self::SumResult { .. } => Kind::TypeMismatch,
         }
     }
 
@@ -2049,6 +2095,74 @@ impl Subst {
 
     /// Drain the deferred tensor-operand ledger. Called once per def body's
     /// inference so one def's deferrals cannot leak into the next.
+    /// Decide every `sum`-family result still waiting on an unbound precision
+    /// variable at the declaration boundary (spec/04 §5.7.1, [04-INF-6]).
+    ///
+    /// The variable never binds after this point, so the result must be one
+    /// type at every dtype it admits: the variable itself when sum_result
+    /// keeps each one, one concrete dtype when sum_result maps them all
+    /// there, and otherwise a type error naming the operation and
+    /// sum_result. Returns whether any gate was decided, so the caller can
+    /// replay shape checks that waited on these results.
+    ///
+    /// `only` limits the decision to gates whose variable resolves to one of
+    /// those roots: the authored binders, which never bind, can be decided
+    /// before the boundary's own derivations run, while an inference variable
+    /// waits until they have had the chance to bind it.
+    pub(crate) fn decide_pending_sum_results(&mut self, only: Option<&[TypeVar]>) -> bool {
+        let pending = {
+            let mut ledger = self
+                .deferred_tensor_operands
+                .lock()
+                .expect("subst.deferred_tensor_operands poisoned");
+            let mut pending = Vec::new();
+            let selected = |tv: TypeVar| {
+                only.is_none_or(|roots| match self.apply(&Type::Var(tv)) {
+                    Type::Var(root) => roots.contains(&root),
+                    _ => true,
+                })
+            };
+            ledger.retain(|(tv, gate)| {
+                if matches!(gate, DeferredOperandGate::SumResult { .. }) && selected(*tv) {
+                    pending.push((*tv, gate.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            pending
+        };
+        let decided = !pending.is_empty();
+        for (variable, gate) in pending {
+            let DeferredOperandGate::SumResult {
+                ref op,
+                ref dims,
+                ref result,
+            } = gate
+            else {
+                unreachable!("only sum-result gates were taken");
+            };
+            match self.apply(&Type::Var(variable)) {
+                Type::Var(root) => match crate::infer::bound_sum_result_precision(op, root, self) {
+                    Ok(precision) => {
+                        gate.reconcile_result(result, Type::Tensor(dims.clone(), precision), self)
+                    }
+                    Err(message) => {
+                        self.record_operand_gate_failure(OperandGateFailure::Decision {
+                            error: crate::errors::CheckError::new(
+                                crate::errors::CheckErrorKind::TypeMismatch,
+                                message,
+                                Vec::new(),
+                            ),
+                        })
+                    }
+                },
+                resolved => gate.clone().discharge(&resolved, self),
+            }
+        }
+        decided
+    }
+
     pub(crate) fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
         std::mem::take(
             &mut *self

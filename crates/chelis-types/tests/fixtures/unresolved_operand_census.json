@@ -894,6 +894,13 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "declaration_close.rs",
+      "function": "decide_open_obligations",
+      "ordinal": 1,
+      "pattern": "Type::Var(root)",
+      "disposition": "not_a_route"
+    },
+    {
       "file": "declarations.rs",
       "function": "type_carries_tensor_with_carriers",
       "ordinal": 1,

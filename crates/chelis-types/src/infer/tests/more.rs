@@ -2306,17 +2306,13 @@ fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
 /// `sum_result` only when that is one type across the bound: the variable
 /// itself for `Float` or `{i32, i64}`, one concrete dtype for `{i8, i16}`.
 /// `Int`, `Numeric` and an unbounded variable are rejected at the
-/// definition, where an i8 call would otherwise carry i32 data typed i8:
-/// the binder is narrowed to the dtypes sum_result keeps, which its
-/// declaration does not admit.
+/// definition, where an i8 call would otherwise carry i32 data typed i8.
 #[test]
 fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
-    // The binder is narrowed to the dtypes sum_result keeps, which its
-    // declaration does not admit, or no dtype is kept at all.
+    // The binder's dtypes have no single sum_result; the diagnostic names
+    // the operation's result rule.
     let rejects_the_bound = |error: &CheckError| {
-        matches!(error.kind, CheckErrorKind::PrecisionMismatch)
-            && error.message.contains("requires dtype set")
-            || error.message.contains("has no single result dtype")
+        error.message.contains("has no single result dtype") && error.message.contains("sum_result")
     };
     let bodies = [
         ("tensor[3, p]", "tensor[3, R]", "cumsum(x, 0i32)"),

@@ -9754,6 +9754,84 @@ fn check_classifies_generated_deep_tensor_holes_by_mapped_structure() {
     }
 }
 
+/// chelis#3009: a `sum`-family call over a generated-Deep precision hole
+/// waits for the hole to bind, then types its result as
+/// `sum_result(p, default(p))` of the bound dtype. An i8 or i16 hole bound
+/// after the call is checked therefore gets i32, exactly as when it binds
+/// first, and eval and the compiled program agree on the value. `ordA` and
+/// `ordB` differ only in whether `add` binds the hole before or after `sum`
+/// is checked; both check, and both trap the same `add` overflow.
+#[test]
+fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
+    let dir = tempdir().expect("tempdir");
+    let cases = [
+        (
+            "e_i16",
+            include_str!("fixtures/sum_result_holes/e_i16.dp"),
+            "out = 180000",
+        ),
+        (
+            "c1",
+            include_str!("fixtures/sum_result_holes/c1.dp"),
+            "out = 203.0",
+        ),
+        (
+            "c2",
+            include_str!("fixtures/sum_result_holes/c2.dp"),
+            "out = tensor(shape=[3], data=[100, 100, 3])",
+        ),
+        (
+            "ordA",
+            include_str!("fixtures/sum_result_holes/ordA.dp"),
+            "numeric trap: overflow in add at i8",
+        ),
+        (
+            "ordB",
+            include_str!("fixtures/sum_result_holes/ordB.dp"),
+            "numeric trap: overflow in add at i8",
+        ),
+    ];
+    let last_line = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.lines()
+            .last()
+            .unwrap_or_default()
+            .trim_start_matches("error: ")
+            .to_string()
+    };
+    for (stem, source, expected) in cases {
+        let path = dir.path().join(format!("{stem}.dp"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("run chelis eval");
+        assert_eq!(last_line(&eval), expected, "{stem}: eval");
+        let out_dir = dir.path().join(format!("{stem}_out"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = StdCommand::new(out_dir.join(stem))
+            .output()
+            .expect("compiled program should run");
+        assert_eq!(last_line(&run), expected, "{stem}: compiled C");
+    }
+}
+
 /// Negative parity for `realize`: exercising it in the host lane with
 /// no inner expression must produce a clean error rather than a panic.
 /// Synthesized programs with bad shape are caught at type-check; this
