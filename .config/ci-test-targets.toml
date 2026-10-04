@@ -2918,6 +2918,15 @@ reason = "script-unit checks the immutable Bullseye producer and release configu
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/test_ci_cvc5_build.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the cvc5 fetch-retry classifier and requires every release.yml smt build to go through the retry wrapper inside a bounded job"
+tracking_issue = "chelis#1004"
+
+[[path_rule]]
 prefix = "scripts/devenv_entry_regression.py"
 disposition = "owner"
 workflow = "ci.yml"

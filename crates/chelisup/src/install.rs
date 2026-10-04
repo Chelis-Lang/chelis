@@ -78,7 +78,7 @@ const FIRST_GLIBC_231_RELEASE: &str = "0.7.24";
 /// in preference order. From [`FIRST_GLIBC_231_RELEASE`] on, Linux prefers the
 /// static build (`chelis-vX.Y.Z-linux-x86_64-static.tar.gz`), whose `chelis`
 /// names no program interpreter and so starts on any x86-64 Linux, including
-/// musl systems and NixOS without nix-ld. A release that publishes no static
+/// musl systems and a stock NixOS. A release that publishes no static
 /// build installs its glibc-2.31 build. `version` is a validated `X.Y.Z`.
 pub fn release_builds(version: &str, slug: &str) -> Result<Vec<String>, String> {
     if slug == "linux-x86_64"
