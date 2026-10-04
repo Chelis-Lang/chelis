@@ -8930,39 +8930,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     // f64/integer sources round directly into f16/bf16 without an intermediate
     // f32 rounding. Every pair, including the exact same-Prim diagonal,
     // materializes logical element order from the source strides.
-    /// The C expression for one element of a named cast rung, as an
-    /// `int64_t` the caller narrows to the target's storage type. The
-    /// source has already been widened out of any reduced float storage.
-    fn named_cast_c_expr(
-        mode: NamedCastMode,
-        src_prec: Prim,
-        dst_prec: Prim,
-        source_value: &str,
-    ) -> String {
-        let width = Self::integer_width(dst_prec);
-        let domain = NumericTrap::Domain {
-            op: mode.keyword(),
-            prim: dst_prec,
-        }
-        .to_string();
-        let overflow = NumericTrap::Overflow {
-            op: mode.keyword(),
-            prim: dst_prec,
-        }
-        .to_string();
-        match mode {
-            NamedCastMode::Trunc => {
-                assert!(
-                    src_prec.is_float() && dst_prec.is_integer(),
-                    "[05-OP-6] C emission is float-to-integer only"
-                );
-                format!(
-                    "chelis_trunc_float_to_int((double)({source_value}), {width}, {domain:?}, {overflow:?})"
-                )
-            }
-        }
-    }
-
     /// Emit a cast-ladder node. `named` selects a named lossy rung;
     /// `None` is the checked default.
     fn emit_cast(
@@ -9046,7 +9013,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             } else {
                 src_elem.clone()
             };
-            let expression = Self::named_cast_c_expr(mode, src_prec, dst_prec, &source_value);
+            let expression =
+                crate::host_emit::named_cast_c_expr(mode, src_prec, dst_prec, &source_value);
             format!("{dst_elem} = ({dst_et}){expression};")
         } else {
             let plan = checked_plan.expect("non-truncating cast carries a checked plan");

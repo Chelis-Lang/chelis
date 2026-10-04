@@ -2165,8 +2165,9 @@ pub struct WireRecordPatternField {
 /// - `25`: `Softmax` retains [05-OP-48] through AD before stable forward
 ///   decomposition; a version-24 reader does not know the operation.
 /// - `26`: the named lossy casts share one tagged `NamedCast` operation
-///   whose `mode` names the rung (chelis#759); `cast_trunc` is its `trunc`
-///   rung. A version-25 reader does not know that operation.
+///   whose `mode` names the rung (chelis#759): `trunc` for `cast_trunc`,
+///   `saturate` for `cast_saturate` and `wrap` for `cast_wrap`. A version-25
+///   reader does not know that operation.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -3960,6 +3961,8 @@ pub enum WireExtremaOperand {
 #[serde(rename_all = "snake_case")]
 pub enum WireNamedCastMode {
     Trunc,
+    Saturate,
+    Wrap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

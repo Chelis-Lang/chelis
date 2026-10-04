@@ -4203,7 +4203,7 @@ mod tests {
     // [06] §7.5: a comparison queues exact zero cotangents for its
     // operands, so rejection analysis must visit their producers too.
     fn comparison_with_discrete_cast(
-        truncating: bool,
+        named: Option<crate::dag::NamedCastMode>,
         through_integer_extrema: bool,
     ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
@@ -4215,24 +4215,32 @@ mod tests {
             scalar_f32(),
             None,
         );
+        // `cast_wrap` reads only a signed integer.
+        let m_type = if named == Some(crate::dag::NamedCastMode::Wrap) {
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            }
+        } else {
+            scalar_f32()
+        };
         let m = dag.add_node(
             owner,
             RiscOp::Load { name: "m".into() },
             vec![],
-            scalar_f32(),
+            m_type,
             None,
         );
         let discrete = dag.add_node(
             owner,
-            if truncating {
-                RiscOp::NamedCast {
-                    mode: crate::dag::NamedCastMode::Trunc,
+            match named {
+                Some(mode) => RiscOp::NamedCast {
+                    mode,
                     new_precision: Prim::Int32,
-                }
-            } else {
-                RiscOp::Cast {
+                },
+                None => RiscOp::Cast {
                     new_precision: Prim::Int32,
-                }
+                },
             },
             vec![m],
             TensorType {
@@ -4304,8 +4312,10 @@ mod tests {
 
     #[test]
     fn grad_comparison_operand_reports_its_structural_rejection() {
-        for (truncating, op) in [(false, "cast"), (true, "cast_trunc")] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, false);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let op = named.map_or("cast", |mode| mode.keyword());
+            let (dag, x, out) = comparison_with_discrete_cast(named, false);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => panic!("{op} beneath comparison must reject grad"),
                 Err(error) => error,
@@ -4322,8 +4332,9 @@ mod tests {
 
     #[test]
     fn grad_zero_only_integer_control_still_reports_float_to_integer_cast() {
-        for truncating in [false, true] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, true);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let (dag, x, out) = comparison_with_discrete_cast(named, true);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => {
                     panic!("float-to-integer cast beneath zero-only integer control must reject")
@@ -4333,7 +4344,7 @@ mod tests {
             assert_eq!(
                 error,
                 AdError::NotSupported {
-                    op: if truncating { "cast_trunc" } else { "cast" },
+                    op: named.map_or("cast", |mode| mode.keyword()),
                     reason: AdRejectionReason::PiecewiseConstant,
                 }
             );

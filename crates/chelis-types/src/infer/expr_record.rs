@@ -1479,10 +1479,13 @@ pub(crate) fn bounded_scalar_cast_result(
 }
 
 /// The source dtype family a named cast rung admits: [05-OP-6]'s
-/// `cast_trunc` reads a float.
+/// `cast_trunc` reads a float, [05-OP-23]'s `cast_saturate` a signed integer
+/// or a float, and [05-OP-24]'s `cast_wrap` a signed integer.
 pub(crate) fn named_cast_source_family(mode: NamedCastMode) -> TypeVarRestriction {
     match mode {
         NamedCastMode::Trunc => TypeVarRestriction::ActiveFloat,
+        NamedCastMode::Saturate => TypeVarRestriction::ActiveNumeric,
+        NamedCastMode::Wrap => TypeVarRestriction::ActiveInt,
     }
 }
 
@@ -1490,6 +1493,8 @@ pub(crate) fn named_cast_source_family(mode: NamedCastMode) -> TypeVarRestrictio
 fn named_cast_source_noun(mode: NamedCastMode) -> &'static str {
     match mode {
         NamedCastMode::Trunc => "a float",
+        NamedCastMode::Saturate => "a signed integer or float",
+        NamedCastMode::Wrap => "a signed integer",
     }
 }
 
@@ -1512,6 +1517,14 @@ pub(crate) fn named_cast_pair_error(
     let hint = match mode {
         NamedCastMode::Trunc => "`cast_trunc` truncates a float toward zero into an integer \
                                  width ([05-OP-6]); use `cast` for every other conversion"
+            .to_string(),
+        NamedCastMode::Saturate => "`cast_saturate` clamps a signed integer or a float \
+                                    truncated toward zero into an integer width ([05-OP-23]); \
+                                    use `cast` for every other conversion"
+            .to_string(),
+        NamedCastMode::Wrap => "`cast_wrap` wraps a signed integer into an integer width \
+                                ([05-OP-24]); use `cast_saturate` for a float source and \
+                                `cast` for every other conversion"
             .to_string(),
     };
     if !target.is_integer() {

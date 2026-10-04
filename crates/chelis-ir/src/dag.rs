@@ -1260,7 +1260,7 @@ pub enum RiscOp {
         new_precision: Prim,
     },
     /// A named lossy cast of the chelis#759 ladder: `cast_trunc`
-    /// ([05-OP-6]). A separate op rather than a mode flag on `Cast` so
+    /// ([05-OP-6]), `cast_saturate` ([05-OP-23]) or `cast_wrap` ([05-OP-24]). A separate op rather than a mode flag on `Cast` so
     /// every backend, evaluator, and adjoint site is forced by exhaustive
     /// matching to state its disposition instead of inheriting the checked
     /// default's, and the rung is an enum so each site states it per rung.
@@ -1433,6 +1433,8 @@ pub enum RiscAtomIdentity {
     Shape,
     Cast,
     CastTrunc,
+    CastSaturate,
+    CastWrap,
     Matmul,
     Gather,
     Scatter,
@@ -1515,6 +1517,8 @@ impl RiscAtomIdentity {
         Self::Shape,
         Self::Cast,
         Self::CastTrunc,
+        Self::CastSaturate,
+        Self::CastWrap,
         Self::Matmul,
         Self::Gather,
         Self::Scatter,
@@ -1597,6 +1601,8 @@ impl RiscAtomIdentity {
             Self::Shape => "shape",
             Self::Cast => "cast",
             Self::CastTrunc => "cast_trunc",
+            Self::CastSaturate => "cast_saturate",
+            Self::CastWrap => "cast_wrap",
             Self::Matmul => "matmul",
             Self::Gather => "gather",
             Self::Scatter => "scatter",
@@ -1759,6 +1765,8 @@ impl RiscOp {
             Self::Cast { .. } => Semantic(Id::Cast),
             Self::NamedCast { mode, .. } => Semantic(match mode {
                 NamedCastMode::Trunc => Id::CastTrunc,
+                NamedCastMode::Saturate => Id::CastSaturate,
+                NamedCastMode::Wrap => Id::CastWrap,
             }),
             Self::BlasMatmul { .. } => Semantic(Id::Matmul),
             Self::Gather { .. } => Semantic(Id::Gather),
@@ -5301,6 +5309,10 @@ mod tests {
             RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
             RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftRight),
         ]);
+        discovery_cases.extend(NamedCastMode::ALL.iter().map(|&mode| RiscOp::NamedCast {
+            mode,
+            new_precision: Prim::Int32,
+        }));
         discovery_cases.extend(
             [
                 ReduceWindowKind::Min,

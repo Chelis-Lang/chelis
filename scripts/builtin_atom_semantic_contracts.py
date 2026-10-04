@@ -24,6 +24,8 @@ CLAUSES = {
     14: ("canonical balanced tree", "Integer overflow is checked at every multiplication", "reverse-mode"),
     15: ("`i64` indices", "lowest axis index containing NaN", "`grad` rejects it"),
     16: ("exact-comparison", "non-differentiability", "lowest axis index whose stored value is minimal"),
+    23: ("truncated toward zero, then the resulting mathematical integer is clamped", "NaN traps `Domain`", "It never traps `Overflow`", "`grad` rejects it"),
+    24: ("congruent to the exact stored source modulo `2^target_width`", "It never traps for overflow", "`grad` rejects it"),
     25: ("reachable elements are recursively admitted", "ADTs, functions, resource handles, and deferred values are type errors", "non-differentiable"),
     26: ("exactly two `bool`", "not short-circuiting", "no accumulator", "`grad` rejects it"),
     27: ("evaluation-order, rejection", "either operand is true"),

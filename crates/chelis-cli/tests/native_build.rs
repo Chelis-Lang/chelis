@@ -1287,6 +1287,20 @@ fn nan_atom_coverage(
             },
             NoFloatValue,
         ),
+        Id::CastSaturate => (
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Saturate,
+                new_precision: Prim::Int32,
+            },
+            NoFloatValue,
+        ),
+        Id::CastWrap => (
+            RiscOp::NamedCast {
+                mode: chelis_ir::dag::NamedCastMode::Wrap,
+                new_precision: Prim::Int32,
+            },
+            NoFloatValue,
+        ),
     }
 }
 

@@ -21392,7 +21392,12 @@ impl<'program> LowerCtx<'program> {
             Err(selector) => raise_fatal_lowering_error(
                 format!(
                     "`{selector}` is not a recognized cast mode selector; the \
-                     only named rung is `trunc` ([05-OP-6])"
+                     named rungs are {}",
+                    chelis_deep::NamedCastMode::ALL
+                        .iter()
+                        .map(|named| format!("`{}` ({})", named.deep_selector(), named.atom()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 Some(kids[2].span()),
                 kids[2].span_id().map(ToOwned::to_owned),

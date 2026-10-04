@@ -7228,6 +7228,8 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         } => WireRiscOp::NamedCast {
             mode: match mode {
                 NamedCastMode::Trunc => WireNamedCastMode::Trunc,
+                NamedCastMode::Saturate => WireNamedCastMode::Saturate,
+                NamedCastMode::Wrap => WireNamedCastMode::Wrap,
             },
             new_precision: new_precision.interchange_name().to_string(),
         },

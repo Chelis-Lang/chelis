@@ -392,7 +392,15 @@
             "named": false
           },
           {
+            "type": "cast_saturate",
+            "named": false
+          },
+          {
             "type": "cast_trunc",
+            "named": false
+          },
+          {
+            "type": "cast_wrap",
             "named": false
           }
         ]
@@ -432,7 +440,15 @@
             "named": false
           },
           {
+            "type": "cast_saturate",
+            "named": false
+          },
+          {
             "type": "cast_trunc",
+            "named": false
+          },
+          {
+            "type": "cast_wrap",
             "named": false
           }
         ]
@@ -3321,7 +3337,15 @@
     "named": false
   },
   {
+    "type": "cast_saturate",
+    "named": false
+  },
+  {
     "type": "cast_trunc",
+    "named": false
+  },
+  {
+    "type": "cast_wrap",
     "named": false
   },
   {

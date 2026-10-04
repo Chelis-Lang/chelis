@@ -420,8 +420,8 @@ the owning spec, registration, and this exact list together.
 Three capabilities live *outside* the array and are intentionally absent below: `const`
 and `load` are `RiscOp` memory nodes produced during lowering, and
 `dropout` is registered in `builtin_env`. All three are documented in
-§1.6. Keywords and special forms include `cast`, `cast_trunc`, `copy`,
-`grad`, `vmap`, `jit`, and `realize`.
+§1.6. Keywords and special forms include `cast`, `cast_trunc`,
+`cast_saturate`, `cast_wrap`, `copy`, `grad`, `vmap`, `jit`, and `realize`.
 
 ```
 Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
@@ -475,8 +475,8 @@ Each target checks whether it can lower the selected source function.
   `load`, and the `uniform_like` template carry zero cotangent.
   `stop_gradient` cuts a selected path. Logical operations reject `grad`
   structurally.
-- **Structural rejection:** float `floor`/`ceil`/`round` and `cast_trunc`
-  are piecewise constant; `count` and argument reductions have discrete
+- **Structural rejection:** float `floor`/`ceil`/`round` and the named
+  casts `cast_trunc`, `cast_saturate` and `cast_wrap` are piecewise constant; `count` and argument reductions have discrete
   outputs; replace-scatter variants reject duplicate-sensitive gradients.
   Integer arithmetic is forward-only where its atom says so.
 - **Host values and control:** `spec/06` §2.10 defines cotangents for
@@ -594,12 +594,16 @@ Nix compares the fresh report against the existing output.
 - **Literals and conversion:** unsuffixed integers default to `i32`
   and floats to `f32`. There is no implicit precision promotion.
   `cast(x, T)` is checked ([04-NUM-14]); a fractional or non-finite
-  float cannot be silently converted to an integer. `cast_trunc(x, T)`
-  is the named float-to-integer truncation path ([05-OP-6]) with
-  `Domain`/`Overflow` traps. `spec/04` [04-NUM-15] fixes the first
-  offending element of a tensor cast by lowest row-major flat index.
-  HIP currently rejects compiled `cast_trunc` until its device traps
-  are implemented.
+  float cannot be silently converted to an integer. The named lossy
+  casts each state their loss: `cast_trunc(x, T)` truncates a float
+  toward zero with `Domain`/`Overflow` traps ([05-OP-6]);
+  `cast_saturate(x, T)` truncates a float and clamps it, or clamps a
+  signed integer, to the integer target, trapping `Domain` only on NaN
+  ([05-OP-23]); `cast_wrap(x, T)` keeps the target-width two's
+  complement value of a signed integer and never traps ([05-OP-24]).
+  `spec/04` [04-NUM-15] fixes the first offending element of a tensor
+  cast by lowest row-major flat index. HIP currently rejects the compiled
+  named casts until their device traps are implemented.
 - **Dimensions:** named axes agree by name, with symbolic extents
   for runtime-varying sizes and concrete extents for fixed sizes.
   Wildcard `*` and rank binders `..r` have restricted contexts

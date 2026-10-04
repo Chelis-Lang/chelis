@@ -200,6 +200,11 @@ path = "tests/issue_3101_borrowed_operands.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_759_saturate_wrap"
+path = "tests/issue_759_saturate_wrap.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_3000_host_computed_comparisons"
 path = "tests/issue_3000_host_computed_comparisons.rs"
 required-features = ["ownership-ledger"]
