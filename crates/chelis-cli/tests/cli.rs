@@ -11234,7 +11234,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
              import Std.Io.Json (Json, JsonFloat, JsonString, JsonInt, JsonObject, write_json)\n\
              rows = [dict_of([(\"k\", \"a,b\"), (\"price\", \"7773.015187\")]), dict_of([(\"k\", \"he said \\\"hi\\\"\"), (\"price\", \"0.15110743269565682\")])]\n\
              done_csv = write_csv(\"{csv}\", rows)\n\
-             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64)), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, i64)))]))\n\
+             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64, \"0.15110743269565682\")), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, i64)))]))\n\
              done_json = write_json(\"{json}\", doc)\n\
              back = read_csv(\"{csv}\")\n\
              n = len(back)\n",

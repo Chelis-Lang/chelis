@@ -325,10 +325,11 @@ the layer list by enumerating every public channel that carries numeric values
 value ADTs, exported stdlib definitions, and published runtime-header exports
 - and the storage decision covers all of them in one change set. The final JSON
 surface has one public value identity: `io/json::Json` with tagged
-`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
+`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64, string)` variants under
 [05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-i64-range
 integer-form token's exact decimal spelling, so parse totality never buys a
-float image ([#1314] owns the implementation).
+float image ([#1314] owns the implementation), and the float variant keeps its
+token's exact text beside the rounded f64.
 [#1293] removes the duplicate prelude `Json`/`JInt`/`JNum` surface and moves CSV
 to its untyped text-table contract before Phase 4C. §C6 owns the standing guard
 that keeps this census from silently growing stale.
@@ -1129,8 +1130,8 @@ Deliverables, with phase homes:
      an open issue. The final control instead rejects that addition because
      the new constructor identity has no exact operation registration; the
      paired integer and float mutations prove the rule uniformly. The
-     source-faithful `JsonInt(i64)` and `JsonFloat(f64)` variants are both
-     wanted tagged numeric operations, not carrier seams.
+     source-faithful `JsonInt(i64)` and `JsonFloat(f64, string)` variants are
+     both wanted tagged numeric operations, not carrier seams.
      The def leg reads capacity off the DECLARED signature, so an
      exported `def` that declares none is public numeric surface the
      census cannot see. That case used to produce no row and no
@@ -1328,7 +1329,7 @@ Named non-goals, each with its owner, so coverage is never inferred:
   defend, and no checker can govern a conversion whose source type is
   not in the program. The fix is still type-system-shaped: TYPE THE
   BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
-  precedent (`JsonInt(i64)` beside `JsonFloat(f64)`; JSON syntax
+  precedent (`JsonInt(i64)` beside `JsonFloat(f64, string)`; JSON syntax
   distinguishes the two, so a parse that erases it discards
   information the source format carried) - after which the checker
   governs everything downstream and the [#759] discipline covers the

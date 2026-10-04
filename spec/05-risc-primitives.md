@@ -1717,7 +1717,7 @@ the sense `spec/design/capability_table.md` §New numeric ops requires: a
 callable in these families has exactly the numeric behavior its
 governing atom states, and a numeric behavior no atom governs does not
 ship. `io/json::Json`'s numeric capacity (`JsonInt(i64)` and
-`JsonBigInt(string)` beside `JsonFloat(f64)`) is decided by [05-OP-2] and its
+`JsonBigInt(string)` beside `JsonFloat(f64, string)`) is decided by [05-OP-2] and its
 exact ADT identity by [05-OP-34].
 
 #### Host-effect execution atom
@@ -1775,13 +1775,29 @@ exact ADT identity by [05-OP-34].
 
 > **[05-OP-2]** Ingestion preserves the source format's numeric
 > distinctions ([04-NUM-11]; `spec/design/dtype_semantics.md` §C6 "type
-> the boundary"). A JSON number token containing `.`, `e`, or `E` SHALL
-> ingest as `JsonFloat` carrying the correctly-rounded f64 of the token; any
-> other number token SHALL ingest as `JsonInt` carrying its exact i64
-> value. An integer-form token outside i64 range SHALL ingest as
+> the boundary"). A JSON number token containing `.`, `e`, or `E` is
+> float-form and SHALL ingest as `JsonFloat(value, text)`, where `text` is
+> the token's exact spelling and `value` is the correctly-rounded f64 of
+> `text`; any other number token SHALL ingest as `JsonInt` carrying its
+> exact i64 value. An integer-form token outside i64 range SHALL ingest as
 > `JsonBigInt` carrying the token's exact decimal spelling; ingestion never
-> selects a lossy float image for an integer-form token.
-> A float-form token whose f64 image is non-finite is a loud error. CSV cells are TEXT at
+> selects a lossy float image for an integer-form token and never discards
+> a float-form token's spelling.
+> A float-form token whose f64 image is non-finite is a loud error.
+> A `JsonFloat(value, text)` is valid exactly when `text` is one RFC 8259
+> number token in float form, the ASCII grammar
+> `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?` with a fraction or an
+> exponent present, and `value` is bit-identical to the correctly-rounded
+> f64 of `text`, which is finite; signed zero is distinguished, so
+> `JsonFloat(0.0, "-0.0")` is invalid. Ingestion produces only valid
+> values. Construction does not check validity ([05-OP-4]); serialization
+> does ([05-OP-5]), and no operation repairs an invalid `JsonFloat` or
+> substitutes one field for the other. For a finite f64 `x`,
+> `JsonFloat(x, to_string(x))` is valid (§8.1). Like `JsonBigInt`'s string,
+> `text` is source-faithful: it compares and renders byte-exactly, so two
+> spellings of one value are unequal documents, and converting it to a
+> number is a caller decision through an explicit parse such as `decimal`.
+> CSV cells are TEXT at
 > parse time (no inferred numeric type); numeric meaning is assigned
 > only by an accessor, under the JSON number grammar with surrounding
 > ASCII space/tab tolerated: float accessors accept the full grammar,
@@ -1799,7 +1815,8 @@ exact ADT identity by [05-OP-34].
 > and returns `None` for every other variant, including an in-range
 > `JsonInt`; converting that string to a numeric dtype is a caller decision
 > through an explicit parse, never an implicit widening. `io/json::json_float`
-> returns a stored `JsonFloat` f64 exactly; on `JsonInt` it performs the named
+> returns a stored `JsonFloat`'s f64 exactly, without reading or validating
+> its text; on `JsonInt` it performs the named
 > lossy i64-to-f64 widening (exact for magnitudes at or below 2^53), and on
 > every other variant, including `JsonBigInt`, it returns `None`. It never
 > truncates or rounds a float
@@ -1828,29 +1845,28 @@ exact ADT identity by [05-OP-34].
 
 #### Exact construction atom
 
-> **[05-OP-4]** `JsonFloat(value)` accepts exactly f64 and
+> **[05-OP-4]** `JsonFloat(value, text)` accepts exactly `(f64, string)` and
 > `JsonInt(value)` accepts exactly i64; every other operand width is a type
 > error naming an explicit checked cast. `JsonBigInt(value)` accepts exactly
-> `string`; the canonical-form check is [05-OP-5]'s serialization rule, not a
-> constructor special case. No construction path widens or narrows a
+> `string`; neither its canonical-form check ([05-OP-5]) nor `JsonFloat`'s
+> validity ([05-OP-2]) is a constructor special case. No construction path widens or narrows a
 > numeric value: the constructed `io/json::Json` document feeds the byte-exact
 > serialization channel of [05-OP-5], and a silent f32-to-f64 widening
-> would serialize the f32 literal's image (`0.1f32` as
+> would store the f32 literal's image (`0.1f32` as
 > `0.10000000149011612`) rather than the value the program stated.
 
 #### Numeric serialization atom
 
 > **[05-OP-5]** `io/json::to_json` emits a stored `JsonInt` i64
 > as its exact decimal digits with no fractional part and no float
-> round-trip, and a stored f64 through the [05-OBS-1] shortest-
-> round-trip channel (`format_element` at `f64`; the §8.1 grammar —
-> every finite emission parses back to the identical f64 and is a valid
-> JSON number token). A stored `JsonBigInt` emits its stored string verbatim
+> round-trip. A stored `JsonFloat` emits its `text` verbatim as the number
+> token after validating the pair under [05-OP-2]; an invalid `JsonFloat` is
+> a loud serialization error. A stored `JsonBigInt` emits its stored string verbatim
 > as the number token after validating that it is the canonical integer form
 > - an optional `-` followed by a nonzero leading digit and decimal digits -
 > denoting a value outside i64 range; any other stored string is a loud
-> serialization error, so a serialized document reparses to the identical
-> variant structure. A non-finite `JsonFloat` is a loud serialization error.
+> serialization error. A serialized document therefore reparses to an equal
+> document. A non-finite `JsonFloat` is a loud serialization error.
 > Equal documents serialize to identical bytes. `to_csv` accepts only the
 > text-table type `List[Dict[string,string]]`; it applies the CSV quoting and
 > row-order rules without inferring, preserving, or serializing a numeric cell
@@ -2821,7 +2837,9 @@ exact ADT identity by [05-OP-34].
 > integer/float source distinction. `JsonBigInt` carries the exact decimal
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
-> compares and renders byte-exactly. The opaque `datetime::*`,
+> compares and renders byte-exactly. `JsonFloat`'s string field is the exact
+> spelling of a float-form token under [05-OP-2], with the same byte-exact
+> comparison and rendering. The opaque `datetime::*`,
 > `datetime/business::*`, `datetime/clock::*`, `datetime/columns::*`, and
 > `datetime/zone::*`
 > identities hold [05-OP-73]'s invariants, and the opaque `decimal::Decimal`
@@ -2830,8 +2848,9 @@ exact ADT identity by [05-OP-34].
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
 > field cotangents, while non-differentiable fields carry `unit`. Thus, for
-> example, `JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes
-> the cotangent of `y` to `x`; integer-only ADTs naturally have only `unit`
+> example, `JsonFloat(x, s)` followed by an executed `JsonFloat(y, t)` match
+> routes the cotangent of `y` to `x`, and the string field carries `unit`;
+> integer-only ADTs naturally have only `unit`
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
@@ -2914,12 +2933,14 @@ exact ADT identity by [05-OP-34].
 > Serialization follows [05-OP-5], uses compact JSON punctuation, and escapes
 > every required control. Object serialization orders members by increasing
 > Unicode scalar-value key sequence, recursively, so equal documents have
-> identical bytes. `try_to_json` returns `None` exactly when a reachable float
-> is non-finite or a reachable `JsonBigInt` violates [05-OP-5]'s canonical
-> out-of-range integer form; `to_json` traps `Domain` for the same documents.
+> identical bytes. `try_to_json` returns `None` exactly when a reachable
+> `JsonFloat` is invalid under [05-OP-2] or a reachable `JsonBigInt` violates
+> [05-OP-5]'s canonical out-of-range integer form; `to_json` raises a
+> [05-OP-60] failure for the same documents, with a message naming both causes.
 > `write_json` and `try_write_json`
 > validate the complete document before opening or truncating the destination.
-> The try form returns `None` for that same invalid content; both forms
+> `write_json` raises the same failure and the try form returns `None` for
+> that same invalid content; both forms
 > propagate a
 > filesystem write failure as `IO` and otherwise write exactly the bytes of
 > `to_json`.
