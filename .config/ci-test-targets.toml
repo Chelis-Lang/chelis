@@ -1424,10 +1424,11 @@ reason = "recursive composite cotangent parity compiles and executes generated C
 tracking_issue = "chelis#1293"
 
 # The complete Std.Decimal differential corpus and extreme-argument sweep take
-# minutes each on a loaded package-expansion shard, and the sweep can reach the
-# 600-second `chelis test` suite timeout there. Pull-request CI runs a canary of
-# each instead, in the same targets, and the targets' other tests in full;
-# docs/manual_gates.md has the command that runs both complete tests on demand.
+# minutes each on a loaded package-expansion shard; the sweep runs as batches of
+# at most 48 `chelis test` cases so the suite timeout bounds a batch
+# (chelis#3142). Pull-request CI runs a canary of each instead, in the same
+# targets, and the targets' other tests in full; docs/manual_gates.md has the
+# command that runs both complete tests on demand.
 [[test_exclusion]]
 package = "chelis-cli"
 target = "std_decimal_oracle"
