@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Differential oracle for `Std.Datetime.Zone` (chelis#2862): eval and C against Python's `zoneinfo`.
 
-For every real zone under `crates/chelis-cli/tests/fixtures/tzif/zones/`, the
-harness loads the file with `zoneinfo.ZoneInfo.from_file` and generates one
+For every real zone under `crates/chelis-cli/tests/fixtures/tzif/zones/`, and
+for the version 3 footers of the synthetic `SYNTHETIC_ZONES`, the harness loads the file with `zoneinfo.ZoneInfo.from_file` and generates one
 Chelis program that reads the same bytes with `read_bytes`, builds the zone
 with `time_zone_from_tzif`, and prints four bindings:
 
@@ -32,8 +32,8 @@ through 9999, so every observation lies there. Each lane must print exactly
 these bindings and equal the expectation; agreeing with the other lane is not
 enough.
 
-Profiles: `full` runs every fixture zone and the `time_zone_utc()` check,
-and runs nightly; `canary` runs `CANARY_ZONES`, a zone with both a gap and
+Profiles: `full` runs every fixture zone, the synthetic version 3 zones and
+the `time_zone_utc()` check, and runs nightly; `canary` runs `CANARY_ZONES`, a zone with both a gap and
 a fold and `UTC`, on every pull request. Each compiled C program builds the
 standard library, so the canary keeps to two.
 
@@ -209,13 +209,17 @@ class Program:
     lanes: tuple[str, ...] = BOTH
 
 
-def zone_program(name: str) -> Program:
-    path = FIXTURE_DIR / f"zones/{name}.tzif"
+def zone_program(name: str, relative: str | None = None, edges: tuple[int, ...] = ()) -> Program:
+    """The program for the fixture `relative` (by default the real zone's
+    file) read as `name`, observing the offsets also just before and at each
+    instant of `edges`."""
+    path = FIXTURE_DIR / (relative or f"zones/{name}.tzif")
     with path.open("rb") as handle:
         zone = zoneinfo.ZoneInfo.from_file(handle, key=name)
     found = changes(zone, path)
     rng = random.Random(f"{SEED}:{name}")
-    instants = sorted({s for change in found for s in (change[0] - 1, change[0])} | {rng.randrange(LOW, HIGH) for _ in range(RANDOM_INSTANTS)})
+    instants = sorted({s for change in found for s in (change[0] - 1, change[0])} | {s for edge in edges for s in (edge - 1, edge)}
+                      | {rng.randrange(LOW, HIGH) for _ in range(RANDOM_INSTANTS)})
     civils = sorted({civil for change in found for civil in local_readings(change)})
     samples = sorted({rng.randrange(LOW, HIGH) for _ in range(RANDOM_INSTANTS)} | {change[0] for change in found[:: max(1, len(found) // 20)]})
     construct = f'time_zone_from_tzif("{name}", read_bytes("{path.as_posix()}"))'
@@ -235,6 +239,19 @@ def zone_program(name: str) -> Program:
     }
     source = "module Demo.Main\n" + IMPORTS + PRELUDE + "\n".join(body) + "\n"
     return Program(name.replace("/", "_"), source, expected)
+
+
+# The version 3 footers, read from synthetic fixtures (name, file, edges).
+# Asia/Jerusalem's rule moves to daylight time at 26:00 on a Thursday, which
+# `changes` finds by scanning the footer years. The all-year rule starts
+# daylight time at 00:00 standard time on January 1 and ends it at 25:00
+# daylight time on December 31, the same instant, 05:00Z on January 1, so
+# its offset never changes and its edges are those nominal transitions.
+SYNTHETIC_ZONES = (
+    ("Asia/Jerusalem", "synthetic/jerusalem_v3.tzif", ()),
+    ("Etc/All_Year_DST", "synthetic/all_year_dst.tzif",
+     tuple(int((datetime.datetime(year, 1, 1, 5) - EPOCH).total_seconds()) for year in FOOTER_YEARS)),
+)
 
 
 def utc_program() -> Program:
@@ -337,6 +354,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile == "canary":
         zones = canary_zones(zones)
     programs = [zone_program(name) for name in zones if not args.only or args.only in name]
+    if args.profile == "full":
+        zones = zones + [name for name, _, _ in SYNTHETIC_ZONES]
+        programs += [zone_program(name, relative, edges) for name, relative, edges in SYNTHETIC_ZONES
+                     if not args.only or args.only in name]
     if args.profile == "full" and (not args.only or args.only in "UTC_nullary"):
         programs.append(utc_program())
     print(f"corpus: {len(programs)} programs, {sum(p.source.count(',') for p in programs)} inputs", flush=True)

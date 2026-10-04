@@ -9,7 +9,8 @@ The fixtures are binary TZif files (RFC 9636) under
 - `synthetic/*.tzif`: small files written by the TZif writer below, each
   exercising one rule of the parser: an empty footer, malformed headers,
   non-increasing transitions, out-of-range offsets, leap-second records, an
-  inconsistent footer, and the version 3 transition-time extension.
+  inconsistent footer, malformed counts, time types, indicators and footer
+  framing, and the version 3 transition-time extension.
 
 `manifest.json` records the tzdata release and the SHA-256 of every file.
 
@@ -98,8 +99,14 @@ def with_version(data: bytes, version: bytes) -> bytes:
     return data[:4] + version + data[5:55] + version + data[56:]
 
 
+def indicated(isstd: Sequence[int], isut: Sequence[int]) -> bytes:
+    """A two-type zone with the given standard/wall and UT/local indicators."""
+    return tzif(b"2", [1_000_000_000], [1], [(0, 0, 0), (3600, 1, 4)], b"STD\x00DST\x00", b"STD-1", isstd=isstd, isut=isut)
+
+
 def synthetic() -> dict[str, bytes]:
     valid = two_type(b"2", [1_000_000_000], b"STD-1")
+    second = 44 + 7  # the version 2+ header's offset in a slim file
     return {
         # Coverage ends at the last transition, 2001-09-09T01:46:40Z.
         "synthetic/empty_footer.tzif": two_type(b"2", [1_000_000_000], b""),
@@ -120,6 +127,23 @@ def synthetic() -> dict[str, bytes]:
         "synthetic/jerusalem_in_v2.tzif": tzif(b"2", [978_307_200], [0], [(7200, 0, 0), (10800, 1, 4)], b"IST\x00IDT\x00", b"IST-2IDT,M3.4.4/26,M10.5.0"),
         # RFC 9636 §3.3.1: daylight time all year.
         "synthetic/all_year_dst.tzif": tzif(b"3", [], [], [(-14400, 1, 0)], b"EDT\x00", b"EST5EDT,0/0,J365/25"),
+        # One file per rejection of a malformed version 2+ header, data block or footer.
+        "synthetic/bad_second_magic.tzif": valid[:second] + b"TZiF" + valid[second + 4:],
+        "synthetic/zero_charcnt.tzif": tzif(b"2", [], [], [(0, 0, 0)], b"", b"UTC0"),
+        "synthetic/short_isstdcnt.tzif": indicated([0], []),
+        "synthetic/short_isutcnt.tzif": indicated([], [0]),
+        "synthetic/truncated_data.tzif": valid[:second + 44 + 5],
+        "synthetic/dst_flag.tzif": tzif(b"2", [1_000_000_000], [1], [(0, 0, 0), (3600, 2, 4)], b"STD\x00DST\x00", b"STD-1"),
+        "synthetic/designation_index.tzif": tzif(b"2", [1_000_000_000], [1], [(0, 0, 0), (3600, 1, 8)], b"STD\x00DST\x00", b"STD-1"),
+        "synthetic/isstd_value.tzif": indicated([0, 2], []),
+        "synthetic/isut_value.tzif": indicated([0, 1], [0, 2]),
+        "synthetic/isut_without_isstd.tzif": indicated([0, 0], [0, 1]),
+        "synthetic/footer_without_newline.tzif": valid[:-7] + b"xSTD-1\n",
+        "synthetic/footer_control_byte.tzif": two_type(b"2", [1_000_000_000], b"STD\x7f-1"),
+        # Their accepted twins: indicators of 0 and 1 in every allowed
+        # combination, and the last designation index.
+        "synthetic/indicators.tzif": indicated([0, 1], [0, 1]),
+        "synthetic/last_designation.tzif": tzif(b"2", [1_000_000_000], [1], [(0, 0, 0), (3600, 1, 7)], b"STD\x00DST\x00", b"STD-1"),
     }
 
 
