@@ -2025,17 +2025,18 @@ defaults can be overridden in three ways:
 
 1. an explicit literal suffix (§5.5) attached to the literal token
 2. a known element type in the surrounding position (§5.6)
-3. an explicit `cast` whose operand is the bare scalar literal itself (§5.6
-   position 4)
+3. an explicit `cast` whose operand is a bare scalar literal or its unary
+   negation (§5.6 position 4)
 
 There is **no implicit precision promotion** from these defaults to any other
 type. `to_tensor([1, 2, 3])` in an unannotated position is `tensor[3, i32]`,
 not `tensor[3, i64]`. `to_tensor([1.0, 2.0, 3.0])` in an unannotated position
 is `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
 type must say so with a suffix, a declared element type, or, for a bare scalar
-literal, a `cast` that takes it directly as its operand. A `cast` of any other
-expression, `cast(to_tensor([1.1, 2.2]), f64)` included, converts a value whose
-literals are already bound.
+literal or its unary negation, a `cast` that takes it directly as its operand.
+A `cast` of any other expression, `cast(neg(1.1), f64)` and
+`cast(to_tensor([1.1, 2.2]), f64)` included, converts a value whose literals
+are already bound.
 
 The default is the **user-facing contract** and is non-overridable except by
 the three mechanisms above. Whichever dtype they select, the literal binds
@@ -2180,9 +2181,9 @@ the literal default in §5.3. The closed set of such positions is exactly:
   tensor type, when the body is a tensor literal. Its numeric literals adopt
   the element type.
 - **Position 4**: the first argument of a `cast(literal, p)` expression, where
-  the literal is a bare scalar numeric literal and `p` is a precision type
-  literal or a dtype-bounded type binder ([04-DTYPE-2]). The literal adopts
-  `p`.
+  the literal is a bare scalar numeric literal or its unary negation and `p` is
+  a precision type literal or a dtype-bounded type binder ([04-DTYPE-2]). The
+  literal adopts `p`.
 
 A callee's declared parameter type and a `cast` never make a bracket literal a
 tensor: a bare bracket literal passed as an argument or cast stays a `List`,
@@ -2192,9 +2193,14 @@ elements carry the dtype they keep, e.g. `cast(to_tensor([1.1f64, 2.2f64]), p)`.
 Position 4 adopts a **bare scalar numeric literal**. `cast(1.1, f64)` binds
 the decimal `1.1` at `f64` — exactly `0x3ff199999999999a` — it does NOT
 narrow to the §5.3 `f32` default and then widen (which would yield the
-f32-truncation value `1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
-at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
-work. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
+f32-truncation value `1.100000023841858`). Likewise `cast(3000000000, i64)`
+binds the literal at `i64`, which is what makes the §5.3 out-of-i32-range
+escape hatch work. A unary negation of such a literal (`spec/02-surf-syntax.md`
+§P10) folds into one signed literal, which adopts `p` exactly as the literal
+would: `cast(-1.1, f64)` binds `-1.1` at `f64` and `cast(-3000000000, i64)`
+binds at `i64`. An explicit
+`neg(1.1)` call is an ordinary operand, whose literal keeps its §5.3 default
+before the cast converts the result. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
 finiteness checks apply at `p`: `cast(2147483648, i32)` is still a range
 error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
 at `f16`, whereas `cast(70000.0f32, f16)` casts a finite `f32` value and

@@ -1062,9 +1062,10 @@ of the §P10 default. The closed set of such positions is exactly:
 - **Position 3**: the body of a function with a declared return type that is
   a tensor type, when the body is a tensor literal
 - **Position 4**: the first argument of an explicit `cast(literal, p)`
-  expression, where the literal is a bare scalar numeric literal — it binds
-  at `p`, which may also be a dtype-bounded type binder; the literal then
-  binds at each admissible instantiation (`spec/04-type-system.md` §5.6)
+  expression, where the literal is a bare scalar numeric literal or its unary
+  negation — it binds at `p`, which may also be a dtype-bounded type binder;
+  the literal then binds at each admissible instantiation
+  (`spec/04-type-system.md` §5.6)
 
 A callee's declared parameter type and a `cast` never make a bracket literal a
 tensor: a bare bracket literal passed as an argument or cast stays a `List`.
@@ -1074,7 +1075,9 @@ carry the dtype they keep, e.g. `f(to_tensor([1.0f64, 2.0f64]))`.
 Position 4 adopts a bare scalar numeric literal: `cast(1.1, f64)` binds the
 decimal at `f64` directly (the desugarer emits
 `(lit {type: (t-prim {} f64)} 1.1)`), not "narrow to the f32 default, then
-widen". Suffixed literals keep their
+widen". A unary negation folds into the literal first, so `cast(-1.1, f64)`
+binds `-1.1` at `f64`; an explicit `neg(1.1)` call is an ordinary operand
+whose literal keeps the §P10 default. Suffixed literals keep their
 suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
 float literal under an integer `p` keeps its float source type and then
 uses the checked target-finalization rule: an integral value casts exactly,
