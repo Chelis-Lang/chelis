@@ -2428,7 +2428,7 @@ is part of the design.
   The issue's candidate fix (eager only in argument position of an eager
   application) is not adopted, for the reason given under the decision.
 - [#1485], an over-rejection and an ingress split. `primary_inference_
-  schedule` (`crates/chelis-types/src/infer/program.rs`) builds a mirror
+  schedule` (`crates/chelis-types/src/infer/program_schedule.rs`) builds a mirror
   edge from a module function to every item at or after the floor that
   references it and a read edge from a value to every later item that reads
   it. `carried = wrap(f)` with `f` reading `carried` closes a two-cycle;

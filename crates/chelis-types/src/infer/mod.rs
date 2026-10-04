@@ -130,6 +130,7 @@ mod group_link;
 mod literal_width;
 mod operand_deferral;
 mod program;
+mod program_schedule;
 pub(crate) mod recursion;
 mod rigid;
 mod shape_honesty;
@@ -179,6 +180,7 @@ pub(crate) use grad_selector::{
 use group_link::*;
 use operand_deferral::*;
 use program::*;
+use program_schedule::*;
 use rigid::*;
 use slot::*;
 pub use static_int::fold_static_int_expr;
