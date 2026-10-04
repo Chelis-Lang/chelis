@@ -3808,7 +3808,7 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .ok_or_else(|| "append expects 2 arguments".to_string())?,
                 );
-                Ok(RuntimeValue::List(list.into()))
+                Ok(RuntimeValue::List(list))
             }
             "concat" => match (args.first(), args.get(1).and_then(RuntimeValue::as_i64)) {
                 (Some(RuntimeValue::List(parts)), Some(axis))
@@ -3821,7 +3821,7 @@ impl<'a> EvalContext<'a> {
                 _ => {
                     let mut lhs = expect_list_arg(args, 0)?;
                     lhs.extend(expect_list_arg(args, 1)?);
-                    Ok(RuntimeValue::List(lhs.into()))
+                    Ok(RuntimeValue::List(lhs))
                 }
             },
             "take" => {
@@ -3831,7 +3831,7 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("take requires non-negative count, got {count}"));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().take(count as usize).collect(),
+                    list.iter().take(count as usize).cloned().collect(),
                 ))
             }
             "skip" => {
@@ -3841,7 +3841,7 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("skip requires non-negative count, got {count}"));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().skip(count as usize).collect(),
+                    list.iter().skip(count as usize).cloned().collect(),
                 ))
             }
             // [05-OP-67]: the explicit one-argument consume. The checker
@@ -4267,7 +4267,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
                 upsert_dict_entry(&mut dict, key, value);
-                Ok(RuntimeValue::Dict(dict.into()))
+                Ok(RuntimeValue::Dict(dict))
             }
             "dict_merge" => {
                 let mut lhs = expect_dict_arg(args, 0)?;
@@ -4276,7 +4276,7 @@ impl<'a> EvalContext<'a> {
                     ensure_dict_key_supported(&key)?;
                     upsert_dict_entry(&mut lhs, key, value);
                 }
-                Ok(RuntimeValue::Dict(lhs.into()))
+                Ok(RuntimeValue::Dict(lhs))
             }
             "dict_keys" => {
                 let dict = expect_dict_arg(args, 0)?;

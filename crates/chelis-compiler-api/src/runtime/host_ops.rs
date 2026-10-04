@@ -728,22 +728,21 @@ pub(super) fn expect_string_arg(args: &[RuntimeValue], index: usize) -> Result<S
     }
 }
 
-pub(super) fn expect_list_arg(
-    args: &[RuntimeValue],
-    index: usize,
-) -> Result<Vec<RuntimeValue>, String> {
+/// The list argument at `index`, sharing its elements. A read leaves them
+/// in place and a write copies them only while another owner shares them, so
+/// a read-only builtin never pays for a copy of the list (chelis#2335).
+pub(super) fn expect_list_arg(args: &[RuntimeValue], index: usize) -> Result<Values, String> {
     match args.get(index) {
-        Some(RuntimeValue::List(items)) => Ok(items.to_vec()),
+        Some(RuntimeValue::List(items)) => Ok(items.clone()),
         other => Err(format!("expected list arg at index {index}, got {other:?}")),
     }
 }
 
-pub(super) fn expect_dict_arg(
-    args: &[RuntimeValue],
-    index: usize,
-) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
+/// The dict argument at `index`, sharing its entries as
+/// [`expect_list_arg`] shares a list's elements.
+pub(super) fn expect_dict_arg(args: &[RuntimeValue], index: usize) -> Result<Entries, String> {
     match args.get(index) {
-        Some(RuntimeValue::Dict(entries)) => Ok(entries.to_vec()),
+        Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
         other => Err(format!("expected dict arg at index {index}, got {other:?}")),
     }
 }
