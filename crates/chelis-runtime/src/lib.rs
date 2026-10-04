@@ -4298,8 +4298,15 @@ pub unsafe extern "C" fn chelis_string_slice(
     start: i64,
     len: i64,
 ) -> chelis_string {
-    if start < 0 || len < 0 {
-        return new_runtime_string(String::new());
+    // [05-OP-58]: a negative start or length is a domain error, reported as
+    // eval reports it.
+    for (argument, offset) in [("start", start), ("length", len)] {
+        if offset < 0 {
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::string_slice_negative(argument, offset)
+            );
+        }
     }
     let inner = string_value(value);
     let text = inner.value.as_str();

@@ -8909,31 +8909,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
         self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
-        // Preserve the existing runtime-bound empty-range rejection shared
-        // with Eval. The metadata API also serves statically empty tensors;
-        // this operation-level admission rule is separate from shape safety.
-        //
-        // It stays AFTER the plan, and therefore after any extent guard the
-        // plan's site emits, because `spec/05-risc-primitives.md` section
-        // 2.4.1 does NOT make an empty span a runtime-bound error: its closed
-        // list is a negative bound, a shrink range overshoot, a non-positive
-        // stride step and the two reshape errors. `spec/04-type-system.md`
-        // section 4.7.2 makes only a NEGATIVE size an error. So an extent-0
-        // result under a declared `tensor[2, f32]` is a CLAIM mismatch and the
-        // guard reporting it is the conforming diagnostic; this rejection is
-        // an operation-level admission rule the numbered spec does not require,
-        // and the evaluator's matching rejection is what diverges from it
-        // (chelis#1795). Round 1 of chelis#1397 read the order the other way
-        // round and this comment records why that reading was wrong, so the
-        // next reader does not re-derive it.
-        for (axis, (start, end)) in bounds.iter().enumerate() {
-            if start.node_input().is_some() || end.node_input().is_some() {
-                let empty = self.gated_check(&format!(
-                    "t{id}_start[{axis}].bits == t{id}_end[{axis}].bits"
-                ));
-                self.line(&format!("if ({empty}) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at i64\"); }}"));
-            }
-        }
+        // `spec/05-risc-primitives.md` section 2.4.1 closes the runtime-bound
+        // errors: equal endpoints select an empty axis (chelis#1795), and the
+        // plan above traps an inverted or overshooting range.
         self.emit_slot_wrapper(id, ty);
         self.emit_movement_copy(id, |emitter| {
             emitter.line(&format!(

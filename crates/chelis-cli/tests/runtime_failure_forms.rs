@@ -17,19 +17,19 @@ use tempfile::tempdir;
 
 /// One guarded program: `{value}` in `source` is replaced by `failing` for the
 /// trapping run and by `passing` for its twin.
-struct Guard {
-    name: &'static str,
-    source: &'static str,
-    failing: &'static str,
-    passing: &'static str,
-    context: &'static str,
-    trap: &'static str,
-    passing_out: &'static str,
+struct Guard<'a> {
+    name: &'a str,
+    source: &'a str,
+    failing: &'a str,
+    passing: &'a str,
+    context: &'a str,
+    trap: &'a str,
+    passing_out: &'a str,
 }
 
 /// Runs `guard` on both lanes, failing and passing, and checks the agreed
 /// result of each.
-fn assert_guard(guard: &Guard) {
+fn assert_guard(guard: &Guard<'_>) {
     let failing = guard.source.replace("{value}", guard.failing);
     let run = parity::assert_lanes_agree(&failing, guard.name);
     assert_eq!(run.status, Some(1), "{}: {run:?}", guard.name);
@@ -253,5 +253,119 @@ fn value_domain_failures_trap_in_the_operation() {
         },
     ] {
         assert_guard(&guard);
+    }
+}
+
+/// The behaviours that differed between the lanes, decided from the spec:
+/// - [05-OP-58]: a negative `string_slice` start or length is a domain error,
+///   never an empty string.
+/// - spec/05 section 2.3: `sum` over an empty axis is its identity.
+/// - [05-OP-11]: `mean` over an execution-time empty axis traps `Domain` in
+///   `mean`, never NaN.
+/// - [04-NUM-9]: an extremum or arg-extremum over an empty axis has no
+///   identity and traps `Domain` in the lowered primitive. `softmax` reports
+///   its lowered `max_reduce`.
+/// - spec/05 section 2.4.1: a `shrink` span with equal endpoints is an
+///   empty axis (chelis#1795).
+#[test]
+fn spec_decided_divergences_agree_across_lanes() {
+    let reduce = |op: &str, result: &str| {
+        format!(
+            "def f(xs: List[f32]) -> {result} = {{\n\
+             t = to_tensor(xs)\n\
+             {op}(t, 0i32)\n\
+             }}\n\
+             out = f({{value}})\n"
+        )
+    };
+    let empty = "filter(fn (v: f32) -> gt(v, 10.0f32), [1.0f32, 2.0f32])";
+    let full = "[1.0f32, 3.0f32]";
+    let (mean, max, argmax, softmax) = (
+        reduce("mean", "tensor[f32]"),
+        reduce("max_reduce", "tensor[f32]"),
+        reduce("argmax_reduce", "tensor[i64]"),
+        reduce("softmax", "tensor[*, f32]"),
+    );
+    for guard in [
+        Guard {
+            name: "string_slice_start",
+            source: "def f(s: string, i: i64) -> string = string_slice(s, i, 2i64)\n\
+                     out = f(\"hello\", {value})\n",
+            failing: "-1i64",
+            passing: "1i64",
+            context: "string_slice start is negative: -1",
+            trap: "numeric trap: domain in string_slice at i64",
+            passing_out: "out = el\n",
+        },
+        Guard {
+            name: "string_slice_length",
+            source: "def f(s: string, n: i64) -> string = string_slice(s, 1i64, n)\n\
+                     out = f(\"hello\", {value})\n",
+            failing: "-2i64",
+            passing: "3i64",
+            context: "string_slice length is negative: -2",
+            trap: "numeric trap: domain in string_slice at i64",
+            passing_out: "out = ell\n",
+        },
+        Guard {
+            name: "mean_empty",
+            source: &mean,
+            failing: empty,
+            passing: full,
+            context: "",
+            trap: "numeric trap: domain in mean at f32",
+            passing_out: "out = 2.0\n",
+        },
+        Guard {
+            name: "max_empty",
+            source: &max,
+            failing: empty,
+            passing: full,
+            context: "",
+            trap: "numeric trap: domain in max_reduce at f32",
+            passing_out: "out = 3.0\n",
+        },
+        Guard {
+            name: "argmax_empty",
+            source: &argmax,
+            failing: empty,
+            passing: full,
+            context: "",
+            trap: "numeric trap: domain in argmax_reduce at i64",
+            passing_out: "out = 1\n",
+        },
+        Guard {
+            name: "softmax_empty",
+            source: &softmax,
+            failing: empty,
+            passing: "[0.0f32, 0.0f32]",
+            context: "",
+            trap: "numeric trap: domain in max_reduce at f32",
+            passing_out: "out = tensor(shape=[2], data=[0.5, 0.5])\n",
+        },
+    ] {
+        assert_guard(&guard);
+    }
+
+    // The empty axis is legal where the operation has an identity or a
+    // representation: `sum` returns zero, and an equal-endpoint `shrink`
+    // returns an extent-0 tensor.
+    for (name, source, expected) in [
+        (
+            "sum_empty",
+            reduce("sum", "tensor[f32]").replace("{value}", empty),
+            "out = 0.0\n",
+        ),
+        (
+            "shrink_empty",
+            "def f(x: tensor[*, f32], k: i64) -> tensor[*, f32] = shrink(x, [[k, k]])\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 1i64)\n"
+                .to_string(),
+            "out = tensor(shape=[0], data=[])\n",
+        ),
+    ] {
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(0), "{name}: {run:?}");
+        assert_eq!(run.stdout, expected, "{name}: {run:?}");
     }
 }

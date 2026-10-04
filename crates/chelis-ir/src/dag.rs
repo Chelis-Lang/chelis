@@ -3139,7 +3139,7 @@ impl Dag {
                 };
                 !matches!(
                     (start.as_lit(), end, extent(axis)),
-                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                    (Some(start), Some(end), Some(extent)) if start <= end && end <= extent
                 )
             }),
             RiscOp::Stride { strides } => strides

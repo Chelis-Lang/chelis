@@ -3880,44 +3880,14 @@ where
                             resolved_stride_steps.as_deref(),
                         )? {
                             Some(extent) => extent,
-                            // A span that selects nothing, or that runs past
-                            // the operand's own extent, computes no extent to
+                            // An inverted span, or one that runs past the
+                            // operand's own extent, computes no extent to
                             // compare, so the guard yields rather than
-                            // comparing a fabricated number.
-                            //
-                            // chelis#1797 added the second of those. An
-                            // overshooting span has an arithmetic width, and
-                            // comparing a claim against it reported a claim
-                            // mismatch for a program whose claim was not the
-                            // defect: `-> tensor[6, f32]` over a span of 6 that
-                            // reads past the end AGREED with the claim and the
-                            // guard passed. `shrink` now returns section
-                            // 2.4.1's overshoot error instead, in the compiled
-                            // lane's words, so declining here is what lets the
-                            // operation report it.
-                            //
-                            // An earlier version of this comment justified the
-                            // decline for the EMPTY case by saying the C
-                            // runtime's movement plan rejects such a span
-                            // before the site is reached. That was checkable
-                            // and false: `ShapeMetadata::shrunk` does not
-                            // reject `start == end` (it rejects a negative
-                            // start, `end < start`, and an overshoot), so an
-                            // empty span builds a plan of extent 0 and C's
-                            // guard runs and reports the claim.
-                            //
-                            // C is the conforming lane there.
-                            // `spec/05-risc-primitives.md` section 2.4.1's
-                            // closed list of runtime-bound errors does not
-                            // include an empty span, and section 4.7.2 makes
-                            // only a NEGATIVE size an error, so an extent-0
-                            // result under a declared `tensor[2, f32]` is a
-                            // claim mismatch. This lane instead rejects the
-                            // span itself under an operation-level admission
-                            // rule the numbered spec does not require; the
-                            // divergence is pre-existing, is tracked by
-                            // chelis#1795, and is pinned rather than repaired
-                            // here.
+                            // comparing a fabricated number, and `shrink`
+                            // reports section 2.4.1's error in the compiled
+                            // lane's words (chelis#1797). An empty span is the
+                            // real extent 0, which the guard compares like any
+                            // other (chelis#1795).
                             None => continue,
                         }
                     }
@@ -4757,18 +4727,10 @@ where
             }
             RiscOp::Shrink { bounds } => {
                 let input = &values[&node.inputs[0]];
+                // spec/05 section 2.4.1 closes the runtime-bound errors: equal
+                // endpoints select an empty axis (chelis#1795), and only an
+                // inverted or overshooting range traps, inside `shrink`.
                 let resolved = resolve_eval_pairs(bounds, node, &values, &input.shape)?;
-                // chelis#616 on the eval lane: a runtime bound that selects
-                // nothing is rejected as the interpreter rejects it and as
-                // the C runtime aborts it, never returned as an empty tensor.
-                for (axis, (start, end)) in resolved.iter().enumerate() {
-                    if start >= end {
-                        return Err(format!(
-                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted \
-                             (start >= end)"
-                        ));
-                    }
-                }
                 shrink(input, &resolved)?
             }
             RiscOp::Stride { .. } => {
@@ -5580,13 +5542,10 @@ where
 /// node's own bounds before that node runs.
 ///
 /// `None` means the operation computes no extent here: a `shrink` span whose
-/// start is not below its end selects nothing, so there is nothing to compare
-/// and the guard yields. THIS lane then reports the span itself. The C lane
-/// does not: `spec/05-risc-primitives.md` section 2.4.1's closed list of
-/// runtime-bound errors does not include an empty span, so an extent-0 result
-/// under a declared literal is a claim mismatch there and C reports the claim.
-/// That divergence is chelis#1795's, not this function's; the inline comment
-/// at the call site carries the full argument.
+/// start is above its end is inverted, so there is nothing to compare and the
+/// guard yields to the operation's own domain trap. An empty span computes
+/// the real extent 0 (`spec/05-risc-primitives.md` section 2.4.1,
+/// chelis#1795), which a declared literal claim then compares on both lanes.
 ///
 /// A span whose END exceeds the operand's extent is declined for the same
 /// reason, and chelis#1797 is why it now can be. Such a span is out of domain,
@@ -5662,7 +5621,7 @@ fn computed_axis_extent_value(
             if end > extent {
                 return Ok(None);
             }
-            Ok(end.checked_sub(start).filter(|span| *span > 0))
+            Ok(end.checked_sub(start))
         }
         crate::axis_sources::ComputedAxisExtent::PadSpan {
             before,
@@ -6085,11 +6044,9 @@ mod tests {
     /// `ShapeMetadata::shrunk` gives it the same `Domain` message on the
     /// compiled lane.
     ///
-    /// This kernel branch is a backstop from the DAG evaluator's side: the
-    /// `RiscOp::Shrink` arm rejects `start >= end` first, with chelis#616's
-    /// admission-rule wording, so a program cannot reach this branch through
-    /// that path. That earlier rejection is a separate lane divergence tracked
-    /// by chelis#1795 and is NOT repaired here.
+    /// The `RiscOp::Shrink` arm reaches this branch for every runtime bound,
+    /// so a program's inverted span reports this trap on eval as on C
+    /// (chelis#1795).
     ///
     /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
     /// with `eval::shrink: axis 0 bound start 3 exceeds end 1`.

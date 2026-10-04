@@ -1862,7 +1862,10 @@ impl<'a> EvalContext<'a> {
                 // These run no callback and render every failure from their
                 // numeric arguments alone, never from an authored string, so
                 // a trap line in their failure is the runtime's own.
-                || matches!(name, "to_tensor" | "split" | "char_code" | "char_from_code");
+                || matches!(
+                    name,
+                    "to_tensor" | "split" | "char_code" | "char_from_code" | "string_slice"
+                );
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
             } else {
@@ -3665,8 +3668,11 @@ impl<'a> EvalContext<'a> {
                 let value = expect_string_arg(args, 0)?;
                 let start = expect_int_arg(args, 1)?;
                 let len = expect_int_arg(args, 2)?;
-                if start < 0 || len < 0 {
-                    return Err("string_slice requires non-negative start and length".to_string());
+                // [05-OP-58]: a negative start or length is a domain error.
+                for (argument, value) in [("start", start), ("length", len)] {
+                    if value < 0 {
+                        return Err(chelis_abi::failure::string_slice_negative(argument, value));
+                    }
                 }
                 let chars = value.chars().collect::<Vec<_>>();
                 let start = start as usize;
@@ -5127,6 +5133,15 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
+                // [05-OP-11]: an execution-time zero extent traps `Domain` as
+                // `mean` at the result dtype, before the composition runs.
+                if tensor.value.shape[axis] == 0 {
+                    return Err(chelis_types::NumericTrap::Domain {
+                        op: "mean",
+                        prim: tensor.precision,
+                    }
+                    .to_string());
+                }
                 eval_composed_unary(&tensor, |dag, decl, x, ty| {
                     tier2::lower_mean(decl.into(), dag, x, axis, ty, None)
                 })

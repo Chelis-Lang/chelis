@@ -190,13 +190,9 @@ fn higher_order_app_and_pipe_preserve_actual_before_entry_failure() {
                 let output = run(&source, c);
                 let rendered = text(&output);
                 assert!(!output.status.success(), "pipe={pipe}, C={c}: {rendered}");
-                let expected_trap = if invalid_first && !c {
-                    // Direct eval rejects intrinsic shrink bounds before the
-                    // IR evaluator's numeric-trap formatter is reached.
-                    "error: shrink axis 0 bound [1, 4] is out of range for input dim 3".into()
-                } else {
-                    format!("numeric trap: domain in {expected_op} at i64")
-                };
+                // chelis#1795: both lanes trap an out-of-range shrink span in
+                // shrink, so the trap line is the same in each.
+                let expected_trap = format!("numeric trap: domain in {expected_op} at i64");
                 assert!(
                     rendered.lines().any(|line| line == expected_trap),
                     "pipe={pipe}, C={c}: {rendered}"
@@ -534,11 +530,7 @@ fn beta_reduced_callbacks_run_failing_actual_before_entry() {
         let output = run(&source, c);
         let rendered = text(&output);
         assert!(!output.status.success(), "C={c}: {rendered}");
-        let expected = if c {
-            "numeric trap: domain in shrink at i64"
-        } else {
-            "error: shrink axis 0 bound [1, 4] is out of range for input dim 3"
-        };
+        let expected = "numeric trap: domain in shrink at i64";
         assert!(
             rendered.lines().any(|line| line == expected),
             "C={c}: {rendered}"

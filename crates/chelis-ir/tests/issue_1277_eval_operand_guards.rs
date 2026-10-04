@@ -89,7 +89,7 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
 }
 
 #[test]
-fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
+fn a_runtime_shrink_that_selects_nothing_is_an_empty_axis() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let x = load(&mut dag, decl, "x", 4);
@@ -118,7 +118,9 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
         None,
     );
     dag.add_root(shrunk);
-    let err = eval_tensor_roots_with_strict(&dag, &[shrunk], |name| match name {
+    // spec/05 section 2.4.1: equal endpoints describe an empty axis
+    // (chelis#1795), so bounds [0, 0) select an extent-0 result.
+    let values = eval_tensor_roots_with_strict(&dag, &[shrunk], |name| match name {
         "x" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
         "k" => Some(
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![], vec![0])
@@ -126,9 +128,6 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
         ),
         _ => None,
     })
-    .expect_err("bounds [0, 0) select nothing and must be rejected");
-    assert!(
-        err.contains("is empty or inverted"),
-        "the interpreter's phrase for an empty bound: {err}"
-    );
+    .expect("bounds [0, 0) select an empty axis");
+    assert_eq!(values[&shrunk].shape, vec![0]);
 }

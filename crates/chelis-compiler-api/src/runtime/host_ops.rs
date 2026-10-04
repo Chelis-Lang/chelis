@@ -1358,10 +1358,11 @@ pub(super) fn tensor_reduce_host(
     let rank = tensor.value.shape.len();
     let axis = normalize_axis(rank, axis, "reduction")?;
     let mut out_shape: Vec<usize> = tensor.value.shape.clone();
+    // An empty axis reaches the kernels: spec/05 section 2.3 gives `sum` and
+    // `prod` their identity there, and an extremum or arg-extremum, which has
+    // none, traps `Domain` in its lowered primitive ([04-NUM-9]), as compiled
+    // C does.
     let axis_len = out_shape.remove(axis);
-    if axis_len == 0 {
-        return Err("reduction over empty axis is undefined".to_string());
-    }
     let out_numel = tensor_numel(&out_shape);
     let mut groups = Vec::with_capacity(out_numel);
     for out_linear in 0..out_numel {
@@ -1812,15 +1813,14 @@ pub(super) fn tensor_shrink_host(
         ));
     }
     let mut out_shape = Vec::with_capacity(in_shape.len());
-    for (axis, ((start, end), in_dim)) in bounds.iter().zip(in_shape.iter()).enumerate() {
-        if start >= end {
-            return Err(format!(
-                "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
-            ));
-        }
-        if *end > *in_dim {
-            return Err(format!(
-                "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {in_dim}"
+    // spec/05 section 2.4.1: equal endpoints select an empty axis
+    // (chelis#1795); an inverted or overshooting range traps `Domain` in
+    // `shrink`, rendered as the IR evaluator and the C runtime render it.
+    for ((start, end), in_dim) in bounds.iter().zip(in_shape.iter()) {
+        if start > end || end > in_dim {
+            return Err(chelis_abi::failure::domain_guard(
+                "shrink",
+                "Domain: shrink bounds outside input extent",
             ));
         }
         out_shape.push(end - start);
@@ -1970,9 +1970,8 @@ pub(super) fn tensor_softmax_host(
         a
     };
 
-    if tensor.value.shape[axis_usize] == 0 {
-        return Err("softmax axis has size 0".to_string());
-    }
+    // An empty axis reaches the lowered `max_reduce`, which traps `Domain`
+    // under [04-NUM-9]'s lowered-primitive rule, as compiled C reports it.
     eval_composed_unary(tensor, |dag, decl, x, ty| {
         tier2::lower_softmax(decl.into(), dag, x, axis_usize, ty, None)
     })

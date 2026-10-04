@@ -1934,7 +1934,8 @@ fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
             },
-            vec![(2, Some(2)), (0, None), (-1, None), (4, None)],
+            // chelis#1795: equal endpoints describe an empty axis.
+            vec![(2, Some(2)), (0, Some(0)), (-1, None), (4, None)],
         ),
         (
             "stride",

@@ -234,6 +234,16 @@ pub fn char_from_code_invalid(code: i64) -> String {
     )
 }
 
+/// `string_slice` received a negative start or length ([05-OP-58]): a
+/// `Domain` trap in `string_slice` at the `i64` offset, after a context line
+/// naming the argument and its value.
+pub fn string_slice_negative(argument: &str, value: i64) -> String {
+    format!(
+        "string_slice {argument} is negative: {value}\n{}",
+        domain_trap_line_at_i64("string_slice")
+    )
+}
+
 /// A `clamp` bound is NaN at a row-major position ([05-OP-33]): a `Domain`
 /// trap in `clamp` at the operand dtype `prim`.
 pub fn clamp_bound_nan(position: usize, prim: &str) -> String {
