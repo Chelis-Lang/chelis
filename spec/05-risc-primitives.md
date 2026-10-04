@@ -2922,12 +2922,12 @@ exact ADT identity by [05-OP-34].
 > Unicode scalar-value key sequence, recursively, so equal documents have
 > identical bytes. `try_to_json` returns `None` exactly when a reachable
 > `JsonFloat` is invalid under [05-OP-2] or a reachable `JsonBigInt` violates
-> [05-OP-5]'s canonical out-of-range integer form; `to_json` fails through
-> [05-OP-60] `fail` for the same documents, with a message naming both causes.
+> [05-OP-5]'s canonical out-of-range integer form; `to_json` raises a
+> [05-OP-60] failure for the same documents, with a message naming both causes.
 > `write_json` and `try_write_json`
 > validate the complete document before opening or truncating the destination.
-> `write_json` fails through `fail` and the try form returns `None` for that
-> same invalid content; both forms
+> `write_json` raises the same failure and the try form returns `None` for
+> that same invalid content; both forms
 > propagate a
 > filesystem write failure as `IO` and otherwise write exactly the bytes of
 > `to_json`.

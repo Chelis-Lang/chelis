@@ -200,7 +200,7 @@ def test_try_to_json_rejects_malformed_or_mismatched_json_float() -> unit ! { Te
 def test_valid_constructed_json_float_serializes_its_text_and_reparses_equal() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonFloat(100000.0f64, "1E5")), "1E5", "a valid exponent spelling is emitted verbatim")
   _ = assert_eq(to_json(JsonFloat(0.1f64, "0.1000000000000000055511151231257827")), "0.1000000000000000055511151231257827", "any text that rounds to the f64 is valid")
-  values = [1e16f64, 1e-7f64, neg(0.0f64), 5e-324f64, 1.7976931348623157e308f64, neg(2048.0f64)]
+  values: List[f64] = [1e16f64, 1e-7f64, neg(0.0f64), 5e-324f64, 1.7976931348623157e308f64, neg(2048.0f64)]
   fold(fn (acc: unit, x: f64) -> {
     doc = float_json(x)
     _ = assert_eq(to_json(doc), to_string(x), "JsonFloat(x, to_string(x)) emits to_string(x)")
