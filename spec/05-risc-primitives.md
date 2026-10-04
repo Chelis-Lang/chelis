@@ -35,7 +35,8 @@ The comparison family [05-OP-36], `max_elem` / `min_elem`, the exact
 arithmetic family [05-OP-64] including `mod`, and the bitwise and shift family
 [05-OP-47] borrow both tensor operands, and the casts `cast` [05-OP-63],
 `cast_trunc` [05-OP-6], `cast_saturate` [05-OP-23], and `cast_wrap`
-[05-OP-24] borrow their tensor source. The unary activations `sigmoid`, `tanh`, `silu`, `gelu`, and `gelu_tanh`
+[05-OP-24] borrow their tensor source. The unary activations `sigmoid`, `tanh`, `silu`, `gelu`, `gelu_tanh`,
+and `standard_normal_cdf`
 borrow their tensor operand, as do the read-only unary primitives composing
 them. Operator and function-call spellings have the same ownership disposition.
 A genuine consuming use still makes a later call in any of these families a
@@ -1269,11 +1270,13 @@ three atoms above and never admits `bool` to a numeric capability or kernel.
 | `tanh(x)` | The Tier 1 primitive `tanh` of §2.2 and [05-OP-46]; it has no lowering |
 | `silu(x)` | `mul(m(x), sigmoid(x))` |
 | `gelu(x)` | `mul(m(x), Phi(x))`, with `Phi` the standard normal CDF graph below |
+| `standard_normal_cdf(x)` | `Phi(x)`, the standard normal CDF graph below |
 | `gelu_tanh(x)` | `mul(m(x), sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
 
 `m(x)` is the multiplicand guard
-`where(is_infinite(x), where(cmplt(x, const(0.0)), neg(const(0.0)), x), x)`:
-it is `x` at every finite input and at NaN and `+inf`, and `-0.0` at `-inf`.
+`where(cmplt(x, const(lowest)), neg(const(0.0)), x)`, with `lowest` the most
+negative finite value of the operand dtype: it is `x` at every finite input and
+at NaN and `+inf`, and `-0.0` at `-inf`.
 Each gated function `x * f(x)` has `f(-inf) = +0` and limit zero from below as
 `x` goes to `-inf`, so the unguarded `mul(x, f(x))` would give `-inf * 0`, a NaN
 for an input whose limit is defined. With the guard, `silu`, `gelu`, and
@@ -1322,7 +1325,7 @@ f16 and bf16 evaluate the
 f32 graph because a per-primitive finalization to an 8- or 11-bit significand
 leaves an argument error that a first-order correction cannot remove.
 
-All six activation functions admit float tensors and float scalars at f16,
+All seven functions of this table admit float tensors and float scalars at f16,
 bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
 rank-zero instance of the tensor operation; non-float operands are type
 errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
@@ -1341,7 +1344,7 @@ does not. `tanh` is a primitive rather than a
 composition: no graph over the other primitives reproduces the correctly
 rounded hyperbolic tangent near zero, where `2*sigmoid(2x)-1` cancels. The
 adjoint is the derivative of the lowering above for `sigmoid`, `silu`,
-`gelu`, and `gelu_tanh`, and [05-OP-46]'s adjoint for `tanh`; `relu` instead carries its own
+`gelu`, `gelu_tanh`, and `standard_normal_cdf`, and [05-OP-46]'s adjoint for `tanh`; `relu` instead carries its own
 adjoint under [05-OP-43] and survives AD as an intact Tier-2 identity.
 
 > **[05-OP-43]** `relu(x) -> result` admits every active float dtype on a
@@ -2941,7 +2944,8 @@ exact ADT identity by [05-OP-34].
 > an arithmetic operand, default dtype, or restriction on `normal_cdf`, whose
 > semantic result remains at its input dtype. A caller defining another
 > property policy states its own tolerance at that property's value dtype.
-> `normal_cdf(x)` is section 3.3's `Phi` at `p_float`: for f32 and f64 its
+> `normal_cdf(x)` is [05-OP-48]'s `standard_normal_cdf(x)`, section 3.3's `Phi` at
+> `p_float`: for f32 and f64 its
 > graph with each constant rounded once to `p_float` and each primitive
 > finalized to `p_float` before its consumer, and for f16 and bf16 the f32
 > graph finalized once to `p_float`. Its `erfc` and `exp` leaves are [05-OP-46]'s correctly rounded
@@ -3887,7 +3891,8 @@ path even though bare `round` under `grad` remains a structural
 
 #### Activation compositions
 
-> **[05-OP-48]** Signature: `sigmoid(x)`, `silu(x)`, `gelu(x)`, and `gelu_tanh(x)` preserve one
+> **[05-OP-48]** Signature: `sigmoid(x)`, `silu(x)`, `gelu(x)`, `gelu_tanh(x)`, and
+> `standard_normal_cdf(x)` preserve one
 > float scalar or tensor's shape and dtype; `softmax(x,axis)` takes a float
 > tensor and an axis-domain i32 and returns the same tensor type.
 >
@@ -3898,7 +3903,7 @@ path even though bare `round` under `grad` remains a structural
 > Result: The pointwise lowerings are section 3.3's primitive graphs:
 > sigmoid is `recip(add(const(1.0), exp(neg(x))))`, silu is
 > `mul(m(x), sigmoid(x))`, gelu is `mul(m(x), Phi(x))` with section 3.3's
-> exact graph for `Phi`, and gelu_tanh is
+> exact graph for `Phi`, standard_normal_cdf is `Phi(x)`, and gelu_tanh is
 > `mul(m(x), sigmoid(mul(const(2.0), u)))` with section 3.3's exact spelling
 > of `u`, where `m` is section 3.3's multiplicand guard: silu, gelu, and
 > gelu_tanh return `-0.0` at `-inf` and `+inf` at `+inf`. Softmax uses section 4.2's max-shifted

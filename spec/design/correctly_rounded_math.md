@@ -524,9 +524,17 @@ decision.
 spec/05 makes `gelu` the exact Gaussian error linear unit `x * Phi(x)`, with `Phi` the
 standard normal CDF, and keeps the tanh approximation as a separate operation,
 `gelu_tanh`, for models trained with it (GPT-2 and its descendants). The same `Phi` graph
-(spec/05 §3.3) is the [05-OP-35] stdlib `normal_cdf`, replacing the
-Abramowitz-and-Stegun polynomial, so the language has one standard normal CDF. Both rest
-on two new [05-OP-46] correctly rounded primitives, `erf` and `erfc`.
+(spec/05 §3.3) is the [05-OP-48] builtin `standard_normal_cdf`, and the [05-OP-35] stdlib
+`normal_cdf` calls it, replacing the Abramowitz-and-Stegun polynomial, so the language
+has one standard normal CDF. Both rest on two new [05-OP-46] correctly rounded
+primitives, `erf` and `erfc`.
+
+`standard_normal_cdf` is a builtin because no Surf definition can spell `Phi`: its residual
+constant `cl` and splitter differ between f32 and f64, f16 and bf16 evaluate the f32
+graph, and a definition generic over `p: Float` has no way to select per-dtype
+constants. It cannot be named `normal_cdf`: inside the standard library package that name
+resolves to the package's own definition, and shells define three-argument
+`normal_cdf`s.
 
 ### 12.1 Why `erfc` and `erf` are primitives
 
@@ -589,8 +597,15 @@ primitive rounded to its width and each leaf correctly rounded:
 |---|---|---|---|
 | f64 | 8,006 sampled in `[-38, 8]` plus successors | 0.980 ulp | 0 |
 | f32 | 8,006 sampled in `[-13, 8]` plus successors | 0.984 ulp | 0 |
-| f16 | all 63,490 non-NaN values | 0.500 ulp | 0 |
-| bf16 | all 65,282 non-NaN values | 0.500 ulp | 0 |
+| f16 | all 63,490 non-NaN values | 0.500005 ulp | 0 |
+| bf16 | all 65,282 non-NaN values | 0.500003 ulp | 0 |
+
+At f16 and bf16 the single finalization of an f32 result that is within an f32 unit of
+the truth gives a bound of half a unit plus `2^-13` (f16) or `2^-16` (bf16) units, which
+the inputs nearest a rounding midpoint approach; `gelu` there is within half a unit of
+its result plus `|x|` times that `Phi` error, because its product reads the finalized
+`Phi`. The manual gate `half_dtype_phi_and_gelu_error_bounds_hold_on_every_input`
+checks both bounds and monotonicity over every f16 and bf16 input.
 
 The spec states the graph, not a bound: the bits are pinned by construction, and these
 figures belong to the implementation oracle (§12.6). Monotonicity is measured, not
@@ -611,8 +626,9 @@ plain product is `-inf * 0`, a NaN where the limit is zero. The §3.3 multiplica
 `m(x)` replaces `-inf` by `-0.0` before the product and changes nothing else. `-0.0`
 rather than `+0` because the functions approach zero from below, and every
 sufficiently negative finite input already returns `-0.0` (`x * +0`); IEEE 754 likewise
-signs a zero limit by its side. The guard is a `where`, not an outer select of a
-constant, so the result stays one graph and the product node never sees `-inf`.
+signs a zero limit by its side. The guard is a `where` on `cmplt(x, lowest)`, which
+is true only at `-inf`, so the result stays one graph over existing primitives and
+the product node never sees `-inf`.
 Checked with the same model, old graph against guarded graph: every finite f16 and bf16
 value and 4,004 sampled f32 and f64 values are bit-identical, `-inf` gives `-0.0`,
 `+inf` gives `+inf`, and NaN stays NaN for all three. `sigmoid` and `normal_cdf` give
@@ -634,12 +650,16 @@ correction reads `z = 0`, so its gradient is exactly zero.
 
 ### 12.6 Implementation surface
 
-The change set renames today's `gelu` to `gelu_tanh` everywhere the compiler names it
-(`chelis-types` builtins, activation graph, and dtype semantics; `chelis-ir` lowering and
-tier 2; the evaluator; C host emission; the Python bindings; the builtin semantic identity
-registry, whose rows the compiler derives), adds `erf`, `erfc`, and the new `gelu`, and
-respells `Std.Contracts.normal_cdf`. Bit-pinned tests of today's `gelu` move to
-`gelu_tanh` unchanged; new tests pin `gelu`, `erf`, `erfc`, and `normal_cdf` against
-mpmath at every width. The prove discharges in
+`chelis_types::activation` holds the one definition of every §3.3 graph, `Phi`
+included; the IR lowering (`chelis_ir::tier2`), the evaluator's scalar and tensor
+kernels, and the C host helpers (built from the `tier2` graph) all run it, so `gelu`,
+`gelu_tanh`, `silu`, and `standard_normal_cdf` have no hand-written lane copy. The graph's
+steps are `neg`, `abs`, `exp`, `erfc`, `recip`, `add`, `sub`, `mul`, `cmplt`, `where`,
+and the f16/bf16 `cast`s. `erf` and `erfc` are wired wherever `tanh` is: the
+evaluator, IR evaluation and fusion, the adjoint, C kernel and host emission, the wire
+schema (version 25), and the device fences. Tests pin the evaluator against an
+independent MPFR model of the graphs on the witness set at every width, the IR and the
+C host helpers against the evaluator (every finite f16 input and the witnesses at the
+other widths), and the f16/bf16 bounds above as a manual gate. The prove discharges in
 `crates/chelis-prove/data/standard_contract_discharges.json` and the standard graph digest
 regenerate.
