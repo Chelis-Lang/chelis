@@ -337,58 +337,6 @@ fn tensor_type_dim_exprs(expr: &Expr) -> Option<(&Expr, &[Expr])> {
     kids.split_last()
 }
 
-fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
-    if actual.is_nan() || expected.is_nan() {
-        return false;
-    }
-    if actual == expected {
-        return true;
-    }
-    if !actual.is_finite() || !expected.is_finite() {
-        return false;
-    }
-    (actual - expected).abs() <= tolerance
-}
-
-fn close_at_f64_width(actual: f64, expected: f64, tolerance: f64) -> bool {
-    if actual.is_nan() || expected.is_nan() {
-        return false;
-    }
-    if actual == expected {
-        return true;
-    }
-    if !actual.is_finite() || !expected.is_finite() {
-        return false;
-    }
-    (actual - expected).abs() <= tolerance
-}
-
-fn first_f32_mismatch(
-    actual: impl Iterator<Item = f32>,
-    expected: impl Iterator<Item = f32>,
-    tolerance: f32,
-) -> Option<usize> {
-    actual
-        .zip(expected)
-        .enumerate()
-        .find_map(|(index, (actual, expected))| {
-            (!close_at_f32_width(actual, expected, tolerance)).then_some(index)
-        })
-}
-
-fn first_f64_mismatch(
-    actual: impl Iterator<Item = f64>,
-    expected: impl Iterator<Item = f64>,
-    tolerance: f64,
-) -> Option<usize> {
-    actual
-        .zip(expected)
-        .enumerate()
-        .find_map(|(index, (actual, expected))| {
-            (!close_at_f64_width(actual, expected, tolerance)).then_some(index)
-        })
-}
-
 fn float_element_is_nan(value: ElementRef) -> bool {
     match value {
         ElementRef::F16(value) => value.is_nan(),
@@ -772,15 +720,6 @@ fn actualize_tensor_entry_parameters(
         }
     }
     Ok(actualized)
-}
-
-fn render_shape(shape: &[usize]) -> String {
-    let dimensions = shape
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{dimensions}]")
 }
 
 fn decode_effect_kind(metadata: &Metadata) -> Result<EffectKind, EffectKindDecodeError<'_>> {
@@ -4827,7 +4766,7 @@ impl<'a> EvalContext<'a> {
                 if cond {
                     Ok(RuntimeValue::Unit)
                 } else {
-                    Err(format!("assert failed: {label}"))
+                    Err(chelis_runtime::host_assert::assert_message(&label))
                 }
             }
             "test_assert_eq" => {
@@ -4841,10 +4780,10 @@ impl<'a> EvalContext<'a> {
                 if runtime_values_equal(actual, expected)? {
                     Ok(RuntimeValue::Unit)
                 } else {
-                    Err(format!(
-                        "assert_eq ({label}): expected {}, got {}",
-                        render_value(expected),
-                        render_value(actual)
+                    Err(chelis_runtime::host_assert::assert_eq_message(
+                        &label,
+                        &render_value(expected),
+                        &render_value(actual),
                     ))
                 }
             }
@@ -4855,20 +4794,20 @@ impl<'a> EvalContext<'a> {
                 if actual.precision != expected.precision
                     || actual.value.shape != expected.value.shape
                 {
-                    return Err(format!(
-                        "assert_eq_tensor ({label}): expected tensor shape {:?} at {}, got {:?} at {}",
-                        expected.value.shape,
+                    return Err(chelis_runtime::host_assert::eq_tensor_header_message(
+                        &label,
+                        &expected.value.shape,
                         expected.precision.name(),
-                        actual.value.shape,
-                        actual.precision.name()
+                        &actual.value.shape,
+                        actual.precision.name(),
                     ));
                 }
                 for index in 0..actual.value.storage().len() {
                     if actual.value.storage().scalar_at(index)
                         != expected.value.storage().scalar_at(index)
                     {
-                        return Err(format!(
-                            "assert_eq_tensor ({label}): first mismatch at row-major index {index}"
+                        return Err(chelis_runtime::host_assert::eq_tensor_mismatch_message(
+                            &label, index,
                         ));
                     }
                 }
@@ -4889,8 +4828,8 @@ impl<'a> EvalContext<'a> {
                 let label = expect_string_arg(args, 3)?;
                 let tensor_prim = actual.value.prim();
                 if tensor_prim != expected.value.prim() || tensor_prim != tolerance.dtype() {
-                    return Err(format!(
-                        "assert_close_tensor ({label}): actual, expected, and tolerance must have one common active float dtype"
+                    return Err(chelis_runtime::host_assert::close_common_dtype_message(
+                        &label,
                     ));
                 }
                 if !tensor_prim.is_float() {
@@ -4900,10 +4839,10 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 if actual.value.shape != expected.value.shape {
-                    return Err(format!(
-                        "assert_close_tensor ({label}): shape mismatch, expected {}, got {}",
-                        render_shape(&expected.value.shape),
-                        render_shape(&actual.value.shape)
+                    return Err(chelis_runtime::host_assert::close_shape_message(
+                        &label,
+                        &expected.value.shape,
+                        &actual.value.shape,
                     ));
                 }
                 let tolerance_f64 = tolerance.as_f64_lossy();
@@ -4912,8 +4851,9 @@ impl<'a> EvalContext<'a> {
                         tolerance.dtype(),
                         tolerance.value().element_ref(),
                     );
-                    return Err(format!(
-                        "assert_close_tensor ({label}): invalid tolerance {rendered_tolerance} (must be finite and non-negative)"
+                    return Err(chelis_runtime::host_assert::close_tolerance_message(
+                        &label,
+                        &rendered_tolerance,
                     ));
                 }
                 if actual.value.len() != expected.value.len() {
@@ -4928,46 +4868,54 @@ impl<'a> EvalContext<'a> {
                     actual.value.storage().view(),
                     expected.value.storage().view(),
                 ) {
-                    (StorageView::F64(actual), StorageView::F64(expected)) => first_f64_mismatch(
-                        actual.iter().copied(),
-                        expected.iter().copied(),
-                        tolerance_f64,
-                    ),
-                    (StorageView::F32(actual), StorageView::F32(expected)) => first_f32_mismatch(
-                        actual.iter().copied(),
-                        expected.iter().copied(),
-                        tolerance_f64 as f32,
-                    ),
-                    (StorageView::F16(actual), StorageView::F16(expected)) => first_f32_mismatch(
-                        actual.iter().map(|value| value.to_f32()),
-                        expected.iter().map(|value| value.to_f32()),
-                        tolerance_f64 as f32,
-                    ),
-                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => first_f32_mismatch(
-                        actual.iter().map(|value| value.to_f32()),
-                        expected.iter().map(|value| value.to_f32()),
-                        tolerance_f64 as f32,
-                    ),
+                    (StorageView::F64(actual), StorageView::F64(expected)) => {
+                        chelis_runtime::host_assert::first_f64_mismatch(
+                            actual.iter().copied(),
+                            expected.iter().copied(),
+                            tolerance_f64,
+                        )
+                    }
+                    (StorageView::F32(actual), StorageView::F32(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().copied(),
+                            expected.iter().copied(),
+                            tolerance_f64 as f32,
+                        )
+                    }
+                    (StorageView::F16(actual), StorageView::F16(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().map(|value| value.to_f32()),
+                            expected.iter().map(|value| value.to_f32()),
+                            tolerance_f64 as f32,
+                        )
+                    }
+                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().map(|value| value.to_f32()),
+                            expected.iter().map(|value| value.to_f32()),
+                            tolerance_f64 as f32,
+                        )
+                    }
                     _ => unreachable!("common active-float dtype check makes storage exhaustive"),
                 };
                 if let Some(index) = mismatch {
                     let actual = actual.value.storage().scalar_at(index);
                     let expected = expected.value.storage().scalar_at(index);
-                    let nan_suffix = if float_element_is_nan(actual.element_ref())
-                        || float_element_is_nan(expected.element_ref())
-                    {
-                        " (NaN is never close)"
-                    } else {
-                        ""
-                    };
+                    let either_nan = float_element_is_nan(actual.element_ref())
+                        || float_element_is_nan(expected.element_ref());
                     let rendered_actual =
                         chelis_types::format_element(tensor_prim, actual.element_ref());
                     let rendered_expected =
                         chelis_types::format_element(tensor_prim, expected.element_ref());
                     let rendered_tolerance =
                         chelis_types::format_element(tensor_prim, tolerance.value().element_ref());
-                    return Err(format!(
-                        "assert_close_tensor ({label}): at index {index} expected {rendered_expected}, got {rendered_actual}, tol {rendered_tolerance}{nan_suffix}"
+                    return Err(chelis_runtime::host_assert::close_mismatch_message(
+                        &label,
+                        index,
+                        &rendered_expected,
+                        &rendered_actual,
+                        &rendered_tolerance,
+                        either_nan,
                     ));
                 }
                 Ok(RuntimeValue::Unit)

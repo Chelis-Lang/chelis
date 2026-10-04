@@ -7800,6 +7800,50 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-HOST-3]: the assertion family runs in compiled host code
+            // through the runtime's shared checks and failure messages. The
+            // operands are borrowed; an assertion returns unit or traps.
+            "test_assert" => {
+                self.lines.push(format!(
+                    "{}if (!({})) chelis_test_assert_fail({});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_eq" => {
+                // Unit equals unit ([05-OP-36]): there is nothing to compare.
+                if !matches!(arg_vars[0].1, HostType::Unit) {
+                    let actual = self.box_value_expr(&arg_vars[0].0, &arg_vars[0].1)?;
+                    let expected = self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?;
+                    self.lines.push(format!(
+                        "{}chelis_test_assert_eq({actual}, {expected}, {});",
+                        self.indent, arg_vars[2].0
+                    ));
+                }
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_eq_tensor" => {
+                self.lines.push(format!(
+                    "{}chelis_test_assert_eq_tensor({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_close_tensor" => {
+                self.lines.push(format!(
+                    "{}chelis_test_assert_close_tensor({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    scalar_carrier_expr(&arg_vars[2].0, &arg_vars[2].1)?,
+                    arg_vars[3].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
             // [05-OP-61], [05-OP-2..3], [05-OP-5]: the runtime's one CSV
             // definition over the `List[Dict[string,string]]` carrier; row
             // indices and numeric results cross as exact tagged scalars.

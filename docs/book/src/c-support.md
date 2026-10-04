@@ -16,16 +16,9 @@ Source owner: `crates/chelis-compiler-api/src/compiler.rs::HOST_ONLY_BUILTINS`. 
 
 ## Assertions and other live host code
 
-The assertion identities below are derived from spec/05 §3.6.1 and checked against the builtin vocabulary. [05-HOST-3] requires host-runtime execution in every language execution mode. Their missing C emission is an implementation gap, not an evaluator-only normative restriction. An unsupported assertion in a live emitted function refuses the build; an entry-unreachable helper can become an abort stub. Std.Test wrappers retain this restriction when they reach these builtins.
+The assertion identities `test_assert`, `test_assert_eq`, `test_assert_close_tensor`, `test_assert_eq_tensor` are derived from spec/05 §3.6.1 and checked against the builtin vocabulary. [05-HOST-3] requires host-runtime execution in every language execution mode, and compiled C runs them through the same runtime checks and failure messages as eval, reachable or not.
 
-| Identity | Entry route | Eval/test | C | Rejection scope | Supported alternative |
-|---|---|---|---|---|---|
-| `test_assert` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |
-| `test_assert_eq` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |
-| `test_assert_close_tensor` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |
-| `test_assert_eq_tensor` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |
-
-The C host emitter has a closed builtin dispatch and rejects unimplemented live expressions. This catch-all is not a finite roster of missing capabilities; the four assertion rows do not enumerate every possible refusal.
+The C host emitter has a closed builtin dispatch and rejects unimplemented live expressions. This catch-all is not a finite roster of missing capabilities.
 
 ## Structured I/O routes
 

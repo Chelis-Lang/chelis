@@ -196,3 +196,127 @@ fn csv_failures_match_eval() {
         assert_eq!(run.failure, failure, "{name}: {run:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// [05-HOST-3] the `test_*` assertion family
+// ---------------------------------------------------------------------------
+
+/// Passing assertions of every identity return unit on both lanes, at
+/// top level and inside a `Test` function, over scalars, strings, recursive
+/// values, signed zeros, and tensors at their own dtype.
+#[test]
+fn passing_assertions_match_eval() {
+    let source = "type Pick = | Left(i64) | Right(string)\n\
+                  def test_values(n: i64) -> unit ! {Test} = {\n\
+                  _ = test_assert(gt(n, 0i64), \"positive\")\n\
+                  _ = test_assert_eq([n, 2i64], [n, 2i64], \"list\")\n\
+                  _ = test_assert_eq((n, \"s\"), (n, \"s\"), \"tuple\")\n\
+                  _ = test_assert_eq(Some(n), Some(n), \"option\")\n\
+                  test_assert_eq(Right(\"r\"), Right(\"r\"), \"adt\")\n\
+                  }\n\
+                  a = test_values(3i64)\n\
+                  b = test_assert_eq(0.0f64, -0.0f64, \"signed zero\")\n\
+                  c = test_assert_eq(\"x\", \"x\", \"string\")\n\
+                  d = test_assert_eq_tensor(to_tensor([1i32, 2i32]), to_tensor([1i32, 2i32]), \"ints\")\n\
+                  e = test_assert_close_tensor(to_tensor([1.0f32, 2.0f32]), to_tensor([1.05f32, 2.0f32]), 0.1f32, \"close\")\n\
+                  f = test_assert_close_tensor(to_tensor([1.0f64]), to_tensor([1.0f64]), 0.0f64, \"exact\")\n\
+                  after = print(\"done\")\n";
+    let run = parity::assert_lanes_agree(source, "passing");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert!(run.stdout.contains("done\n"), "{run:?}");
+}
+
+/// The failing twins: each assertion traps `Test` with its label and the
+/// eval-identical message, after the effects that precede it and before any
+/// that follow.
+#[test]
+fn failing_assertions_match_eval() {
+    for (name, assertion, failure) in [
+        (
+            "bool",
+            "test_assert(false, \"flag\")",
+            "assert failed: flag",
+        ),
+        (
+            "scalar",
+            "test_assert_eq(3i64, 4i64, \"n\")",
+            "assert_eq (n): expected 4, got 3",
+        ),
+        (
+            "nan",
+            "test_assert_eq(div(0.0f64, 0.0f64), div(0.0f64, 0.0f64), \"nan\")",
+            "assert_eq (nan): expected NaN, got NaN",
+        ),
+        (
+            "list",
+            "test_assert_eq([1i64, 2i64], [1i64, 3i64], \"xs\")",
+            "assert_eq (xs): expected [1, 3], got [1, 2]",
+        ),
+        (
+            "option",
+            "test_assert_eq(Some(\"a\"), None, \"o\")",
+            "assert_eq (o): expected None, got Some(a)",
+        ),
+        (
+            "tensor",
+            "test_assert_eq_tensor(to_tensor([1i8, 2i8]), to_tensor([1i8, 5i8]), \"t\")",
+            "assert_eq_tensor (t): first mismatch at row-major index 1",
+        ),
+        (
+            "close",
+            "test_assert_close_tensor(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.5f32]), 0.1f32, \"c\")",
+            "assert_close_tensor (c): at index 1 expected 2.5, got 2.0, tol 0.1",
+        ),
+        (
+            "closenan",
+            "test_assert_close_tensor(to_tensor([div(0.0f64, 0.0f64)]), to_tensor([1.0f64]), 1.0f64, \"cn\")",
+            "assert_close_tensor (cn): at index 0 expected 1.0, got NaN, tol 1.0 (NaN is never close)",
+        ),
+        (
+            "tolerance",
+            "test_assert_close_tensor(to_tensor([1.0f32]), to_tensor([1.0f32]), -1.0f32, \"tl\")",
+            "assert_close_tensor (tl): invalid tolerance -1.0 (must be finite and non-negative)",
+        ),
+    ] {
+        let source = format!(
+            "before = print(\"before\")\nchecked = {assertion}\nafter = print(\"after\")\n"
+        );
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(run.failure, failure, "{name}: {run:?}");
+        assert!(
+            run.stdout.contains("before") && !run.stdout.contains("after"),
+            "{name}: {run:?}"
+        );
+    }
+}
+
+/// An uncalled assertion definition is ordinary compiled code: the program
+/// builds without an abort stub, and its executable asserts nothing.
+#[test]
+fn an_uncalled_assertion_definition_compiles_without_a_stub() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("dead.ch");
+    fs::write(
+        &path,
+        "def test_dead() -> unit ! {Test} = test_assert(false, \"unreachable\")\nout = 7i32\n",
+    )
+    .expect("write source");
+    let out = dir.path().join("out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--emit-c"])
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+    let emitted = fs::read_to_string(out.join("dead.c")).expect("emitted C");
+    assert!(!emitted.contains("unsupported:"), "{emitted}");
+    assert!(emitted.contains("chelis_test_assert_fail"), "{emitted}");
+    let run = parity::assert_lanes_agree(
+        "def test_dead() -> unit ! {Test} = test_assert(false, \"unreachable\")\nout = 7i32\n",
+        "dead",
+    );
+    assert_eq!(run.stdout, "out = 7\n", "{run:?}");
+}

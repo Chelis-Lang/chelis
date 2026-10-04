@@ -1392,6 +1392,26 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_close_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_scalar tolerance , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_eq_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
       "flags": []
     },

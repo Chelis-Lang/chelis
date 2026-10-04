@@ -23,6 +23,7 @@ pub mod build_record;
 mod decimal_parse;
 pub mod dtype_header;
 mod element;
+pub mod host_assert;
 pub mod host_clock;
 pub mod host_csv;
 pub mod host_process;
@@ -7602,6 +7603,223 @@ pub unsafe extern "C" fn chelis_clock_wall_read() -> *mut chelis_tuple {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_clock_monotonic_read() -> *mut chelis_tuple {
     clock_read_tuple(host_clock::ClockOperation::Monotonic)
+}
+
+/// The language spelling of a tensor element dtype in assertion messages.
+fn assertion_dtype_name(dtype: RuntimeDType) -> &'static str {
+    match dtype {
+        RuntimeDType::F32 => "f32",
+        RuntimeDType::F64 => "f64",
+        RuntimeDType::F16 => "f16",
+        RuntimeDType::Bf16 => "bf16",
+        RuntimeDType::I8 => "i8",
+        RuntimeDType::I16 => "i16",
+        RuntimeDType::I32 => "i32",
+        RuntimeDType::I64 => "i64",
+        RuntimeDType::Bool => "bool",
+        RuntimeDType::Key => "key",
+    }
+}
+
+unsafe fn assertion_shape(tensor: *const chelis_tensor) -> Vec<usize> {
+    (*tensor)
+        .shape()
+        .iter()
+        .map(|extent| usize::try_from(*extent).unwrap_or_else(|_| runtime_fail!("negative extent")))
+        .collect()
+}
+
+/// [05-HOST-3] `test_assert` in compiled host code, reached only when the
+/// condition is false.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_test_assert_fail(label: chelis_string) {
+    runtime_fail!(
+        "{}",
+        host_assert::assert_message(&string_value(label).value)
+    );
+}
+
+/// [05-HOST-3] `test_assert_eq` over two borrowed values of one static type,
+/// with [05-OP-36]'s recursive equality.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_test_assert_eq(
+    actual: chelis_value,
+    expected: chelis_value,
+    label: chelis_string,
+) {
+    if !values_equal(actual, expected) {
+        runtime_fail!(
+            "{}",
+            host_assert::assert_eq_message(
+                &string_value(label).value,
+                &value_to_string_inline(expected),
+                &value_to_string_inline(actual),
+            )
+        );
+    }
+}
+
+/// [05-HOST-3] `test_assert_eq_tensor`: one dtype, one shape, and every
+/// row-major element equal under [05-OP-36].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_test_assert_eq_tensor(
+    actual: *const chelis_tensor,
+    expected: *const chelis_tensor,
+    label: chelis_string,
+) {
+    let label = &string_value(label).value;
+    let [actual_dtype, expected_dtype] = validate_tensor_inputs([
+        (actual, "test_assert_eq_tensor actual"),
+        (expected, "test_assert_eq_tensor expected"),
+    ]);
+    let (actual_shape, expected_shape) = (assertion_shape(actual), assertion_shape(expected));
+    if actual_dtype != expected_dtype || actual_shape != expected_shape {
+        runtime_fail!(
+            "{}",
+            host_assert::eq_tensor_header_message(
+                label,
+                &expected_shape,
+                assertion_dtype_name(expected_dtype),
+                &actual_shape,
+                assertion_dtype_name(actual_dtype),
+            )
+        );
+    }
+    unsafe fn element_eq<T: TensorElement + PartialEq + Copy>(
+        lhs: *const chelis_tensor,
+        rhs: *const chelis_tensor,
+        index: usize,
+    ) -> bool {
+        *T::data_ptr_unchecked(lhs.cast_mut()).add(index)
+            == *T::data_ptr_unchecked(rhs.cast_mut()).add(index)
+    }
+    for index in 0..(*actual).count() {
+        let equal = match actual_dtype {
+            RuntimeDType::F32 => element_eq::<f32>(actual, expected, index),
+            RuntimeDType::F64 => element_eq::<f64>(actual, expected, index),
+            RuntimeDType::I64 => element_eq::<i64>(actual, expected, index),
+            RuntimeDType::I32 => element_eq::<i32>(actual, expected, index),
+            RuntimeDType::I16 => element_eq::<i16>(actual, expected, index),
+            RuntimeDType::I8 => element_eq::<i8>(actual, expected, index),
+            RuntimeDType::Bool => {
+                (*Bool8::data_ptr_unchecked(actual.cast_mut()).add(index)).get()
+                    == (*Bool8::data_ptr_unchecked(expected.cast_mut()).add(index)).get()
+            }
+            RuntimeDType::F16 => {
+                let bits = |t: *const chelis_tensor| *(tensor_data(t) as *const u16).add(index);
+                half::f16::from_bits(bits(actual)) == half::f16::from_bits(bits(expected))
+            }
+            RuntimeDType::Bf16 => {
+                let bits = |t: *const chelis_tensor| *(tensor_data(t) as *const u16).add(index);
+                half::bf16::from_bits(bits(actual)) == half::bf16::from_bits(bits(expected))
+            }
+            RuntimeDType::Key => unreachable!("validate_tensor_inputs rejects a key"),
+        };
+        if !equal {
+            runtime_fail!("{}", host_assert::eq_tensor_mismatch_message(label, index));
+        }
+    }
+}
+
+/// [05-HOST-3] `test_assert_close_tensor` with [05-OP-35]'s closeness, at
+/// the same widths as the evaluator.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_test_assert_close_tensor(
+    actual: *const chelis_tensor,
+    expected: *const chelis_tensor,
+    tolerance: chelis_scalar,
+    label: chelis_string,
+) {
+    let label = &string_value(label).value;
+    let [dtype, expected_dtype] = validate_tensor_inputs([
+        (actual, "test_assert_close_tensor actual"),
+        (expected, "test_assert_close_tensor expected"),
+    ]);
+    let tolerance_dtype = validate_scalar(tolerance, "test_assert_close_tensor tolerance");
+    if dtype != expected_dtype || dtype != tolerance_dtype {
+        runtime_fail!("{}", host_assert::close_common_dtype_message(label));
+    }
+    let (actual_shape, expected_shape) = (assertion_shape(actual), assertion_shape(expected));
+    if actual_shape != expected_shape {
+        runtime_fail!(
+            "{}",
+            host_assert::close_shape_message(label, &expected_shape, &actual_shape)
+        );
+    }
+    let tolerance_f64 = match dtype {
+        RuntimeDType::F64 => f64::from_bits(tolerance.bits),
+        RuntimeDType::F32 => f64::from(f32::from_bits(tolerance.bits as u32)),
+        RuntimeDType::F16 => f64::from(half::f16::from_bits(tolerance.bits as u16)),
+        RuntimeDType::Bf16 => f64::from(half::bf16::from_bits(tolerance.bits as u16)),
+        other => runtime_fail!(
+            "assert_close_tensor ({label}): tensor dtype {} is not an active float dtype",
+            assertion_dtype_name(other)
+        ),
+    };
+    if !tolerance_f64.is_finite() || tolerance_f64 < 0.0 {
+        runtime_fail!(
+            "{}",
+            host_assert::close_tolerance_message(label, &render_scalar(tolerance))
+        );
+    }
+    let count = (*actual).count();
+    let half_values = |t: *const chelis_tensor, bf16: bool| {
+        (0..count).map(move |index| {
+            let bits = *(tensor_data(t) as *const u16).add(index);
+            if bf16 {
+                half::bf16::from_bits(bits).to_f32()
+            } else {
+                half::f16::from_bits(bits).to_f32()
+            }
+        })
+    };
+    let mismatch = match dtype {
+        RuntimeDType::F64 => host_assert::first_f64_mismatch(
+            (0..count).map(|index| *f64::data_ptr_unchecked(actual.cast_mut()).add(index)),
+            (0..count).map(|index| *f64::data_ptr_unchecked(expected.cast_mut()).add(index)),
+            tolerance_f64,
+        ),
+        RuntimeDType::F32 => host_assert::first_f32_mismatch(
+            (0..count).map(|index| *f32::data_ptr_unchecked(actual.cast_mut()).add(index)),
+            (0..count).map(|index| *f32::data_ptr_unchecked(expected.cast_mut()).add(index)),
+            tolerance_f64 as f32,
+        ),
+        RuntimeDType::F16 => host_assert::first_f32_mismatch(
+            half_values(actual, false),
+            half_values(expected, false),
+            tolerance_f64 as f32,
+        ),
+        RuntimeDType::Bf16 => host_assert::first_f32_mismatch(
+            half_values(actual, true),
+            half_values(expected, true),
+            tolerance_f64 as f32,
+        ),
+        _ => unreachable!("the float dtype was established above"),
+    };
+    if let Some(index) = mismatch {
+        let rendered_actual = tensor_elem_to_string(actual, dtype, index);
+        let rendered_expected = tensor_elem_to_string(expected, dtype, index);
+        let is_nan = |t: *const chelis_tensor| match dtype {
+            RuntimeDType::F64 => (*f64::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
+            RuntimeDType::F32 => (*f32::data_ptr_unchecked(t.cast_mut()).add(index)).is_nan(),
+            RuntimeDType::F16 => {
+                half::f16::from_bits(*(tensor_data(t) as *const u16).add(index)).is_nan()
+            }
+            _ => half::bf16::from_bits(*(tensor_data(t) as *const u16).add(index)).is_nan(),
+        };
+        let either_nan = is_nan(actual) || is_nan(expected);
+        runtime_fail!(
+            "{}",
+            host_assert::close_mismatch_message(
+                label,
+                index,
+                &rendered_expected,
+                &rendered_actual,
+                &render_scalar(tolerance),
+                either_nan,
+            )
+        );
+    }
 }
 
 /// The compiled carrier of a CSV text table, `List[Dict[string,string]]`, as

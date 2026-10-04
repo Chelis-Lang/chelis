@@ -94,14 +94,10 @@ def render(root: Path) -> str:
     lines += [
         "", "Source owner: `crates/chelis-compiler-api/src/compiler.rs::HOST_ONLY_BUILTINS`. The private, same-named kernel-routing roster in `crates/chelis-ir/src/host.rs` chooses the host lane; it is not a C exclusion list. For example, `print`, string operations, `process_run`, the clock reads, `round_to`, and the CSV builtins have compiled host implementations.", "",
         "## Assertions and other live host code", "",
-        "The assertion identities below are derived from spec/05 §3.6.1 and checked against the builtin vocabulary. [05-HOST-3] requires host-runtime execution in every language execution mode. Their missing C emission is an implementation gap, not an evaluator-only normative restriction. An unsupported assertion in a live emitted function refuses the build; an entry-unreachable helper can become an abort stub. Std.Test wrappers retain this restriction when they reach these builtins.", "",
-        "| Identity | Entry route | Eval/test | C | Rejection scope | Supported alternative |",
-        "|---|---|---|---|---|---|",
-    ]
-    for name in assertions(root):
-        lines.append(f"| `{name}` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |")
-    lines += [
-        "", "The C host emitter has a closed builtin dispatch and rejects unimplemented live expressions. This catch-all is not a finite roster of missing capabilities; the four assertion rows do not enumerate every possible refusal.", "",
+        "The assertion identities "
+        + ", ".join(f"`{name}`" for name in assertions(root))
+        + " are derived from spec/05 §3.6.1 and checked against the builtin vocabulary. [05-HOST-3] requires host-runtime execution in every language execution mode, and compiled C runs them through the same runtime checks and failure messages as eval, reachable or not.", "",
+        "The C host emitter has a closed builtin dispatch and rejects unimplemented live expressions. This catch-all is not a finite roster of missing capabilities.", "",
         "## Structured I/O routes", "",
         "The CSV builtins (`parse_csv`, `to_csv`, and the `csv_*` accessors) run on both lanes through one runtime definition. The source-defined `Std.Io.Csv` module is a separate route whose file reader, string renderer and writer compile through ordinary List/Dict/string/IO support. Its cells are strings, and numeric conversion must be explicit. The line-based reader does not support quoted fields containing embedded newlines ([#954](https://github.com/Chelis-Lang/chelis/issues/954)).", "",
         "`Std.Io.Json` is likewise a separate source-defined route. The removed JSON builtins are not current exclusions. Import resolution needs the `chelis-std` dependency; an unresolved import on both lanes is a dependency error, not evidence of a C capability gap.", "",

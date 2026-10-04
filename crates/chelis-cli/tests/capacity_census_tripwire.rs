@@ -147,6 +147,12 @@ const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
 /// derived flags are necessary but never sufficient: the complete family,
 /// kind, canonical identity, and flag vector must match one of these rows.
 const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
+        &[],
+    ),
     // A closed diagnostic identity; no extent, width, dtype, or payload is encoded.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -730,6 +736,27 @@ macro_rules! final_numeric_row {
 }
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_close_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_scalar tolerance , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`"
+    ),
     final_numeric_row!(
         "header-export",
         "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",

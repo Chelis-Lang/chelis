@@ -64,13 +64,12 @@ class PublishedInventoryTests(unittest.TestCase):
         for name in ["print", "string_concat", "process_run", "round_to", "parse_csv", "csv_int"]:
             self.assertNotIn(name, names)
 
-    def test_test_assertions_are_live_scoped_implementation_gaps(self):
+    def test_test_assertions_are_compiled_host_operations(self):
         text = inventory.render(self.root)
         self.assertIn("[05-HOST-3]", text)
-        self.assertIn("implementation gap", text)
         for name in ["test_assert", "test_assert_eq", "test_assert_close_tensor", "test_assert_eq_tensor"]:
-            self.assertIn(f"| `{name}` | builtin | Available | Rejected where live", text)
-
+            self.assertIn(f"`{name}`", text)
+            self.assertNotIn(f"| `{name}` |", text)
 
 if __name__ == "__main__":
     unittest.main()

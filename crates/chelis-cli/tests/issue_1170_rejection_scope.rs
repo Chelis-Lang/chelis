@@ -38,13 +38,11 @@ fn whole_program_gates_reject_even_unreachable_calls() {
 }
 
 #[test]
-fn live_assertion_refuses_but_unreachable_assertion_does_not() {
-    let live = rejection("out = test_assert(true, \"live\")\n");
-    assert!(
-        live.contains("host emission (codegen:c)") && live.contains("[04-TOT-2]"),
-        "{live}"
+fn live_and_unreachable_assertions_both_compile() {
+    assert_eq!(
+        common::build_and_run("out = test_assert(true, \"live\")\n", "scope"),
+        "out = ()\n"
     );
-    assert!(live.contains("test_assert"), "{live}");
     let source = "def dead() -> unit = test_assert(false, \"unreachable\")\nout = print(7i32)\n";
     assert_eq!(common::build_and_run(source, "scope"), "7\nout = ()\n");
 }
