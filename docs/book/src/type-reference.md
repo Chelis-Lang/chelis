@@ -219,6 +219,24 @@ and signed integer reductions, an explicitly wider permitted accumulator
 also widens the result. The requested accumulator must have the same numeric
 kind and be no narrower than either the operands or their default.
 
+Small-integer sums widen to `i32` (`spec/04` §5.7.1), because a total of N
+values needs more bits than its elements. Stored `i8` and `i16` tensors stay
+`i8` and `i16`; only the aggregate an operation returns widens:
+
+| Operation | What it sums | Result for an `i8` or `i16` operand | Result for any other operand |
+|---|---|---|---|
+| `sum` | the selected axes | `i32` | the operand dtype |
+| `cumsum` | every prefix along the axis | `i32` | the operand dtype |
+| `trace` | the selected diagonal | `i32` | the operand dtype |
+| `einsum` | every contracted label | `i32` | the operand dtype |
+
+A declared result, or a downstream operation, that expects the operand dtype
+is a type error that names this rule. Declare the result as `i32`, or narrow
+it explicitly with `cast(total, i8)`, which traps `Overflow` when the total
+does not fit. A function generic over a precision variable must bound it to
+dtypes that share one result, such as `Float`, `{i32, i64}`, or `{i8, i16}`
+with an `i32` result.
+
 ## Function types
 
 A function type can be written `A -> B -> C`: `A` and `B` are the two

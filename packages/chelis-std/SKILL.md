@@ -48,6 +48,8 @@ Rules to preserve:
 
 - No implicit broadcasting. Shapes must match unless an explicit helper changes them.
 - No implicit precision promotion. Use `cast` when changing precision.
+- `sum`, `cumsum`, `trace`, and `einsum` over `i8` or `i16` return `i32` (`spec/04` §5.7.1);
+  declare the result as `i32`, or narrow it with an explicit `cast`.
 - Named dimensions are nominal: `batch` and `seq` do not unify by size.
 - Integer literals default to `i32`; float literals default to `f32`.
 - Reduction-style calls need an explicit axis argument.

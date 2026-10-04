@@ -136,6 +136,11 @@ normalized original positions in descending order. For `sum`, the default
 `bf16`/`f16` accumulator is `f32`, and the result returns to `bf16`/`f16`.
 Other defaults are
 `f32→f32`, `f64→f64`, `i8/i16→i32`, `i32→i32`, and `i64→i64`.
+`sum`, `cumsum`, `trace`, and `einsum` all return
+`sum_result(p, default(p))`, so over `i8` or `i16` each returns `i32`: a
+total of N values needs more bits than its elements, so the stored tensor
+keeps its dtype and only the aggregate widens. Declare the result as `i32`
+or narrow it with an explicit `cast`.
 An explicit wider accumulator follows the exact result matrix in
 `spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
 accumulator parameter.
