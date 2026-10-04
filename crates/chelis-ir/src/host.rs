@@ -3647,9 +3647,6 @@ fn host_program_call_name_sites<T>(
 /// gates cannot drift (chelis#891 review finding 13).
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
     "process_run",
-    // [05-OP-75] clock reads: compiled host execution is chelis#1297.
-    "clock_wall_read",
-    "clock_monotonic_read",
     "round_to",
     // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
     // carrier is evaluator-only. Compiled structured I/O lives in the

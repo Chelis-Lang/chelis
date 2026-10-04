@@ -732,6 +732,20 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_monotonic_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
         &["numeric-op"],
         "[05-OP-32]",

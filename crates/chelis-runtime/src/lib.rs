@@ -23,6 +23,7 @@ pub mod build_record;
 mod decimal_parse;
 pub mod dtype_header;
 mod element;
+pub mod host_clock;
 mod ieee_narrow;
 mod list;
 mod metadata;
@@ -7572,6 +7573,32 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
         .map(|name| internal_value_from_string(new_runtime_string(name)))
         .collect();
     new_list(items, "chelis_list_dir")
+}
+
+/// [05-OP-75] in compiled host code: one checked reading as the
+/// `(seconds, nanoseconds)` tuple, or the operation's `io` failure. The
+/// evaluator calls the same [`host_clock::checked_clock_read`] definition.
+unsafe fn clock_read_tuple(operation: host_clock::ClockOperation) -> *mut chelis_tuple {
+    let time = host_clock::checked_clock_read(operation).unwrap_or_else(|message| {
+        runtime_fail!("{message}");
+    });
+    new_tuple(
+        vec![
+            internal_value_from_i64(time.seconds),
+            internal_value_from_i64(time.nanoseconds),
+        ],
+        operation.builtin(),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_clock_wall_read() -> *mut chelis_tuple {
+    clock_read_tuple(host_clock::ClockOperation::Wall)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_clock_monotonic_read() -> *mut chelis_tuple {
+    clock_read_tuple(host_clock::ClockOperation::Monotonic)
 }
 
 #[no_mangle]

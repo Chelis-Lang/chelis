@@ -35,16 +35,6 @@ fn whole_program_gates_reject_even_unreachable_calls() {
         scan.contains("tensor_scan") && scan.contains("[05-HOST-1]"),
         "{scan}"
     );
-    let clock = rejection("def dead() -> (i64, i64) = clock_wall_read()\nout = print(7i32)\n");
-    assert!(
-        clock
-            .contains("compiled targets (the host interpreter's eval/test lanes only) (codegen:c)"),
-        "{clock}"
-    );
-    assert!(
-        clock.contains("clock_wall_read") && clock.contains("[05-HOST-2]"),
-        "{clock}"
-    );
 }
 
 #[test]

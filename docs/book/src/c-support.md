@@ -12,8 +12,6 @@ These identities come directly from the compiler's two exclusion rosters. Eval a
 |---|---|---|---|---|---|
 | `tensor_scan` | builtin | Available | Rejected | Whole checked program | Use eval/test, or rewrite the recurrence with supported tensor primitives. |
 | `process_run` | builtin | Available | Rejected | Whole lowered host program | No equivalent compiled builtin; execute the child process in the embedding host. |
-| `clock_wall_read` | builtin | Available | Rejected | Whole lowered host program | No compiled clock-read route ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)); measure in the embedding host. |
-| `clock_monotonic_read` | builtin | Available | Rejected | Whole lowered host program | No compiled clock-read route ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)); measure in the embedding host. |
 | `round_to` | builtin | Available | Rejected | Whole lowered host program | No equivalent compiled builtin; specify decimal rounding explicitly using admitted arithmetic, or use eval. |
 | `parse_csv` | builtin | Available | Rejected | Whole lowered host program | Stdlib route: `Std.Io.Csv.read_csv` / `try_read_csv` returns `List[Dict[string,string]]`; use `len`, `dict_keys`, `dict_get`, and explicit string-to-number conversion. This changes the document representation; it is not a drop-in builtin alias. |
 | `to_csv` | builtin | Available | Rejected | Whole lowered host program | Stdlib route: `Std.Io.Csv.to_csv` / `write_csv` accepts string-valued rows; convert numeric fields explicitly. |

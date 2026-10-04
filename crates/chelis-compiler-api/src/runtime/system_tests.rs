@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use chelis_unord::UnordMap;
 
+use chelis_runtime::host_clock::{CLOCK_SECONDS_MAX, CLOCK_SECONDS_MIN};
+
 use super::system::{
-    CLOCK_SECONDS_MAX, CLOCK_SECONDS_MIN, EvalClockReading, EvalClockTime, EvalProcessOutput,
-    EvalSystem, EvalSystemBoundary, EvalSystemError, EvalSystemOperation, EvalSystemPolicy,
+    EvalClockReading, EvalClockTime, EvalProcessOutput, EvalSystem, EvalSystemBoundary,
+    EvalSystemError, EvalSystemOperation, EvalSystemPolicy,
 };
 use super::{
     HostEvaluationInputs, RuntimeFailure, RuntimeFailureKind, RuntimeTensorValue, RuntimeValue,

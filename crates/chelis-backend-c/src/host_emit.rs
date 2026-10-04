@@ -7800,6 +7800,22 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-OP-75]: one checked host reading, shared with the
+            // evaluator through the runtime's `host_clock` definition.
+            "clock_wall_read" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_clock_wall_read();",
+                    self.indent
+                ));
+                return Ok(());
+            }
+            "clock_monotonic_read" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_clock_monotonic_read();",
+                    self.indent
+                ));
+                return Ok(());
+            }
             "mmap_file" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_mmap_file({});",

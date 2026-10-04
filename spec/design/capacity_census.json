@@ -663,6 +663,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_clock_monotonic_read ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
       "flags": [
         "numeric-op"

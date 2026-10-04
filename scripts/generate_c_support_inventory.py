@@ -50,8 +50,6 @@ def route_metadata(name: str) -> str:
         return "Use eval/test, or rewrite the recurrence with supported tensor primitives."
     if name == "process_run":
         return "No equivalent compiled builtin; execute the child process in the embedding host."
-    if name in {"clock_wall_read", "clock_monotonic_read"}:
-        return "No compiled clock-read route ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)); measure in the embedding host."
     if name == "round_to":
         return "No equivalent compiled builtin; specify decimal rounding explicitly using admitted arithmetic, or use eval."
     if name in {"parse_csv", "csv_f64s", "csv_ints", "csv_strs", "csv_nrows", "csv_cols", "csv_f64", "csv_int", "csv_str"}:
