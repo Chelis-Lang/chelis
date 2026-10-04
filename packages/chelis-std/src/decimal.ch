@@ -1,5 +1,5 @@
 module Std.Decimal
-export (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
+export (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_to_f16, decimal_to_bf16, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
 import Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)
 -- Std.Decimal: exact decimal numbers, governed by [05-OP-76]. A `Decimal` is
 -- the rational c / 10^s with |c| <= 10^38 - 1 and 0 <= s <= 38, held in
@@ -381,24 +381,34 @@ def decimal_to_f64(x: Decimal) -> f64 =
     | Some(value) => value
     | None => fail(dec_failure("decimal_to_f64", "domain", dec_joined(["canonical text \"", decimal_to_string(x), "\" is not float text"])))
   }
--- The exact value rounded once to f32 with ties to even. The f64 nearest the
--- magnitude v has binary exponent p = floor(log2 v), or p + 1 when it rounded
--- up to 2^(p+1); v then lies within 2^(p-53) of 2^(p+1), so rounding on that
--- one-bit-coarser grid also gives 2^(p+1), the f32 result. The significand
+-- The exact value rounded once with ties to even to a binary format whose
+-- significand has `precision` bits and whose smallest subnormal is 2^lowest,
+-- held exactly in an f64. The f64 nearest the magnitude v has binary exponent
+-- p = floor(log2 v), or p + 1 when it rounded up to 2^(p+1); v then lies
+-- within 2^(p-53) of 2^(p+1), so rounding on a grid at least one bit coarser
+-- also gives 2^(p+1), the narrower format's result. The significand
 -- q = round(c * 2^-shift / 10^s) is formed exactly in limbs, with the shift
--- clamped at -149 for subnormal results, so q * 2^shift is exact in f64 and
--- in f32 and the final cast does not round.
-def decimal_to_f32(x: Decimal) -> f32 =
-  if dec_is_zero(x) then 0.0f32 else {
+-- clamped at `lowest` for subnormal results, so q * 2^shift is exact in f64
+-- and in the narrower format, and the final cast does not round unless the
+-- value is past that format's range, where it overflows to infinity. A
+-- negative value whose magnitude rounds to zero keeps its sign.
+def dec_binary_rounded(x: Decimal, precision: i64, lowest: i64) -> f64 =
+  if dec_is_zero(x) then 0.0f64 else {
     magnitude = dec_magnitude(x)
     nearest = false |> dec_value(magnitude, x.scale) |> decimal_to_f64
-    shift = dec_binary_parts(nearest).1 |> add(29i64) |> dec_max(-149i64)
+    shift =
+      dec_binary_parts(nearest).1
+      |> add(sub(53i64, precision))
+      |> dec_max(lowest)
     fraction = dec_binary_fraction(magnitude, x.scale, shift)
     rounded = dec_round_quotient(fraction.0, fraction.1, false, RoundTiesToEven).0
     significand = cast(add(mul(dec_limb(rounded, 1i64), dec_base()), dec_limb(rounded, 0i64)), f64)
     result = mul(significand, dec_pow2_f64(shift))
-    cast(if x.negative then neg(result) else result, f32)
+    if x.negative then neg(result) else result
   }
+def decimal_to_f32(x: Decimal) -> f32 = cast(dec_binary_rounded(x, 24i64, -149i64), f32)
+def decimal_to_f16(x: Decimal) -> f16 = cast(dec_binary_rounded(x, 11i64, -24i64), f16)
+def decimal_to_bf16(x: Decimal) -> bf16 = cast(dec_binary_rounded(x, 8i64, -133i64), bf16)
 def decimal_scale(x: Decimal) -> i64 = x.scale
 -- Arithmetic.
 def decimal_add(a: Decimal, b: Decimal) -> Decimal = dec_sum("decimal_add", a, b, b.negative, " plus ")
