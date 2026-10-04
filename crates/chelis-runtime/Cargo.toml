@@ -41,5 +41,12 @@ chelis-types = { workspace = true }
 # storage conversions, whose production lane is this crate's finalization.
 chelis-crmath = { workspace = true }
 
+# chelis#3032: the sort-tuple ownership tests read the allocation ledger, so
+# every runner, the change-owned lane included, builds them with it.
+[[test]]
+name = "sort_tuple_ownership"
+path = "tests/sort_tuple_ownership.rs"
+required-features = ["ownership-ledger"]
+
 [lints]
 workspace = true
