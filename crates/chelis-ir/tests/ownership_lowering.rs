@@ -886,10 +886,18 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
 fn assert_front_rejects(source: &str) {
     let declarations = surf_parse(source).expect("negative twin still parses");
     let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
+    let report = check_typed_program(&deep).expect_err("negative twin unexpectedly checked");
+    assert_eq!(report.errors.len(), 1, "{source}: {:?}", report.errors);
+    let error = &report.errors[0];
     assert!(
-        check_typed_program(&deep).is_err(),
-        "negative twin unexpectedly checked"
+        matches!(
+            &error.kind,
+            chelis_types::errors::CheckErrorKind::UnboundVariable { identifier }
+                if identifier == "missing"
+        ),
+        "negative twin must reach its missing callee: {source}: {error:?}"
     );
+    assert_eq!(error.message, "unbound variable: missing");
 }
 
 #[test]
