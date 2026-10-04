@@ -733,55 +733,94 @@ pub(super) fn infer_trace_result_type(
     ))
 }
 
-/// The result of `einsum(equation, left, right)` under [05-OP-33]: each
-/// output label takes the extent of its first occurrence scanning left then
-/// right, at `sum_result(p, default(p))`. `None` when the operands or the
-/// equation are not settled enough to decide, so the call keeps its
-/// signature's result and the runtime checks the equation.
+/// The result of `einsum(equation, left, right)` under [05-OP-33], for two
+/// settled tensor operands whose precisions the caller has already unified:
+/// each output label takes the extent of its first occurrence scanning left
+/// then right, at `sum_result(p, default(p))`. An equation outside the
+/// grammar, a label count that differs from an operand's rank, an output
+/// label absent from both inputs or repeated, and a rank-spread operand,
+/// whose rank no fixed equation can match at every instantiation, are each
+/// rejected; there is no undecided outcome.
 pub(super) fn infer_einsum_result_type(
     equation: &str,
     left: &Type,
     right: &Type,
     subst: &Subst,
-) -> Result<Option<Type>, String> {
-    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, right_precision)) =
-        (left, right)
-    else {
-        return Ok(None);
+) -> Result<Type, String> {
+    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
+        return Err(format!(
+            "einsum expects two tensor operands, got {left} and {right}"
+        ));
     };
-    if precision != right_precision {
-        return Ok(None);
-    }
+    let grammar = || {
+        format!(
+            "einsum equation `{equation}` must match `[a-z]*,[a-z]*->[a-z]*` \
+             (spec/05-risc-primitives.md [05-OP-33])"
+        )
+    };
     let Some((inputs, output)) = equation.split_once("->") else {
-        return Ok(None);
+        return Err(grammar());
     };
     let Some((left_labels, right_labels)) = inputs.split_once(',') else {
-        return Ok(None);
+        return Err(grammar());
     };
-    if left_labels.len() != left_dims.len() || right_labels.len() != right_dims.len() {
-        return Ok(None);
+    if [left_labels, right_labels, output]
+        .iter()
+        .any(|labels| !labels.chars().all(|label| label.is_ascii_lowercase()))
+    {
+        return Err(grammar());
+    }
+    for (side, labels, dims) in [
+        ("left", left_labels, left_dims),
+        ("right", right_labels, right_dims),
+    ] {
+        if dims.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
+            return Err(format!(
+                "einsum equation `{equation}` fixes the {side} operand's rank at {}, but \
+                 the operand has a rank spread, which denotes every rank \
+                 ([05-OP-33], [04-INF-6])",
+                labels.len()
+            ));
+        }
+        if labels.len() != dims.len() {
+            return Err(format!(
+                "einsum equation `{equation}` gives the {side} operand {} labels, but it \
+                 has rank {} ([05-OP-33])",
+                labels.len(),
+                dims.len()
+            ));
+        }
     }
     let mut dims = Vec::with_capacity(output.len());
-    for label in output.chars() {
+    for (index, label) in output.chars().enumerate() {
+        if output.chars().take(index).any(|earlier| earlier == label) {
+            return Err(format!(
+                "einsum output label `{label}` must occur exactly once in `{equation}` \
+                 ([05-OP-33])"
+            ));
+        }
         let dim = left_labels
             .chars()
             .position(|candidate| candidate == label)
-            .map(|index| &left_dims[index])
+            .map(|position| &left_dims[position])
             .or_else(|| {
                 right_labels
                     .chars()
                     .position(|candidate| candidate == label)
-                    .map(|index| &right_dims[index])
-            });
-        let Some(dim) = dim else {
-            return Ok(None);
-        };
+                    .map(|position| &right_dims[position])
+            })
+            .ok_or_else(|| {
+                format!(
+                    "einsum output label `{label}` must occur in an input of `{equation}` \
+                     ([05-OP-33])"
+                )
+            })?;
         dims.push(dim.clone());
     }
-    Ok(Some(Type::Tensor(
+    Ok(Type::Tensor(
         dims,
         default_sum_result_precision("einsum", precision, subst)?,
-    )))
+    ))
 }
 
 /// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an

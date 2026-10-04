@@ -809,14 +809,47 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
+                // [05-OP-33]: both operands have one dtype `p`. Identify their
+                // precisions before deciding the result, so two distinct
+                // binders, or two different concrete dtypes, are rejected
+                // rather than leaving the result undecided.
+                let left = type_for_readonly_check(&arg_tys[1], subst);
+                let right = type_for_readonly_check(&arg_tys[2], subst);
+                match (&left, &right) {
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
+                    (Type::Tensor(_, left_precision), Type::Tensor(_, right_precision)) => {
+                        if let Err(error) =
+                            unify_tensor_prec(left_precision, right_precision, subst)
+                        {
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::PrecisionMismatch,
+                                    with_node_provenance(
+                                        node,
+                                        format!(
+                                            "einsum operands must share one dtype \
+                                             (spec/05-risc-primitives.md [05-OP-33]): {}",
+                                            error.message
+                                        ),
+                                    ),
+                                    vec![],
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
                 return match infer_einsum_result_type(
                     &equation,
                     &type_for_readonly_check(&arg_tys[1], subst),
                     &type_for_readonly_check(&arg_tys[2], subst),
                     subst,
                 ) {
-                    Ok(Some(result)) => result,
-                    Ok(None) => result_ty,
+                    Ok(result) => result,
                     Err(message) => report(
                         errors,
                         CheckError::new(

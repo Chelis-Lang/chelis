@@ -2364,3 +2364,70 @@ fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
     );
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// chelis#3009: `einsum`'s operands share one dtype `p` ([05-OP-33]), so the
+/// checker identifies their precisions before deciding `sum_result(p)`.
+/// Two distinct binders, or two different concrete dtypes, are rejected,
+/// and no operand shape leaves the result undecided: an unresolved operand
+/// replays once it binds, and a malformed equation is rejected.
+#[test]
+fn einsum_operands_share_one_precision_and_the_result_is_always_decided() {
+    // The reviewer's two-binder witness.
+    let errors = surf_check_errors(
+        "def a[p: Int, q: Int](x: tensor[2, p], y: tensor[2, q]) -> tensor[2, p] = einsum(\"i,i->i\", x, y)\n\
+         def g(x: tensor[2, i8]) -> tensor[2, i8] = add(a(copy(x), copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8]))\n",
+    );
+    assert!(!errors.is_empty(), "two distinct binders must not check");
+    // A concrete i8/i16 pair.
+    let errors = surf_check_errors(
+        "def f(x: tensor[2, i8], y: tensor[2, i16]) -> tensor[i32] = einsum(\"i,i->\", x, y)\n",
+    );
+    assert!(
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                && error.message.contains("share one dtype")
+        ),
+        "{errors:?}"
+    );
+    // Equation, rank and output-label violations are decided statically.
+    for equation in ["i,i", "i->i", "I,i->i", "ij,i->i", "i,i->ii", "i,i->k"] {
+        let source = format!(
+            "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = einsum(\"{equation}\", x, y)\n"
+        );
+        assert!(
+            !surf_check_errors(&source).is_empty(),
+            "{source} must not check"
+        );
+    }
+    // An unannotated lambda operand is decided when the call binds it.
+    let lambda = |declared: &str| {
+        format!(
+            "def f(x: tensor[2, i8]) -> tensor[{declared}] = {{\n  g = fn (a, b) -> einsum(\"i,i->\", a, b)\n  g(copy(x), x)\n}}\n"
+        )
+    };
+    let errors = surf_check_errors(&lambda("i32"));
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        !surf_check_errors(&lambda("i8")).is_empty(),
+        "the replayed einsum must type at i32"
+    );
+}
+
+/// chelis#3009: a variadic named-axis `sum` over an operand whose type is
+/// not yet known replays once the operand binds, so its result is
+/// `sum_result` of the bound dtype rather than left undecided.
+#[test]
+fn variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds() {
+    let lambda = |declared: &str| {
+        format!(
+            "def f(x: tensor[seq, head, i8]) -> tensor[{declared}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+        )
+    };
+    let errors = surf_check_errors(&lambda("i32"));
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        !surf_check_errors(&lambda("i8")).is_empty(),
+        "the replayed sum must type at i32"
+    );
+}

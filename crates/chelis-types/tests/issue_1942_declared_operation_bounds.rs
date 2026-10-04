@@ -248,6 +248,12 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
             .expect("Surf fixture must desugar");
         assert!(check_typed_program(&program).is_err(), "{source}");
     }
+    // Negative control: an aliased `sum` over an unbounded binder stays
+    // rejected by the operand contract.
+    check(
+        "op = sum\ndef g[p](x: tensor[3, p]) -> tensor[p] = op(x, 0i32)\n",
+        false,
+    );
     // [05-OP-64], [05-OP-47]. Scalar controls avoid claiming a repair of
     // the separate pre-existing bounded-tensor integer validator limitation.
     for operation in ["mod", "bitand", "bitor", "bitxor", "shl", "shr"] {

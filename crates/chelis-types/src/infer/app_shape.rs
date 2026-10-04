@@ -77,6 +77,23 @@ pub(super) fn infer_reduction_app(
     }
 
     let result_ty = Type::Var(vg.fresh_tvar());
+    // An operand whose type is not yet known leaves the reduction's result
+    // undecided here, so replay it once the operand binds, as the
+    // fixed-arity reduction route does.
+    if arg_tys
+        .iter()
+        .any(|ty| shape_operand_awaits_binding(ty, subst))
+    {
+        product.defer_shape_check(
+            DeferredShapeRule::Reduction {
+                name: fname.to_string(),
+                location: CheckSite::Expr(expr).owned_location(),
+            },
+            kids[1..].to_vec(),
+            arg_tys.clone(),
+            result_ty.clone(),
+        );
+    }
     check_reduction_signature(
         CheckSite::Expr(expr),
         fname,
