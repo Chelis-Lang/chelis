@@ -828,12 +828,14 @@ pub(super) fn infer_einsum_result_type(
 /// `cumsum`, `trace`, `einsum`). i8 and i16 widen to i32; a dtype with no
 /// default accumulator, such as bool, is rejected.
 ///
-/// A precision variable denotes every dtype its bound admits ([04-INF-6]),
-/// so the result must be one type at all of them. It is the variable itself
-/// when `sum_result` keeps every member (a float, i32 or i64 bound), and one
+/// A precision variable denotes every dtype it admits ([04-INF-6]), so the
+/// result must be one type at all of them. It is the variable itself when
+/// `sum_result` keeps every member (a float, i32 or i64 bound), and one
 /// concrete dtype when it maps every member there (`{i8, i16}` gives i32).
-/// Any other bound, including `Int`, `Numeric` and no bound at all, has no
-/// single result type and is rejected where the operation is written.
+/// Otherwise the variable is narrowed to the members `sum_result` keeps and
+/// published: an authored `Int`, `Numeric` or unbounded binder is then
+/// rejected at its declaration, and a variable inference may still bind
+/// rejects i8, i16 and bool when it binds.
 pub(super) fn default_sum_result_precision(
     op: &str,
     precision: &TensorPrec,
@@ -863,36 +865,56 @@ pub(super) fn default_sum_result_precision(
              concrete dtype"
         )
     };
-    let Some(restriction) = subst.tvar_restriction(variable) else {
-        return Err(no_single_result("an unbounded variable"));
-    };
+    let restriction = subst.tvar_restriction(variable);
     let members = Prim::ACTIVE_FLOATS
         .into_iter()
         .chain(Prim::ACTIVE_INTEGERS)
         .chain([Prim::Bool])
-        .filter(|prim| restriction.admits(*prim))
+        .filter(|prim| restriction.is_none_or(|bound| bound.admits(*prim)))
         .collect::<Vec<_>>();
-    let bound = format!("its bound `{}`", restriction.bound_spelling());
-    let mut results = Vec::with_capacity(members.len());
-    for member in &members {
-        match member.default_reduce_sum_result_precision() {
-            Ok(result) => results.push(result),
-            Err(_) => return Err(no_single_result(&bound)),
-        }
-    }
+    let results = members
+        .iter()
+        .map(|member| member.default_reduce_sum_result_precision().ok())
+        .collect::<Vec<_>>();
     if members
         .iter()
         .zip(&results)
-        .all(|(member, result)| member == result)
+        .all(|(member, result)| *result == Some(*member))
     {
         return Ok(precision.clone());
     }
-    match results.split_first() {
-        Some((first, rest)) if rest.iter().all(|result| result == first) => {
-            Ok(TensorPrec::Concrete(*first))
-        }
-        _ => Err(no_single_result(&bound)),
+    if let Some((Some(first), rest)) = results.split_first()
+        && rest.iter().all(|result| *result == Some(*first))
+    {
+        return Ok(TensorPrec::Concrete(*first));
     }
+    // No one type covers the variable's dtypes. Constrain it to those at which
+    // sum_result is the variable itself and publish the variable. A variable
+    // inference may still bind (a hole, or an operand an operation has only
+    // constrained to some numeric value) then rejects i8, i16 and bool as a
+    // precision mismatch rather than typing i32 data at i8. An authored binder
+    // that this narrows is rejected at its declaration ([04-INF-6],
+    // [04-DTYPE-2]).
+    let identity = members
+        .iter()
+        .zip(&results)
+        .filter(|(member, result)| **result == Some(**member))
+        .map(|(member, _)| *member)
+        .collect::<Vec<_>>();
+    if identity.is_empty() {
+        let bound = match restriction {
+            Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
+            None => "an unbounded variable".to_string(),
+        };
+        return Err(no_single_result(&bound));
+    }
+    subst
+        .narrow_tvar_restriction(
+            variable,
+            TypeVarRestriction::ActiveSet(PrimSet::from_members(identity)),
+        )
+        .map(|()| precision.clone())
+        .map_err(|error| format!("{op}: {}", error.message))
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the

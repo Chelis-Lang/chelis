@@ -2306,9 +2306,18 @@ fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
 /// `sum_result` only when that is one type across the bound: the variable
 /// itself for `Float` or `{i32, i64}`, one concrete dtype for `{i8, i16}`.
 /// `Int`, `Numeric` and an unbounded variable are rejected at the
-/// definition, where an i8 call would otherwise carry i32 data typed i8.
+/// definition, where an i8 call would otherwise carry i32 data typed i8:
+/// the binder is narrowed to the dtypes sum_result keeps, which its
+/// declaration does not admit.
 #[test]
 fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
+    // The binder is narrowed to the dtypes sum_result keeps, which its
+    // declaration does not admit, or no dtype is kept at all.
+    let rejects_the_bound = |error: &CheckError| {
+        matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+            && error.message.contains("requires dtype set")
+            || error.message.contains("has no single result dtype")
+    };
     let bodies = [
         ("tensor[3, p]", "tensor[3, R]", "cumsum(x, 0i32)"),
         ("tensor[3, p]", "tensor[R]", "sum(x, 0i32)"),
@@ -2337,10 +2346,7 @@ fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
             );
             let errors = surf_check_errors(&source);
             assert!(
-                errors
-                    .iter()
-                    .any(|error| error.message.contains("has no single result dtype")
-                        && error.message.contains("sum_result")),
+                errors.iter().any(rejects_the_bound),
                 "{source} must be rejected at the definition: {errors:?}"
             );
         }
@@ -2352,9 +2358,7 @@ fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
          out = g(to_tensor([10i8, 10i8, 10i8]))\n",
     );
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("has no single result dtype")),
+        errors.iter().any(rejects_the_bound),
         "the generic i8 cumsum witness must be rejected: {errors:?}"
     );
     // A `Float` generic instantiates at f16 and keeps the operand dtype.
