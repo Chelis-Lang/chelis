@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as pydt
 from fractions import Fraction
+import itertools
 import random
 import re
 import sys
@@ -654,6 +655,25 @@ class HarnessLogic(unittest.TestCase):
         names = " ".join(harness.CANARY_PROGRAMS)
         self.assertIn("days_first_400", names)
         self.assertIn("days_last_400", names)
+
+    def test_canary_calls_every_column_family(self) -> None:
+        families = list(itertools.chain.from_iterable(harness.COLUMN_FAMILIES.values()))
+        self.assertEqual(sorted(families), sorted(harness.COLUMN_FUNCTIONS))
+        self.assertEqual(len(families), len(set(families)))
+        corpus = harness.build_ci_corpus()
+        programs = harness.make_programs(corpus, 150)
+        (columns,) = [program for program in harness.canary_programs(programs) if program.name == "columns_families"]
+        exprs = " ".join(binding.expr for binding in columns.bindings)
+        for family, functions in harness.COLUMN_FAMILIES.items():
+            self.assertTrue(harness.calls(exprs, functions), family)
+        observed = [binding for program in programs if program.name.startswith("columns_") for binding in program.bindings]
+        self.assertEqual(sorted(binding.name for binding in observed), sorted(value.name for value in corpus.columns))
+
+    def test_column_families_reject_an_uncalled_family(self) -> None:
+        corpus = harness.build_ci_corpus()
+        without = [value for value in corpus.columns if not harness.calls(value.expr, harness.COLUMN_FAMILIES["instant rounding"])]
+        with self.assertRaisesRegex(AssertionError, "instant rounding"):
+            harness.column_family_values(without)
 
     def test_canary_rejects_a_name_the_ci_profile_lacks(self) -> None:
         programs = [program for program in harness.make_programs(harness.build_ci_corpus(), 150)
