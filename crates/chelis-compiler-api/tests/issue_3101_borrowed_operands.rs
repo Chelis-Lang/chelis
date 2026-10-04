@@ -26,7 +26,7 @@ fn cases() -> Vec<(String, String)> {
             cases.push((
                 format!("{op}_{dtype}"),
                 program(&format!(
-                    "def apply[n](x: tensor[n, {dtype}], y: tensor[n, {dtype}]) -> (tensor[n, {dtype}], tensor[n, {dtype}], tensor[n, {dtype}]) = ({op}(&x, &y), x, y)\n\
+                    "def apply[n](x: tensor[n, {dtype}], y: tensor[n, {dtype}]) -> (tensor[n, {dtype}], tensor[n, {dtype}], tensor[n, {dtype}]) = ({op}(&x, &y), neg(x), neg(y))\n\
                      graph = apply(to_tensor([7{dtype}, -7{dtype}, 5{dtype}]), to_tensor([3{dtype}, 2{dtype}, 1{dtype}]))\n\
                      x = to_tensor([-6{dtype}, 9{dtype}, 4{dtype}])\n\
                      y = to_tensor([4{dtype}, 3{dtype}, 2{dtype}])\n\
@@ -38,7 +38,7 @@ fn cases() -> Vec<(String, String)> {
     cases.push((
         "casts".to_string(),
         program(
-            "def apply(x: tensor[3, f32]) -> (tensor[3, f64], tensor[3, i32], tensor[3, f32]) = (cast(&x, f64), cast_trunc(&x, i32), x)\n\
+            "def apply(x: tensor[3, f32]) -> (tensor[3, f64], tensor[3, i32], tensor[3, f32]) = (cast(&x, f64), cast_trunc(&x, i32), exp(x))\n\
              graph = apply(to_tensor([1.75f32, -2.5f32, 3.0f32]))\n\
              x = to_tensor([1.5f64, -0.5f64])\n\
              top = to_list(cast_trunc(&x, i8))\n\

@@ -44,10 +44,12 @@ fn borrowed_cast_source_returns_the_target_dtype_at_the_source_shape() {
 #[test]
 fn borrowed_cast_source_stays_readable_after_the_cast() {
     let program =
-        "def f(x: tensor[3, f32]) -> (tensor[3, f64], tensor[3, f32]) = (cast(&x, f64), x)\n";
-    if let Err(report) = check_ir_program(&surf_to_deep(program)) {
-        panic!("a borrow does not consume x, got {:?}", report.errors);
-    }
+        "def f(x: tensor[3, f32]) -> (tensor[3, f64], tensor[3, f32]) = (cast(&x, f64), exp(x))\n";
+    let errors = linearity_errors_of(program);
+    assert!(
+        errors.is_empty(),
+        "a borrow does not consume x, got {errors:?}"
+    );
 }
 
 #[test]
@@ -115,17 +117,17 @@ fn borrowed_integer_tensor_operands_return_the_operand_type() {
 fn borrowed_integer_operands_stay_readable() {
     for op in INT_OPS {
         let source = format!(
-            "def f(x: tensor[2, i32], y: tensor[2, i32]) -> (tensor[2, i32], tensor[2, i32], tensor[2, i32]) = ({op}(&x, &y), x, y)\n"
+            "def f(x: tensor[2, i32], y: tensor[2, i32]) -> (tensor[2, i32], tensor[2, i32], tensor[2, i32]) = ({op}(&x, &y), neg(x), neg(y))\n"
         );
-        let errors = errors_of(&source);
+        let errors = linearity_errors_of(&source);
         assert!(
             errors.is_empty(),
             "{op}: a borrow consumes nothing: {errors:?}"
         );
         let owned = format!(
-            "def f(x: tensor[2, i32], y: tensor[2, i32]) -> (tensor[2, i32], tensor[2, i32]) = ({op}(x, y), x)\n"
+            "def f(x: tensor[2, i32], y: tensor[2, i32]) -> (tensor[2, i32], tensor[2, i32]) = ({op}(x, y), neg(x))\n"
         );
-        let errors = errors_of(&owned);
+        let errors = linearity_errors_of(&owned);
         assert!(
             errors.is_empty(),
             "{op}: an owned operand auto-borrows: {errors:?}"
@@ -174,9 +176,8 @@ fn borrowed_integer_mismatches_name_the_real_cause() {
 
 #[test]
 fn borrowed_cast_trunc_source_is_admitted() {
-    let source =
-        "def f(x: tensor[3, f32]) -> (tensor[3, i32], tensor[3, f32]) = (cast_trunc(&x, i32), x)\n";
-    let errors = errors_of(source);
+    let source = "def f(x: tensor[3, f32]) -> (tensor[3, i32], tensor[3, f32]) = (cast_trunc(&x, i32), exp(x))\n";
+    let errors = linearity_errors_of(source);
     assert!(errors.is_empty(), "{errors:?}");
     let wrong = "def f(x: tensor[3, i32]) -> tensor[3, i64] = cast_trunc(&x, i64)\n";
     assert!(
