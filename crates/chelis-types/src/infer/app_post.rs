@@ -809,7 +809,22 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
-                return result_ty;
+                return match infer_einsum_result_type(
+                    &equation,
+                    &type_for_readonly_check(&arg_tys[1], subst),
+                    &type_for_readonly_check(&arg_tys[2], subst),
+                ) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => result_ty,
+                    Err(message) => report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(node, message),
+                            vec![],
+                        ),
+                    ),
+                };
             }
             "gather" => {
                 if arg_tys.len() != 3 {
@@ -951,7 +966,17 @@ pub(super) fn finish_unified_app(
                 };
                 match cumsum_operand {
                     Type::Tensor(dims, precision) => {
-                        return Type::Tensor(dims, precision);
+                        return match default_sum_result_precision("cumsum", &precision) {
+                            Ok(result) => Type::Tensor(dims, result),
+                            Err(message) => report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_node_provenance(node, message),
+                                    vec![],
+                                ),
+                            ),
+                        };
                     }
                     Type::Error(_) => return result_ty,
                     Type::Var(_) => {

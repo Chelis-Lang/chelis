@@ -725,7 +725,83 @@ pub(super) fn infer_trace_result_type(
         .enumerate()
         .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
         .collect();
-    Ok(Type::Tensor(out_dims, precision.clone()))
+    Ok(Type::Tensor(
+        out_dims,
+        default_sum_result_precision("trace", precision)?,
+    ))
+}
+
+/// The result of `einsum(equation, left, right)` under [05-OP-33]: each
+/// output label takes the extent of its first occurrence scanning left then
+/// right, at `sum_result(p, default(p))`. `None` when the operands or the
+/// equation are not settled enough to decide, so the call keeps its
+/// signature's result and the runtime checks the equation.
+pub(super) fn infer_einsum_result_type(
+    equation: &str,
+    left: &Type,
+    right: &Type,
+) -> Result<Option<Type>, String> {
+    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, right_precision)) =
+        (left, right)
+    else {
+        return Ok(None);
+    };
+    if precision != right_precision {
+        return Ok(None);
+    }
+    let Some((inputs, output)) = equation.split_once("->") else {
+        return Ok(None);
+    };
+    let Some((left_labels, right_labels)) = inputs.split_once(',') else {
+        return Ok(None);
+    };
+    if left_labels.len() != left_dims.len() || right_labels.len() != right_dims.len() {
+        return Ok(None);
+    }
+    let mut dims = Vec::with_capacity(output.len());
+    for label in output.chars() {
+        let dim = left_labels
+            .chars()
+            .position(|candidate| candidate == label)
+            .map(|index| &left_dims[index])
+            .or_else(|| {
+                right_labels
+                    .chars()
+                    .position(|candidate| candidate == label)
+                    .map(|index| &right_dims[index])
+            });
+        let Some(dim) = dim else {
+            return Ok(None);
+        };
+        dims.push(dim.clone());
+    }
+    Ok(Some(Type::Tensor(
+        dims,
+        default_sum_result_precision("einsum", precision)?,
+    )))
+}
+
+/// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an
+/// operation that accumulates with the default sum accumulator (`cumsum`,
+/// `trace`). i8 and i16 widen to i32; a dtype with no default accumulator,
+/// such as bool, is rejected. A precision variable is returned unchanged
+/// until unification resolves it, as `sum` does.
+pub(super) fn default_sum_result_precision(
+    op: &str,
+    precision: &TensorPrec,
+) -> Result<TensorPrec, String> {
+    match precision {
+        TensorPrec::Concrete(prim) => prim
+            .default_reduce_sum_result_precision()
+            .map(TensorPrec::Concrete)
+            .map_err(|message| {
+                format!(
+                    "{op} expects a tensor precision with a default sum accumulator, got {}; {message}",
+                    prim.name()
+                )
+            }),
+        TensorPrec::Var(_) => Ok(precision.clone()),
+    }
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the

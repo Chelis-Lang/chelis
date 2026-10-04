@@ -2218,3 +2218,85 @@ fn a_tensor_cast_to_a_key_is_rejected() {
         .is_ok()
     );
 }
+
+/// chelis#3009: spec/04 §4.3 types `cumsum`, `trace` and `einsum` as
+/// `sum_result(p, default(p))`, which is i32 for an i8 or i16 operand, the
+/// dtype both evaluation lanes store. The operand dtype is rejected as the
+/// result, and a dtype with no default sum accumulator is rejected outright.
+#[test]
+fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
+    for (operand, result) in [
+        ("i8", "i32"),
+        ("i16", "i32"),
+        ("i32", "i32"),
+        ("i64", "i64"),
+        ("f16", "f16"),
+        ("bf16", "bf16"),
+        ("f32", "f32"),
+        ("f64", "f64"),
+    ] {
+        let cumsum =
+            format!("def f(x: tensor[3, {operand}]) -> tensor[3, {result}] = cumsum(x, 0)\n");
+        let errors = surf_check_errors(&cumsum);
+        assert!(errors.is_empty(), "{cumsum}: {errors:?}");
+        let trace =
+            format!("def f(x: tensor[2, 2, {operand}]) -> tensor[{result}] = trace(x, 0, 1)\n");
+        let errors = surf_check_errors(&trace);
+        assert!(errors.is_empty(), "{trace}: {errors:?}");
+        let einsum = format!(
+            "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {result}] = einsum(\"ij,jk->ik\", a, b)\n"
+        );
+        let errors = surf_check_errors(&einsum);
+        assert!(errors.is_empty(), "{einsum}: {errors:?}");
+    }
+    for operand in ["i8", "i16"] {
+        let cumsum =
+            format!("def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n");
+        assert!(
+            !surf_check_errors(&cumsum).is_empty(),
+            "{cumsum} must not check at the operand dtype"
+        );
+        let trace =
+            format!("def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n");
+        assert!(
+            !surf_check_errors(&trace).is_empty(),
+            "{trace} must not check at the operand dtype"
+        );
+        let einsum = format!(
+            "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {operand}] = einsum(\"ij,jk->ik\", a, b)\n"
+        );
+        assert!(
+            !surf_check_errors(&einsum).is_empty(),
+            "{einsum} must not check at the operand dtype"
+        );
+        // A consumer that requires the operand dtype rejects the widened prefix.
+        let downstream = format!(
+            "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+        );
+        assert!(
+            !surf_check_errors(&downstream).is_empty(),
+            "{downstream} must not check"
+        );
+    }
+    // The output extents follow the equation's labels.
+    let errors = surf_check_errors(
+        "def f(a: tensor[1, 2, f32], b: tensor[2, 3, f32]) -> tensor[3, 1, f32] = einsum(\"ij,jk->ik\", a, b)\n",
+    );
+    assert!(
+        !errors.is_empty(),
+        "einsum output extents must follow the equation"
+    );
+    for source in [
+        "def f(x: tensor[3, bool]) -> tensor[3, bool] = cumsum(x, 0)\n",
+        "def f(x: tensor[2, 2, bool]) -> tensor[bool] = trace(x, 0, 1)\n",
+        "def f(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[bool] = einsum(\"i,i->\", a, b)\n",
+    ] {
+        let errors = surf_check_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("default sum accumulator")),
+            "{source} must be rejected for its dtype: {errors:?}"
+        );
+    }
+}
