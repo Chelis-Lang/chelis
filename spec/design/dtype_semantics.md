@@ -1329,7 +1329,7 @@ Named non-goals, each with its owner, so coverage is never inferred:
   defend, and no checker can govern a conversion whose source type is
   not in the program. The fix is still type-system-shaped: TYPE THE
   BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
-  precedent (`JsonInt(i64)` beside `JsonFloat(f64)`; JSON syntax
+  precedent (`JsonInt(i64)` beside `JsonFloat(f64, string)`; JSON syntax
   distinguishes the two, so a parse that erases it discards
   information the source format carried) - after which the checker
   governs everything downstream and the [#759] discipline covers the

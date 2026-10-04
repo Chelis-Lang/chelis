@@ -300,7 +300,70 @@ from_value = serialized(JsonFloat(0.1f64, to_string(0.1f64)))
     }
 }
 
-/// The loud serializer names the malformed or mismatched `JsonFloat` text
+/// Serializer validation of a constructed `JsonFloat` text does not grow the
+/// evaluation depth with the text's length (the chelis#2307 class): texts of a
+/// few thousand characters validate in eval and compiled C, whether they are
+/// valid, malformed, mismatched, or overflow to a non-finite value.
+#[test]
+fn long_json_float_texts_validate_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("json-float-long-text");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (Json, JsonFloat, try_to_json)
+
+def zeros(count: i64) -> string = fold(fn (acc: string, unused: i64) -> string_concat(acc, "0"), "", range(0i64, count))
+def serialized_length(value: Json) -> string =
+  match try_to_json(value) with {
+    | Some(text) => to_string(string_len(text))
+    | None => "refused"
+  }
+
+long_fraction = serialized_length(JsonFloat(1.0f64, string_concat("1.", zeros(3000i64))))
+long_malformed = serialized_length(JsonFloat(1.0f64, string_concat(string_concat("1.", zeros(3000i64)), "x")))
+long_mismatched = serialized_length(JsonFloat(2.0f64, string_concat("1.", zeros(3000i64))))
+long_overflow = serialized_length(JsonFloat(div(1.0f64, 0.0f64), string_concat(string_concat("1", zeros(3000i64)), ".0")))
+"#,
+    );
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("eval should run");
+    assert!(
+        eval.status.success(),
+        "eval failed: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval = String::from_utf8(eval.stdout).expect("utf-8 stdout");
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "long_fraction = 3002",
+        "long_malformed = refused",
+        "long_mismatched = refused",
+        "long_overflow = refused",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
+}
+
+/// The loud serializer's message names the invalid-`JsonFloat` cause
 /// ([05-OP-5], [05-OP-35]): `to_json` fails through `fail` rather than
 /// emitting either field.
 #[test]

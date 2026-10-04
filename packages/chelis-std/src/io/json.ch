@@ -329,24 +329,25 @@ def canonical_integer_text(text: string) -> bool =
   }
 -- RFC 8259 number token with a fraction or an exponent:
 -- -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?
+-- Each digit run is a fold over the characters, so validation depth does
+-- not grow with the text's length.
 def float_token_text(text: string) -> bool = {
+  size = string_len(text)
+  chars = map(fn (idx: i64) -> char_at(text, idx), range(0i64, size))
   int_start = if eq(char_at(text, 0i64), "-") then 1i64 else 0i64
-  int_end = integer_part_end(text, int_start)
-  exp_end = exponent_end(text, fraction_end(text, int_end))
-  and(gt(int_end, int_start), and(gt(exp_end, int_end), eq(exp_end, string_len(text))))
+  int_end = digit_run_end(chars, int_start)
+  integer_ok = and(gt(int_end, int_start), or(neq(char_at(text, int_start), "0"), eq(int_end, add(int_start, 1i64))))
+  has_fraction = and(eq(char_at(text, int_end), "."), is_digit(char_at(text, add(int_end, 1i64))))
+  frac_end = if has_fraction then digit_run_end(chars, add(int_end, 1i64)) else int_end
+  marker = char_at(text, frac_end)
+  sign = char_at(text, add(frac_end, 1i64))
+  exp_start = if or(eq(sign, "+"), eq(sign, "-")) then add(frac_end, 2i64) else add(frac_end, 1i64)
+  has_exponent = and(or(eq(marker, "e"), eq(marker, "E")), is_digit(char_at(text, exp_start)))
+  exp_end = if has_exponent then digit_run_end(chars, exp_start) else frac_end
+  and(integer_ok, and(gt(exp_end, int_end), eq(exp_end, size)))
 }
-def integer_part_end(text: string, idx: i64) -> i64 = {
-  first = char_at(text, idx)
-  if eq(first, "0") then add(idx, 1i64) else if is_digit(first) then digits_end(text, add(idx, 1i64)) else idx
-}
-def fraction_end(text: string, idx: i64) -> i64 = if and(eq(char_at(text, idx), "."), is_digit(char_at(text, add(idx, 1i64)))) then digits_end(text, add(idx, 2i64)) else idx
-def exponent_end(text: string, idx: i64) -> i64 =
-  if or(eq(char_at(text, idx), "e"), eq(char_at(text, idx), "E")) then {
-    sign = char_at(text, add(idx, 1i64))
-    digits_start = if or(eq(sign, "+"), eq(sign, "-")) then add(idx, 2i64) else add(idx, 1i64)
-    if is_digit(char_at(text, digits_start)) then digits_end(text, add(digits_start, 1i64)) else idx
-  } else idx
-def digits_end(text: string, idx: i64) -> i64 = if is_digit(char_at(text, idx)) then digits_end(text, add(idx, 1i64)) else idx
+-- The index of the first non-digit at or after `start`.
+def digit_run_end(chars: List[string], start: i64) -> i64 = fold(fn (acc: i64, pair: (i64, string)) -> if and(eq(acc, pair.0), is_digit(pair.1)) then add(acc, 1i64) else acc, start, enumerate(chars))
 def all_digits(text: string, idx: i64) -> bool = if gte(idx, string_len(text)) then true else and(is_digit(char_at(text, idx)), all_digits(text, add(idx, cast(1, i64))))
 def decimal_digits_greater(left: string, right: string, idx: i64) -> bool =
   if gte(idx, string_len(left)) then false else {
