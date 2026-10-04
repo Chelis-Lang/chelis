@@ -272,11 +272,11 @@ fn w5_int_width_field_param_samples_as_integer_at_tier_c() {
             "module M
 export (make)
 @opaque
-@invariant(c) c.n >= ({lo} : {width})
+@invariant(c) c.n >= {lo}{width}
 type Counter =
   | Counter {{ n: {width} }}
 def make(x: {width}) -> Option[Counter] =
-  if x >= ({lo} : {width}) then Some(Counter {{ n: x }}) else None
+  if x >= {lo}{width} then Some(Counter {{ n: x }}) else None
 ",
             lo = 0,
             width = width
@@ -367,10 +367,10 @@ fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
             "module M
 export (make)
 @opaque
-@invariant(c) c.n == (0 : {width})
+@invariant(c) c.n == 0{width}
 type Counter =
   | Counter {{ n: {width} }}
-def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
+def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: 0{width} }}
 "
         );
         let outcomes = run(&surf, "fuzz-only");

@@ -660,7 +660,7 @@ fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
     // without producing corrupt artifact bytes. The direct WireDag sibling
     // above still locks GraphExtractError::NonFiniteValue at its boundary.
     let err = box_range_goal_from_source(
-        "out = (1e400 : tensor[f32])\n",
+        "out = (scalar_to_tensor(1e400f64) : tensor[f64])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
@@ -671,21 +671,22 @@ fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
         "expected the canonical Surf non-finite rejection, got {err:?}"
     );
 
-    // chelis#729 rework: the sealed payload finalizes at the ascribed
-    // dtype, so a value that overflows ITS OWN dtype (1e300 at f32 is
-    // +inf per [04-NUM-2]) is honestly non-finite and takes the same
-    // rejection; the pre-sealed payload carried the finite f64 fiction
-    // and slipped past this guard.
+    // The suffix selects f32; scalar_to_tensor constructs the tensor result.
+    // [04-LIT-2] rejects a literal that rounds to infinity at its own
+    // width before a non-finite wire constant can be produced.
     let err = box_range_goal_from_source(
-        "out = (1e300 : tensor[f32])\n",
+        "out = (scalar_to_tensor(1e300f32) : tensor[f32])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
     )
-    .expect_err("an f32-overflowing const finalizes to inf and must be rejected");
+    .expect_err("an f32-overflowing literal must be rejected before wire emission");
     assert!(
-        matches!(err, GraphExtractError::NonFiniteValue { .. }),
-        "expected NonFiniteValue for the finalized f32 inf, got {err:?}"
+        matches!(&err, GraphExtractError::LowerFailed(message)
+            if message.contains("[04-LIT-2]")
+                && message.contains("f32")
+                && message.contains("rounds to infinity")),
+        "expected the f32 literal-range rejection, got {err:?}"
     );
 }
 
@@ -693,14 +694,11 @@ fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
 fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     // The positive twin: a finite extreme (1e300) is NOT non-finite, so it
     // serializes as a real JSON number and produces a populated goal.
-    // RE-AUTHORED at the chelis#729 rework (chelis#856): the fixture was
-    // `1.0e300 : tensor[f32]`, which only passed because the pre-sealed
-    // payload carried the un-finalized f64 image; the honest f32 value
-    // of 1e300 is +inf ([04-NUM-2] overflow), which the guard now
-    // correctly rejects (see the rejected twin below). A finite extreme
-    // needs a dtype that can hold it, so the fixture moves to f64.
+    // A finite extreme needs a dtype that can hold it. The literal suffix
+    // binds f64; scalar_to_tensor constructs an actual tensor rather than
+    // attempting to reinterpret a scalar with an expression ascription.
     let extracted = box_range_goal_from_source(
-        "out = (1e300 : tensor[f64])\n",
+        "out = (scalar_to_tensor(1e300f64) : tensor[f64])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
@@ -713,6 +711,14 @@ fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     parsed
         .validate_schema_version()
         .expect("the artifact is a supported version");
+    let expected = chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1e300)
+        .expect("the finite extreme has an exact tagged f64 payload");
+    assert!(
+        parsed
+            .nodes
+            .iter()
+            .any(|node| { matches!(&node.op, WireRiscOp::Const { value } if value == &expected) })
+    );
 }
 
 #[test]
