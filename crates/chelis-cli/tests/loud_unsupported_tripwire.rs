@@ -510,12 +510,10 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        1,
-        "the `map_or(-1_i64, ...)` \
-         process-exit-code default (proven-structural: a signal-killed \
-         child has no exit code, and -1 is the conventional sentinel, not \
-         a chelis#703 value substitution) newly counted by the rt791 F6 \
-         widening. The former scalarization first-element read was FIXED \
+        0,
+        "the `map_or(-1_i64, ...)` process-exit-code default moved to \
+         chelis-runtime's host_process with chelis#1297, which both lanes \
+         call and this pattern's scope does not scan. The former scalarization first-element read was FIXED \
          by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
          and errors loudly on an empty buffer), shrinking this row per B1. \
          The interpreter's with-seed default was FIXED by chelis#2413 \
@@ -660,12 +658,22 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-types/src/observation.rs",
-        6,
+        5,
         "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
          plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
-         messages (round-4 F5 widening), plus [05-OP-1]'s one sealed \
-         decimal-place formatter - the sanctioned formatter's implementation \
-         and its self-checks, not additional exits",
+         messages (round-4 F5 widening) - the sanctioned formatter's \
+         implementation and its self-checks, not additional exits. \
+         [05-OP-1]'s decimal-place formatter moved to \
+         chelis-runtime's host_round with chelis#1297",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-runtime/src/host_round.rs",
+        1,
+        "[05-OP-1]'s one sealed decimal-place formatter, moved from \
+         chelis-types' observation.rs by chelis#1297 so the evaluator and \
+         compiled C share one rounding; the parse back to the operand's own \
+         width is the single finalization, not an additional exit",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -722,7 +730,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        22,
+        20,
         "declared derived-Debug residue carriers: Err(format!) \
          diagnostics over Value/callable/handle shapes; the seven \
          chelis#890/#903 JSON/CSV builtin dispatch arms left with \
@@ -731,7 +739,9 @@ const BASELINE: &[Entry] = &[
          pipe-only callable-application path is deleted, and with it its \
          `pipe stage is not callable: {other:?}` arm. One fewer since \
          chelis#2413: the `with seed` handler and its seed diagnostic are \
-         deleted",
+         deleted. Two fewer since chelis#1297: the assert_eq_tensor shape \
+         diagnostic moved to chelis-runtime's host_assert, which renders \
+         shapes without Debug",
     ),
     (
         Pat::RustDebugNumericFormat,

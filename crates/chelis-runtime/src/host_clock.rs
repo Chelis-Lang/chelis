@@ -196,7 +196,11 @@ mod tests {
         let second = checked_clock_read(ClockOperation::Monotonic).unwrap();
         assert!(
             (first.seconds, first.nanoseconds) <= (second.seconds, second.nanoseconds),
-            "{first:?} then {second:?}"
+            "({}, {}) then ({}, {})",
+            first.seconds,
+            first.nanoseconds,
+            second.seconds,
+            second.nanoseconds
         );
     }
 }

@@ -63,7 +63,7 @@ pub fn decode_process_output(
     let stderr =
         String::from_utf8(stderr).map_err(|_| invalid_capture_message(program, "stderr"))?;
     Ok(ProcessOutput {
-        exit_code: exit_status.map_or(-1, i64::from),
+        exit_code: exit_status.map_or(-1_i64, i64::from),
         stdout,
         stderr,
     })

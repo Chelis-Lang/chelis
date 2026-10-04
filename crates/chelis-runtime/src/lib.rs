@@ -8009,14 +8009,20 @@ pub extern "C" fn chelis_round_to(x: chelis_scalar, places: chelis_scalar) -> ch
         RuntimeDType::I16 => i64::from(places.bits as u16 as i16),
         RuntimeDType::I32 => i64::from(places.bits as u32 as i32),
         RuntimeDType::I64 => i64::from_ne_bytes(places.bits.to_ne_bytes()),
-        other => runtime_fail!("Domain: round_to places must be a signed integer, got {other:?}"),
+        other => runtime_fail!(
+            "Domain: round_to places must be a signed integer, got {}",
+            other.name()
+        ),
     };
     let rounded = match validate_scalar(x, "round_to operand") {
         RuntimeDType::F64 => host_round::round_to_f64(f64::from_bits(x.bits), places_value)
             .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits())),
         RuntimeDType::F32 => host_round::round_to_f32(f32::from_bits(x.bits as u32), places_value)
             .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(value.to_bits()))),
-        other => runtime_fail!("Domain: round_to operand must be f64 or f32, got {other:?}"),
+        other => runtime_fail!(
+            "Domain: round_to operand must be f64 or f32, got {}",
+            other.name()
+        ),
     };
     rounded.unwrap_or_else(|message| runtime_fail!("{message}"))
 }

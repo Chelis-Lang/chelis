@@ -25,7 +25,9 @@ pub fn eq_tensor_header_message(
     actual_dtype: &str,
 ) -> String {
     format!(
-        "assert_eq_tensor ({label}): expected tensor shape {expected_shape:?} at {expected_dtype}, got {actual_shape:?} at {actual_dtype}"
+        "assert_eq_tensor ({label}): expected tensor shape {} at {expected_dtype}, got {} at {actual_dtype}",
+        render_shape(expected_shape),
+        render_shape(actual_shape)
     )
 }
 
