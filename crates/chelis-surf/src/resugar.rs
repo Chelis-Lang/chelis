@@ -4368,6 +4368,30 @@ fn pipe_stage_operand_precision(stage: &DeepExpr) -> Option<String> {
     }
 }
 
+/// The cast target of a pipe's cast stage, the call-first lambda
+/// `fn (x) -> cast(x, p)` the parser builds for `|> cast(p)`.
+fn pipe_cast_stage_target(stage: &DeepExpr) -> Option<&DeepExpr> {
+    let node = node_ref(stage).ok()?;
+    if node.tag != DeepTag::Fn || node.meta.surf_pipe_stage().is_none() {
+        return None;
+    }
+    let [params, body] = node.children else {
+        return None;
+    };
+    let param = node_ref(params)
+        .ok()
+        .filter(|params| params.tag == DeepTag::Params && params.children.len() == 1)
+        .and_then(|params| parameter_name(&params.children[0]))?;
+    let body = node_ref(body).ok()?;
+    (body.tag == DeepTag::Cast
+        && body
+            .children
+            .first()
+            .is_some_and(|operand| variable_name(operand) == Some(param.as_str())))
+    .then(|| body.children.get(1))
+    .flatten()
+}
+
 fn first_parameter_precision(callee: &DeepExpr) -> Option<String> {
     let declared = declared_tensors();
     if declared
@@ -4389,6 +4413,16 @@ fn first_parameter_precision(callee: &DeepExpr) -> Option<String> {
 /// whose head and constructor stage form the literal.
 fn resugar_pipe_head(node: &NodeRef<'_>) -> Result<Expr, ResugarError> {
     let head = &node.children[0];
+    // `x |> cast(p)` is `cast(x, p)`, so a scalar literal head prints by the
+    // cast operand's rule.
+    if let Some(target) = node.children.get(1).and_then(pipe_cast_stage_target)
+        && let Some(precision) = primitive_type_name(target)
+        && let Ok(literal) = node_ref(head)
+        && literal.tag == DeepTag::Lit
+        && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
+    {
+        return resugar_literal_with_default_suffix(literal);
+    }
     if let Some(constructor) = node.children.get(1)
         && is_intrinsic_constructor(constructor)
     {

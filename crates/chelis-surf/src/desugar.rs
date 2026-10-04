@@ -1706,6 +1706,23 @@ fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
     }
 }
 
+/// The target and mode of a pipe's cast stage, `x |> cast(p)`, which the
+/// parser builds as the call-first lambda `fn (x) -> cast(x, p)`.
+fn cast_stage(stage: &Expr) -> Option<(&str, CastMode)> {
+    let Expr::Lambda(params, body, _) = stage else {
+        return None;
+    };
+    if !is_first_argument_pipe_lambda(stage) {
+        return None;
+    }
+    match body.as_ref() {
+        Expr::Cast(operand, prec, mode, _) if matches!(operand.as_ref(), Expr::Var(name, _) if name == &params[0].name) => {
+            Some((canonical_primitive_name(prec).unwrap_or(prec), *mode))
+        }
+        _ => None,
+    }
+}
+
 fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
     with_metadata_value(
         expr,
@@ -2825,61 +2842,8 @@ impl DesugarCtx {
                 // `cast_trunc(to_tensor([1.9]), i32)` into an i32 tensor and
                 // make the truncating cast a type error on its own
                 // argument.
-                let binder = self.current_type_binder(prec);
-                // `binder` is consulted again below for the unbounded case, so
-                // the bound is cloned out rather than moved.
-                let binder_is_unbounded = matches!(binder, Some(None));
-                let binder_is_declared = binder.is_some();
-                let binder_bound = binder.flatten();
-                let tensor_literal = (*mode != CastMode::Trunc)
-                    .then(|| {
-                        self.desugar_adopting_tensor_literal(
-                            e,
-                            Adoption::Cast(prec),
-                            local_fn_params,
-                        )
-                    })
-                    .flatten();
-                let inner = match (tensor_literal, e.as_ref()) {
-                    (Some(tensor_literal), _) => tensor_literal,
-                    _ if *mode == CastMode::Trunc => {
-                        self.desugar_expr_with_scope(e, local_fn_params)
-                    }
-                    (None, other) => {
-                        let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
-                        // A signed direct `lit` is the unambiguous carrier only
-                        // when the Surf syntax is eligible for adoption, or when
-                        // it proves the narrow literal-source rejection for an
-                        // unbounded binder. Ordinary suffixed casts keep their
-                        // authored unary-minus application shape.
-                        let needs_signed_literal = unsuffixed || binder_is_unbounded;
-                        let ordinary = needs_signed_literal
-                            .then(|| canonical_signed_cast_literal(other))
-                            .flatten()
-                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
-                            .unwrap_or_else(|| {
-                                self.desugar_expr_with_scope(other, local_fn_params)
-                            });
-                        let adopted = classify_literal_source(&ordinary).and_then(|source| {
-                            if scalar_literal_source_adopts_binder_target(
-                                source,
-                                binder_bound,
-                                unsuffixed,
-                            ) {
-                                adopted_scalar_literal_source(source, prec, DeepTag::TVar)
-                            } else if scalar_literal_source_adopts_cast_target(
-                                source, prec, unsuffixed,
-                            ) {
-                                adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
-                            } else {
-                                None
-                            }
-                        });
-                        adopted
-                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
-                            .unwrap_or(ordinary)
-                    }
-                };
+                let binder_is_declared = self.current_type_binder(prec).is_some();
+                let inner = self.desugar_cast_operand(e, prec, *mode, local_fn_params);
                 // Every declared binder is a `t-var`; only a bound permits
                 // literal adoption. The checker rejects unbounded targets.
                 let target = if binder_is_declared {
@@ -3509,11 +3473,65 @@ impl DesugarCtx {
         attach_span_metadata(desugar_list_literal(&items), list_span)
     }
 
+    /// Desugar the operand of `cast(operand, prec)`, a §5.6 position 4
+    /// (spec §P10b): an unsuffixed scalar literal or a tensor literal adopts
+    /// the target, which may be a declared dtype binder. The `cast_trunc`
+    /// rung adopts nothing. A pipe's cast stage passes its operand here too,
+    /// since `x |> cast(p)` denotes `cast(x, p)`.
+    fn desugar_cast_operand(
+        &self,
+        e: &Expr,
+        prec: &str,
+        mode: CastMode,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let binder = self.current_type_binder(prec);
+        // `binder` is consulted again below for the unbounded case, so
+        // the bound is cloned out rather than moved.
+        let binder_is_unbounded = matches!(binder, Some(None));
+        let binder_bound = binder.flatten();
+        let tensor_literal = (mode != CastMode::Trunc)
+            .then(|| self.desugar_adopting_tensor_literal(e, Adoption::Cast(prec), local_fn_params))
+            .flatten();
+        match (tensor_literal, e) {
+            (Some(tensor_literal), _) => tensor_literal,
+            _ if mode == CastMode::Trunc => self.desugar_expr_with_scope(e, local_fn_params),
+            (None, other) => {
+                let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
+                // A signed direct `lit` is the unambiguous carrier only
+                // when the Surf syntax is eligible for adoption, or when
+                // it proves the narrow literal-source rejection for an
+                // unbounded binder. Ordinary suffixed casts keep their
+                // authored unary-minus application shape.
+                let needs_signed_literal = unsuffixed || binder_is_unbounded;
+                let ordinary = needs_signed_literal
+                    .then(|| canonical_signed_cast_literal(other))
+                    .flatten()
+                    .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                    .unwrap_or_else(|| self.desugar_expr_with_scope(other, local_fn_params));
+                let adopted = classify_literal_source(&ordinary).and_then(|source| {
+                    if scalar_literal_source_adopts_binder_target(source, binder_bound, unsuffixed)
+                    {
+                        adopted_scalar_literal_source(source, prec, DeepTag::TVar)
+                    } else if scalar_literal_source_adopts_cast_target(source, prec, unsuffixed) {
+                        adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
+                    } else {
+                        None
+                    }
+                });
+                adopted
+                    .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                    .unwrap_or(ordinary)
+            }
+        }
+    }
+
     /// A pipe denotes its nested call: `x |> f(y)` is `f(x, y)` and
-    /// `x |> cast(p)` is `cast(x, p)`. A tensor literal a pipe feeds to a stage
-    /// therefore adopts exactly as that call's argument does (§5.6), whether
-    /// it is the head (`to_tensor([...]) |> s`) or the head and a constructor
-    /// stage (`[...] |> to_tensor |> s`).
+    /// `x |> cast(p)` is `cast(x, p)`. A literal a pipe feeds to a stage
+    /// therefore adopts exactly as that call's argument does (§5.6): a scalar
+    /// or tensor literal head of a cast stage, a tensor literal head of a call
+    /// stage (`to_tensor([...]) |> s`), and the head and constructor stage of
+    /// `[...] |> to_tensor |> s`.
     fn desugar_pipe(&self, head: &Expr, stages: &[Expr], local_fn_params: &[String]) -> deep::Expr {
         let receiver = |index: usize| {
             stages
@@ -3527,6 +3545,9 @@ impl DesugarCtx {
                 receiver(1).map(|adoption| {
                     self.desugar_adopted_chain(items, *list_span, adoption, local_fn_params)
                 })
+            }
+            (_, [stage, ..]) if let Some((prec, mode)) = cast_stage(stage) => {
+                Some(self.desugar_cast_operand(head, prec, mode, local_fn_params))
             }
             _ => receiver(0).and_then(|adoption| {
                 self.desugar_adopting_tensor_literal(head, adoption, local_fn_params)

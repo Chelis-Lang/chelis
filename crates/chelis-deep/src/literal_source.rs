@@ -168,6 +168,22 @@ pub fn visit_binder_literal_uses<'a>(
     let mut stack = vec![(expr, None)];
     while let Some((expr, adopting_binder)) = stack.pop() {
         if let Some((tag, meta, children)) = node_parts(expr) {
+            // `x |> cast(p)` is `cast(x, p)`: a pipe's head is the operand of
+            // a cast stage, and adopts its binder exactly as the call does.
+            if tag == DeepTag::Pipe
+                && let [head, stage, rest @ ..] = children
+                && let Some(binder) = pipe_cast_stage_binder(stage)
+            {
+                let source = classify_literal_source(head);
+                stack.extend(rest.iter().rev().map(|child| (child, None)));
+                stack.push((stage, None));
+                stack.push((
+                    source.map_or(head, |source| source.literal),
+                    source.map(|_| binder),
+                ));
+                meta.visit_expressions(&mut |value, _| stack.push((value, None)));
+                continue;
+            }
             if tag == DeepTag::Cast
                 && let [operand, target, rest @ ..] = children
                 && let Some(binder) = exact_type_variable_name(target)
@@ -217,6 +233,35 @@ pub fn visit_binder_literal_uses<'a>(
             Expr::Node(..) | Expr::Atom(..) => {}
         }
     }
+}
+
+/// The binder a pipe's cast stage targets: the call-first lambda
+/// `fn (x) -> cast(x, p)` the parser builds for `|> cast(p)`, with `p` a
+/// `t-var`.
+fn pipe_cast_stage_binder(stage: &Expr) -> Option<&str> {
+    let (DeepTag::Fn, meta, [params, body]) = node_parts(stage)? else {
+        return None;
+    };
+    meta.surf_pipe_stage()?;
+    let (DeepTag::Params, _, [param]) = node_parts(params)? else {
+        return None;
+    };
+    let param = match param {
+        Expr::Atom(Atom::Name(name), _) => name.as_str(),
+        other => match node_parts(other)? {
+            (_, _, [Expr::Atom(Atom::Name(name), _), ..]) => name.as_str(),
+            _ => return None,
+        },
+    };
+    let (DeepTag::Cast, _, [operand, target, ..]) = node_parts(body)? else {
+        return None;
+    };
+    let (DeepTag::Var, _, [Expr::Atom(Atom::Name(name), _)]) = node_parts(operand)? else {
+        return None;
+    };
+    (name == param)
+        .then(|| exact_type_variable_name(target))
+        .flatten()
 }
 
 fn direct_literal(expr: &Expr) -> Option<(&Expr, &Metadata, Option<&Atom>)> {
