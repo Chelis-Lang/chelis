@@ -3280,8 +3280,11 @@ y = matmul(a, b)
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("matmul shared-axis mismatch must fail");
     assert!(
-        err.contains("matmul") && err.contains("mismatch"),
-        "expected matmul shared-axis diagnostic, got: {err}"
+        err.contains(
+            "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, rhs [2, 2] has 2 at axis 0\n\
+             numeric trap: domain in matmul at i64"
+        ),
+        "expected matmul's Domain trap (spec/04 section 4.7), got: {err}"
     );
 }
 

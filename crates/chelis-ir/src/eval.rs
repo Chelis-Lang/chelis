@@ -1107,6 +1107,26 @@ impl ElementwiseBinOp {
 /// assertion. The routing of host-lane def applications through this
 /// evaluator (chelis#1277 B2h) made a runtime disagreement user input; the
 /// rendering is the one every lane shares.
+/// The failure of `node`'s operand agreement between `lhs` and `rhs`: a
+/// `Domain` trap in the node's operation, or in `matmul` when the node is
+/// matmul's decomposed product ([`crate::tier2::is_matmul_product`]), with
+/// the operands as written.
+fn agreement_failure(dag: &Dag, node: &DagNode, lhs: &TensorValue, rhs: &TensorValue) -> String {
+    if crate::tier2::is_matmul_product(node, |id| dag.get(id)) {
+        let exact = |shape: &[usize]| {
+            shape
+                .iter()
+                .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+                .collect::<Vec<_>>()
+        };
+        return chelis_abi::failure::matmul_product_disagreement(
+            &exact(&lhs.shape),
+            &exact(&rhs.shape),
+        );
+    }
+    shape_disagreement(crate::grad::risc_op_name(&node.op), lhs, rhs)
+}
+
 fn shape_disagreement(op: &str, lhs: &TensorValue, rhs: &TensorValue) -> String {
     let exact = |shape: &[usize]| {
         shape
@@ -1120,7 +1140,8 @@ fn shape_disagreement(op: &str, lhs: &TensorValue, rhs: &TensorValue) -> String 
 /// Validate a producer's complete positive-rank agreement relation before
 /// reading the extent used by its declared-result claim.
 fn same_shape_agreement_extent(
-    op: &str,
+    dag: &Dag,
+    node: &DagNode,
     agreement: &crate::axis_sources::SameShapeAgreement,
     axis: usize,
     values: &UnordMap<NodeId, TensorValue>,
@@ -1146,7 +1167,7 @@ fn same_shape_agreement_extent(
             .get(member)
             .ok_or_else(|| format!("same-shape agreement member {} is not available", member.0))?;
         if value.shape != first.shape {
-            return Err(shape_disagreement(op, first, value));
+            return Err(agreement_failure(dag, node, first, value));
         }
     }
     first.shape.get(axis).copied().ok_or_else(|| {
@@ -3856,12 +3877,7 @@ where
                         }
                     }
                     crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
-                        same_shape_agreement_extent(
-                            crate::grad::risc_op_name(&node.op),
-                            agreement,
-                            *axis,
-                            &values,
-                        )?
+                        same_shape_agreement_extent(dag, node, agreement, *axis, &values)?
                     }
                     crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
                         reason,
@@ -4130,11 +4146,16 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
-            RiscOp::Mul => binary_elementwise(
-                ElementwiseBinOp::Mul,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Mul => {
+                let (lhs, rhs) = (&values[&node.inputs[0]], &values[&node.inputs[1]]);
+                // A disagreement inside matmul's decomposed product is
+                // matmul's own `Domain` trap (spec/04 section 4.7).
+                if lhs.shape != rhs.shape && crate::tier2::is_matmul_product(node, |id| dag.get(id))
+                {
+                    return Err(agreement_failure(dag, node, lhs, rhs));
+                }
+                binary_elementwise(ElementwiseBinOp::Mul, lhs, rhs)?
+            }
             RiscOp::Div => {
                 if is_runtime_mean_div(dag, node)
                     && values[&node.inputs[1]]

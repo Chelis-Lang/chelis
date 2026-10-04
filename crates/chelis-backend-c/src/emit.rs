@@ -1224,17 +1224,26 @@ impl CEmitter {
         // spec/04-type-system.md section 4.7: a disagreement is a `Domain`
         // trap in the operation, rendered by the runtime as every evaluator
         // renders it.
-        let op = chelis_ir::grad::risc_op_name(&node.op);
+        // Matmul's decomposed product reports matmul's own trap, with the
+        // operands as written ([`chelis_ir::tier2::is_matmul_product`]).
+        let (trap, op) = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+            ("chelis_matmul_product_trap(", String::new())
+        } else {
+            (
+                "chelis_elementwise_shape_trap(",
+                format!("\"{}\", ", chelis_ir::grad::risc_op_name(&node.op)),
+            )
+        };
         for (left_index, left) in agreement.members().iter().enumerate() {
             let a = left.0;
             for right in &agreement.members()[left_index + 1..] {
                 let b = right.0;
                 self.line(&format!(
                     "if (t{a}_rank != t{b}_rank) {{ \
-                     chelis_elementwise_shape_trap(\"{op}\", t{a}, t{b}); }} \
+                     {trap}{op}t{a}, t{b}); }} \
                      if (t{a}_rank == t{b}_rank) {{ for (int __d = 0; __d < t{a}_rank; __d++) {{ \
                      if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ \
-                     chelis_elementwise_shape_trap(\"{op}\", t{a}, t{b}); \
+                     {trap}{op}t{a}, t{b}); \
                      }} }} }}"
                 ));
             }

@@ -1453,17 +1453,16 @@ pub(super) fn tensor_matmul_host(
     if lhs.precision != rhs.precision || !lhs.precision.is_float() {
         return Err("matmul requires one matching active float dtype".to_string());
     }
-    if a[a.len() - 1] != b[b.len() - 2] {
-        return Err("matmul shared-axis mismatch".to_string());
-    }
-    for (&a_extent, &b_extent) in a[..a.len() - 2]
-        .iter()
-        .rev()
-        .zip(b[..b.len() - 2].iter().rev())
-    {
-        if a_extent != b_extent && a_extent != 1 && b_extent != 1 {
-            return Err("matmul batch-axis mismatch".to_string());
-        }
+    // spec/04-type-system.md section 4.7: a shared- or batch-axis
+    // disagreement is a `Domain` trap in `matmul`.
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    if let Some(failure) = chelis_abi::failure::matmul_operand_disagreement(&exact(a), &exact(b)) {
+        return Err(failure);
     }
     let mut dag = Dag::new();
     let decl = dag.declare("matmul");

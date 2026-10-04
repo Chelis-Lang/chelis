@@ -7697,6 +7697,24 @@ pub unsafe extern "C" fn chelis_elementwise_shape_trap(
     );
 }
 
+/// A runtime disagreement between matmul's operands, observed on its
+/// decomposed product `[..., i, j, k]`: a `Domain` trap in `matmul`
+/// (spec/04-type-system.md section 4.7), rendered with the operands as
+/// written, as every evaluator renders it, before exiting with status 1.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_product_trap(
+    lhs: *const chelis_tensor,
+    rhs: *const chelis_tensor,
+) {
+    if lhs.is_null() || rhs.is_null() {
+        runtime_fail!("chelis internal error: null matmul product trap operand");
+    }
+    runtime_fail!(
+        "{}",
+        chelis_abi::failure::matmul_product_disagreement((*lhs).shape(), (*rhs).shape())
+    );
+}
+
 /// [05-HOST-1] `tensor_scan` over a tensor state in compiled host code:
 /// stacks the scan's states along a new leading axis, giving
 /// `[len(states)] ++ shape(template)` at the template's dtype. The template

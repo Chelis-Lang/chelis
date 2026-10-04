@@ -37,6 +37,63 @@ pub fn operand_shape_disagreement(op: &str, lhs: &[i64], rhs: &[i64]) -> String 
     format!("{context}\n{}", domain_trap_line_at_i64(op))
 }
 
+/// `matmul(lhs, rhs)`'s operands disagree at run time: the shared axis (the
+/// last axis of `lhs` against the second-to-last of `rhs`) differs, or a
+/// batch axis differs where neither extent is 1. spec/04-type-system.md
+/// section 4.7 makes it a `Domain` trap in `matmul`, after a context line
+/// naming both operands as written. `None` when the operands agree.
+pub fn matmul_operand_disagreement(lhs: &[i64], rhs: &[i64]) -> Option<String> {
+    let (lhs_rank, rhs_rank) = (lhs.len(), rhs.len());
+    if lhs_rank < 2 || rhs_rank < 2 {
+        return None;
+    }
+    let (lhs_text, rhs_text) = (render_shape(lhs), render_shape(rhs));
+    let (lhs_shared, rhs_shared) = (lhs_rank - 1, rhs_rank - 2);
+    let context = if lhs[lhs_shared] != rhs[rhs_shared] {
+        format!(
+            "matmul shared axis disagrees: lhs {lhs_text} has {} at axis {lhs_shared}, \
+             rhs {rhs_text} has {} at axis {rhs_shared}",
+            lhs[lhs_shared], rhs[rhs_shared]
+        )
+    } else {
+        // Batch axes align from the right, and an extent of 1 broadcasts.
+        let batch = (1..=(lhs_rank - 2).min(rhs_rank - 2)).find_map(|offset| {
+            let (left_axis, right_axis) = (lhs_rank - 2 - offset, rhs_rank - 2 - offset);
+            let (left, right) = (lhs[left_axis], rhs[right_axis]);
+            (left != right && left != 1 && right != 1).then_some((left_axis, right_axis))
+        })?;
+        format!(
+            "matmul batch axis disagrees: lhs {lhs_text} has {} at axis {}, \
+             rhs {rhs_text} has {} at axis {}",
+            lhs[batch.0], batch.0, rhs[batch.1], batch.1
+        )
+    };
+    Some(format!("{context}\n{}", domain_trap_line_at_i64("matmul")))
+}
+
+/// The same failure observed on matmul's decomposed product, whose operands
+/// are `lhs` expanded with the output's column axis last and `rhs` expanded
+/// with the output's row axis before its own last two
+/// (`[..., i, j, k]` each). Removing those axes recovers the operands as
+/// written, so the evaluators and the compiled runtime report one rendering
+/// whichever form they observe the disagreement in. Falls back to the
+/// product's own shapes if the decomposed operands are not rank three or more.
+pub fn matmul_product_disagreement(expanded_lhs: &[i64], expanded_rhs: &[i64]) -> String {
+    let recovered = (expanded_lhs.len() >= 3 && expanded_rhs.len() >= 3).then(|| {
+        let lhs = &expanded_lhs[..expanded_lhs.len() - 1];
+        let row_axis = expanded_rhs.len() - 3;
+        let rhs = expanded_rhs[..row_axis]
+            .iter()
+            .chain(&expanded_rhs[row_axis + 1..])
+            .copied()
+            .collect::<Vec<_>>();
+        matmul_operand_disagreement(lhs, &rhs)
+    });
+    recovered
+        .flatten()
+        .unwrap_or_else(|| operand_shape_disagreement("matmul", expanded_lhs, expanded_rhs))
+}
+
 /// A runtime target extent of the movement operation `op` is negative: the
 /// non-negativity guard of spec/04-type-system.md section 4.7 traps
 /// `Domain` in `op`, after a context line naming the axis and the value.
@@ -122,6 +179,31 @@ mod tests {
         );
         // A longer operand whose prefix agrees disagrees in rank.
         assert!(operand_shape_disagreement("mul", &[2], &[2, 1]).contains("in rank"));
+    }
+
+    #[test]
+    fn a_matmul_disagreement_names_matmul_and_the_operands_as_written() {
+        use super::{matmul_operand_disagreement, matmul_product_disagreement};
+        let shared = "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, \
+                      rhs [2, 2] has 2 at axis 0\n\
+                      numeric trap: domain in matmul at i64";
+        assert_eq!(
+            matmul_operand_disagreement(&[2, 3], &[2, 2]).as_deref(),
+            Some(shared)
+        );
+        // The decomposed product of the same operands renders identically.
+        assert_eq!(matmul_product_disagreement(&[2, 3, 2], &[2, 2, 2]), shared);
+        assert_eq!(
+            matmul_operand_disagreement(&[4, 2, 3], &[5, 3, 2]).as_deref(),
+            Some(
+                "matmul batch axis disagrees: lhs [4, 2, 3] has 4 at axis 0, \
+                 rhs [5, 3, 2] has 5 at axis 0\n\
+                 numeric trap: domain in matmul at i64"
+            )
+        );
+        // Agreement, including a broadcast batch extent of 1, is no failure.
+        assert_eq!(matmul_operand_disagreement(&[1, 2, 3], &[5, 3, 2]), None);
+        assert_eq!(matmul_operand_disagreement(&[2, 3], &[3, 2]), None);
     }
 
     #[test]

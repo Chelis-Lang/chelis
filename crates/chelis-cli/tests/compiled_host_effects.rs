@@ -657,3 +657,136 @@ fn language_failures_exit_like_eval() {
         assert_eq!(run.context, context, "{name}: {run:?}");
     }
 }
+
+/// A runtime disagreement between matmul's operands is a `Domain` trap in
+/// `matmul` itself (spec/04-type-system.md section 4.7: the trap names the
+/// operation that introduces the guarded extent), never in the `mul` that the
+/// lowering decomposes it into, and never a non-trap failure. The context
+/// line names both operands as written. The rows cover an IO-effect caller,
+/// a pure callee reached from `main`, and a batched rank-3 product.
+#[test]
+fn matmul_operand_disagreements_trap_in_matmul_on_both_lanes() {
+    let runtime = |count: &str| format!("tensor_to_scalar(sum(to_tensor({count}), 0))");
+    let ones = |count: &str| format!("to_tensor(map(fn (i: i64) -> 1.0f32, range(0i64, {count})))");
+    let two = runtime("[1i64, 1i64]");
+    let three = runtime("[1i64, 2i64]");
+    for (name, source, context) in [
+        (
+            "matmul_io",
+            format!(
+                "def run(a: tensor[*, *, f32], b: tensor[*, *, f32]) -> tensor[*, *, f32] ! {{IO}} = {{\n\
+                 _ = print(\"in\")\n\
+                 matmul(a, b)\n\
+                 }}\n\
+                 a = reshape({}, [{two}, 3i64])\n\
+                 b = reshape({}, [{two}, 2i64])\n\
+                 c = run(a, b)\n",
+                ones("6i64"),
+                ones("4i64")
+            ),
+            "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, rhs [2, 2] has 2 at axis 0",
+        ),
+        (
+            "matmul_main",
+            format!(
+                "def mm(a: tensor[*, *, f32], b: tensor[*, *, f32]) -> tensor[*, *, f32] = matmul(a, b)\n\
+                 def main() -> tensor[*, *, f32] = mm(reshape({}, [{two}, 3i64]), reshape({}, [{two}, 2i64]))\n",
+                ones("6i64"),
+                ones("4i64")
+            ),
+            "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, rhs [2, 2] has 2 at axis 0",
+        ),
+        (
+            "matmul_batched",
+            format!(
+                "def mm(a: tensor[*, *, *, f32], b: tensor[*, *, *, f32]) -> tensor[*, *, *, f32] = matmul(a, b)\n\
+                 def main() -> tensor[*, *, *, f32] = mm(reshape({}, [2i64, 2i64, {three}]), reshape({}, [2i64, {two}, 2i64]))\n",
+                ones("12i64"),
+                ones("8i64")
+            ),
+            "matmul shared axis disagrees: lhs [2, 2, 3] has 3 at axis 2, rhs [2, 2, 2] has 2 at axis 1",
+        ),
+        (
+            "matmul_claimed",
+            "sig f[n]: tensor[2, n, f32] -> tensor[n, 2, f32] -> tensor[2, 2, f32]\n\
+             def f(x, y) = {\n\
+             k = sub(shape(x, cast(1, i32)), cast(1, i64))\n\
+             a = shrink(x, [[cast(0, i64), cast(2, i64)], [cast(0, i64), k]])\n\
+             matmul(a, y)\n\
+             }\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), \
+             to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32], [5.0f32, 6.0f32]]))\n"
+                .to_string(),
+            "matmul shared axis disagrees: lhs [2, 2] has 2 at axis 1, rhs [3, 2] has 3 at axis 0",
+        ),
+        (
+            "matmul_vmap",
+            "sig g[n]: tensor[2, n, f32] -> tensor[n, 2, f32] -> tensor[2, 2, f32]\n\
+             def g(x, y) = {\n\
+             k = sub(shape(x, cast(1, i32)), cast(1, i64))\n\
+             a = shrink(x, [[cast(0, i64), cast(2, i64)], [cast(0, i64), k]])\n\
+             matmul(a, y)\n\
+             }\n\
+             out = vmap(g)(to_tensor([[[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]]), \
+             to_tensor([[[1.0f32, 2.0f32], [3.0f32, 4.0f32], [5.0f32, 6.0f32]]]))\n"
+                .to_string(),
+            "matmul shared axis disagrees: lhs [1, 2, 2] has 2 at axis 2, rhs [1, 3, 2] has 3 at axis 1",
+        ),
+    ] {
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(
+            run.failure, "numeric trap: domain in matmul at i64",
+            "{name}: {run:?}"
+        );
+        assert_eq!(run.context, context, "{name}: {run:?}");
+    }
+}
+
+/// The lanes recognise matmul's decomposed product by its two expands
+/// carrying the matmul call's one span (`tier2::is_matmul_product`), a
+/// heuristic until chelis#3125 marks the product structurally. This pins
+/// where that heuristic must still answer correctly:
+/// - two matmuls nested in one expression each report `matmul`;
+/// - an authored `mul` of two expands at matmul's axes, on one line, reports
+///   `mul`, because each authored expand has its own span.
+#[test]
+fn matmul_trap_naming_survives_nested_and_look_alike_products() {
+    let ones = |count: &str| format!("to_tensor(map(fn (i: i64) -> 1.0f32, range(0i64, {count})))");
+    let three = "tensor_to_scalar(sum(to_tensor([1i64, 2i64]), 0))";
+    for (name, source, op, context) in [
+        (
+            "matmul_nested",
+            format!(
+                "def mm(a: tensor[*, *, f32], b: tensor[*, *, f32], c: tensor[*, *, f32]) -> tensor[*, *, f32] = matmul(matmul(a, b), c)\n\
+                 def main() -> tensor[*, *, f32] = mm(reshape({}, [2i64, 2i64]), reshape({}, [2i64, {three}]), reshape({}, [2i64, 2i64]))\n",
+                ones("4i64"),
+                ones("6i64"),
+                ones("4i64")
+            ),
+            "matmul",
+            "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, rhs [2, 2] has 2 at axis 0",
+        ),
+        (
+            "matmul_lookalike",
+            format!(
+                "def f(p: tensor[*, f32], q: tensor[*, f32], n: i64) -> tensor[*, *, *, f32] = mul(expand(reshape(p, [2i64, n, 1i64]), 2i32, 2i64), expand(reshape(q, [1i64, 2i64, 2i64]), 0i32, 2i64))\n\
+                 def main() -> tensor[*, *, *, f32] = f({}, {}, {three})\n",
+                ones("6i64"),
+                ones("4i64")
+            ),
+            "mul",
+            "mul operands disagree at axis 1: lhs [2, 3, 2] has 3, rhs [2, 2, 2] has 2",
+        ),
+    ] {
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(
+            run.failure,
+            format!("numeric trap: domain in {op} at i64"),
+            "{name}: {run:?}"
+        );
+        assert_eq!(run.context, context, "{name}: {run:?}");
+    }
+}
+
