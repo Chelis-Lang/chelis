@@ -2025,13 +2025,17 @@ defaults can be overridden in three ways:
 
 1. an explicit literal suffix (§5.5) attached to the literal token
 2. a known element type in the surrounding position (§5.6)
-3. an explicit `cast` around the literal expression
+3. an explicit `cast` whose operand is the bare scalar literal itself (§5.6
+   position 4)
 
 There is **no implicit precision promotion** from these defaults to any other
 type. `to_tensor([1, 2, 3])` in an unannotated position is `tensor[3, i32]`,
 not `tensor[3, i64]`. `to_tensor([1.0, 2.0, 3.0])` in an unannotated position
 is `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
-type must say so via suffix, declared element type, or `cast`.
+type must say so with a suffix, a declared element type, or, for a bare scalar
+literal, a `cast` that takes it directly as its operand. A `cast` of any other
+expression, `cast(to_tensor([1.1, 2.2]), f64)` included, converts a value whose
+literals are already bound.
 
 The default is the **user-facing contract** and is non-overridable except by
 the three mechanisms above. Whichever dtype they select, the literal binds
