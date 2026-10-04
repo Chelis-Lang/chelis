@@ -47,24 +47,25 @@
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_vocab::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
-pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+pub const NUMERIC_TRAP_PREFIX: &str = NumericTrapLine::PREFIX;
 
 /// Why a key buffer or key scalar refuses every numeric read: a key has no
 /// arithmetic, comparison, or cast (spec/04 §1.1), and the IR verifier keeps
 /// keys out of every numeric operation, so reaching one is a compiler defect.
 const KEY_HAS_NO_NUMERIC_READING: &str = "a random key has no numeric reading; the IR verifier keeps keys out of every numeric operation";
 /// Frozen spelling of the [04-NUM-9] overflow kind.
-pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
+pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = NumericTrapKind::Overflow.as_str();
 /// Frozen spelling of the [04-NUM-9] domain kind.
-pub const NUMERIC_TRAP_DOMAIN_KIND: &str = "domain";
+pub const NUMERIC_TRAP_DOMAIN_KIND: &str = NumericTrapKind::Domain.as_str();
 /// Frozen spelling of the [04-NUM-9] division-by-zero kind.
-pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = "division by zero";
+pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = NumericTrapKind::DivZero.as_str();
 /// Frozen separator before the canonical raising primitive name.
-pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = " in ";
+pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = NumericTrapLine::OPERATION_SEPARATOR;
 /// Frozen separator before the finalized dtype name.
-pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = " at ";
+pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = NumericTrapLine::DTYPE_SEPARATOR;
 
 /// The one numeric error type, identical in every lane
 /// (`spec/design/dtype_semantics.md` section C2).
@@ -79,34 +80,26 @@ pub enum NumericTrap {
     DivZero { op: &'static str, prim: Prim },
 }
 
+impl NumericTrap {
+    /// The kind, raising primitive, and dtype, as the shared [04-NUM-9]
+    /// line formatter takes them.
+    pub fn line(&self) -> NumericTrapLine<'static> {
+        let (kind, op, prim) = match *self {
+            NumericTrap::Overflow { op, prim } => (NumericTrapKind::Overflow, op, prim),
+            NumericTrap::Domain { op, prim } => (NumericTrapKind::Domain, op, prim),
+            NumericTrap::DivZero { op, prim } => (NumericTrapKind::DivZero, op, prim),
+        };
+        NumericTrapLine {
+            kind,
+            op,
+            dtype: prim.name(),
+        }
+    }
+}
+
 impl std::fmt::Display for NumericTrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NumericTrap::Overflow { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_OVERFLOW_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-            NumericTrap::Domain { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DOMAIN_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-            NumericTrap::DivZero { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DIV_ZERO_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-        }
+        self.line().fmt(f)
     }
 }
 

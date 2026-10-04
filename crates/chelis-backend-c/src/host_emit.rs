@@ -7693,18 +7693,15 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::Mul => {
                     binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1))
                 }
-                // #387: integer scalar `div`/`mod` trap portably on a zero
-                // divisor (ARM64 does not fault on integer div-by-zero), using the
-                // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
-                // returns the (nonzero) divisor so it composes inline. Float `div`
-                // is IEEE-754 and is never guarded; `mod` is integer-only.
                 // chelis#178: integer `div` is a type error; this arm is dead
                 // (the checker rejects it before host-emit) but kept as a
-                // defensive guard. Float `div` is IEEE-754 and never guarded.
+                // defensive guard. It checks the divisor like `trunc_div`, so
+                // neither a zero divisor nor MIN / -1 reaches C undefined
+                // behavior. Float `div` is IEEE-754 and never guarded.
                 CExpressionBuiltin::Div if is_integer_abi(&arg_vars[0].1) => binary(
                     BinaryOperator::Divide,
                     arg(0),
-                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                    checked_integer_divisor_expr("div", arg(0), arg(1), ty)?,
                 ),
                 CExpressionBuiltin::Div => {
                     binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1))
@@ -7717,35 +7714,28 @@ impl<'a> HostEmitter<'a> {
                     checked_integer_divisor_expr("trunc_div", arg(0), arg(1), ty)?,
                 ),
                 // chelis#178: `floor_div` rounds toward -inf. Integer (host
-                // scalar) operands use the guarded `/` plus a remainder-sign
-                // correction; float operands use `floor(a / b)`.
+                // scalar) operands use the runtime's checked floor division,
+                // the same helper the tensor lane emits; float operands use
+                // `floor(a / b)`.
                 CExpressionBuiltin::FloorDiv if is_integer_abi(&arg_vars[0].1) => {
-                    let guarded_divisor =
-                        || checked_integer_divisor_expr("floor_div", arg(0), arg(1), ty);
-                    let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor()?);
-                    let remainder = || {
-                        Ok::<_, Unsupported>(binary(
-                            BinaryOperator::Remainder,
+                    EmittedExpr::call(
+                        "chelis_int_checked_floor_div",
+                        [
                             arg(0),
-                            guarded_divisor()?,
-                        ))
-                    };
-                    let nonzero = binary(
-                        BinaryOperator::NotEqual,
-                        remainder()?,
-                        EmittedExpr::integer(0),
-                    );
-                    let sign_differs = binary(
-                        BinaryOperator::NotEqual,
-                        binary(BinaryOperator::Less, remainder()?, EmittedExpr::integer(0)),
-                        binary(BinaryOperator::Less, arg(1), EmittedExpr::integer(0)),
-                    );
-                    let correction = EmittedExpr::conditional(
-                        binary(BinaryOperator::LogicalAnd, nonzero, sign_differs),
-                        EmittedExpr::integer(1),
-                        EmittedExpr::integer(0),
-                    );
-                    binary(BinaryOperator::Subtract, quotient, correction)
+                            arg(1),
+                            EmittedExpr::integer(integer_abi_width(ty)?),
+                            EmittedExpr::string_literal(integer_trap_message(
+                                ty,
+                                "floor_div",
+                                false,
+                            )?),
+                            EmittedExpr::string_literal(integer_trap_message(
+                                ty,
+                                "floor_div",
+                                true,
+                            )?),
+                        ],
+                    )
                 }
                 CExpressionBuiltin::FloorDiv => EmittedExpr::call(
                     float_math_function(ty, "floor", "floorf"),
@@ -9446,6 +9436,17 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}if ({bytes} != 0) memcpy({view}.data, chelis_host_tensor_data({base}), (size_t){bytes});", self.indent));
         }
+        let tree = matches!(kind, SparseSummaryKind::ScatterAdd).then(|| {
+            let prefix = self.next_temp("sparse_add");
+            let lines = CEmitter::scatter_add_tree_open_lines(
+                &prefix,
+                count,
+                &format!("chelis_tensor_numel({target})"),
+                summary.output.precision,
+            );
+            self.push_relative_lines(lines);
+            prefix
+        });
         let linear = self.next_temp("sparse_linear");
         let slot = self.next_temp("sparse_slot");
         let selected = self.next_temp("sparse_selected");
@@ -9460,18 +9461,9 @@ impl<'a> HostEmitter<'a> {
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
             SparseSummaryKind::ScatterAdd => {
-                let updates = &args[summary.input_indices[2]];
-                let destination = format!("(({element}*){view}.data)[{offset}]");
-                let sum = CEmitter::scatter_add_sum(
-                    crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
-                        axis: summary.axis,
-                        batch_rank: 0,
-                    }),
-                    &destination,
-                    &format!("((const {element}*)chelis_host_tensor_data({updates}))[{linear}]"),
-                    summary.output.precision,
-                );
-                self.lines.push(format!("{}    {destination} = {sum};", self.indent));
+                let tree = tree.as_deref().expect("scatter-add opened its tree");
+                let record = CEmitter::scatter_add_tree_record_line(tree, &linear, &offset);
+                self.lines.push(format!("{}    {record}", self.indent));
             }
             SparseSummaryKind::ScatterReplace => {
                 let updates = &args[summary.input_indices[2]];
@@ -9479,11 +9471,35 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.lines.push(format!("{}}}", self.indent));
+        if let Some(tree) = tree {
+            let updates = &args[summary.input_indices[2]];
+            let lines = CEmitter::scatter_add_tree_close_lines(
+                &tree,
+                count,
+                &format!("{view}.data"),
+                &format!("chelis_tensor_numel({target})"),
+                &format!("chelis_host_tensor_data({updates})"),
+                summary.output.precision,
+                crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                    axis: summary.axis,
+                    batch_rank: 0,
+                }),
+            );
+            self.push_relative_lines(lines);
+        }
         self.end_tensor_write(&guard);
         self.lines.push(format!(
             "{}chelis_sparse_plan_release({plan});",
             self.indent
         ));
+    }
+
+    /// Push lines whose indentation is relative to the current depth.
+    fn push_relative_lines(&mut self, lines: Vec<(usize, String)>) {
+        for (depth, line) in lines {
+            self.lines
+                .push(format!("{}{}{line}", self.indent, "    ".repeat(depth)));
+        }
     }
 
     fn assign_call(

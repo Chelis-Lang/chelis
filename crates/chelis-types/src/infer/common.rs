@@ -555,7 +555,13 @@ pub(crate) fn decide_shape_route(
         );
         return result;
     }
-    match shape_route_result(&route, operand) {
+    match shape_route_result(
+        &route,
+        operand,
+        SumResultSlot::Fresh(vg),
+        TypeDiagnosticLocation::from_node(node),
+        subst,
+    ) {
         Ok((result, updates)) => {
             if let Some(expected_updates) = updates
                 && let crate::unify::ShapeRoute::Gather {
@@ -602,9 +608,15 @@ pub(crate) fn decide_shape_route(
 /// Returns `(result type, updates obligation)`. The updates unification is the
 /// caller's because discharge runs inside unification while the eager arm has
 /// a `&mut Subst`; the DECISION of what updates must equal is here.
+///
+/// A `trace` whose result precision waits on an inference variable publishes
+/// a type from `slot`, gated to the decided result ([`publish_sum_result`]).
 pub(crate) fn shape_route_result(
     route: &crate::unify::ShapeRoute,
     operand: &Type,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
 ) -> Result<(Type, Option<Type>), String> {
     use crate::unify::ShapeRoute;
     // Strip one borrow only for the routes whose arms do, so a deferred
@@ -644,7 +656,10 @@ pub(crate) fn shape_route_result(
         } => {
             let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
             let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
-            Ok((infer_trace_result_type(operand, axis1, axis2)?, None))
+            Ok((
+                infer_trace_result_type(operand, axis1, axis2, slot, location, subst)?,
+                None,
+            ))
         }
     }
 }
@@ -710,6 +725,9 @@ pub(super) fn infer_trace_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("trace expects tensor input, got {tensor_ty}"));
@@ -725,7 +743,248 @@ pub(super) fn infer_trace_result_type(
         .enumerate()
         .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
         .collect();
-    Ok(Type::Tensor(out_dims, precision.clone()))
+    let precision = default_sum_result_precision("trace", precision, subst)?;
+    Ok(publish_sum_result(
+        "trace", out_dims, precision, slot, location, subst,
+    ))
+}
+
+/// The result of `einsum(equation, left, right)` under [05-OP-33], for two
+/// settled tensor operands whose precisions the caller has already unified:
+/// each output label takes the extent of its first occurrence scanning left
+/// then right, at `sum_result(p, default(p))`. An equation outside the
+/// grammar, a label count that differs from an operand's rank, an output
+/// label absent from both inputs or repeated, and a rank-spread operand,
+/// whose rank no fixed equation can match at every instantiation, are each
+/// rejected; there is no undecided outcome.
+pub(super) fn infer_einsum_result_type(
+    equation: &str,
+    left: &Type,
+    right: &Type,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
+) -> Result<Type, String> {
+    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
+        return Err(format!(
+            "einsum expects two tensor operands, got {left} and {right}"
+        ));
+    };
+    let grammar = || {
+        format!(
+            "einsum equation `{equation}` must match `[a-z]*,[a-z]*->[a-z]*` \
+             (spec/05-risc-primitives.md [05-OP-33])"
+        )
+    };
+    let Some((inputs, output)) = equation.split_once("->") else {
+        return Err(grammar());
+    };
+    let Some((left_labels, right_labels)) = inputs.split_once(',') else {
+        return Err(grammar());
+    };
+    if [left_labels, right_labels, output]
+        .iter()
+        .any(|labels| !labels.chars().all(|label| label.is_ascii_lowercase()))
+    {
+        return Err(grammar());
+    }
+    for (side, labels, dims) in [
+        ("left", left_labels, left_dims),
+        ("right", right_labels, right_dims),
+    ] {
+        if dims.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
+            return Err(format!(
+                "einsum equation `{equation}` fixes the {side} operand's rank at {}, but \
+                 the operand has a rank spread, which denotes every rank \
+                 ([05-OP-33], [04-INF-6])",
+                labels.len()
+            ));
+        }
+        if labels.len() != dims.len() {
+            return Err(format!(
+                "einsum equation `{equation}` gives the {side} operand {} labels, but it \
+                 has rank {} ([05-OP-33])",
+                labels.len(),
+                dims.len()
+            ));
+        }
+    }
+    let mut dims = Vec::with_capacity(output.len());
+    for (index, label) in output.chars().enumerate() {
+        if output.chars().take(index).any(|earlier| earlier == label) {
+            return Err(format!(
+                "einsum output label `{label}` must occur exactly once in `{equation}` \
+                 ([05-OP-33])"
+            ));
+        }
+        let dim = left_labels
+            .chars()
+            .position(|candidate| candidate == label)
+            .map(|position| &left_dims[position])
+            .or_else(|| {
+                right_labels
+                    .chars()
+                    .position(|candidate| candidate == label)
+                    .map(|position| &right_dims[position])
+            })
+            .ok_or_else(|| {
+                format!(
+                    "einsum output label `{label}` must occur in an input of `{equation}` \
+                     ([05-OP-33])"
+                )
+            })?;
+        dims.push(dim.clone());
+    }
+    let precision = default_sum_result_precision("einsum", precision, subst)?;
+    Ok(publish_sum_result(
+        "einsum", dims, precision, slot, location, subst,
+    ))
+}
+
+/// How a `sum`-family call's result precision stands when the call is checked.
+pub(super) enum SumResultPrecision {
+    /// The result precision is known now.
+    Decided(TensorPrec),
+    /// The operand's precision is an inference variable whose dtypes have no
+    /// single result. The call publishes its own result type and a
+    /// [`crate::unify::DeferredOperandGate::SumResult`] decides it once the
+    /// variable binds, or at the declaration boundary.
+    Pending(TypeVar),
+}
+
+/// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an
+/// operation that accumulates with the default sum accumulator (`sum`,
+/// `cumsum`, `trace`, `einsum`). i8 and i16 widen to i32; a dtype with no
+/// default accumulator, such as bool, is rejected.
+///
+/// Over a precision variable the result is decided now when one type covers
+/// every dtype the variable admits ([`bound_sum_result_precision`]).
+/// Otherwise it waits for the variable: inference may still bind it (a hole,
+/// or a lambda parameter's precision), and an authored binder is decided at
+/// the declaration boundary over every dtype its bound admits ([04-INF-6]).
+pub(super) fn default_sum_result_precision(
+    op: &str,
+    precision: &TensorPrec,
+    subst: &Subst,
+) -> Result<SumResultPrecision, String> {
+    match precision {
+        TensorPrec::Concrete(prim) => settled_sum_result_precision(op, &Type::Prim(*prim))
+            .map(|result| SumResultPrecision::Decided(TensorPrec::Concrete(result))),
+        TensorPrec::Var(variable) => Ok(match bound_sum_result_precision(op, *variable, subst) {
+            Ok(result) => SumResultPrecision::Decided(result),
+            Err(_) => SumResultPrecision::Pending(*variable),
+        }),
+    }
+}
+
+/// Where a waiting `sum`-family result gets the type it publishes.
+pub(crate) enum SumResultSlot<'a> {
+    /// The checked call: publish `dims` at a fresh precision variable, so a
+    /// consumer sees the result's shape before its precision is decided.
+    Fresh(&'a mut VarGen),
+    /// A deferred decision: publish the type the call already handed out.
+    Existing(&'a Type),
+}
+
+/// The result tensor a `sum`-family call publishes: `dims` at the decided
+/// precision, or, while the precision waits, a type from `slot` with a gate
+/// that unifies `dims` at the decided precision into it later.
+pub(super) fn publish_sum_result(
+    op: &str,
+    dims: Vec<Dim>,
+    precision: SumResultPrecision,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
+) -> Type {
+    match precision {
+        SumResultPrecision::Decided(precision) => Type::Tensor(dims, precision),
+        SumResultPrecision::Pending(variable) => {
+            let published = match slot {
+                SumResultSlot::Fresh(vg) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Var(vg.fresh_tvar()))
+                }
+                SumResultSlot::Existing(published) => published.clone(),
+            };
+            subst.record_deferred_tensor_operand(
+                variable,
+                crate::unify::DeferredOperandGate::SumResult {
+                    op: op.to_string(),
+                    dims,
+                    result: Box::new(published.clone()),
+                    location,
+                },
+            );
+            published
+        }
+    }
+}
+
+/// `sum_result(p, default(p))` for a settled precision.
+pub(crate) fn settled_sum_result_precision(op: &str, resolved: &Type) -> Result<Prim, String> {
+    match resolved {
+        Type::Prim(prim) => prim
+            .default_reduce_sum_result_precision()
+            .map_err(|message| {
+                format!(
+                    "{op} expects a tensor precision with a default sum accumulator, so that its \
+                 result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+                 got {}; {message}",
+                    prim.name()
+                )
+            }),
+        other => Err(format!(
+            "{op} expects a tensor precision with a default sum accumulator, so that its \
+             result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+             got {other}"
+        )),
+    }
+}
+
+/// `sum_result(p, default(p))` over every dtype the precision variable admits
+/// ([04-INF-6]): the variable itself when sum_result keeps each one (a
+/// float, i32 or i64 bound), one concrete dtype when it maps them all there
+/// (`{i8, i16}` gives i32), and otherwise no single type.
+pub(crate) fn bound_sum_result_precision(
+    op: &str,
+    variable: TypeVar,
+    subst: &Subst,
+) -> Result<TensorPrec, String> {
+    let restriction = subst.tvar_restriction(variable);
+    let members = Prim::ACTIVE_FLOATS
+        .into_iter()
+        .chain(Prim::ACTIVE_INTEGERS)
+        .chain([Prim::Bool])
+        .filter(|prim| restriction.is_none_or(|bound| bound.admits(*prim)))
+        .collect::<Vec<_>>();
+    let results = members
+        .iter()
+        .map(|member| member.default_reduce_sum_result_precision().ok())
+        .collect::<Vec<_>>();
+    if members
+        .iter()
+        .zip(&results)
+        .all(|(member, result)| *result == Some(*member))
+    {
+        return Ok(TensorPrec::Var(variable));
+    }
+    if let Some((Some(first), rest)) = results.split_first()
+        && rest.iter().all(|result| *result == Some(*first))
+    {
+        return Ok(TensorPrec::Concrete(*first));
+    }
+    let bound = match restriction {
+        Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
+        None => "an unbounded variable".to_string(),
+    };
+    Err(format!(
+        "{op} over a tensor whose precision is a type variable has no single result dtype: \
+         its result is sum_result(p, default(p)) (spec/04-type-system.md §5.7.1), \
+         the variable denotes every dtype {bound} admits ([04-INF-6]), and \
+         sum_result does not give one dtype across them; bound the variable to \
+         `Float`, or to dtypes that share one sum_result, or cast the operand to a \
+         concrete dtype"
+    ))
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the

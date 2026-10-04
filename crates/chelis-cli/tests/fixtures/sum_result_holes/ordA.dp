@@ -1,0 +1,50 @@
+(defsig {span: "surf:0..137"}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} i8))
+    (t-tensor {} (t-prim {} i32))))
+
+(def {span: "surf:0..137"}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:45..137"}
+      (bind {}
+        h
+        (fn {span: "surf:53..128"}
+          (params {} (v {type: (t-tensor {} (d-lit {} 3) (t-var {} _))}))
+          (let {span: "surf:78..128"}
+            (bind {}
+              a
+              (app {span: "surf:88..97"}
+                (var {span: "surf:88..91"} add)
+                (var {span: "surf:92..93"} v)
+                (var {span: "surf:95..96"} x)))
+            (let {}
+              (bind {}
+                s
+                (app {span: "surf:106..118"}
+                  (var {span: "surf:106..109"} sum)
+                  (var {span: "surf:110..111"} v)
+                  (lit {span: "surf:113..117", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))
+              (var {span: "surf:123..124"} s)))))
+      (app {span: "surf:131..135"}
+        (var {span: "surf:131..132"} h)
+        (var {span: "surf:133..134"} x)))))
+
+(def {span: "surf:139..182"}
+  out
+  (app {span: "surf:145..182"}
+    (var {span: "surf:145..150"} probe)
+    (app {span: "surf:151..181"}
+      (var {span: "surf:151..160"} to_tensor)
+      (app {span: "surf:161..180"}
+        (var {} Cons)
+        (lit {span: "surf:162..167", type: (t-prim {} i8)} 100)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:169..174", type: (t-prim {} i8)} 100)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:176..179", type: (t-prim {} i8)} 3)
+            (var {} Nil)))))))

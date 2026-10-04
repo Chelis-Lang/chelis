@@ -473,28 +473,28 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 10,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 11,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 12,
       "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
-      "ordinal": 13,
+      "ordinal": 12,
       "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 13,
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -522,28 +522,28 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 17,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 18,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 19,
       "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
-      "ordinal": 20,
+      "ordinal": 19,
       "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 20,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -578,6 +578,13 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 25,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 26,
       "pattern": "Type::Var(tv)",
       "disposition": "constrains_the_variable",
       "reason": "publishes the element's own type variable as the precision rather than a placeholder, so outer inference pins both together"
@@ -884,6 +891,13 @@
       "function": "type_contains_rank",
       "ordinal": 1,
       "pattern": "Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declaration_close.rs",
+      "function": "decide_open_obligations",
+      "ordinal": 1,
+      "pattern": "Type::Var(root)",
       "disposition": "not_a_route"
     },
     {

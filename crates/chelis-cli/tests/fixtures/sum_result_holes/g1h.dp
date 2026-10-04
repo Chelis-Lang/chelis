@@ -1,0 +1,67 @@
+(defsig {dtype_bounds: {p: int}, span: "surf:0..99"}
+  f
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 2) (t-var {} p))))
+
+(def {span: "surf:0..99"}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:54..99"}
+      (vmap {span: "surf:54..96"}
+        (fn {span: "surf:59..95"}
+          (params {} (v {type: (t-tensor {} (d-lit {} 3) (t-var {} _))}))
+          (app {span: "surf:83..95"}
+            (var {span: "surf:83..86"} sum)
+            (var {span: "surf:87..88"} v)
+            (lit {span: "surf:90..94", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))
+        (lit {type: (t-prim {} i32)} 0))
+      (var {span: "surf:97..98"} x))))
+
+(defsig {span: "surf:101..151"}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} i8))
+    (t-tensor {} (d-lit {} 2) (t-prim {} i8))))
+
+(def {span: "surf:101..151"}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:147..151"}
+      (var {span: "surf:147..148"} f)
+      (var {span: "surf:149..150"} x))))
+
+(def {span: "surf:153..213"}
+  out
+  (app {span: "surf:159..213"}
+    (var {span: "surf:159..160"} g)
+    (app {span: "surf:161..212"}
+      (var {span: "surf:161..170"} to_tensor)
+      (app {span: "surf:171..211"}
+        (var {} Cons)
+        (app {span: "surf:172..193"}
+          (var {} Cons)
+          (lit {span: "surf:173..178", type: (t-prim {} i8)} 100)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:180..185", type: (t-prim {} i8)} 100)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:187..192", type: (t-prim {} i8)} 100)
+              (var {} Nil))))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:195..210"}
+            (var {} Cons)
+            (lit {span: "surf:196..199", type: (t-prim {} i8)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:201..204", type: (t-prim {} i8)} 2)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:206..209", type: (t-prim {} i8)} 3)
+                (var {} Nil))))
+          (var {} Nil))))))

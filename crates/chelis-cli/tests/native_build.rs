@@ -2446,3 +2446,181 @@ fn tanh_adjoint_is_the_pinned_graph_on_every_half_precision_input_in_eval_and_c(
             .join("\n")
     );
 }
+
+/// `value` as `width`'s storage bits; every caller passes a value the width
+/// represents exactly.
+fn exact_bits(width: &NanWidth, value: f64) -> u64 {
+    let bits = match width.name {
+        "f16" => u64::from(half::f16::from_f32(value as f32).to_bits()),
+        "bf16" => u64::from(half::bf16::from_f32(value as f32).to_bits()),
+        "f32" => u64::from((value as f32).to_bits()),
+        _ => value.to_bits(),
+    };
+    assert!(
+        width.is_nan(bits) || value.is_nan() || {
+            let back = match width.name {
+                "f16" => half::f16::from_bits(bits as u16).to_f64(),
+                "bf16" => half::bf16::from_bits(bits as u16).to_f64(),
+                "f32" => f64::from(f32::from_bits(bits as u32)),
+                _ => f64::from_bits(bits),
+            };
+            back == value
+        },
+        "{value} is not exact at {}",
+        width.name
+    );
+    bits
+}
+
+/// One scatter-add case: its name, indices, updates, and specified result.
+type ScatterAddCase = (&'static str, Vec<i64>, Vec<f64>, [f64; 2]);
+
+/// chelis#3048: [05-OP-33] scatter-add, the gather adjoint and the forward
+/// `scatter(..., "add")` alike, combines each destination's base leaf and its
+/// targeting updates, in row-major update order, through the canonical
+/// adjacent-pair balanced tree. Each case's updates round differently under a
+/// left-to-right fold (`B + 1` rounds to `B`), so a built static library and
+/// eval agree with the specified value bit for bit only when both lanes use
+/// the tree. `B` is the width's first integer whose successor it does not
+/// represent.
+#[test]
+fn scatter_add_and_the_gather_adjoint_fold_duplicates_by_the_balanced_tree_in_eval_and_c() {
+    let big = |w: &str| match w {
+        "f16" => 2048.0,
+        "bf16" => 256.0,
+        "f32" => 16_777_216.0,
+        _ => 9_007_199_254_740_992.0,
+    };
+    // (case, indices, updates, specified result) with base all zero. `issue`
+    // is the issue's witness verbatim: [1, B, -B, 0.5] into one destination
+    // gives 1.5 (0.5 left to right), with B = 1e8 at f32. `interleaved`
+    // splits that witness and [B, 1, 1, -B] (2 by the tree, 0 left to right)
+    // across two destinations. `six` sends six updates to one destination:
+    // 4 by the tree, 0 left to right.
+    let cases = |b: f64| -> Vec<ScatterAddCase> {
+        let issue = if b == 16_777_216.0 { 1e8 } else { b };
+        vec![
+            (
+                "issue",
+                vec![0, 0, 0, 0],
+                vec![1.0, issue, -issue, 0.5],
+                [1.5, 0.0],
+            ),
+            (
+                "interleaved",
+                vec![0, 1, 0, 1, 0, 1, 0, 1],
+                vec![1.0, b, b, 1.0, -b, 1.0, 0.5, -b],
+                [1.5, 2.0],
+            ),
+            (
+                "six",
+                vec![1, 1, 1, 1, 1, 1],
+                vec![b, 1.0, 1.0, 1.0, 1.0, -b],
+                [0.0, 4.0],
+            ),
+            (
+                "nan",
+                vec![0, 0, 1],
+                vec![1.0, f64::NAN, 1.0],
+                [f64::NAN, 1.0],
+            ),
+        ]
+    };
+    let mut program = String::new();
+    let mut body = String::new();
+    let mut rows = Vec::new();
+    for width in &NAN_WIDTHS {
+        let w = width.name;
+        for (case, indices, updates, _) in cases(big(w)) {
+            let n = updates.len();
+            let indices = indices
+                .iter()
+                .map(|index| format!("{index}i64"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let helpers = format!(
+                "def gather_loss_{case}_{w}(x: tensor[2, {w}], u: tensor[{n}, {w}]) -> {w} = tensor_to_scalar(sum(mul(gather(x, to_tensor([{indices}]), 0i32), u), 0i32))\n"
+            );
+            program.push_str(&helpers);
+            for (op, call) in [
+                ("grad", format!("grad(gather_loss_{case}_{w}, wrt=x)(x, u)")),
+                (
+                    "scatter",
+                    format!("scatter(x, to_tensor([{indices}]), u, 0i32, \"add\")"),
+                ),
+            ] {
+                let label = format!("{op}_{case}_{w}");
+                program.push_str(&format!(
+                    "def {label}(x: tensor[2, {w}], u: tensor[{n}, {w}]) -> tensor[2, {w}] = {call}\n"
+                ));
+                rows.push((width, case, label, helpers.clone(), call));
+            }
+        }
+    }
+    for (width, case, label, _, _) in &rows {
+        let (_, _, updates, _) = cases(big(width.name))
+            .into_iter()
+            .find(|(name, ..)| name == case)
+            .unwrap();
+        let data = |values: &[f64]| {
+            values
+                .iter()
+                .map(|value| format!("{:#x}", exact_bits(width, *value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        body.push_str(&format!(
+            "    {{ static const {storage} x[2] = {{ {zeros} }}; static const int64_t xs[1] = {{ 2 }};\n      \
+             static const {storage} u[{n}] = {{ {updates} }}; static const int64_t us[1] = {{ {n} }};\n      \
+             chelis_tensor *r = {def}(chelis_tensor_entry_borrow(1, xs, {dtype}, x, sizeof x), chelis_tensor_entry_borrow(1, us, {dtype}, u, sizeof u));\n      \
+             const {storage} *o = (const {storage} *)chelis_tensor_read_view(r).data;\n      \
+             for (int i = 0; i < 2; ++i) printf(\"{label} %d %llx\\n\", i, (unsigned long long)o[i]); }}\n",
+            storage = width.storage,
+            zeros = data(&[0.0, 0.0]),
+            n = updates.len(),
+            updates = data(&updates),
+            def = mangled(label),
+            dtype = width.dtype,
+        ));
+    }
+    let (_, c) = run_static_library("scatter_add_fold", &program, &body);
+
+    let mut compared = Vec::new();
+    for (width, case, label, helpers, call) in &rows {
+        let w = width.name;
+        let (_, _, updates, specified) = cases(big(w))
+            .into_iter()
+            .find(|(name, ..)| name == case)
+            .unwrap();
+        let n = updates.len();
+        let source = format!(
+            "{helpers}def main(x: tensor[2, {w}], u: tensor[{n}, {w}]) -> tensor[2, {w}] = {call}\n"
+        );
+        let update_bits: Vec<u64> = updates
+            .iter()
+            .map(|value| exact_bits(width, *value))
+            .collect();
+        let eval = nan_eval_bits(
+            &source,
+            &[
+                ("x", width, vec![exact_bits(width, 0.0); 2]),
+                ("u", width, update_bits),
+            ],
+            width,
+        );
+        for (index, value) in specified.iter().enumerate() {
+            let want = if value.is_nan() {
+                width.canonical
+            } else {
+                exact_bits(width, *value)
+            };
+            compared.push((format!("eval {label}[{index}] vs spec"), eval[index], want));
+            compared.push((
+                format!("C {label}[{index}] vs eval"),
+                c_result(&c, label, index),
+                eval[index],
+            ));
+        }
+    }
+    assert_lanes_agree("chelis#3048 scatter-add fold", compared);
+}

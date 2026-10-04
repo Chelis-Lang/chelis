@@ -44,7 +44,6 @@ enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
     TensorF32Bits(Vec<usize>, Vec<u32>),
     Domain(&'static str, &'static [&'static str]),
-    TargetDivisionByZero,
     ExactTargetDivisionByZero,
     EntryShapeMismatch(&'static str),
     Reject(&'static str),
@@ -1048,21 +1047,6 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                                 == *bits
                     })
             }
-            Expected::TargetDivisionByZero => {
-                // The existing C integer helper uses its older diagnostic.
-                // Assert each lane's arithmetic failure independently: an
-                // earlier reshape claim failure does not satisfy this case.
-                run["stage"] == "execute"
-                    && run["success"] == false
-                    && stderr.lines().any(|line| {
-                        line.strip_prefix("error: ").unwrap_or(line)
-                            == if lane == "eval" {
-                                "numeric trap: division by zero in floor_div at i64"
-                            } else {
-                                "integer division or remainder by zero"
-                            }
-                    })
-            }
             Expected::ExactTargetDivisionByZero => {
                 run["stage"] == "execute"
                     && run["success"] == false
@@ -1954,7 +1938,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             ),
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(3), vector(6)],
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         );
     }
     assert_eq!(cases.len(), 60);
@@ -2123,7 +2107,7 @@ fn staged_graph_segments_preserve_eager_sources() {
             if n == 2 {
                 Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
             } else {
-                Expected::TargetDivisionByZero
+                Expected::ExactTargetDivisionByZero
             },
         );
     }
@@ -2409,7 +2393,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             2,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[4, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "literal_positive",
@@ -2439,7 +2423,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             2,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "named_good_first_later_trap",
@@ -2449,7 +2433,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             1,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "named_positive",
@@ -2512,7 +2496,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             "(tensor[d0, f32]) -> tensor[f32]",
             vec![vector(n)],
             if n == 4 {
-                Expected::TargetDivisionByZero
+                Expected::ExactTargetDivisionByZero
             } else {
                 Expected::Tensor(vec![], vec![9.0])
             },

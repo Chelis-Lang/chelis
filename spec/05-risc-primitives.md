@@ -157,11 +157,8 @@ at the explicit `floor_div` / `trunc_div` integer primitives below.
   IEEE division (so `floor_div(7.0, 2.0) == 3.0`,
   `floor_div(-7.0, 2.0) == -4.0`); `b == 0` follows IEEE and is not
   guarded (`floor(+inf) == +inf`).
-- **Zero divisor (integer operands)** — traps with the same clean
-  diagnostic as `mod` (`integer division or remainder by zero`).
-  Both the evaluator and the C backend halt; the C backend emits
-  the explicit `chelis_int_div_guard` zero-divisor guard (see the
-  `trunc_div` note below for the portability rationale).
+- **Zero divisor and signed minimum divided by `-1` (integer
+  operands)** — the `DivZero` and `Overflow` traps of [05-OP-64].
 
 **`trunc_div` semantics (integer-only).** `trunc_div(a, b)`
 computes the quotient rounded toward zero — the exact C/Rust
@@ -170,17 +167,10 @@ integer `/` operator — and is **valid on integer operands only**
 zero requires an explicit sign-aware `floor`/`ceil` composition before the
 checked integer cast).
 `trunc_div(7, 2) == 3`, `trunc_div(-7, 2) == -3`,
-`trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. `1 / 0` traps with
-the `integer division or remainder by zero` diagnostic (the same
-message `mod`'s zero-divisor path emits, so the two primitives are
-consistent across both lanes). The C backend emits an explicit
-zero-divisor guard (`chelis_int_div_guard`) before every integer
-`trunc_div` / `floor_div` / `mod` rather than relying on a hardware
-fault: x86 raises `SIGFPE` on integer division by zero, but AArch64
-(e.g. Apple silicon) defines it to return a value and does not
-fault, so a signal-dependent trap would silently compute a wrong
-answer there. The explicit guard traps deterministically on every
-target.
+`trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. Zero divisors and
+signed minimum divided by `-1` follow [05-OP-64]. A trap that depends on
+a hardware fault is not conforming: x86 raises `SIGFPE` on integer
+division by zero, while AArch64 returns a value and does not fault.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 

@@ -56,7 +56,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
     let c_path = out_dir.join(format!("op_{name}.c"));
     let c = fs::read_to_string(&c_path).expect("read generated c");
     let c_lines = c.lines().count();
-    let adjacent_pair_sum = c.contains("__sum_level_") && c.contains("__next_n_");
+    let adjacent_pair_sum = c.contains("__sum_level_") && c.contains("__pair_next");
     let allocs = c.matches("chelis_alloc(").count();
     // Only count actual *call sites* (indented, with open paren).
     let sgemm_calls = c.matches("    cblas_sgemm(").count();

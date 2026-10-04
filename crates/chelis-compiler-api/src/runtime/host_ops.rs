@@ -2816,7 +2816,12 @@ pub(super) fn tensor_clamp_value(
     // fails at the first offending position before any selection there;
     // otherwise the result is the bound the stored input crosses, or the
     // exact stored input. Comparisons run at the stored dtype, as in
-    // `chelis_tensor_clamp`, whose failure lines these are.
+    // `chelis_tensor_clamp`, whose failure lines these are: the [04-NUM-9]
+    // domain trap at the operand dtype, then the position detail.
+    let clamp_domain = NumericTrap::Domain {
+        op: "clamp",
+        prim: tensor.precision,
+    };
     let bound = |bound: &RuntimeTensorValue, linear: usize| {
         let index = if bound.value.shape.is_empty() {
             0
@@ -2837,12 +2842,14 @@ pub(super) fn tensor_clamp_value(
             || !compare(CompareOp::Eq, hi_value, hi_value)?
         {
             return Err(format!(
-                "Domain: clamp bound is NaN at row-major position {linear}"
+                "{}\nclamp bound is NaN at row-major position {linear}",
+                clamp_domain
             ));
         }
         if compare(CompareOp::Gt, lo_value, hi_value)? {
             return Err(format!(
-                "Domain: clamp lower bound exceeds upper bound at row-major position {linear}"
+                "{}\nclamp lower bound exceeds upper bound at row-major position {linear}",
+                clamp_domain
             ));
         }
         let value = tensor.value.storage().scalar_at(linear);

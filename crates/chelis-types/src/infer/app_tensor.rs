@@ -638,12 +638,14 @@ pub(super) fn check_matmul_signature(
     subst.apply(&canonical)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_reduction_signature(
     site: CheckSite<'_>,
     name: &str,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
+    vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
@@ -974,11 +976,10 @@ pub(super) fn check_reduction_signature(
     // caveat documented on `RiscOp::Argmax`; the i64 label is the
     // declarative output type.)
     //
-    // WS-A5: the §5.7.1 widening rule is defined over a known operand
-    // precision. If the operand precision is still polymorphic
-    // (TensorPrec::Var), defer the decision until the precision is
-    // resolved by unification — return the canonical-but-still-poly
-    // result type and let the standard unify path proceed.
+    // WS-A5: the §5.7.1 widening rule over a precision variable is decided
+    // over every dtype its bound admits ([04-INF-6]); see
+    // `default_sum_result_precision`.
+    let mut pending_sum_result = None;
     let result_prec: TensorPrec = if name == "count" {
         TensorPrec::Concrete(Prim::Int64)
     } else if name == "sum" {
@@ -1002,7 +1003,20 @@ pub(super) fn check_reduction_signature(
                     );
                 }
             },
-            TensorPrec::Var(_) => prec.clone(),
+            TensorPrec::Var(_) => match default_sum_result_precision("sum", &prec, subst) {
+                Ok(SumResultPrecision::Decided(result)) => result,
+                Ok(SumResultPrecision::Pending(variable)) => {
+                    pending_sum_result = Some(variable);
+                    prec.clone()
+                }
+                Err(message) => {
+                    return report_at_check_site(
+                        errors,
+                        CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]),
+                        site,
+                    );
+                }
+            },
         }
     } else if name == "argmax_reduce" || name == "argmin_reduce" {
         TensorPrec::Concrete(Prim::Int64)
@@ -1013,7 +1027,7 @@ pub(super) fn check_reduction_signature(
     // before falling back to the generic unify error, so users binding
     // `sum(i8 tensor)` to `tensor[i8]` see the spec-row hint
     // instead of the opaque "doesn't match declared signature" trail.
-    if name == "sum" && result_prec != prec {
+    if name == "sum" && pending_sum_result.is_none() && result_prec != prec {
         let resolved_result = subst.apply(result_ty);
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
@@ -1046,7 +1060,17 @@ pub(super) fn check_reduction_signature(
             );
         }
     }
-    let canonical = Type::Tensor(out_dims, result_prec);
+    let canonical = match pending_sum_result {
+        Some(variable) => publish_sum_result(
+            "sum",
+            out_dims,
+            SumResultPrecision::Pending(variable),
+            SumResultSlot::Fresh(vg),
+            site.owned_location(),
+            subst,
+        ),
+        None => Type::Tensor(out_dims, result_prec),
+    };
     if let Err(te) = unify(result_ty, &canonical, subst) {
         let mut error: CheckError = te.into();
         error.message = format!("{name} result (from argument 1): {}", error.message);

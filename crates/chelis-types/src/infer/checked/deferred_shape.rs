@@ -416,6 +416,7 @@ impl InferenceProduct {
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
+                    vg,
                     subst,
                     errors,
                 ),
