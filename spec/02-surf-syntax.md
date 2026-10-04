@@ -1074,7 +1074,12 @@ a `List` and is never converted, so a tensor argument is written
 `f(to_tensor([1.0, 2.0]))` and a tensor cast is written
 `cast(to_tensor([1.1, 2.2]), f64)`, which binds both decimals at `f64`. A call
 through a lexical binding that shadows `to_tensor` is an ordinary call: its
-argument is a `List` and adopts nothing.
+argument is a `List` and adopts nothing. A bare bracket literal that its own
+declaration converts is rejected where a lexical binding named `to_tensor` is
+in scope, because the conversion would resolve to that binding. A call through
+a lexical binding that shadows a top-level function is not a call to that
+function: position 2 reads the declared signature only of the function the
+callee names.
 
 Position 4 applies to a bare scalar numeric literal as well as to a
 tensor-literal body: `cast(1.1, f64)` binds the decimal at
