@@ -12,11 +12,12 @@
 //!
 //! `str::trim` removes exactly the leading and trailing White_Space
 //! characters. The integer grammar is then the standard library's: an
-//! optional sign followed by one or more ASCII digits. A finite float
-//! spelling is rounded by the exact integer-ratio conversion that the
-//! scalar-carrier parse also uses, so the result is correctly rounded at any
-//! length and does not depend on the caller's floating-point environment; the
-//! two contracts differ only in what overflow means.
+//! optional sign followed by one or more ASCII digits. Every float spelling
+//! other than the exceptional ones goes to the exact integer-ratio conversion
+//! that the scalar-carrier parse also uses. It owns the finite grammar, which
+//! the two atoms state identically, and it rounds correctly at any length
+//! without depending on the caller's floating-point environment. The two
+//! contracts differ there only in what overflow means.
 
 use crate::decimal_parse::{self, Rounded};
 
@@ -45,32 +46,12 @@ pub fn to_float(text: &str) -> Option<f64> {
     if unsigned.eq_ignore_ascii_case("nan") {
         return Some(f64::from_bits(sign | QUIET_NAN_BITS));
     }
-    if !finite_spelling(unsigned) {
-        return None;
-    }
     Some(match decimal_parse::round_decimal(text, 11, 52, 1023)? {
         Rounded::Bits(bits) => f64::from_bits(bits),
         Rounded::Overflow { negative } => {
             f64::from_bits(if negative { SIGN_BIT } else { 0 } | INFINITY_BITS)
         }
     })
-}
-
-/// The unsigned finite grammar `([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?`.
-fn finite_spelling(unsigned: &str) -> bool {
-    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
-    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
-        None => (unsigned, None),
-    };
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let mantissa_valid =
-        !(whole.is_empty() && fraction.is_empty()) && digits(whole) && digits(fraction);
-    let exponent_valid = exponent.is_none_or(|exponent| {
-        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-        !exponent.is_empty() && digits(exponent)
-    });
-    mantissa_valid && exponent_valid
 }
 
 #[cfg(test)]

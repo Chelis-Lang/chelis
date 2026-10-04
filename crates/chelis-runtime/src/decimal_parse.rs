@@ -76,7 +76,10 @@ fn scaled_round(numerator: &BigUint, denominator: &BigUint, binary_shift: i32) -
     }
 }
 
-/// `None` only for text outside the finite decimal grammar.
+/// `None` only for text outside the finite decimal grammar, which [05-OP-31]
+/// and [05-OP-59] state identically: an optional sign, then one or more ASCII
+/// digits with an optional point and fraction digits or a point and one or
+/// more digits, then an optional `[eE][+-]?[0-9]+` exponent.
 fn finite_decimal_ratio(text: &str) -> Option<DecimalValue> {
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),

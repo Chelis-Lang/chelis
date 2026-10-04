@@ -4384,40 +4384,6 @@ fn valid_signed_decimal(text: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn valid_finite_decimal(text: &str) -> bool {
-    let unsigned = text
-        .strip_prefix('+')
-        .or_else(|| text.strip_prefix('-'))
-        .unwrap_or(text);
-    if unsigned.is_empty() {
-        return false;
-    }
-    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
-        Some(index) => (&unsigned[..index], Some(&unsigned[index + 1..])),
-        None => (unsigned, None),
-    };
-    if mantissa.bytes().any(|byte| byte == b'e' || byte == b'E') {
-        return false;
-    }
-    if let Some(exponent) = exponent {
-        let digits = exponent
-            .strip_prefix('+')
-            .or_else(|| exponent.strip_prefix('-'))
-            .unwrap_or(exponent);
-        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            return false;
-        }
-    }
-    match mantissa.split_once('.') {
-        Some((whole, fraction)) => {
-            (!whole.is_empty() || !fraction.is_empty())
-                && whole.bytes().all(|byte| byte.is_ascii_digit())
-                && fraction.bytes().all(|byte| byte.is_ascii_digit())
-        }
-        None => !mantissa.is_empty() && mantissa.bytes().all(|byte| byte.is_ascii_digit()),
-    }
-}
-
 fn parse_integer_scalar(text: &str, dtype: RuntimeDType) -> Option<chelis_scalar> {
     if !valid_signed_decimal(text) {
         return None;
@@ -4465,8 +4431,7 @@ fn parse_float_scalar(text: &str, dtype: RuntimeDType) -> Option<chelis_scalar> 
     if !matches!(
         dtype,
         RuntimeDType::F16 | RuntimeDType::Bf16 | RuntimeDType::F32 | RuntimeDType::F64
-    ) || !valid_finite_decimal(text)
-    {
+    ) {
         return None;
     }
     let bits = match dtype {
