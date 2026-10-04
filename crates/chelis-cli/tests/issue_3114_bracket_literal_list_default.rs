@@ -89,7 +89,7 @@ fn unannotated_bracket_literals_are_lists_in_every_lane_and_after_resugaring() {
         ("[1i64, 2i64]", 2),
         // The chelis#3114 reproduction: `neg(2.0f64)` resugars as `-2.0f64`.
         ("[1.0f64, neg(2.0f64)]", 2),
-        ("[(1.0 : f64), 2.0f64]", 2),
+        ("[(1.0f64 : f64), 2.0f64]", 2),
         ("[half(), 2.0f64]", 2),
         // A List of Lists may be ragged; only a tensor literal is rejected.
         ("[[1i64], [2i64, 3i64]]", 2),
