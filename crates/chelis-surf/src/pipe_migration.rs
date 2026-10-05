@@ -379,8 +379,18 @@ fn source_span(span: &str) -> Option<(usize, usize)> {
 fn literal_dtypes(
     expr: &RawExpr,
     result: &mut BTreeMap<(usize, usize), String>,
+    negated_literals: &mut BTreeSet<(usize, usize)>,
     binding_value: bool,
 ) -> Result<(), String> {
+    if head(expr) == Some("app")
+        && let Some([callee, literal]) = kids(expr)
+        && variable(callee) == Some("neg")
+        && head(literal) == Some("lit")
+        && let Some(span) = node_metadata(expr, binding_value)?.span_id()
+        && let Some(span) = source_span(span.value())
+    {
+        negated_literals.insert(span);
+    }
     let metadata = if head(expr) == Some("lit") {
         node_metadata(expr, binding_value)?
     } else {
@@ -404,24 +414,29 @@ fn literal_dtypes(
                     || index == 1
                     || (index >= 2 && contains_program_child(tag, index - 2, arity))
                 {
-                    literal_dtypes(item, result, is_bind_value(head(expr), index))?;
+                    literal_dtypes(
+                        item,
+                        result,
+                        negated_literals,
+                        is_bind_value(head(expr), index),
+                    )?;
                 }
             }
         }
         RawExpr::Map(entries, _) => {
             for (key, value) in entries {
                 if contains_program_nodes(key) {
-                    literal_dtypes(value, result, false)?;
+                    literal_dtypes(value, result, negated_literals, false)?;
                 }
             }
         }
         RawExpr::MetaExpr { entries, expr, .. } => {
             for (key, value) in entries {
                 if contains_program_nodes(key) {
-                    literal_dtypes(value, result, false)?;
+                    literal_dtypes(value, result, negated_literals, false)?;
                 }
             }
-            literal_dtypes(expr, result, false)?;
+            literal_dtypes(expr, result, negated_literals, false)?;
         }
         RawExpr::Atom(..) | RawExpr::ExtensionData(_) => {}
     }
@@ -435,30 +450,68 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
     let mut baseline =
         chelis_deep::parser::parse_pipe_migration_raw(previous_deep).map_err(|e| e.to_string())?;
     let mut dtypes = BTreeMap::new();
+    let mut old_negated_literals = BTreeSet::new();
     for expr in &baseline {
-        literal_dtypes(expr, &mut dtypes, false)?;
+        literal_dtypes(expr, &mut dtypes, &mut old_negated_literals, false)?;
     }
     let mut decls = crate::parser::parse_pipe_migration(source).map_err(|e| e.to_string())?;
     let mut current_dtypes = BTreeMap::new();
+    let mut current_negated_literals = BTreeSet::new();
     let current = crate::desugar::desugar_program(&decls).map_err(|error| error.to_string())?;
     for expr in &current {
-        literal_dtypes(&expr.to_raw(), &mut current_dtypes, false)?;
+        literal_dtypes(
+            &expr.to_raw(),
+            &mut current_dtypes,
+            &mut current_negated_literals,
+            false,
+        )?;
     }
     let mut signed_spans = BTreeMap::new();
     let mut authored_lambdas = BTreeSet::new();
+    let mut shape_edits = BTreeMap::new();
     pipe_sugar::visit_program_mut(&mut decls, &mut |expr| {
         if let Expr::Unary(UnaryOp::Neg, value, span) = expr
             && let Expr::Lit(Literal::Int(_) | Literal::Float(_), literal) = &**value
         {
-            signed_spans.insert(
-                (literal.offset, literal.offset + literal.len),
-                (span.offset, span.offset + span.len),
-            );
+            let literal_key = (literal.offset, literal.offset + literal.len);
+            let signed_key = (span.offset, span.offset + span.len);
+            signed_spans.insert(literal_key, signed_key);
+            if old_negated_literals.contains(&signed_key)
+                && !current_dtypes.contains_key(&literal_key)
+                && current_dtypes.contains_key(&signed_key)
+            {
+                // Contextual cast typing can collapse a negative argument even
+                // without changing its dtype. Keep the proven old neg operation
+                // as a call; do not weaken the complete graph comparison or add
+                // a suffix merely to prevent sign folding.
+                shape_edits.insert((span.offset, literal.offset), "neg(".to_string());
+                shape_edits.insert((literal_key.1, literal_key.1), ")".to_string());
+                *expr = Expr::Apply(
+                    Box::new(Expr::Var("neg".into(), *span)),
+                    vec![(**value).clone()],
+                    *span,
+                );
+            }
         }
         if let Expr::Lambda(_, _, span) = expr {
             authored_lambdas.insert(span.offset);
         }
     });
+    if !shape_edits.is_empty() {
+        // Check original comments before replacing any authored token range.
+        crate::format::format_pipe_migration_source(source, &decls)
+            .map_err(|error| error.to_string())?;
+        current_dtypes.clear();
+        current_negated_literals.clear();
+        for expr in crate::desugar::desugar_program(&decls).map_err(|error| error.to_string())? {
+            literal_dtypes(
+                &expr.to_raw(),
+                &mut current_dtypes,
+                &mut current_negated_literals,
+                false,
+            )?;
+        }
+    }
     let mut edits = BTreeMap::new();
     let mut failure = None;
     pipe_sugar::visit_program_mut(&mut decls, &mut |expr| {
@@ -468,15 +521,18 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
         pipe_sugar::visit_expr_mut(seed, &mut |value| {
             if let Expr::Lit(Literal::Int(_) | Literal::Float(_), span) = value {
                 let literal_key = (span.offset, span.offset + span.len);
-                let key = signed_spans
+                let signed_key = signed_spans.get(&literal_key);
+                let old_dtype = dtypes
                     .get(&literal_key)
-                    .copied()
-                    .unwrap_or(literal_key);
-                if let Some(dtype) = dtypes.get(&key) {
+                    .or_else(|| signed_key.and_then(|key| dtypes.get(key)));
+                let current_dtype = current_dtypes
+                    .get(&literal_key)
+                    .or_else(|| signed_key.and_then(|key| current_dtypes.get(key)));
+                if let Some(dtype) = old_dtype {
                     // A suffix is necessary only if normalization changes
                     // literal adoption. The complete expanded-Deep comparison
                     // remains the publication oracle, including unknown types.
-                    if current_dtypes.get(&key) != Some(dtype) {
+                    if current_dtype != Some(dtype) {
                         edits.insert(literal_key.1, dtype.clone());
                     }
                 } else {
@@ -492,8 +548,14 @@ pub fn prepare(source: &str, previous_deep: &str) -> Result<PipeMigration, Strin
         return Err(failure);
     }
     let mut suffixed = source.to_string();
-    for (offset, dtype) in edits.into_iter().rev() {
-        suffixed.insert_str(offset, &dtype);
+    for (offset, dtype) in edits {
+        shape_edits
+            .entry((offset, offset))
+            .and_modify(|closing| closing.insert_str(0, &dtype))
+            .or_insert(dtype);
+    }
+    for ((start, end), replacement) in shape_edits.into_iter().rev() {
+        suffixed.replace_range(start..end, &replacement);
     }
     let decls = crate::parser::parse_pipe_migration(&suffixed).map_err(|e| e.to_string())?;
     let source = crate::format::format_pipe_migration_source(&suffixed, &decls)

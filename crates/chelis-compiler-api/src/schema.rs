@@ -1716,12 +1716,42 @@ pub struct WireParam {
     pub span: Span,
 }
 
+/// Cast-rung transport for authored pipe stages, including the nested named rung.
+/// Its
+/// spelling mirrors the authored syntax packet rather than exposing Deep AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeCastMode {
+    Checked,
+    Named(WirePipeNamedCastMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeNamedCastMode {
+    Trunc,
+    Saturate,
+    Wrap,
+}
+
+impl From<chelis_deep::CastMode> for WirePipeCastMode {
+    fn from(mode: chelis_deep::CastMode) -> Self {
+        use chelis_deep::{CastMode, NamedCastMode};
+        match mode {
+            CastMode::Checked => Self::Checked,
+            CastMode::Named(mode) => Self::Named(match mode {
+                NamedCastMode::Trunc => WirePipeNamedCastMode::Trunc,
+                NamedCastMode::Saturate => WirePipeNamedCastMode::Saturate,
+                NamedCastMode::Wrap => WirePipeNamedCastMode::Wrap,
+            }),
+        }
+    }
+}
+
 /// Authored pipe-stage syntax; normalization consumes this before literal typing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WirePipeStageSyntax {
     Callable,
     CallFirst,
-    Cast(chelis_deep::CastMode),
+    Cast(WirePipeCastMode),
     Copy,
     Realize,
 }
@@ -1732,7 +1762,7 @@ impl From<chelis_surf::ast::PipeStageSyntax> for WirePipeStageSyntax {
         match syntax {
             S::Callable => Self::Callable,
             S::CallFirst => Self::CallFirst,
-            S::Cast(mode) => Self::Cast(mode),
+            S::Cast(mode) => Self::Cast(mode.into()),
             S::Copy => Self::Copy,
             S::Realize => Self::Realize,
         }

@@ -35,7 +35,9 @@ Deep vocabulary and ingress reject the retired node.
 `chelis migrate pipes --baseline-compiler OLD --inplace PATH...` is the reusable
 shell/downstream migration surface. It obtains literal dtypes and expanded Deep
 from the previous compiler, suffixes only unsuffixed seed numbers whose dtype
-would change (including signed literals), and checks
+would change (including signed literals). It retains a historical negative-seed
+operation as an explicit `neg(...)` call when contextual cast typing would
+otherwise collapse it to a literal, including same-width casts, and checks
 normalized expanded Deep equality before atomic batch replacement. Missing evidence
 or an unpreservable comment rejects the migration. `--check` performs the same
 proof and rejects files needing edits. `--keep-going` explicitly selects

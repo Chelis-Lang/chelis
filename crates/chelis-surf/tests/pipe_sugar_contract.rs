@@ -335,6 +335,35 @@ fn migration_preserves_literal_dtype_and_old_grouping() {
 }
 
 #[test]
+fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_widths() {
+    // Actual c5e4d116 receipt: a standalone negative seed retains a neg call,
+    // unlike a negative literal already inside a cast's contextual argument.
+    let previous = r#"(def {span: "surf:0..23"} out (pipe {span: "surf:6..23"} (app {span: "surf:6..10"} (var {} neg) (lit {span: "surf:7..10", type: (t-prim {} f32)} 0.1)) (fn {span: "surf:14..23", surf_pipe_stage: "call-first"} (params {} __chelis_pipe) (cast {span: "surf:14..23"} (var {span: "surf:14..18"} __chelis_pipe) (t-prim {} f64)))))"#;
+    for (old_dtype, dtype) in [("f32", "f32"), ("f32", "f64"), ("f64", "f64")] {
+        let source = format!("out = -0.1 |> cast({dtype})\n");
+        let previous = previous
+            .replace("(t-prim {} f64)", &format!("(t-prim {{}} {dtype})"))
+            .replace(
+                "type: (t-prim {} f32)",
+                &format!("type: (t-prim {{}} {old_dtype})"),
+            );
+        let migrated = chelis_surf::pipe_migration::prepare(&source, &previous).unwrap();
+        let suffix = if old_dtype == "f32" { "" } else { old_dtype };
+        assert_eq!(
+            migrated.source,
+            format!("out = neg(0.1{suffix}) |> cast({dtype})\n")
+        );
+        assert_eq!(
+            meaning(&migrated.source),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+        );
+        assert_eq!(format_source(&migrated.source).unwrap(), migrated.source);
+        let missing = previous.replace(&format!(", type: (t-prim {{}} {old_dtype})"), "");
+        assert!(chelis_surf::pipe_migration::prepare(&source, &missing).is_err());
+    }
+}
+
+#[test]
 fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     let source = "out = cast(-1.0, f32) |> f\n";
     let previous = "(def {} out (pipe {} (cast {} (lit {span: \"surf:11..15\", type: (t-prim {} f32)} -1.0) (t-prim {} f32)) (var {} f)))";
