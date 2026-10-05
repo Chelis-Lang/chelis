@@ -64,6 +64,21 @@ STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
 DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
 DEFAULT_DURATION_MILLISECONDS = 30_000
+# chelis#2355: a target a pull request adds or directly modifies, with no
+# duration row, whose change-owned run exceeds the collection threshold gets
+# its row collected into the report artifact and a visible warning; above the
+# blocking threshold the report fails until the row is added, so the
+# package-expansion planner never weights a shard-sized target at the default.
+DURATION_ROW_BLOCK_MILLISECONDS = 600_000
+DURATION_ROW_THRESHOLD_MILLISECONDS = 120_000
+# Below the collection threshold but within this band, an unrowed target is
+# reported as an advisory: run-to-run timing noise can carry it over.
+DURATION_ROW_ADVISORY_MILLISECONDS = 60_000
+DURATION_ROW_CANDIDATES_FILE = "duration-row-candidates.json"
+DURATION_ROW_UNDERESTIMATE_RATIO = 3
+DURATION_ROW_SCOPE_KINDS = frozenset(
+    {"integration_target_added", "integration_target_directly_modified"}
+)
 CHANGE_OWNED_SHARD_ALGORITHM = "duration-lpt-v1"
 PACKAGE_EXPANSION_SHARD_ALGORITHM = "duration-lpt-v1"
 PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM = "sha256-modulo-v1"
@@ -4448,6 +4463,192 @@ def validate_change_owned_report(
     }
 
 
+def duration_row_scope(plan: Mapping[str, Any]) -> list[str]:
+    """The targets this pull request adds or directly modifies, from the plan.
+
+    An added target is a workspace target the candidate has and the base does
+    not (`target_dispositions`), which includes one added or renamed by a
+    `[[test]]` entry; a directly modified target is one whose own source file
+    changed (`path_dispositions`)."""
+    return sorted(
+        {
+            row["identity"]
+            for key in ("path_dispositions", "target_dispositions")
+            for row in plan.get(key, [])
+            if row.get("kind") in DURATION_ROW_SCOPE_KINDS
+        }
+    )
+
+
+def _change_owned_observations(
+    documents: Sequence[tuple[Mapping[str, Any], Path]],
+) -> dict[str, tuple[int, int]]:
+    """Each executed change-owned target's run milliseconds and its
+    list-plus-run milliseconds, the figure `build-duration-baseline` records
+    for a change-owned sample.
+
+    The run time is what the gate judges. A change-owned target runs as its
+    own command, so the first target of a crate on a shard pays that crate's
+    test-binary compilation in its list step (about 120s for
+    chelis-compiler-api); package expansion compiles grouped targets together,
+    so that cost is not the target's own."""
+    observations: dict[str, tuple[int, int]] = {}
+    for receipt, junit_path in documents:
+        timings = _strict_json_object(junit_path.parent / receipt["timings_file"])
+        raw_targets = timings.get("targets")
+        if not isinstance(raw_targets, dict):
+            raise ValueError(
+                f"change-owned shard {receipt['shard']} timings have no targets"
+            )
+        for canonical in receipt["executed_targets"]:
+            row = raw_targets.get(canonical)
+            if not isinstance(row, dict):
+                raise ValueError(f"change-owned timing is missing for {canonical}")
+            list_seconds = _duration_seconds(
+                row.get("list_seconds"), f"change-owned {canonical} list_seconds"
+            )
+            run_seconds = _duration_seconds(
+                row.get("run_seconds"), f"change-owned {canonical} run_seconds"
+            )
+            observations[canonical] = (
+                max(1, math.ceil(run_seconds * 1000)),
+                max(1, math.ceil((list_seconds + run_seconds) * 1000)),
+            )
+    return observations
+
+
+def duration_row_review(
+    plan: Mapping[str, Any],
+    documents: Sequence[tuple[Mapping[str, Any], Path]],
+    duration_baseline: DurationBaseline,
+) -> dict[str, list[str]]:
+    """Collect a duration row for each heavy target this pull request adds or
+    directly modifies, and require it for a shard-sized one (chelis#2355).
+
+    An unrowed target that ran over the collection threshold gets a visible
+    warning and its row in `candidates`; over the blocking threshold it is a
+    failure. Only a target with no row in the candidate's checked-in baseline
+    is judged,
+    so the rule is sticky: once a row exists the target is never judged again,
+    whatever later runs observe. The judged time is the target's test run, not
+    its list step's compilation. Receipt time is load-sensitive, so an unrowed
+    target whose time sits near the threshold can pass one run and fail an
+    identical rerun; the advisory band names such targets on a passing run, and
+    adding the row the failure prints ends the flap for good. An existing row
+    that underestimates the observed time is reported, not failed: the planner
+    already weights that target, and its refresh is the baseline refresh's job.
+    A target in scope that the lane did not execute (a manual gate or standing
+    coverage) is listed as unjudged rather than skipped silently.
+    """
+    scope = duration_row_scope(plan)
+    observations = _change_owned_observations(documents)
+    unexecuted = {row["identity"]: "manual gate" for row in plan["manual_gate_targets"]}
+    unexecuted.update(
+        {identity: "standing coverage" for identity in plan["standing_coverage_reuse"]}
+    )
+    rows = {identity.canonical: ms for identity, ms in duration_baseline.targets.items()}
+    failures: list[str] = []
+    warnings: list[str] = []
+    advisories: list[str] = []
+    unjudged: list[str] = []
+    candidates: dict[str, dict[str, int]] = {}
+    for identity in scope:
+        observation = observations.get(identity)
+        if observation is None:
+            if identity in unexecuted:
+                unjudged.append(f"{identity}: not executed here ({unexecuted[identity]})")
+                continue
+            raise ValueError(f"change-owned timing is missing for {identity}")
+        observed, row_value = observation
+        row = rows.get(identity)
+        if row is not None:
+            if (
+                observed > DURATION_ROW_THRESHOLD_MILLISECONDS
+                and observed > DURATION_ROW_UNDERESTIMATE_RATIO * row
+            ):
+                advisories.append(
+                    f"{identity}: ran {observed / 1000:.1f}s against its "
+                    f"{row / 1000:.1f}s row; a baseline refresh will correct it"
+                )
+            continue
+        row_text = canonical_json(
+            {identity: {"milliseconds": row_value, "samples": 1}}
+        ).decode().strip()[1:-1]
+        fix = (
+            f"`python3 scripts/ci_change_owned.py set-duration-row {identity} "
+            f"{row_value}` (it writes {row_text}, its list-plus-run time, into "
+            f"the baseline's targets)"
+        )
+        baseline_path = DURATION_BASELINE_PATH.relative_to(ROOT)
+        if observed > DURATION_ROW_THRESHOLD_MILLISECONDS:
+            candidates[identity] = {"milliseconds": row_value, "samples": 1}
+        if observed > DURATION_ROW_BLOCK_MILLISECONDS:
+            failures.append(
+                f"duration row required: {identity} ran {observed / 1000:.1f}s in "
+                f"change-owned CI, over the "
+                f"{DURATION_ROW_BLOCK_MILLISECONDS // 1000}s threshold, and "
+                f"{baseline_path} has no row for it, so package expansion would "
+                f"weight it at the {DEFAULT_DURATION_MILLISECONDS // 1000}s "
+                f"default. Add the row with {fix} and push."
+            )
+        elif observed > DURATION_ROW_THRESHOLD_MILLISECONDS:
+            warnings.append(
+                f"duration row missing: {identity} ran {observed / 1000:.1f}s in "
+                f"change-owned CI and {baseline_path} has no row for it; its "
+                f"row is collected in {DURATION_ROW_CANDIDATES_FILE}, or add it "
+                f"now with {fix}"
+            )
+        elif observed > DURATION_ROW_ADVISORY_MILLISECONDS:
+            advisories.append(
+                f"{identity}: ran {observed / 1000:.1f}s with no duration row; "
+                f"timing noise can carry it over the "
+                f"{DURATION_ROW_THRESHOLD_MILLISECONDS // 1000}s collection "
+                f"threshold, so consider {fix}"
+            )
+    return {
+        "failures": failures,
+        "warnings": warnings,
+        "advisories": advisories,
+        "unjudged": unjudged,
+        "candidates": candidates,
+    }
+
+
+def write_duration_row_candidates(
+    output: Path, candidates: Mapping[str, Mapping[str, int]]
+) -> None:
+    """The collected rows, in the baseline's own row format, for a refresh to
+    fold in. Written on every change-owned report, empty when none."""
+    output.mkdir(parents=True, exist_ok=True)
+    (output / DURATION_ROW_CANDIDATES_FILE).write_bytes(
+        canonical_json({"version": 1, "targets": dict(sorted(candidates.items()))})
+    )
+
+
+def set_duration_row(
+    path: Path, identity: str, milliseconds: int, *, replace: bool = False
+) -> None:
+    """Write one reviewed row into the duration baseline, keeping its canonical
+    form, so the row a duration-row report prints is one command away.
+
+    Offline: it reads only the baseline and checks the identity's
+    `package::target` form, not that the target exists; the planner never
+    looks up a row for an absent target. A row measured over several samples
+    is a refresh's work and is replaced only with `replace`."""
+    Identity.parse(identity)
+    _positive_int(milliseconds, "duration row milliseconds")
+    load_duration_baseline(path)
+    data = _strict_json_object(path)
+    existing = data["targets"].get(identity)
+    if existing is not None and existing["samples"] > 1 and not replace:
+        raise ValueError(
+            f"{identity} has a row from {existing['samples']} samples; pass "
+            f"--replace to overwrite it"
+        )
+    data["targets"][identity] = {"milliseconds": milliseconds, "samples": 1}
+    path.write_bytes(canonical_json(data))
+
+
 def shard_durations(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
@@ -4909,6 +5110,7 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
+    lines.extend(f"  - {finding}" for finding in report["failures"])
     if report["lane"] == "change-owned":
         manual_gates = report.get("manual_gate_targets", [])
         lines.append(f"- Manual gates, not executed in PR CI: {len(manual_gates)}")
@@ -4920,6 +5122,16 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
                 f"{MANUAL_GATES_PATH} {entries} ({row['tracking_issue']})"
             )
     lines.extend(_classification_counts(report))
+    duration_rows = report.get("duration_rows", {})
+    for label, key in (
+        ("Duration-row warnings (row collected, not blocking)", "warnings"),
+        ("Duration-row advisories", "advisories"),
+        ("Not judged for a duration row", "unjudged"),
+    ):
+        entries = duration_rows.get(key, [])
+        if entries:
+            lines.append(f"- {label}: {len(entries)}")
+            lines.extend(f"  - {entry}" for entry in entries)
     for row in report.get("shard_durations", []):
         weight = row["estimated_milliseconds"] / 1000
         actual = row["actual_milliseconds"]
@@ -4928,8 +5140,6 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
             f"- Shard {row['shard']}: took {actual_text} "
             f"(balancing weight {weight:.3f}s)"
         )
-    for finding in report["failures"]:
-        lines.append(f"  - {finding}")
     lines.extend(_classification_lines(report))
     (output / "summary.md").write_text("\n".join(lines) + "\n")
 
@@ -5074,6 +5284,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     duration_baseline.add_argument("--output", type=Path, required=True)
 
+    duration_row = subparsers.add_parser(
+        "set-duration-row",
+        help="write one target's row into the reviewed duration baseline",
+    )
+    duration_row.add_argument("identity", help="package::target")
+    duration_row.add_argument("milliseconds", type=int)
+    duration_row.add_argument("--baseline", type=Path, default=DURATION_BASELINE_PATH)
+    duration_row.add_argument(
+        "--replace",
+        action="store_true",
+        help="overwrite a row measured over several samples",
+    )
+
     run_shard = subparsers.add_parser("run-shard", help="execute one plan shard")
     run_shard.add_argument("--plan", type=Path, required=True)
     run_shard.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
@@ -5197,6 +5420,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{len(result['sources'])} samples"
         )
         return 0
+    if args.command == "set-duration-row":
+        set_duration_row(
+            args.baseline, args.identity, args.milliseconds, replace=args.replace
+        )
+        print(f"DURATION ROW: {args.identity} = {args.milliseconds} ms")
+        return 0
     if args.command == "run-shard":
         plan = load_json(args.plan)
         receipt = execute_shard(
@@ -5264,18 +5493,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     plan = load_json(args.plan)
     if args.lane == "change-owned":
+        candidates: Mapping[str, Mapping[str, int]] = {}
+        duration_rows: dict[str, Any] | None = None
         try:
-            receipts = load_receipts(args.receipts_root)
+            documents = load_receipt_documents(args.receipts_root)
             standing_coverage = (
                 load_json(args.standing_coverage)
                 if args.standing_coverage is not None
                 else None
             )
+            # The duration review runs before validation so its collected
+            # rows reach the artifact even when a test or a receipt fails.
+            review_error: Exception | None = None
+            try:
+                duration_rows = duration_row_review(
+                    plan, documents, load_duration_baseline()
+                )
+                candidates = duration_rows["candidates"]
+            except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+                review_error = error
             result = validate_change_owned_report(
                 plan,
-                receipts,
+                [receipt for receipt, _ in documents],
                 standing_coverage,
             )
+            if review_error is not None:
+                raise review_error
         except (
             ValueError,
             KeyError,
@@ -5295,8 +5538,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "standing_reused_targets": [],
                 "failures": [str(error)],
             }
+            if duration_rows is not None:
+                result["duration_rows"] = duration_rows
+                result["failures"].extend(duration_rows["failures"])
+            write_duration_row_candidates(args.output, candidates)
             _write_report_files(args.output, result)
             print(f"CHANGE-OWNED REPORT: FAIL: {error}", file=sys.stderr)
+            return 1
+        assert duration_rows is not None
+        result["duration_rows"] = duration_rows
+        write_duration_row_candidates(args.output, candidates)
+        if duration_rows["failures"]:
+            # A blocked report keeps its coverage and the other targets'
+            # warnings and advisories; only the verdict changes.
+            result["success"] = False
+            result["failures"] = list(duration_rows["failures"])
+            _write_report_files(args.output, result)
+            print(
+                "CHANGE-OWNED REPORT: FAIL: " + "; ".join(duration_rows["failures"]),
+                file=sys.stderr,
+            )
             return 1
     else:
         try:
