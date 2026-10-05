@@ -413,6 +413,49 @@ fn migration_validates_compacting_stage_annotations_before_erasure() {
 }
 
 #[test]
+fn migration_requires_node_maps_and_preserves_macro_source_data() {
+    let source = "out = x |> f(y)\n";
+    let previous = "(def {} out (pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) (app {} (var {} f) (var {} p) (var {} y)))))";
+    let valid = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    assert_eq!(
+        meaning(&valid.source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&valid.baseline).unwrap())
+    );
+    for (owner, pattern) in [
+        ("fn", "(fn {surf_pipe_stage: \"call-first\"}"),
+        ("pipe", "(pipe {}"),
+    ] {
+        for replacement in ["true", "(var {} x)", "()", ""] {
+            let malformed = previous.replace(pattern, &format!("({owner} {replacement}"));
+            let error = match chelis_surf::pipe_migration::prepare(source, &malformed) {
+                Ok(_) => panic!("accepted non-map envelope for {owner}: {replacement}"),
+                Err(error) => error,
+            };
+            assert!(error.contains("metadata map"), "{error}");
+        }
+    }
+    for data in [
+        "(pipe x y z)",
+        "(fn true x y)",
+        "(pipe (lit {span: true} 1) x y)",
+    ] {
+        let previous =
+            format!("(def {{}} out (pipe {{}} (var {{}} x) (var {{source: {data}}} f)))");
+        let migrated = chelis_surf::pipe_migration::prepare("out = x |> f\n", &previous).unwrap();
+        assert!(print_canonical(&migrated.baseline).contains(data), "{data}");
+    }
+    for data in ["true", "(true x y)"] {
+        let previous =
+            format!("(def {{}} out (pipe {{}} (var {{}} x) (var {{source: {data}}} f)))");
+        let error = match chelis_surf::pipe_migration::prepare("out = x |> f\n", &previous) {
+            Ok(_) => panic!("accepted malformed source record: {data}"),
+            Err(error) => error,
+        };
+        assert!(error.contains("source"), "{error}");
+    }
+}
+
+#[test]
 fn migration_preserves_trailing_lambda_and_conditional_grouping() {
     for (source, previous) in [
         (

@@ -355,6 +355,39 @@ fn migration_requires_old_dtype_evidence_and_checks_the_entire_batch_before_writ
         assert_eq!(fs::read_to_string(&first).unwrap(), source);
         assert_eq!(fs::read_to_string(&second).unwrap(), source);
     }
+    for (owner, pattern) in [
+        ("fn", "(fn {surf_pipe_stage: \"call-first\"}"),
+        ("pipe", "(pipe {}"),
+    ] {
+        for replacement in ["true", "(var {} x)", "()", ""] {
+            let malformed = receipt.replace(pattern, &format!("({owner} {replacement}"));
+            fs::write(&baseline, format!(
+                "#!{}\nimport sys\nfrom pathlib import Path\nsys.stdout.write({malformed:?} if Path(sys.argv[-1]).name == 'second.ch' else {receipt:?})\n",
+                python.trim()
+            )).unwrap();
+            fs::write(&first, source).unwrap();
+            fs::write(&second, source).unwrap();
+            let rejected = run(&[
+                args.as_slice(),
+                &[
+                    "--inplace",
+                    first.to_str().unwrap(),
+                    second.to_str().unwrap(),
+                ],
+            ]
+            .concat());
+            assert!(
+                !rejected.status.success(),
+                "accepted non-map {owner}: {rejected:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&rejected.stderr).contains("metadata map"),
+                "{rejected:?}"
+            );
+            assert_eq!(fs::read_to_string(&first).unwrap(), source);
+            assert_eq!(fs::read_to_string(&second).unwrap(), source);
+        }
+    }
 }
 
 #[test]

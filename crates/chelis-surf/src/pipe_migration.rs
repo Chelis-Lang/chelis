@@ -89,6 +89,7 @@ fn admitted_owner_metadata(owner: RawExpr, binding_value: bool) -> Result<Metada
     };
     match owner {
         chelis_deep::Expr::Node(node, _) => Ok(node.meta().clone()),
+        chelis_deep::Expr::Atom(..) => Ok(Metadata::default()),
         _ => Err("previous Deep annotation owner did not produce a typed node".into()),
     }
 }
@@ -127,8 +128,11 @@ fn decode_metadata(
 }
 
 fn node_metadata(expr: &RawExpr, binding_value: bool) -> Result<Metadata, String> {
-    if map_entries(expr).is_none() {
-        return Ok(Metadata::default());
+    if !matches!(expr, RawExpr::Atom(..)) && map_entries(expr).is_none() {
+        return Err(format!(
+            "previous Deep `{}` requires an inline metadata map",
+            head(expr).unwrap_or("annotation owner")
+        ));
     }
     // Placement-sensitive annotations (literal spelling, quantified bounds,
     // etc.) must be admitted on their real owner, not a standalone map.
@@ -201,8 +205,19 @@ fn is_bind_value(parent: Option<&str>, index: usize) -> bool {
     parent == Some("bind") && index >= 2 && (index - 2) % 2 == 1
 }
 
+fn contains_program_nodes(key: &str) -> bool {
+    !matches!(
+        chelis_deep::metadata::role(key),
+        chelis_deep::metadata::MetadataRole::Preserved
+            | chelis_deep::metadata::MetadataRole::BinderMap
+    )
+}
+
 fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
     let parent = head(expr).map(str::to_owned);
+    if parent.as_deref() == Some("pipe") && map_entries(expr).is_none() {
+        return Err("previous Deep `pipe` requires an inline metadata map".into());
+    }
     match expr {
         RawExpr::List(items, _) => {
             for (index, item) in items.iter_mut().enumerate() {
@@ -211,14 +226,18 @@ fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
         }
         RawExpr::Map(entries, _) => {
             entries.retain(|(key, _)| key != "surf_pipe_stage");
-            for (_, value) in entries {
-                fold(value, false)?;
+            for (key, value) in entries {
+                if contains_program_nodes(key) {
+                    fold(value, false)?;
+                }
             }
         }
         RawExpr::MetaExpr { entries, expr, .. } => {
             entries.retain(|(key, _)| key != "surf_pipe_stage");
-            for (_, value) in entries {
-                fold(value, false)?;
+            for (key, value) in entries {
+                if contains_program_nodes(key) {
+                    fold(value, false)?;
+                }
             }
             fold(expr, false)?;
         }
@@ -279,6 +298,8 @@ fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
                 entries.extend(annotations);
             }
         }
+    } else {
+        return Err("previous Deep `pipe` requires an inline metadata map".into());
     }
     *expr = carried;
     Ok(())
@@ -314,13 +335,17 @@ fn literal_dtypes(
             }
         }
         RawExpr::Map(entries, _) => {
-            for (_, value) in entries {
-                literal_dtypes(value, result, false)?;
+            for (key, value) in entries {
+                if contains_program_nodes(key) {
+                    literal_dtypes(value, result, false)?;
+                }
             }
         }
         RawExpr::MetaExpr { entries, expr, .. } => {
-            for (_, value) in entries {
-                literal_dtypes(value, result, false)?;
+            for (key, value) in entries {
+                if contains_program_nodes(key) {
+                    literal_dtypes(value, result, false)?;
+                }
             }
             literal_dtypes(expr, result, false)?;
         }
