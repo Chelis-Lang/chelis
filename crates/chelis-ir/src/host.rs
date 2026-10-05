@@ -15054,45 +15054,143 @@ fn fresh_binder_name(name: &str, avoid: &UnordSet<String>) -> String {
         .expect("an unused binder name exists")
 }
 
-fn collect_pattern_binder_names(pattern: &Expr, out: &mut UnordSet<String>) {
-    let Some((tag, _, kids)) = stamped_parts(pattern) else {
-        return;
-    };
-    match tag {
-        DeepTag::PatVar => {
-            if let Some(name) = kids.first().and_then(symbol_name) {
-                out.insert(name.to_string());
-            }
-        }
-        DeepTag::PatAs => {
-            if let Some(name) = kids.first().and_then(symbol_name) {
-                out.insert(name.to_string());
-            }
-            if let Some(inner) = kids.get(1) {
-                collect_pattern_binder_names(inner, out);
-            }
-        }
-        DeepTag::PatCtor => {
-            for child in kids.iter().skip(1) {
-                collect_pattern_binder_names(child, out);
-            }
-        }
-        DeepTag::PatRecord => {
-            for field in kids.iter().skip(1) {
-                if let Some((DeepTag::Kv, _, field_kids)) = stamped_parts(field)
-                    && let Some(field_pattern) = field_kids.get(1)
-                {
-                    collect_pattern_binder_names(field_pattern, out);
-                }
-            }
-        }
-        DeepTag::PatTuple => {
-            for child in kids {
-                collect_pattern_binder_names(child, out);
-            }
-        }
-        _ => {}
+/// The binder renames that keep `binders` from capturing a live replacement,
+/// and the shadow set for the scope those binders open (chelis#2163,
+/// chelis#3229).
+///
+/// The arguments being substituted in carry the CALLER's names. A binder that
+/// spells one of them would capture it, so it is renamed first. Renaming a
+/// binder preserves meaning ONLY when the fresh name is genuinely unused, so
+/// `live` stays narrow (rename no more than necessary) while `avoid` stays
+/// wide (collide with nothing). `construct` is the whole binding form - the
+/// `fn`, `let` or match arm - so `avoid` sees every name it already spells.
+fn capture_avoiding_renames(
+    construct: &Expr,
+    binders: &[String],
+    substitutions: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
+) -> (Vec<(String, String)>, UnordSet<String>) {
+    let mut bound = shadowed.clone();
+    bound.extend(binders.iter().cloned());
+    let live = live_replacement_names(substitutions, &bound);
+    let mut avoid = UnordSet::default();
+    for (_, replacement) in substitutions.to_sorted() {
+        collect_occurring_names(replacement, &mut avoid);
     }
+    collect_occurring_names(construct, &mut avoid);
+    avoid.extend(binders.iter().cloned());
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for name in binders {
+        if live.contains(name) && !renames.iter().any(|(from, _)| from == name) {
+            let fresh = fresh_binder_name(name, &avoid);
+            avoid.insert(fresh.clone());
+            renames.push((name.clone(), fresh));
+        }
+    }
+    let mut next_shadowed = shadowed.clone();
+    for name in binders {
+        match renames.iter().find(|(from, _)| from == name) {
+            Some((_, fresh)) => next_shadowed.insert(fresh.clone()),
+            None => next_shadowed.insert(name.clone()),
+        };
+    }
+    (renames, next_shadowed)
+}
+
+/// Rename the binders a Deep pattern introduces (chelis#3229).
+///
+/// Rewrites exactly the positions [`chelis_deep::pattern_binder_names`]
+/// reads as binders - a `pat-var`'s name, a `pat-as`'s outer name, and those
+/// nested in constructor, record-field and tuple sub-patterns - and leaves
+/// constructor names, record field labels and literals alone, keeping every
+/// node's metadata.
+fn rename_pattern_binders(pattern: &Expr, renames: &[(String, String)]) -> Expr {
+    if renames.is_empty() {
+        return pattern.clone();
+    }
+    let Expr::Node(node, span) = pattern else {
+        return pattern.clone();
+    };
+    let rename_name = |child: &Expr| match symbol_name(child)
+        .and_then(|name| renames.iter().find(|(from, _)| from == name))
+    {
+        Some((_, fresh)) => rename_binder_child(child, fresh),
+        None => child.clone(),
+    };
+    let kids = node.children_slice();
+    let children = match node.tag() {
+        // `(pat-var name)`, `(pat-as name pattern)`.
+        DeepTag::PatVar | DeepTag::PatAs => kids
+            .iter()
+            .enumerate()
+            .map(|(index, child)| match index {
+                0 => rename_name(child),
+                _ => rename_pattern_binders(child, renames),
+            })
+            .collect(),
+        // `(pat-ctor Ctor pattern...)`, `(pat-record Ctor (kv field pattern)...)`.
+        DeepTag::PatCtor | DeepTag::PatRecord => kids
+            .iter()
+            .enumerate()
+            .map(|(index, child)| match index {
+                0 => child.clone(),
+                _ => rename_pattern_binders(child, renames),
+            })
+            .collect(),
+        // A record field's label is not a binder; its sub-pattern is.
+        DeepTag::Kv => kids
+            .iter()
+            .enumerate()
+            .map(|(index, child)| match index {
+                1 => rename_pattern_binders(child, renames),
+                _ => child.clone(),
+            })
+            .collect(),
+        DeepTag::PatTuple => kids
+            .iter()
+            .map(|child| rename_pattern_binders(child, renames))
+            .collect(),
+        _ => return pattern.clone(),
+    };
+    Expr::node(node.tag(), node.meta().clone(), children, *span)
+}
+
+/// Substitute into one match arm (chelis#3229).
+///
+/// An arm's pattern binders scope over its guard and body exactly as a
+/// `fn`'s parameters scope over its body: they shadow a same-named
+/// replacement there, and a binder that would capture a name free in a live
+/// replacement is renamed in the pattern, guard and body together first.
+fn substitute_match_arm(
+    arm: &Expr,
+    substitutions: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
+) -> Expr {
+    let (Expr::Node(node, span), Some((DeepTag::Arm, _, kids))) = (arm, stamped_parts(arm)) else {
+        // Not an arm, so it opens no pattern scope; mirrors
+        // `rename_match_arm_bound_names`.
+        return substitute_expr(arm, substitutions, shadowed);
+    };
+    // An arm with no pattern child binds nothing. Spelled out rather than
+    // defaulted, as in the `fn` arm of `substitute_expr`.
+    let binders = match kids.first() {
+        Some(pattern) => chelis_deep::pattern_binder_names(pattern),
+        None => Vec::new(),
+    };
+    let (renames, next_shadowed) = capture_avoiding_renames(arm, &binders, substitutions, shadowed);
+    let children = kids
+        .iter()
+        .enumerate()
+        .map(|(index, child)| match index {
+            0 => rename_pattern_binders(child, &renames),
+            _ => substitute_expr(
+                &rename_bound_names(child, &renames, &UnordSet::new()),
+                substitutions,
+                &next_shadowed,
+            ),
+        })
+        .collect();
+    Expr::node(node.tag(), node.meta().clone(), children, *span)
 }
 
 fn rename_match_arm_bound_names(
@@ -15105,7 +15203,7 @@ fn rename_match_arm_bound_names(
     };
     let mut inner = shadowed.clone();
     if let Some(pattern) = kids.first() {
-        collect_pattern_binder_names(pattern, &mut inner);
+        inner.extend(chelis_deep::pattern_binder_names(pattern));
     }
     match arm {
         Expr::Node(node, span) => Expr::Node(
@@ -15345,44 +15443,18 @@ fn substitute_expr(
             // A `fn` with no params list contributes no binder names. Spelled
             // out rather than defaulted: an empty list is the stated outcome
             // here, not a fallback (loud_unsupported.md B2.5).
-            let param_names: Vec<Option<String>> = match params_list {
-                Some(params) => params.children_slice().iter().map(param_name).collect(),
+            let param_names: Vec<String> = match params_list {
+                Some(params) => params
+                    .children_slice()
+                    .iter()
+                    .filter_map(param_name)
+                    .collect(),
                 None => Vec::new(),
             };
-            // chelis#2163: the arguments being substituted in carry the
-            // CALLER's names. A binder here that spells one of them would
-            // capture it, so rename the binder first. Renaming a binder
-            // preserves meaning ONLY when the fresh name is genuinely unused,
-            // so `live` stays narrow (rename no more than necessary) while
-            // `avoid` stays wide (collide with nothing).
-            let mut bound = shadowed.clone();
-            for name in param_names.iter().flatten() {
-                bound.insert(name.clone());
-            }
-            let live = live_replacement_names(substitutions, &bound);
-            let mut avoid = UnordSet::default();
-            for (_, replacement) in substitutions.to_sorted() {
-                collect_occurring_names(replacement, &mut avoid);
-            }
-            collect_occurring_names(expr, &mut avoid);
-            for name in param_names.iter().flatten() {
-                avoid.insert(name.clone());
-            }
-            let mut renames: Vec<(String, String)> = Vec::new();
-            for name in param_names.iter().flatten() {
-                if live.contains(name) {
-                    let fresh = fresh_binder_name(name, &avoid);
-                    avoid.insert(fresh.clone());
-                    renames.push((name.clone(), fresh));
-                }
-            }
-            let mut next_shadowed = shadowed.clone();
-            for name in param_names.iter().flatten() {
-                match renames.iter().find(|(from, _)| from == name) {
-                    Some((_, fresh)) => next_shadowed.insert(fresh.clone()),
-                    None => next_shadowed.insert(name.clone()),
-                };
-            }
+            // chelis#2163: a parameter that spells a name free in a live
+            // replacement would capture it, so it is renamed first.
+            let (renames, next_shadowed) =
+                capture_avoiding_renames(expr, &param_names, substitutions, shadowed);
             let mut children = Vec::with_capacity(kids.len());
             if let Some(params) = kids.first() {
                 children.push(match (as_node(params), renames.is_empty()) {
@@ -15419,12 +15491,12 @@ fn substitute_expr(
                 .and_then(as_node)
                 .filter(|bind_list| bind_list.tag() == DeepTag::Bind);
             // As above: a `let` with no `bind` list binds nothing here.
-            let bound_names: Vec<Option<String>> = match bind_list {
+            let bound_names: Vec<String> = match bind_list {
                 Some(bind_list) => {
                     let bind_kids = bind_list.children_slice();
                     (0..bind_kids.len())
                         .step_by(2)
-                        .map(|index| {
+                        .filter_map(|index| {
                             bind_kids
                                 .get(index)
                                 .and_then(symbol_name)
@@ -15435,32 +15507,9 @@ fn substitute_expr(
                 None => Vec::new(),
             };
             // chelis#2163: same capture rule as the `fn` arm above, for a
-            // `let` binder, with the same narrow-`live`/wide-`avoid` split.
-            let mut bound = shadowed.clone();
-            for name in bound_names.iter().flatten() {
-                bound.insert(name.clone());
-            }
-            let live = live_replacement_names(substitutions, &bound);
-            let mut avoid = UnordSet::default();
-            for (_, replacement) in substitutions.to_sorted() {
-                collect_occurring_names(replacement, &mut avoid);
-            }
-            collect_occurring_names(expr, &mut avoid);
-            let mut renames: Vec<(String, String)> = Vec::new();
-            for name in bound_names.iter().flatten() {
-                if live.contains(name) {
-                    let fresh = fresh_binder_name(name, &avoid);
-                    avoid.insert(fresh.clone());
-                    renames.push((name.clone(), fresh));
-                }
-            }
-            let mut next_shadowed = shadowed.clone();
-            for name in bound_names.iter().flatten() {
-                match renames.iter().find(|(from, _)| from == name) {
-                    Some((_, fresh)) => next_shadowed.insert(fresh.clone()),
-                    None => next_shadowed.insert(name.clone()),
-                };
-            }
+            // `let` binder.
+            let (renames, next_shadowed) =
+                capture_avoiding_renames(expr, &bound_names, substitutions, shadowed);
             if kids.len() >= 2 {
                 let mut rebuilt = kids.to_vec();
                 // A binding's value is evaluated before that name is in
@@ -15529,6 +15578,20 @@ fn substitute_expr(
                     .collect();
                 Expr::node(list.tag(), list.meta().clone(), children, *span)
             }
+        }
+        // chelis#3229: each arm opens its own pattern scope; the scrutinee is
+        // outside every arm's scope.
+        Expr::Node(list, span) if list.tag() == DeepTag::Match => {
+            let children = list
+                .children_slice()
+                .iter()
+                .enumerate()
+                .map(|(index, child)| match index {
+                    0 => substitute_expr(child, substitutions, shadowed),
+                    _ => substitute_match_arm(child, substitutions, shadowed),
+                })
+                .collect();
+            Expr::node(list.tag(), list.meta().clone(), children, *span)
         }
         Expr::Node(node, span) => Expr::node(
             node.tag(),
@@ -27391,5 +27454,126 @@ mod record_hoist_binder_vocabulary_tests {
             claim(true),
             HostResultRequirementPlan::NamedList { state: 0, .. }
         ));
+    }
+}
+
+/// chelis#3229: inlining substitution respects match-arm pattern scope.
+#[cfg(test)]
+mod match_arm_substitution_tests {
+    use super::*;
+
+    fn deep(source: &str) -> Expr {
+        chelis_deep::parser::parse_str(source)
+            .expect("Deep fixture parses")
+            .into_iter()
+            .next()
+            .expect("one expression")
+    }
+
+    fn substituted(source: &str, substitutions: &[(&str, &str)]) -> String {
+        let substitutions = substitutions
+            .iter()
+            .map(|(name, replacement)| (name.to_string(), deep(replacement)))
+            .collect::<UnordMap<_, _>>();
+        chelis_deep::printer::print_expr_flat(&substitute_expr(
+            &deep(source),
+            &substitutions,
+            &UnordSet::new(),
+        ))
+    }
+
+    fn flat(source: &str) -> String {
+        chelis_deep::printer::print_expr_flat(&deep(source))
+    }
+
+    const ADD_K: &str = "(fn {} (params {} z) (app {} (var {} add) (var {} z) (var {} k)))";
+
+    #[test]
+    fn a_pattern_binder_shadows_the_formal_in_its_guard_and_body_only() {
+        // The scrutinee and the binder-free arm are outside `Some(x)`'s scope,
+        // so only they read the replacement.
+        let source = "(match {} (var {} x) \
+             (arm {} (pat-ctor {} Some (pat-var {} x)) \
+               (app {} (var {} gt) (var {} x) (lit {} 5)) (var {} x)) \
+             (arm {} (pat-wild {}) () (var {} x)))";
+        assert_eq!(
+            substituted(source, &[("x", "(var {} y)")]),
+            flat(
+                "(match {} (var {} y) \
+                 (arm {} (pat-ctor {} Some (pat-var {} x)) \
+                   (app {} (var {} gt) (var {} x) (lit {} 5)) (var {} x)) \
+                 (arm {} (pat-wild {}) () (var {} y)))"
+            )
+        );
+    }
+
+    #[test]
+    fn a_capturing_arm_binder_is_renamed_in_pattern_guard_and_body() {
+        // `g`'s replacement reads a free `k`; `Some(k)` would capture it.
+        // The other arm binds nothing, so its `k` is the outer one and stays.
+        let source = "(match {} (var {} o) \
+             (arm {} (pat-ctor {} Some (pat-var {} k)) \
+               (app {} (var {} gt) (app {} (var {} g) (var {} k)) (lit {} 10)) \
+               (app {} (var {} g) (var {} k))) \
+             (arm {} (pat-wild {}) () (var {} k)))";
+        let expected = format!(
+            "(match {{}} (var {{}} o) \
+             (arm {{}} (pat-ctor {{}} Some (pat-var {{}} k__inl1)) \
+               (app {{}} (var {{}} gt) (app {{}} {ADD_K} (var {{}} k__inl1)) (lit {{}} 10)) \
+               (app {{}} {ADD_K} (var {{}} k__inl1))) \
+             (arm {{}} (pat-wild {{}}) () (var {{}} k)))"
+        );
+        assert_eq!(substituted(source, &[("g", ADD_K)]), flat(&expected));
+    }
+
+    #[test]
+    fn binders_nested_in_as_tuple_record_and_constructor_patterns_are_renamed() {
+        // Constructor names and the record field label are not binders and
+        // must survive the rename; every binder that would capture is renamed.
+        let lambda = "(fn {} (params {} z) \
+             (app {} (var {} add) (var {} k) (var {} j) (var {} m)))";
+        let source = "(match {} (var {} o) \
+             (arm {} (pat-tuple {} (pat-as {} k (pat-wild {})) \
+               (pat-record {} Pt (kv {} j (pat-var {} j))) \
+               (pat-ctor {} Some (pat-var {} m))) () \
+               (app {} (var {} g) (var {} k) (var {} j) (var {} m))))";
+        let expected = format!(
+            "(match {{}} (var {{}} o) \
+             (arm {{}} (pat-tuple {{}} (pat-as {{}} k__inl1 (pat-wild {{}})) \
+               (pat-record {{}} Pt (kv {{}} j (pat-var {{}} j__inl1))) \
+               (pat-ctor {{}} Some (pat-var {{}} m__inl1))) () \
+               (app {{}} {lambda} (var {{}} k__inl1) (var {{}} j__inl1) (var {{}} m__inl1))))"
+        );
+        assert_eq!(substituted(source, &[("g", lambda)]), flat(&expected));
+    }
+
+    #[test]
+    fn a_nested_match_arm_shadows_only_inside_itself() {
+        let source = "(match {} (var {} o) \
+             (arm {} (pat-ctor {} Some (pat-var {} a)) () \
+               (match {} (var {} p) \
+                 (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x)) \
+                 (arm {} (pat-wild {}) () (var {} x)))))";
+        assert_eq!(
+            substituted(source, &[("x", "(var {} y)")]),
+            flat(
+                "(match {} (var {} o) \
+                 (arm {} (pat-ctor {} Some (pat-var {} a)) () \
+                   (match {} (var {} p) \
+                     (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x)) \
+                     (arm {} (pat-wild {}) () (var {} y)))))"
+            )
+        );
+    }
+
+    #[test]
+    fn a_binder_beside_a_shadowed_formal_is_not_renamed() {
+        // `x`'s replacement reads `k`, but the arm also binds `x`, so that
+        // replacement never reaches this arm and `k` cannot be captured: the
+        // arm must come back unchanged rather than with a gratuitous rename.
+        let source = "(match {} (var {} o) \
+             (arm {} (pat-tuple {} (pat-var {} x) (pat-var {} k)) () \
+               (app {} (var {} add) (var {} x) (var {} k))))";
+        assert_eq!(substituted(source, &[("x", "(var {} k)")]), flat(source));
     }
 }
