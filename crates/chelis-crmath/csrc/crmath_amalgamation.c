@@ -3098,6 +3098,33 @@ SOFTWARE.
 #endif
 
 
+/* __builtin_roundeven was introduced in gcc 10:
+   https://gcc.gnu.org/gcc-10/changes.html,
+   and in clang 17 */
+#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
+# define chelis_cr_sin__roundeven_finite(x) __builtin_roundeven (x)
+#else
+/* round x to nearest integer, breaking ties to even */
+static double
+chelis_cr_sin__roundeven_finite (double x)
+{
+  double ix;
+  ix = __builtin_round (x); /* nearest, away from 0 */
+  if (__builtin_fabs (ix - x) == 0.5)
+  {
+    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
+    union { double f; uint64_t n; } u, v;
+    u.f = ix;
+    v.f = ix - __builtin_copysign (1.0, x);
+    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
+       is rounded away from zero. */
+    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
+      ix = v.f;
+  }
+  return ix;
+}
+#endif
+
 typedef unsigned __int128 chelis_cr_sin__u128;
 
 typedef uint64_t chelis_cr_sin__u64;
@@ -3882,7 +3909,7 @@ chelis_cr_sin__cr_sin_moderate (double x, int sbit)
   double ax = __builtin_fabs(x);
   static const double invpi = 0x1.45f306dc9c883p+12;
   // |invpi/2^14 - 1/pi| < 2^-55.496
-  double k = __builtin_roundeven (invpi * ax);
+  double k = chelis_cr_sin__roundeven_finite (invpi * ax);
   // |2^14*(pih + pil) + pi| < 2^-108.041
   double rh = __builtin_fma (k, chelis_cr_sin__pih, ax), rl = k * chelis_cr_sin__pil; // rh is exact
 

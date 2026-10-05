@@ -26,7 +26,12 @@ every lane compiles:
    portable arm beside each stays). The dynamic rounding-mode switch keeps only
    its round-to-nearest case, which Chelis pins at every entry (design section
    6). Values are unchanged: every dropped arm computes the same bits as the
-   arm that stays.
+   arm that stays;
+5. every `__builtin_roundeven` is reached through a `roundeven_finite` helper
+   that uses the builtin only on compilers that have it (GCC 10, Clang 17) and
+   otherwise rounds half to even with older builtins, to the same value. binary64
+   `sin` calls the builtin directly, so `guard_sin_roundeven` gives it binary64
+   `exp`'s helper verbatim and routes the call through it.
 
 The amalgamation opens with `#error` guards against fast math, finite-math-only,
 and excess-precision evaluation.
@@ -283,6 +288,47 @@ def contract_clean(text: str, origin: str) -> str:
     return text
 
 
+# binary64 `sin` (`cr_sin_moderate`) calls `__builtin_roundeven` directly. GCC 9 and
+# older and Clang 16 and older (every Xcode 15) do not provide it, and `chelis build`
+# compiles every kernel into its compiler canary, so no native build worked on those
+# compilers. The other kernels that round to an integer call `roundeven_finite`,
+# which is the builtin where the compiler version provides it and a round-half-to-
+# even from older builtins otherwise; both give the same value for every finite input.
+_SIN_ROUNDEVEN_CALL = "__builtin_roundeven (invpi * ax)"
+_FENV_PRAGMA = "#pragma STDC FENV_ACCESS ON\n"
+ROUNDEVEN_HELPER_SOURCE = "src/binary64/exp/exp.c"
+_ROUNDEVEN_HELPER = re.compile(
+    r"^/\* __builtin_roundeven was introduced in gcc 10:\n.*?^#endif\n", re.MULTILINE | re.DOTALL
+)
+_ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+\w*roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
+
+
+def guard_sin_roundeven(text: str, read) -> str:
+    """binary64 `sin`'s text with binary64 `exp`'s `roundeven_finite` definition
+    after its `FENV_ACCESS` pragma and its `__builtin_roundeven` call replaced by a
+    call to that helper."""
+    helpers = _ROUNDEVEN_HELPER.findall(read(ROUNDEVEN_HELPER_SOURCE))
+    if len(helpers) != 1 or "roundeven_finite (double x)" not in helpers[0]:
+        raise VendorError(f"{ROUNDEVEN_HELPER_SOURCE} no longer defines one guarded roundeven_finite (double)")
+    if text.count(_SIN_ROUNDEVEN_CALL) != 1 or text.count(_FENV_PRAGMA) != 1:
+        raise VendorError("binary64 sin no longer has the one `__builtin_roundeven` call this guards")
+    text = text.replace(_SIN_ROUNDEVEN_CALL, "roundeven_finite (invpi * ax)")
+    return text.replace(_FENV_PRAGMA, f"{_FENV_PRAGMA}\n{helpers[0]}")
+
+
+def require_guarded_roundeven(text: str, origin: str) -> None:
+    """Fail unless every `__builtin_roundeven` in `text`'s code is a guarded
+    `roundeven_finite` definition."""
+    for m in _TOKEN.finditer(text):
+        if m.lastgroup != "ident" or m.group() != "__builtin_roundeven":
+            continue
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        line = text[start : len(text) if end == -1 else end].strip()
+        if not _ROUNDEVEN_DEFINE.fullmatch(line):
+            raise VendorError(f"{origin}: `__builtin_roundeven` outside a guarded roundeven_finite: {line!r}")
+
+
 def _reindent(body: str, indent: str) -> str:
     """The round-to-nearest case body, moved out of its `case` to `indent`."""
     lines = [line for line in body.split("\n") if line.strip()]
@@ -398,8 +444,12 @@ static {ctype} {entry}({ctype} x) {{
 
 def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     raw = read(kernel.path)
-    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
     rename = set(names)
+    if kernel.path == "src/binary64/sin/sin.c":
+        raw = guard_sin_roundeven(raw, read)
+        rename.add("roundeven_finite")
+    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
+    require_guarded_roundeven(text, kernel.path)
     if kernel.upstream_entry not in rename:
         raise VendorError(f"{kernel.name}: entry {kernel.upstream_entry} missing from identifiers")
     body = rename_identifiers(text, rename, kernel.prefix)
