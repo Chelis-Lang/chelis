@@ -760,6 +760,20 @@ macro relu_ref(x) = max_elem(x, 0.0)
 
 Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
 
+> **[02-MACRO-1]** The parameter names of a macro definition SHALL be
+> distinct. A definition that names a parameter more than once SHALL be
+> rejected during macro expansion, whether or not the program calls the
+> macro, with a diagnostic that names the macro and the repeated parameter.
+
+> **[02-MACRO-2]** A call that resolves to a macro under the resolution order
+> below SHALL supply exactly one argument for each parameter of that macro.
+> This applies to user-defined and standard prelude macros alike, and to a
+> call that a macro expansion produces. A call with fewer or more arguments
+> SHALL be rejected during macro expansion, before substitution, with a
+> diagnostic that names the macro, its parameter count, and the supplied
+> argument count. Expansion SHALL NOT leave a parameter without its argument
+> to resolve in the caller's scope, and SHALL NOT discard an argument.
+
 Macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then

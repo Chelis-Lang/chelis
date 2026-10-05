@@ -57,6 +57,20 @@ pub enum ExpansionError {
     PreludeLoad { message: String },
 
     #[error(
+        "macro `{name}` declares parameter `{parameter}` more than once; macro parameter names must be distinct (spec/02-surf-syntax.md [02-MACRO-1])"
+    )]
+    DuplicateParameter { name: String, parameter: String },
+
+    #[error(
+        "macro `{name}` expects {expected} argument(s), but this call supplies {found}; a macro call supplies exactly one argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
+    )]
+    ArityMismatch {
+        name: String,
+        expected: usize,
+        found: usize,
+    },
+
+    #[error(
         "`{declaration} {name}` collides with the standard prelude macro `{name}`: ordinary top-level `def`/`sig` declarations may not reuse a loaded standard-prelude macro name (spec/02-surf-syntax.md §P5b); rename the declaration or define a user macro when macro override is intended"
     )]
     StandardPreludeNameCollision {
@@ -70,6 +84,46 @@ struct MacroDef {
     name: String,
     params: Vec<String>,
     body: Expr,
+}
+
+impl MacroDef {
+    /// Admit a definition, authored or prelude, only when its parameter names
+    /// are distinct ([02-MACRO-1]): a repeated name would let its later
+    /// binding silently replace the earlier argument.
+    fn admitted(self) -> Result<Self, ExpansionError> {
+        let repeated = {
+            let mut seen = UnordSet::new();
+            self.params
+                .iter()
+                .find(|param| !seen.insert(param.as_str()))
+                .cloned()
+        };
+        match repeated {
+            Some(parameter) => Err(ExpansionError::DuplicateParameter {
+                name: self.name,
+                parameter,
+            }),
+            None => Ok(self),
+        }
+    }
+
+    /// Pair each parameter with the call's argument at its position. A call
+    /// supplies exactly one argument per parameter ([02-MACRO-2]); any other
+    /// count is rejected here, before substitution, so no parameter is left
+    /// to resolve in the caller's scope and no argument escapes checking.
+    fn bind_arguments<'a>(
+        &'a self,
+        args: &'a [Expr],
+    ) -> Result<impl Iterator<Item = (&'a String, &'a Expr)>, ExpansionError> {
+        if args.len() != self.params.len() {
+            return Err(ExpansionError::ArityMismatch {
+                name: self.name.clone(),
+                expected: self.params.len(),
+                found: args.len(),
+            });
+        }
+        Ok(self.params.iter().zip(args))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -472,10 +526,11 @@ impl Expander {
         let Some(def) = macros.get(&name) else {
             return Ok(None);
         };
+        let arguments = def.bind_arguments(&args)?;
         self.consume_expansion_budget()?;
         let invocation = macro_source(&def.name, &args);
         let (placeholder_params, placeholder_args) =
-            macro_arg_placeholders(def, &args, self.expansions);
+            macro_arg_placeholders(&def.body, arguments, self.expansions);
         let placeholder_body = substitute_expr(&def.body, &placeholder_params, &UnordSet::new());
         let hygienic = hygienize_expr(
             &placeholder_body,
@@ -556,17 +611,17 @@ fn inherit_replaced_value_annotations(
     ))
 }
 
-fn macro_arg_placeholders(
-    def: &MacroDef,
-    args: &[Expr],
+fn macro_arg_placeholders<'a>(
+    body: &Expr,
+    arguments: impl Iterator<Item = (&'a String, &'a Expr)>,
     expansion_id: usize,
 ) -> (UnordMap<String, Expr>, UnordMap<String, Expr>) {
     let mut used_symbols = UnordSet::new();
-    collect_symbols(&def.body, &mut used_symbols);
+    collect_symbols(body, &mut used_symbols);
 
     let mut placeholder_params = UnordMap::new();
     let mut placeholder_args = UnordMap::new();
-    for (idx, (param, arg)) in def.params.iter().zip(args.iter()).enumerate() {
+    for (idx, (param, arg)) in arguments.enumerate() {
         let placeholder = fresh_placeholder(idx, expansion_id, &mut used_symbols);
         placeholder_params.insert(param.clone(), var(&placeholder));
         placeholder_args.insert(placeholder, arg.clone());
@@ -754,11 +809,13 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(MacroDef {
+    MacroDef {
         name: name.to_string(),
         params,
         body: kids[2].clone(),
-    }))
+    }
+    .admitted()
+    .map(Some)
 }
 
 fn substitute_expr(
@@ -1335,6 +1392,7 @@ fn standard_prelude_macros() -> Result<UnordMap<String, MacroDef>, ExpansionErro
         prelude_residual(),
         prelude_cross_entropy(),
     ] {
+        let def = def.admitted()?;
         defs.insert(def.name.clone(), def);
     }
     Ok(defs)
