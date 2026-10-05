@@ -4813,3 +4813,13 @@ packages = ["chelis-axis-core"]
 prefix = "scripts/test_axis_proof_tools.py"
 disposition = "packages"
 packages = ["chelis-axis-core"]
+
+[[path_rule]]
+prefix = "scripts/axis_oracle_report.py"
+disposition = "packages"
+packages = ["chelis-axis-core"]
+
+[[path_rule]]
+prefix = "scripts/test_axis_oracle_report.py"
+disposition = "packages"
+packages = ["chelis-axis-core"]

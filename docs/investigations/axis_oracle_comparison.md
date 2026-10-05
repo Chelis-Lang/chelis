@@ -27,7 +27,8 @@ specification, invariant, comment and unmutated source span. This campaign tests
 that operator inventory, not all possible compiler defects.
 
 Every viable mutant runs through all three test suites: the axis contract tests,
-the complete type-checker library suite, and the complete IR library suite. The
+the complete type-checker and IR unit and integration suites (`--all-targets
+--no-fail-fast`). The
 test column therefore measures integration detection. Kani and Verus measure the
 four executable contracts. A failed proof is distinct from a contract violation:
 Verus receives detection credit only with a concrete input independently evaluated
@@ -36,6 +37,9 @@ reported separately; it is evidence of proof fragility only after equivalence is
 established. Tool errors, timeouts and insufficient unwinding receive no detection
 credit. Panics on contract inputs are concrete violations of the executable safety
 obligation. Nontermination without a reproduced finite violation is inconclusive.
+Executable mutant tests have an 8 GiB process-group RSS ceiling and concrete
+probes have a 512 MiB ceiling, so a mutant that continually appends cannot exhaust
+the shared workstation. A resource-limit termination is inconclusive.
 
 Kani restates the contracts as ordinary Rust assertions; it cannot read erased
 Verus specifications. Rank is symbolic and bounded; axis and signed-axis values

@@ -155,17 +155,19 @@ def group_rss(group: int) -> int:
     return total
 
 
-def execute(command: list[str], cwd: Path, env: dict[str, str], log: Path, timeout: float = 900) -> dict:
+def execute(command: list[str], cwd: Path, env: dict[str, str], log: Path, timeout: float = 900,
+            rss_limit_bytes: int | None = None) -> dict:
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    peak, timed_out = 0, False
+    peak, timed_out, memory_limited = 0, False, False
     with log.open("w") as stream:
         process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         while process.poll() is None:
             peak = max(peak, group_rss(process.pid))
-            if time.monotonic() - started > timeout:
-                timed_out = True
+            if time.monotonic() - started > timeout or (rss_limit_bytes is not None and peak > rss_limit_bytes):
+                memory_limited = rss_limit_bytes is not None and peak > rss_limit_bytes
+                timed_out = not memory_limited
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
                     process.wait(timeout=2)
@@ -175,6 +177,7 @@ def execute(command: list[str], cwd: Path, env: dict[str, str], log: Path, timeo
             time.sleep(0.05)
         code = process.wait()
     return {"command": command, "exit_code": code, "timeout": timed_out,
+            "memory_limit": memory_limited, "rss_limit_bytes": rss_limit_bytes,
             "wall_seconds": time.monotonic() - started, "peak_group_rss_bytes": peak,
             "log": str(log), "log_sha256": digest(log.read_bytes())}
 
@@ -306,11 +309,11 @@ def campaign(args: argparse.Namespace, source: str, inventory: list[dict]) -> No
                 row["tests"] = []
                 for label, command in [
                     ("axis", ["cargo", "test", "--locked", "-p", "chelis-axis-core", "--test", "axis_contract"]),
-                    ("types", ["cargo", "test", "--locked", "-p", "chelis-types", "--lib"]),
-                    ("ir", ["cargo", "test", "--locked", "-p", "chelis-ir", "--lib"]),
+                    ("types", ["cargo", "test", "--locked", "-p", "chelis-types", "--all-targets", "--no-fail-fast"]),
+                    ("ir", ["cargo", "test", "--locked", "-p", "chelis-ir", "--all-targets", "--no-fail-fast"]),
                 ]:
-                    test = execute(command, args.checkout, env, args.output / f"logs/{mutant['id']}-{label}.log", 180)
-                    test["status"] = classify("tests", test["exit_code"], Path(test["log"]).read_text(), test["timeout"])
+                    test = execute(command, args.checkout, env, args.output / f"logs/{mutant['id']}-{label}.log", 180, 8 * 1024**3)
+                    test["status"] = "memory_limit" if test["memory_limit"] else classify("tests", test["exit_code"], Path(test["log"]).read_text(), test["timeout"])
                     test["suite"] = label
                     row["tests"].append(test)
                 proof = execute([args.verus, "--crate-type=lib", str(SOURCE), "--time", "--output-json"],
@@ -329,7 +332,7 @@ def campaign(args: argparse.Namespace, source: str, inventory: list[dict]) -> No
                 row["witness_build"] = probe_build
                 if probe_build["exit_code"] == 0:
                     probe = execute([str(binary), mutant["function"]], args.checkout, args.env,
-                                    args.output / f"logs/{mutant['id']}-witness.log", 15)
+                                    args.output / f"logs/{mutant['id']}-witness.log", 15, 512 * 1024**2)
                     row["witness_probe"] = probe
                     matches = [json.loads(line) for line in Path(probe["log"]).read_text().splitlines()
                                if line.startswith('{"function"')]
@@ -362,7 +365,7 @@ def costs(args: argparse.Namespace, source: str) -> None:
             receipts = []
             if oracle == "tests":
                 env = args.env | {"CARGO_TARGET_DIR": str(args.output / "targets/tests")}
-                for package, extra in (("chelis-axis-core", ["--test", "axis_contract"]), ("chelis-types", ["--lib"]), ("chelis-ir", ["--lib"])):
+                for package, extra in (("chelis-axis-core", ["--test", "axis_contract"]), ("chelis-types", ["--all-targets", "--no-fail-fast"]), ("chelis-ir", ["--all-targets", "--no-fail-fast"])):
                     receipt = execute(["cargo", "test", "--locked", "-p", package, *extra], args.checkout,
                                       env, args.output / f"logs/{key}-{package}.log")
                     receipt["status"] = classify("tests", receipt["exit_code"], Path(receipt["log"]).read_text(), receipt["timeout"])
