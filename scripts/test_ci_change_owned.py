@@ -6573,5 +6573,180 @@ name = {json.dumps(name)}
         unknown = owned.TestIdentity("chelis-cli", "std_datetime_oracle", "no_such_test")
         self.assertEqual(self.missing_tests(root, [unknown]), [unknown.canonical])
 
+
+class DurationRowReviewTests(unittest.TestCase):
+    """chelis#2355: a heavy target the pull request adds or modifies needs a row."""
+
+    ADDED = "chelis-cli::heavy_new"
+    MODIFIED = "chelis-cli::touched"
+
+    def plan(self) -> dict:
+        return {
+            "path_dispositions": [
+                {"identity": self.ADDED, "kind": "integration_target_added",
+                 "path": "crates/chelis-cli/tests/heavy_new.rs", "status": "A"},
+                {"identity": self.MODIFIED, "kind": "integration_target_directly_modified",
+                 "path": "crates/chelis-cli/tests/touched.rs", "status": "M"},
+                {"kind": "docs_only", "path": "docs/x.md", "status": "M"},
+            ],
+            "manual_gate_targets": [],
+            "standing_coverage_reuse": [],
+        }
+
+    def documents(
+        self, root: Path, seconds: dict[str, float | None], list_seconds: float = 0.0
+    ) -> list:
+        shard = root / "shard-0"
+        shard.mkdir(parents=True)
+        targets = {
+            identity: {"list_seconds": list_seconds, "run_seconds": value}
+            for identity, value in seconds.items()
+            if value is not None
+        }
+        (shard / "timings.json").write_bytes(owned.canonical_json({"targets": targets}))
+        receipt = {"shard": 0, "timings_file": "timings.json",
+                   "executed_targets": sorted(seconds)}
+        return [(receipt, shard / "junit.xml")]
+
+    def baseline(self, rows: dict[str, int]) -> owned.DurationBaseline:
+        return owned.DurationBaseline(
+            default_milliseconds=owned.DEFAULT_DURATION_MILLISECONDS,
+            targets={owned.Identity.parse(key): value for key, value in rows.items()},
+            digest="0" * 64,
+        )
+
+    def review(self, seconds: dict, rows: dict | None = None, plan: dict | None = None):
+        seconds = {self.MODIFIED: 1.0, **seconds}
+        with tempfile.TemporaryDirectory() as tmp:
+            return owned.duration_row_review(
+                plan or self.plan(),
+                self.documents(Path(tmp), seconds),
+                self.baseline(rows or {}),
+            )
+
+    def test_heavy_unrowed_target_fails_with_the_row_to_add(self) -> None:
+        result = self.review({self.ADDED: 130.0, self.MODIFIED: 1.0})
+        self.assertEqual(len(result["failures"]), 1)
+        failure = result["failures"][0]
+        self.assertIn(f"duration row required: {self.ADDED} ran 130.0s", failure)
+        self.assertIn(f"set-duration-row {self.ADDED} 130000", failure)
+        self.assertIn('"milliseconds":130000,"samples":1', failure)
+
+    def test_list_step_compilation_is_not_judged_but_the_row_includes_it(self) -> None:
+        # A lone change-owned target's list step compiles its crate's test
+        # binary; that is not the target's own cost, so only the run is judged.
+        with tempfile.TemporaryDirectory() as tmp:
+            light = owned.duration_row_review(
+                self.plan(),
+                self.documents(Path(tmp) / "a", {self.ADDED: 10.0, self.MODIFIED: 1.0}, 200.0),
+                self.baseline({}),
+            )
+            heavy = owned.duration_row_review(
+                self.plan(),
+                self.documents(Path(tmp) / "b", {self.ADDED: 130.0, self.MODIFIED: 1.0}, 20.0),
+                self.baseline({}),
+            )
+        self.assertEqual(light["failures"], [])
+        self.assertIn(f"set-duration-row {self.ADDED} 150000", heavy["failures"][0])
+
+    def test_heavy_rowed_target_passes(self) -> None:
+        result = self.review({self.ADDED: 130.0}, rows={self.ADDED: 125_000})
+        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+
+    def test_light_unrowed_target_passes_quietly(self) -> None:
+        result = self.review({self.ADDED: 30.0, self.MODIFIED: 59.0})
+        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+
+    def test_threshold_boundary_and_its_advisory_band(self) -> None:
+        at = self.review({self.ADDED: 120.0})
+        self.assertEqual(at["failures"], [])
+        self.assertEqual(len(at["advisories"]), 1)
+        self.assertIn("timing noise can carry it over", at["advisories"][0])
+        over = self.review({self.ADDED: 120.001})
+        self.assertEqual(len(over["failures"]), 1)
+
+    def test_a_row_makes_the_rule_sticky_and_reports_an_underestimate(self) -> None:
+        # Any row ends the judgement, so a rerun at any timing passes; a row
+        # the observation exceeds threefold is reported, not failed.
+        result = self.review({self.ADDED: 500.0}, rows={self.ADDED: 1})
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(len(result["advisories"]), 1)
+        self.assertIn("a baseline refresh will correct it", result["advisories"][0])
+
+    def test_targets_outside_the_added_or_modified_scope_are_not_judged(self) -> None:
+        plan = self.plan()
+        plan["path_dispositions"] = [plan["path_dispositions"][2]]
+        result = self.review({self.ADDED: 900.0}, plan=plan)
+        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+
+    def test_missing_timing_fails_closed_and_unexecuted_targets_are_listed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "change-owned timing is missing"):
+            self.review({self.ADDED: None, self.MODIFIED: 1.0})
+        plan = self.plan()
+        plan["manual_gate_targets"] = [{"identity": self.ADDED}]
+        with tempfile.TemporaryDirectory() as tmp:
+            documents = self.documents(Path(tmp), {self.MODIFIED: 1.0})
+            result = owned.duration_row_review(plan, documents, self.baseline({}))
+        self.assertEqual(result["unjudged"], [f"{self.ADDED}: not executed here (manual gate)"])
+
+    def test_set_duration_row_writes_a_canonical_row_the_loader_accepts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durations.json"
+            path.write_bytes(owned.canonical_json({
+                "version": owned.DURATION_BASELINE_VERSION,
+                "default_milliseconds": owned.DEFAULT_DURATION_MILLISECONDS,
+                "sources": [{"candidate_sha": "a" * 40, "plan_digest": "b" * 64}],
+                "targets": {"p::t": {"milliseconds": 5, "samples": 1}},
+            }))
+            self.assertEqual(
+                owned.main(["set-duration-row", self.ADDED, "130000", "--baseline", str(path)]),
+                0,
+            )
+            baseline = owned.load_duration_baseline(path)
+            self.assertEqual(baseline.targets[owned.Identity.parse(self.ADDED)], 130_000)
+            self.assertEqual(path.read_bytes(), owned.canonical_json(json.loads(path.read_text())))
+
+    def run_report_cli(self, seconds: dict) -> tuple[int, dict]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_bytes(owned.canonical_json({**self.plan(), "plan_digest": "d"}))
+            documents = self.documents(root / "receipts", {self.MODIFIED: 1.0, **seconds})
+            passing = {"version": 1, "lane": "change-owned", "required": True,
+                       "success": True, "observed_success": True, "plan_digest": "d",
+                       "covered_targets": [], "manual_gate_targets": [],
+                       "standing_reused_targets": [], "shard_durations": [], "failures": []}
+            with mock.patch.object(owned, "load_receipt_documents", return_value=documents), \
+                    mock.patch.object(owned, "validate_change_owned_report", return_value=passing), \
+                    mock.patch.object(owned, "load_duration_baseline", return_value=self.baseline({})), \
+                    contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                code = owned.main(["report", "--plan", str(plan_path), "--lane", "change-owned",
+                                   "--receipts-root", str(root / "receipts"),
+                                   "--output", str(root / "out"), "--required"])
+            return code, json.loads((root / "out" / "report.json").read_text())
+
+    def test_required_report_fails_on_a_heavy_unrowed_target(self) -> None:
+        code, report = self.run_report_cli({self.ADDED: 130.0})
+        self.assertEqual(code, 1)
+        self.assertFalse(report["success"])
+        self.assertIn(f"duration row required: {self.ADDED}", report["failures"][0])
+        code, report = self.run_report_cli({self.ADDED: 10.0})
+        self.assertEqual(code, 0)
+        self.assertEqual(report["duration_rows"]["failures"], [])
+
+    def test_summary_lists_advisories_and_unjudged_targets(self) -> None:
+        report = {
+            "lane": "change-owned", "required": True, "observed_success": True,
+            "plan_digest": "d", "covered_targets": [], "manual_gate_targets": [],
+            "standing_reused_targets": [], "failures": [], "shard_durations": [],
+            "duration_rows": {"failures": [], "advisories": ["a: advisory"],
+                              "unjudged": ["b: not executed here (manual gate)"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            owned._write_report_files(Path(tmp), report)
+            rendered = (Path(tmp) / "summary.md").read_text()
+        self.assertIn("- Duration-row advisories: 1\n  - a: advisory", rendered)
+        self.assertIn("- Not judged for a duration row: 1", rendered)
+
 if __name__ == "__main__":
     unittest.main()
