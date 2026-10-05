@@ -122,6 +122,7 @@ rules! {
     "effect" => S::Names(&["resource"]), P::Tag(T::HandleEffect), "resource on handle-effect";
     "literal_source" => S::Names(&["integer"]), P::Tag(T::Lit), "integer on lit";
     "destructure" => S::True, P::Tag(T::Bind), "true on bind";
+    "accumulator" => S::Type, P::Tag(T::App), "a type-expression node naming a dtype on app";
 }
 
 enum KeyClass {
@@ -190,6 +191,7 @@ impl<'a> View<'a> {
         match self {
             Self::Value(v) => match v {
                 V::Type(v) => Self::Ast(v.expression()),
+                V::Accumulator(v) => Self::Ast(v.expression()),
                 V::PropertyTolerance(v) | V::PropertySeed(v) | V::PropertySamples(v) => {
                     Self::Ast(v.expression())
                 }

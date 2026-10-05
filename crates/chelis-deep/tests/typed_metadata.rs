@@ -51,9 +51,9 @@ fn source_arguments_and_extension_values_are_data() {
 }
 
 #[test]
-fn registered_inventory_contains_thirty_compiler_owned_keys() {
+fn registered_inventory_contains_every_compiler_owned_key() {
     let keys = chelis_deep::metadata::REGISTERED_METADATA_KEYS;
-    assert_eq!(keys.len(), 30);
+    assert_eq!(keys.len(), 31);
     assert_eq!(TYPED_CASES.len(), keys.len());
     for key in keys {
         assert!(
@@ -61,7 +61,7 @@ fn registered_inventory_contains_thirty_compiler_owned_keys() {
             "{key}"
         );
     }
-    for key in ["effect", "literal_source", "destructure"] {
+    for key in ["effect", "literal_source", "destructure", "accumulator"] {
         assert!(keys.contains(&key), "{key}");
     }
 }
@@ -218,6 +218,10 @@ const TYPED_CASES: &[(&str, &str)] = &[
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),
+    (
+        "accumulator",
+        "(app {accumulator: (t-prim {} f64)} (var {} sum) (var {} x) (lit {} 0))",
+    ),
 ];
 
 #[test]

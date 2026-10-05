@@ -2269,6 +2269,11 @@ parameter is what tells the backend to compute the inner sum at a wider
 precision and (where the result is the operand precision) downcast at the
 end.
 
+Surf spells the parameter as the call's final argument
+`accumulator=<dtype>` (spec/02 `CallArgs`), and Deep carries it as the `app`
+node's `accumulator` metadata (spec/03 §1.1). Any other call that supplies
+it is a type error.
+
 The accumulator is optional only on the user-facing Surf and Deep call
 surfaces. When it is omitted, the compiler resolves it to the documented
 default for the operand precision before any backend is invoked. The IR

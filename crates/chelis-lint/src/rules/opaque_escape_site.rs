@@ -387,6 +387,7 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Var(_, s)
         | Expr::Constructor(_, s)
         | Expr::Apply(_, _, s)
+        | Expr::Accumulate(_, _, s)
         | Expr::List(_, s)
         | Expr::Record(_, _, s)
         | Expr::RecordUpdate(_, _, s)

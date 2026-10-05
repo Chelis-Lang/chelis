@@ -11,11 +11,11 @@ use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::annotations::{
-    Amenability, BindingTypeOrigin, EffectMember, EffectSet as AstEffectSet, InvariantPredicate,
-    LiteralOrigin, LiteralStyle, MetadataValue as M, PipeStageOrigin, PositiveInteger, Present,
-    PropertyBinder, PropertyContracts, PropertyPreconditions, PropertyQuantifiers,
-    PropertySourceKind, ResourceEffect, RuntimeExpression, SpanId, Spanned, TypeSyntax,
-    VariableRef, VariableTuple, WrtTargets,
+    AccumulatorSyntax, Amenability, BindingTypeOrigin, EffectMember, EffectSet as AstEffectSet,
+    InvariantPredicate, LiteralOrigin, LiteralStyle, MetadataValue as M, PipeStageOrigin,
+    PositiveInteger, Present, PropertyBinder, PropertyContracts, PropertyPreconditions,
+    PropertyQuantifiers, PropertySourceKind, ResourceEffect, RuntimeExpression, SpanId, Spanned,
+    TypeSyntax, VariableRef, VariableTuple, WrtTargets,
 };
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
@@ -737,6 +737,7 @@ impl GradSelectorResolver {
                 self.visit_expr(value, scope)?;
                 CallableOrigin::NonCallable
             }
+            Expr::Accumulate(call, _, _) => self.visit_expr(call, scope)?,
             Expr::Grad(function, wrt, span) => {
                 let target = self.visit_expr(function, scope)?;
                 if let Some(wrt) = wrt {
@@ -1423,6 +1424,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
         | Expr::Cast(_, _, _, span)
+        | Expr::Accumulate(_, _, span)
         | Expr::Grad(_, _, span)
         | Expr::Vmap(_, _, span)
         | Expr::Jit(_, span)
@@ -1652,6 +1654,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         Expr::Apply(func, args, _) => {
             expr_mentions_name(func, name) || args.iter().any(|arg| expr_mentions_name(arg, name))
         }
+        Expr::Accumulate(call, _, _) => expr_mentions_name(call, name),
         Expr::Record(_, fields, _) => fields
             .iter()
             .any(|(_, value)| expr_mentions_name(value, name)),
@@ -1895,6 +1898,30 @@ impl DesugarCtx {
                         span: *span,
                     }],
                     Box::new(Expr::Apply(func.clone(), applied_args, *span)),
+                    *span,
+                );
+                mark_call_first_pipe_stage(self.desugar_expr_with_scope(&lambda, local_fn_params))
+            }
+            Expr::Accumulate(call, precision, span) if matches!(call.as_ref(), Expr::Apply(_, args, _) if !args.is_empty()) =>
+            {
+                let Expr::Apply(func, args, _) = call.as_ref() else {
+                    unreachable!("matched an application");
+                };
+                let pipe_param = fresh_pipe_param_name(stage);
+                let mut applied_args = Vec::with_capacity(args.len() + 1);
+                applied_args.push(Expr::Var(pipe_param.clone(), *span));
+                applied_args.extend(args.iter().cloned());
+                let lambda = Expr::Lambda(
+                    vec![Param {
+                        name: pipe_param,
+                        ty: None,
+                        span: *span,
+                    }],
+                    Box::new(Expr::Accumulate(
+                        Box::new(Expr::Apply(func.clone(), applied_args, *span)),
+                        precision.clone(),
+                        *span,
+                    )),
                     *span,
                 );
                 mark_call_first_pipe_stage(self.desugar_expr_with_scope(&lambda, local_fn_params))
@@ -2578,6 +2605,19 @@ impl DesugarCtx {
             ),
 
             Expr::Apply(func, args, _) => self.desugar_apply(func, args, local_fn_params),
+
+            // spec/03 §1.1 `accumulator`: the call's app node carries the
+            // dtype as a type-expression annotation.
+            Expr::Accumulate(call, precision, _) => {
+                let precision = canonical_primitive_name(precision).unwrap_or(precision);
+                with_metadata_value(
+                    self.desugar_expr_with_scope(call, local_fn_params),
+                    M::Accumulator(
+                        AccumulatorSyntax::try_new(node(DeepTag::TPrim, vec![sym(precision)]))
+                            .expect("desugared accumulator type syntax"),
+                    ),
+                )
+            }
 
             Expr::Binary(op, lhs, rhs, _) => {
                 // Every operator keeps its authored operand order

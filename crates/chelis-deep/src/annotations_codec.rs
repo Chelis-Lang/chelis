@@ -183,6 +183,10 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
             crate::stamp_to_typed::stamp_serialized_type(raw)
                 .map_err(|e| stamp_error(spelling, e))?,
         )?),
+        K::Accumulator => V::Accumulator(AccumulatorSyntax::try_new(
+            crate::stamp_to_typed::stamp_serialized_type(raw)
+                .map_err(|e| stamp_error(spelling, e))?,
+        )?),
         K::Loc => {
             let RawExpr::List(items, _) = raw else {
                 return Err(invalid(spelling, span, "(loc file line column)"));
@@ -543,6 +547,7 @@ fn decode_wire_value(key: MetadataKey, value: WireExpr) -> Result<MetadataValue,
     if !matches!(
         key,
         K::Type
+            | K::Accumulator
             | K::PropertySeed
             | K::PropertySamples
             | K::PropertyTolerance
@@ -562,6 +567,7 @@ fn decode_wire_value(key: MetadataKey, value: WireExpr) -> Result<MetadataValue,
     let span = expr.span();
     Ok(match key {
         K::Type => V::Type(TypeSyntax::try_new(expr)?),
+        K::Accumulator => V::Accumulator(AccumulatorSyntax::try_new(expr)?),
         K::PropertySeed => V::PropertySeed(RuntimeExpression::try_for_key(expr, spelling)?),
         K::PropertySamples => V::PropertySamples(RuntimeExpression::try_for_key(expr, spelling)?),
         K::PropertyTolerance => {
@@ -761,6 +767,7 @@ impl WireExpr {
         let span = value.span();
         match value {
             V::Type(v) => Self::from_ast(v.expression()),
+            V::Accumulator(v) => Self::from_ast(v.expression()),
             V::PropertyTolerance(v) | V::PropertySeed(v) | V::PropertySamples(v) => {
                 Self::from_ast(v.expression())
             }

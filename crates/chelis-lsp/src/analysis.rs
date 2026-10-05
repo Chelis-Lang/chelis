@@ -692,6 +692,15 @@ fn collect_expr_symbols(
                 target,
             });
         }
+        Expr::Accumulate(call, _, _) => collect_expr_symbols(
+            text,
+            call,
+            top_level,
+            locals,
+            references,
+            definitions,
+            completions,
+        ),
         Expr::Apply(func, args, _) => {
             collect_expr_symbols(
                 text,
@@ -1403,6 +1412,7 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Var(_, span)
         | Expr::Constructor(_, span)
         | Expr::Apply(_, _, span)
+        | Expr::Accumulate(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
         | Expr::RecordUpdate(_, _, span)

@@ -1451,7 +1451,10 @@ AnnotExpr     <- AccessExpr (S ':' S TypeExpr)?
 AccessExpr    <- AppExpr AccessStep*
 AccessStep    <- '.' IntLit                              # tuple index
                / '.' (Ident / TypeIdent) CallArgs?        # field / module path, optionally applied
-CallArgs      <- '(' S (Expr (S ',' S Expr)* (S ',')?)? S ')'
+CallArgs      <- '(' S ((Expr (S ',' S Expr)* (S ',' S AccumArg)? / AccumArg)
+                  (S ',')?)? S ')'
+AccumArg      <- 'accumulator' S '=' S PrecType  # spec/04 §5.7; `accumulator`
+                                                  # stays an ordinary identifier
 AppExpr       <- AtomExpr CallArgs?
                / TransformExpr CallArgs?
 
@@ -1695,6 +1698,7 @@ true                              ⟹  (lit {type: (t-prim {} bool)} true)
 
 -- Application
 f(x, y)                           ⟹  (app {} (var {} f) x' y')
+f(x, y, accumulator=p)            ⟹  (app {accumulator: (t-prim {} p)} (var {} f) x' y')
 
 -- Arithmetic (all via derived built-ins)
 a + b                             ⟹  (app {} (var {} add) a' b')
@@ -1805,6 +1809,13 @@ Juxtaposition and ungrouped chained calls are parse errors. A returned
 function value is applied through a grouped callee, `(f(x))(y)`, which the
 `AtomExpr CallArgs?` production represents without flattening the two calls.
 Transform callees use the explicit `TransformExpr CallArgs?` production.
+
+A call's argument list may end with the one named argument
+`accumulator=<dtype>`, the explicit accumulator of spec/04 §5.7:
+`sum(x, 0i32, accumulator=f64)`. It follows every positional argument and
+desugars to the `app` node's `accumulator` metadata (spec/03 §1.1). Only a
+call of the built-in `matmul`, `sum`, or `einsum` admits it; on any other
+callee it is a type error.
 
 ### 6.2 Bindings
 

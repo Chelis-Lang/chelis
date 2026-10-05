@@ -371,6 +371,9 @@ fn check_surf_expr(
             }
             check_surf_expr(ctx, source, inner, catalog, module, out);
         }
+        surf::Expr::Accumulate(call, _, _) => {
+            check_surf_expr(ctx, source, call, catalog, module, out);
+        }
         surf::Expr::Apply(func, args, _span) => {
             check_surf_expr(ctx, source, func, catalog, module, out);
             for arg in args {

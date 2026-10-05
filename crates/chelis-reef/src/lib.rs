@@ -1127,6 +1127,7 @@ fn collect_decl_type_references(decl: &Decl, out: &mut BTreeSet<String>) {
 fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
     match expr {
         Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Constructor(_, _) => {}
+        Expr::Accumulate(call, _, _) => collect_expr_type_references(call, out),
         Expr::Apply(callee, arguments, _) => {
             collect_expr_type_references(callee, out);
             for argument in arguments {
@@ -1277,6 +1278,7 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
             }
         }
         Expr::Lit(_, _) | Expr::Var(_, _) => {}
+        Expr::Accumulate(call, _, _) => collect_expr_constructor_references(call, out),
         Expr::Apply(callee, arguments, _) => {
             collect_expr_constructor_references(callee, out);
             for argument in arguments {
@@ -1476,6 +1478,7 @@ fn collect_expr_references(expr: &Expr, out: &mut BTreeSet<String>) {
             out.insert(name.clone());
         }
         Expr::Lit(_, _) => {}
+        Expr::Accumulate(call, _, _) => collect_expr_references(call, out),
         Expr::Apply(callee, args, _) => {
             collect_expr_references(callee, out);
             for arg in args {
@@ -11574,6 +11577,11 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut UnordSet<Stri
                 .iter()
                 .map(|item| rewrite_expr(item, resolver, locals))
                 .collect(),
+            *span,
+        ),
+        Expr::Accumulate(call, precision, span) => Expr::Accumulate(
+            Box::new(rewrite_expr(call, resolver, locals)),
+            precision.clone(),
             *span,
         ),
         Expr::Apply(func, args, span) => Expr::Apply(

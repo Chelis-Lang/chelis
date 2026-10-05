@@ -251,6 +251,7 @@ fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
             migrate_expr(function, shadow);
             args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
         }
+        Expr::Accumulate(call, _, _) => migrate_expr(call, shadow),
         Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             items.iter_mut().for_each(|item| migrate_expr(item, shadow))
         }
@@ -1020,6 +1021,17 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Lit(lit, _) => format_lit(lit),
         Expr::Var(name, _) | Expr::Constructor(name, _) => name.clone(),
         Expr::Apply(func, args, _) => format_apply(func, args),
+        Expr::Accumulate(call, precision, _) => match call.as_ref() {
+            Expr::Apply(func, args, _) => {
+                let call = format_apply(func, args);
+                let separator = if args.is_empty() { "" } else { ", " };
+                format!(
+                    "{}{separator}accumulator={precision})",
+                    &call[..call.len() - 1]
+                )
+            }
+            other => format_expr(other),
+        },
         Expr::List(items, _) => format!(
             "[{}]",
             items.iter().map(format_expr).collect::<Vec<_>>().join(", ")
@@ -1373,6 +1385,7 @@ fn format_call_callee(function: &Expr) -> String {
         // first call makes call-result application explicit and preserves a
         // nested Deep `app` rather than flattening it to `f(x, y)`.
         Expr::Apply(..)
+        | Expr::Accumulate(..)
         // Prefix and keyword-led forms otherwise absorb the following call
         // into their body or tail: `if c then f else g(x)`,
         // `fn (x) -> x(y)`, `-f(y)`, and so on.
@@ -1616,6 +1629,7 @@ fn expression_span(expr: &Expr) -> chelis_deep::Span {
         | Expr::Var(_, span)
         | Expr::Constructor(_, span)
         | Expr::Apply(_, _, span)
+        | Expr::Accumulate(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
         | Expr::RecordUpdate(_, _, span)
@@ -1652,6 +1666,7 @@ fn wrap_simple(expr: &Expr) -> String {
         | Expr::Var(_, _)
         | Expr::Constructor(_, _)
         | Expr::Apply(_, _, _)
+        | Expr::Accumulate(_, _, _)
         | Expr::List(_, _)
         | Expr::Access(_, _, _)
         | Expr::TupleGet(_, _, _)
@@ -1691,6 +1706,7 @@ fn wrap_operand(expr: &Expr) -> String {
         | Expr::Var(_, _)
         | Expr::Constructor(_, _)
         | Expr::Apply(_, _, _)
+        | Expr::Accumulate(_, _, _)
         | Expr::List(_, _)
         | Expr::Record(_, _, _)
         | Expr::Access(_, _, _)

@@ -6400,6 +6400,11 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             name: name.clone(),
             span: span(*s),
         },
+        Expr::Accumulate(call, accumulator, s) => WireSurfExpr::Accumulate {
+            call: Box::new(wire_expr(call)?),
+            accumulator: accumulator.clone(),
+            span: span(*s),
+        },
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
             func: Box::new(wire_expr(func)?),
             args: args
