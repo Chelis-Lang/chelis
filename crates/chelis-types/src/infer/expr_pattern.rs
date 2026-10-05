@@ -375,7 +375,9 @@ pub(super) fn pattern_bindings(
                     // spelling is a value binding, not constructor authority
                     // for a pattern head (chelis#1076).
                     let (arg_types, ret) = instantiate_variant_of(adt_def, variant_info, vg);
-                    let _ = unify(&ret, scrutinee_ty, subst);
+                    if let Err(error) = unify(&ret, scrutinee_ty, subst) {
+                        errors.push(at_check_site(pat, error.into()));
+                    }
                     let supplied = kids.len() - 1;
                     if supplied != arg_types.len() {
                         let expected = arg_types.len();
@@ -548,7 +550,9 @@ pub(super) fn pattern_bindings(
                     // downstream linearity/borrow checks. (closes #181)
                     let (instantiated_arg_types, instantiated_ret) =
                         instantiate_variant_of(adt_def, variant_info, vg);
-                    let _ = unify(&instantiated_ret, scrutinee_ty, subst);
+                    if let Err(error) = unify(&instantiated_ret, scrutinee_ty, subst) {
+                        errors.push(at_check_site(pat, error.into()));
+                    }
 
                     for kv_expr in kids.iter().skip(1) {
                         if let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv_expr)
@@ -666,12 +670,8 @@ pub(super) fn pattern_bindings(
                 // in a tuple scrutinee.
                 let resolved = subst.apply(scrutinee_ty);
                 // Pair each child sub-pattern with the matching tuple
-                // element type when the resolved scrutinee is a tuple of
-                // equal arity; otherwise hand each child a fresh type
-                // variable. The opacity check inside the nested
-                // `pat-record` / `pat-ctor` arms keys off the pattern's
-                // constructor name, not the scrutinee type, so the gate
-                // still fires under a fresh-var element type.
+                // element type. A known non-tuple or wrong-length tuple is
+                // inadmissible even if a later wildcard arm can run.
                 // chelis#1836: an UNRESOLVED scrutinee is tied to the
                 // pattern's own shape here. The pattern fixes the arity, so
                 // the scrutinee unifies with a tuple of one fresh element per
@@ -683,33 +683,15 @@ pub(super) fn pattern_bindings(
                 // the later binding could not contradict, and a false
                 // declared shape checked at score 1.
                 //
-                // A failure to unify is reported rather than dropped: the
-                // scrutinee is a variable here, so the only way this can fail
-                // is an occurs-check violation, which is a real defect in the
-                // program rather than a shape this arm may ignore.
-                let tied: Option<Vec<Type>> = match &resolved {
-                    Type::Var(_) => {
-                        let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
-                        match unify(&resolved, &Type::Tuple(elems.clone()), subst) {
-                            Ok(()) => Some(elems),
-                            Err(error) => {
-                                errors.push(error.into());
-                                None
-                            }
-                        }
-                    }
-                    _ => None,
-                };
-                let elem_tys: Option<&[Type]> = match (&resolved, &tied) {
-                    (_, Some(elems)) => Some(elems.as_slice()),
-                    (Type::Tuple(ts), None) if ts.len() == kids.len() => Some(ts.as_slice()),
-                    _ => None,
-                };
+                // Unification handles all three cases: a flexible scrutinee
+                // gains the tuple shape, an exact tuple pins the element
+                // types, and a mismatched kind or arity reports an error.
+                let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
+                if let Err(error) = unify(&resolved, &Type::Tuple(elems.clone()), subst) {
+                    errors.push(at_check_site(pat, error.into()));
+                }
                 for (i, sub_pat) in kids.iter().enumerate() {
-                    let elem_ty = match elem_tys {
-                        Some(ts) => subst.apply(&ts[i]),
-                        None => vg.fresh_type(),
-                    };
+                    let elem_ty = subst.apply(&elems[i]);
                     pattern_bindings(
                         sub_pat,
                         PatternSite::Other,
