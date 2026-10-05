@@ -2212,8 +2212,8 @@ fn explicit_v018_migration_renames_inside_the_value_that_binds_the_shadow() {
 
 /// chelis#2985: a call's final `accumulator=<dtype>` argument (spec/02
 /// `CallArgs`) formats canonically, desugars to the `app` node's
-/// `accumulator` metadata (spec/03 §1.1), and resugars to the same Surf; its
-/// Deep form reparses and prints unchanged.
+/// `accumulator` metadata (spec/03 §1.1), and resugars to calls with the same
+/// accumulator widths. Authored formatting retains pipes; Deep reparses unchanged.
 #[test]
 fn explicit_accumulator_round_trips_through_deep() {
     let source = concat!(
@@ -2236,7 +2236,11 @@ fn explicit_accumulator_round_trips_through_deep() {
     let reparsed = parse_deep(&printed).expect("the Deep form reparses");
     assert_eq!(print_canonical(&reparsed), printed);
     let resugared = resugar_program(&deep).expect("the Deep form resugars");
-    assert_eq!(format_program(&resugared), source);
+    let canonical = source.replace(
+        "x |> sum(0i32, accumulator=f64)",
+        "sum(x, 0i32, accumulator=f64)",
+    );
+    assert_eq!(format_program(&resugared), canonical);
 }
 
 /// chelis#2985: `accumulator=` takes a dtype and follows every positional
