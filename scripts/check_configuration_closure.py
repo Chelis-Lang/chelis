@@ -60,7 +60,7 @@ class ClippyRun:
     command: tuple[str, ...]
     owner: str
     #: Hosts covered at the registered cadence. The gate owns the canonical
-    #: per-pull-request commands; CI's `lint-and-unit` job runs all three on
+    #: per-pull-request commands; CI's `lint-and-unit` job runs all four on
     #: Linux, and `macos-workspace-shard` runs default and solver-free Clippy
     #: on macOS nightly. `no-default-features` has Linux coverage only.
     #: `scripts/test_check_configuration_closure.py` checks the macOS command
@@ -87,6 +87,22 @@ class ClippyRun:
                 flags.append(argument)
             elif argument == "--features" and index + 1 < len(self.command):
                 flags.extend(("--features", self.command[index + 1]))
+                index += 1
+            index += 1
+        return tuple(flags)
+
+    def cargo_package_flags(self) -> tuple[str, ...]:
+        """Preserve package selection when Cargo resolves a restricted row."""
+        flags: list[str] = []
+        index = 0
+        while index < len(self.command):
+            argument = self.command[index]
+            if argument == "--":
+                break
+            if argument == "--workspace":
+                flags.append(argument)
+            elif argument in ("-p", "--package", "--exclude"):
+                flags.extend((argument, self.command[index + 1]))
                 index += 1
             index += 1
         return tuple(flags)
@@ -169,6 +185,16 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--",
             "-D",
             "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux",),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="core-without-migration",
+        command=(
+            "cargo", "clippy", "-p", "chelis-deep", "-p", "chelis-surf",
+            "--all-targets", "--no-default-features", "--", "-D", "warnings",
         ),
         owner="scripts/gate.py",
         hosts=("linux",),
@@ -404,6 +430,52 @@ def resolved_features(
     repo_root: Path = REPO_ROOT,
 ) -> frozenset[tuple[str, str]]:
     """The `(package, feature)` pairs cargo actually enables for one row."""
+    return resolved_configuration(run, repo_root)[1]
+
+
+def resolved_configuration(
+    run: ClippyRun,
+    repo_root: Path = REPO_ROOT,
+) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+    """Cargo's compiled package scope and enabled workspace features.
+
+    Metadata resolves the whole workspace, even for a package-restricted
+    Clippy command. Cargo tree preserves that selection and dependency feature
+    unification; an absent package must not count as its feature's off-state.
+    """
+    selection = run.cargo_package_flags()
+    if any(flag in selection for flag in ("-p", "--package", "--exclude")):
+        metadata = _cargo_metadata(repo_root, no_deps=True)
+        members = set(metadata["workspace_members"])
+        identities = {
+            f'{package["name"]} v{package["version"]} ({Path(package["manifest_path"]).parent})':
+            package["name"]
+            for package in metadata["packages"] if package["id"] in members
+        }
+        completed = subprocess.run(
+            ("cargo", "tree", *selection, *run.cargo_feature_flags(),
+             "--edges", "normal,build,dev", "--prefix", "none", "--no-dedupe",
+             "--format", "{p}|{f}"),
+            cwd=repo_root, check=True, capture_output=True, text=True,
+        )
+        compiled: set[str] = set()
+        enabled: set[tuple[str, str]] = set()
+        for line in completed.stdout.splitlines():
+            if not line.strip():
+                continue
+            identity, separator, features = line.partition("|")
+            if not separator:
+                raise ConfigurationClosureFailure(f"unreadable Cargo tree row: {line!r}")
+            if identity not in identities:
+                continue
+            package = identities[identity]
+            compiled.add(package)
+            enabled.update((package, feature) for feature in features.split(",")
+                           if feature and feature != "default")
+        if not compiled:
+            raise ConfigurationClosureFailure("restricted Clippy row resolves no workspace packages")
+        return frozenset(compiled), frozenset(enabled)
+
     metadata = _cargo_metadata(repo_root, *run.cargo_feature_flags())
     members = set(metadata["workspace_members"])
     names = {package["id"]: package["name"] for package in metadata["packages"]}
@@ -414,7 +486,7 @@ def resolved_features(
         for feature in node["features"]:
             if feature != "default":
                 enabled.add((names[node["id"]], feature))
-    return frozenset(enabled)
+    return frozenset(names[member] for member in members), frozenset(enabled)
 
 
 def check_matrix_covers_declared_features(
@@ -437,13 +509,13 @@ def check_matrix_covers_declared_features(
         for package, features in declared_features(repo_root).items()
         for feature in features
     }
-    by_row = {run.label: resolved_features(run, repo_root) for run in matrix}
+    by_row = {run.label: resolved_configuration(run, repo_root) for run in matrix}
 
     enabled_somewhere: set[tuple[str, str]] = set()
     disabled_somewhere: set[tuple[str, str]] = set()
-    for enabled in by_row.values():
+    for compiled, enabled in by_row.values():
         enabled_somewhere |= enabled & declared
-        disabled_somewhere |= declared - enabled
+        disabled_somewhere |= {pair for pair in declared - enabled if pair[0] in compiled}
 
     def render(pairs: set[tuple[str, str]]) -> str:
         return ", ".join(sorted(f"{package}/{feature}" for package, feature in pairs))

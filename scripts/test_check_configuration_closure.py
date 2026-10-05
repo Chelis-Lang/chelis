@@ -312,6 +312,30 @@ class MatrixCoverageTests(unittest.TestCase):
         cvc5 = CLOSURE.resolved_features(rows["cvc5-features"], REPO_ROOT)
         self.assertIn(("chelis-prove", "cvc5-rs"), cvc5)
 
+    def test_migration_off_row_compiles_core_without_the_cli_feature(self) -> None:
+        rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
+        compiled, enabled = CLOSURE.resolved_configuration(rows["core-without-migration"], REPO_ROOT)
+        self.assertTrue({"chelis-deep", "chelis-surf"} <= compiled)
+        self.assertNotIn("chelis-cli", compiled)
+        for package in ("chelis-deep", "chelis-surf"):
+            self.assertNotIn((package, "pre-020-pipe-migration"), enabled)
+            self.assertIn((package, "pre-020-pipe-migration"),
+                          CLOSURE.resolved_features(rows["default-features"], REPO_ROOT))
+
+    def test_removing_core_off_row_reopens_migration_configuration_gap(self) -> None:
+        matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
+                       if run.label != "core-without-migration")
+        with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
+                                    "chelis-deep/pre-020-pipe-migration"):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
+
+    def test_uncompiled_package_cannot_count_as_feature_off_coverage(self) -> None:
+        matrix = tuple(run for run in CLOSURE.CLIPPY_MATRIX
+                       if run.label in {"all-features", "core-without-migration"})
+        with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure,
+                                    "chelis-cli/chelis-prove"):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
+
     def test_every_registered_run_is_issued_by_its_owner(self) -> None:
         for run in CLOSURE.CLIPPY_MATRIX:
             CLOSURE.check_owner_invokes(run, REPO_ROOT)
@@ -339,7 +363,7 @@ class MatrixCoverageTests(unittest.TestCase):
             self.assertEqual(run.cadence, CLOSURE.NIGHTLY)
             self.assertIn(" ".join(run.command), commands)
         gate_rows = [run for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"]
-        self.assertEqual(len(gate_rows), 3)
+        self.assertEqual(len(gate_rows), 4)
         for run in gate_rows:
             self.assertEqual(run.hosts, ("linux",))
             self.assertEqual(run.cadence, CLOSURE.PER_PULL_REQUEST)
