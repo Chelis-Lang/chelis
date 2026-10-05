@@ -24,7 +24,6 @@ chelis-vocab.workspace = true
 half = { workspace = true }
 libc.workspace = true
 memmap2 = "0.9"
-num-bigint = "0.4"
 
 [build-dependencies]
 # build.rs records a SHA-256 of each declared source input, which development
@@ -40,6 +39,11 @@ chelis-types = { workspace = true }
 # Test-only: the floating-point profile's obligation rows for the f16 and bf16
 # storage conversions, whose production lane is this crate's finalization.
 chelis-crmath = { workspace = true }
+# Test-only: the oracle for the differential tests of the exact decimal parse
+# and `round_to` (the `reference` module in `src/decimal_parse.rs`'s tests).
+# The runtime itself must not link it: num-bigint's size estimates call host
+# `exp`, `log`, `log2` and `cbrt` (chelis#2963).
+num-bigint = "0.4"
 
 # chelis#3032: the sort-tuple ownership tests read the allocation ledger, so
 # every runner, the change-owned lane included, builds them with it.
