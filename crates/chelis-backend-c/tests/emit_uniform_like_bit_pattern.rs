@@ -338,7 +338,8 @@ int main(void) {
     let Some(output) = compile_and_run("uniform_like_f64", src, harness) else {
         panic!("emitted f64 C did not compile/run");
     };
-    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+    // [05-OP-8]: the bounds have the template's dtype, as in the graph above.
+    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F64, value).unwrap();
     // The draw's key is `key_from_seed(42)`.
     let key = chelis_types::RandomKey::from_seed(
         chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
