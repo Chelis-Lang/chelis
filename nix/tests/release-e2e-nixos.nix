@@ -101,6 +101,6 @@ pkgs.testers.runNixOSTest {
             " evidence/report.json evidence/logs evidence/canary"
             " evidence/exit-status evidence/console.log"
         )
-        machine.copy_from_vm("/tmp/evidence.tar.gz", machine.name)
+        machine.copy_from_machine("/tmp/evidence.tar.gz", machine.name)
   '';
 }

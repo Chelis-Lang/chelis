@@ -133,6 +133,8 @@ jobs:
         with:
           name: release-e2e-inputs
           path: e2e
+          # The gates include .github/scripts.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
