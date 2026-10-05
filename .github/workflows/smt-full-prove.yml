@@ -146,6 +146,11 @@ jobs:
       - name: Run CLI prove tests with the release solver feature
         run: cargo test -p chelis-cli --features smt --test prove
 
+      # Every test in these CLI targets is smt-gated, so default-feature PR
+      # lanes list none; this job is their owner.
+      - name: Run smt-gated CLI prove targets
+        run: cargo test -p chelis-cli --features smt --test issue_979_nautilus_quantile --test prove_injection_starvation
+
       - name: Run carcara-gated chelis-prove tests
         # The nightly parallel process exited with SIGSEGV after tests; the
         # same complete suite passed serially. Retain the full corpus while

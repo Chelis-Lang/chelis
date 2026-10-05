@@ -1361,6 +1361,22 @@ tracking_issue = "chelis#3017"
 # by the SMT jobs. The nightly full SMT prove runs every smt-gated chelis-prove
 # integration target with the feature.
 [[target_exclusion]]
+package = "chelis-cli"
+name = "issue_979_nautilus_quantile"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-cli --features smt --test issue_979_nautilus_quantile` runs it with cvc5"
+tracking_issue = "chelis#979"
+[[target_exclusion]]
+package = "chelis-cli"
+name = "prove_injection_starvation"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-cli --features smt --test prove_injection_starvation` runs it with cvc5"
+tracking_issue = "chelis#3164"
+[[target_exclusion]]
 package = "chelis-prove"
 name = "issue_1475_sqrt_domain"
 workflow = "smt-full-prove.yml"
