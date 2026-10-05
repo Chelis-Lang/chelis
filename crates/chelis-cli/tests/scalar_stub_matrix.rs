@@ -301,7 +301,7 @@ fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
         "sigmoid" => tier2_sigmoid_expr(x, dtype),
         "tanh" => x.to_string(),
         "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
-        "gelu" => {
+        "gelu_tanh" => {
             let x_sq = format!("mul({x}, {x})");
             let x_cu = format!("mul({x_sq}, {x})");
             let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
@@ -320,11 +320,11 @@ fn reduced_float_scalar_activations_match_tier2_node_finalization() {
         ("f16", "sigmoid", "0.0007328987121582031"),
         ("f16", "tanh", "5.960464477539063e-8"),
         ("f16", "silu", "2.9802322387695313e-7"),
-        ("f16", "gelu", "2.9802322387695313e-7"),
+        ("f16", "gelu_tanh", "2.9802322387695313e-7"),
         ("bf16", "sigmoid", "0.005889892578125"),
         ("bf16", "tanh", "9.183549615799121e-41"),
         ("bf16", "silu", "0.00555419921875"),
-        ("bf16", "gelu", "0.0030975341796875"),
+        ("bf16", "gelu_tanh", "0.0030975341796875"),
     ] {
         let x = format!("cast({input}, {dtype})");
         let activation = format!("{op}({x})");

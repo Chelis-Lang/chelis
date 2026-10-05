@@ -115,6 +115,28 @@ class ContractCleanTests(unittest.TestCase):
             with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, what):
                 vcm.contract_clean(text, "t")
 
+    def test_underflow_flag_save_and_clear_are_dropped(self):
+        text = (
+            "double f(double x){\n  int underflow = fetestexcept (FE_UNDERFLOW); // at input\n"
+            "  if (underflow == 0 && x < 1.0 && fetestexcept (FE_UNDERFLOW))\n"
+            "    feclearexcept (FE_UNDERFLOW); // spurious underflow\n  return x;\n}\n"
+        )
+        self.assertEqual(vcm.contract_clean(text, "t"), "double f(double x){\n  return x;\n}\n")
+
+    def test_define_between_if_and_else_moves_to_the_top(self):
+        text = (
+            "double f(double x){\n  if (x < 0) {\n    return -x;\n  }\n#define T 2.0\n"
+            "  /* a comment\n     over two lines */\n  else if (x <= T) {\n    return x;\n  }\n  return 0;\n}\n"
+        )
+        out = vcm.contract_clean(text, "t")
+        self.assertTrue(out.startswith("#define T 2.0\ndouble f(double x){"), out)
+        self.assertEqual(out.count("#define T"), 1)
+
+    def test_define_used_before_its_line_is_not_hoisted(self):
+        text = "double T = 1;\nint f(int x){\n  if (x) {\n    return 1;\n  }\n#define T 2\n  else {\n    return T;\n  }\n}\n"
+        with self.assertRaisesRegex(vcm.VendorError, "cannot hoist"):
+            vcm.contract_clean(text, "t")
+
     def test_include_outside_the_contract_is_rejected(self):
         with self.assertRaisesRegex(vcm.VendorError, "x86intrin"):
             vcm.contract_clean("#include <x86intrin.h>\n", "t")
@@ -146,7 +168,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_kernel_matrix_is_the_op46_transcendentals_at_both_widths(self):
         pairs = {(k.function, k.width) for k in vcm.KERNELS}
-        self.assertEqual(pairs, {(f, w) for f in ("exp", "log", "sin", "cos", "tan", "atan", "tanh") for w in (32, 64)})
+        self.assertEqual(pairs, {(f, w) for f in ("exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc") for w in (32, 64)})
 
     def test_amalgamation_opens_with_the_guards(self):
         text = vcm.AMALGAMATION.read_text(encoding="utf-8")

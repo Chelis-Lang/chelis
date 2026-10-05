@@ -35,7 +35,8 @@ The comparison family [05-OP-36], `max_elem` / `min_elem`, the exact
 arithmetic family [05-OP-64] including `mod`, and the bitwise and shift family
 [05-OP-47] borrow both tensor operands, and the casts `cast` [05-OP-63],
 `cast_trunc` [05-OP-6], `cast_saturate` [05-OP-23], and `cast_wrap`
-[05-OP-24] borrow their tensor source. The unary activations `sigmoid`, `tanh`, `silu`, and `gelu`
+[05-OP-24] borrow their tensor source. The unary activations `sigmoid`, `tanh`, `silu`, `gelu`, `gelu_tanh`,
+and `standard_normal_cdf`
 borrow their tensor operand, as do the read-only unary primitives composing
 them. Operator and function-call spellings have the same ownership disposition.
 A genuine consuming use still makes a later call in any of these families a
@@ -233,6 +234,8 @@ and float precisions as their tensor forms and use the same adjoint rule.
 | `tan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tan(x) | `g / (cos(x) * cos(x))` (= `g / cos²(x)`) |
 | `atan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise atan(x) | `g / (1 + x * x)` |
 | `tanh` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tanh(x) | `g * (1 - y * y)` (using `y = tanh(x)`) |
+| `erf` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise error function erf(x) | `g * (k * exp(-(x * x)))` (`k = 2/sqrt(pi)`) |
+| `erfc` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise complementary error function erfc(x) = 1 - erf(x) | `-(g * (k * exp(-(x * x))))` (`k = 2/sqrt(pi)`) |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
 | `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | For float operands, `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0); integer operands are forward-only |
 | `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
@@ -1265,26 +1268,83 @@ three atoms above and never admits `bool` to a numeric capability or kernel.
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
 | `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
 | `tanh(x)` | The Tier 1 primitive `tanh` of §2.2 and [05-OP-46]; it has no lowering |
-| `silu(x)` | `mul(x, sigmoid(x))` |
-| `gelu(x)` | `mul(x, sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
+| `silu(x)` | `mul(m(x), sigmoid(x))` |
+| `gelu(x)` | `mul(m(x), Phi(x))`, with `Phi` the standard normal CDF graph below |
+| `standard_normal_cdf(x)` | `Phi(x)`, the standard normal CDF graph below |
+| `gelu_tanh(x)` | `mul(m(x), sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
 
-All five activation functions admit float tensors and float scalars at f16,
+`m(x)` is the multiplicand guard
+`where(cmplt(x, const(lowest)), neg(const(0.0)), x)`, with `lowest` the most
+negative finite value of the operand dtype: it is `x` at every finite input and
+at NaN and `+inf`, and `-0.0` at `-inf`.
+Each gated function `x * f(x)` has `f(-inf) = +0` and limit zero from below as
+`x` goes to `-inf`, so the unguarded `mul(x, f(x))` would give `-inf * 0`, a NaN
+for an input whose limit is defined. With the guard, `silu`, `gelu`, and
+`gelu_tanh` give `-0.0` at `-inf`, the signed zero every sufficiently negative
+finite input already produces as `x * +0`, and `+inf` at `+inf`. `sigmoid`
+and `Phi` need no guard: their graphs give `+0` at `-inf` and `1` at `+inf`.
+
+`Phi(x)` is the standard normal cumulative distribution function
+`0.5 * erfc(-x / sqrt(2))`. For an f32 or f64 operand it is the graph below,
+at the operand dtype. Its constants are `c`, the real value `1/sqrt(2)`
+rounded to the operand dtype; `cl`, the real value `1/sqrt(2) - c` rounded to
+the operand dtype; `k`, the real value `2/sqrt(pi)` rounded to the operand
+dtype; the Veltkamp splitter `s`, which is `4097` for f32 and `134217729` for
+f64; and the range bound `L = 64`. For an f16 or bf16 operand, `Phi` widens
+the operand exactly to f32, evaluates the f32 graph, and finalizes that f32
+result to the operand's storage once under [04-NUM-2], as [05-OP-46] does for
+its correctly rounded primitives; the stored result is that composition.
+
+```text
+e   = erfc(mul(neg(x), const(c)))
+z   = where(cmplt(abs(x), const(L)), x, const(0.0))
+a   = neg(z)
+th  = mul(a, const(c))
+ta  = mul(const(s), a)
+ah  = sub(ta, sub(ta, a))
+al  = sub(a, ah)
+tc  = mul(const(s), const(c))
+ch  = sub(tc, sub(tc, const(c)))
+cr  = sub(const(c), ch)
+tl  = add(add(add(add(sub(mul(ah, ch), th), mul(ah, cr)), mul(al, ch)), mul(al, cr)),
+          mul(a, const(cl)))
+Phi = mul(const(0.5), sub(e, mul(mul(const(k), exp(neg(mul(th, th)))), tl)))
+```
+
+`th + tl` is `-z/sqrt(2)` carried to twice the operand precision: `ah`, `al`,
+`ch`, and `cr` are Veltkamp splits, and the first four terms of `tl` are the
+exact rounding error of `th`. The subtracted product is the first-order Taylor
+term of `erfc` at `th`, so the rounding of the scaled argument does not reach
+the result. `z` is `x` wherever the correction can be nonzero at any active
+float width and `0.0` elsewhere, including at an infinity and at NaN, where the
+correction is then exactly zero and `e` alone carries the result: `Phi(+inf)`
+is `1`, `Phi(-inf)` is `+0`, and NaN propagates through `e`. The bound also
+keeps every split product finite, and because the correction reads `z` rather
+than `x`, its cotangent contribution to `x` is exactly zero outside the bound.
+f16 and bf16 evaluate the
+f32 graph because a per-primitive finalization to an 8- or 11-bit significand
+leaves an argument error that a first-order correction cannot remove.
+
+All seven functions of this table admit float tensors and float scalars at f16,
 bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
 rank-zero instance of the tensor operation; non-float operands are type
 errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
 arithmetic width and finalizes to the operand's storage width before the next
-primitive observes it, as required by [04-NUM-1]. Each constant is the real
-value rounded once to the operand dtype. The `exp` leaf is [05-OP-46]'s
-correctly rounded primitive, so each lowering denotes one result bit pattern
-for each input. `gelu` is the tanh approximation of the Gaussian error linear
-unit, `0.5*x*(1+tanh(u))`, spelled through the identity
+primitive observes it, as required by [04-NUM-1]; the one exception is `Phi`
+at f16 and bf16, whose graph is stated above at f32 with one final
+finalization to storage. Each constant is the real
+value rounded once to the operand dtype. The `exp` and `erfc` leaves are
+[05-OP-46]'s correctly rounded primitives, so each lowering denotes one result
+bit pattern for each input. `gelu` is the Gaussian error linear unit,
+`x * Phi(x)`. `gelu_tanh` is its tanh approximation,
+`0.5*x*(1+tanh(u))`, spelled through the identity
 `0.5*(1+tanh(u)) = sigmoid(2u)`: the tanh spelling cancels catastrophically
 for negative `x`, where `tanh(u)` approaches `-1`, and the sigmoid spelling
 does not. `tanh` is a primitive rather than a
 composition: no graph over the other primitives reproduces the correctly
 rounded hyperbolic tangent near zero, where `2*sigmoid(2x)-1` cancels. The
-adjoint is the derivative of the lowering above for `sigmoid`, `silu`, and
-`gelu`, and [05-OP-46]'s adjoint for `tanh`; `relu` instead carries its own
+adjoint is the derivative of the lowering above for `sigmoid`, `silu`,
+`gelu`, `gelu_tanh`, and `standard_normal_cdf`, and [05-OP-46]'s adjoint for `tanh`; `relu` instead carries its own
 adjoint under [05-OP-43] and survives AD as an intact Tier-2 identity.
 
 > **[05-OP-43]** `relu(x) -> result` admits every active float dtype on a
@@ -1326,7 +1386,7 @@ composition of the operations governed here.
 The following names appear in lowering narratives (§4) as pseudocode or
 pattern-matched operations. Most decompose into Tier 1 primitives. `cos` is a
 first-class unary primitive `RiscOp::Cos` (see §2.2), alongside `tan`,
-`atan`, `tanh`, `abs`, `floor`, and `ceil`, none of which decompose.
+`atan`, `tanh`, `erf`, `erfc`, `abs`, `floor`, and `ceil`, none of which decompose.
 
 | Helper | Decomposes to |
 |---|---|
@@ -2884,21 +2944,18 @@ exact ADT identity by [05-OP-34].
 > an arithmetic operand, default dtype, or restriction on `normal_cdf`, whose
 > semantic result remains at its input dtype. A caller defining another
 > property policy states its own tolerance at that property's value dtype.
-> `normal_cdf(+inf)` is exact `1p`, `normal_cdf(-inf)` is exact `0p`, and a NaN
-> input returns [04-NUM-2]'s canonical NaN at `p_float`. Every finite input uses
-> this exact same-`p_float` composition:
-> `0.5 * (1 - erf_approx(-x * 0.7071067811865475))`, where for
-> `a=abs(x)`, `erf_approx(x)` is `x * 1.1283791670955126` when `a < 1e-5` and
-> otherwise uses `t=1/(1+0.3275911*a)`,
-> `p=t*(0.254829592+t*(-0.284496736+t*(1.421413741+t*(-1.453152027+t*1.061405429))))`,
-> and `sign(x)*(1-p*exp(-a*a))`. Each decimal literal rounds directly to
-> `p_float`, and each primitive finalizes to `p_float` before its consumer.
-> The `exp` inside this compound graph is [05-OP-46]'s correctly rounded
-> `exp` at `p_float`'s arithmetic width, finalized to `p_float`, so the
-> complete callable denotes one result bit pattern per input and has
-> [05-OBS-3]'s zero-ULP cross-lane bound.
-> Its adjoint is the derivative of that exact finite graph, not a substituted
-> library CDF. The infinities have zero cotangent and NaN propagates the
+> `normal_cdf(x)` is [05-OP-48]'s `standard_normal_cdf(x)`, section 3.3's `Phi` at
+> `p_float`: for f32 and f64 its
+> graph with each constant rounded once to `p_float` and each primitive
+> finalized to `p_float` before its consumer, and for f16 and bf16 the f32
+> graph finalized once to `p_float`. Its `erfc` and `exp` leaves are [05-OP-46]'s correctly rounded
+> primitives at `p_float`'s arithmetic width, so the complete callable denotes
+> one result bit pattern per input and has [05-OBS-3]'s zero-ULP cross-lane
+> bound. `normal_cdf(+inf)` is exact `1p`, `normal_cdf(-inf)` is exact `0p`, and a NaN
+> input returns [04-NUM-2]'s canonical NaN at `p_float`, each as the graph's own
+> result.
+> Its adjoint is the derivative of that exact graph, not a substituted
+> library CDF or density. The infinities have zero cotangent and NaN propagates the
 > canonical NaN cotangent; no non-finite input traps `Domain`.
 >
 > JSON parsing accepts exactly one complete RFC 8259 value encoded as valid
@@ -3740,8 +3797,8 @@ path even though bare `round` under `grad` remains a structural
 #### Unary arithmetic
 
 > **[05-OP-46]** Signature: `neg(x)`, `recip(x)`, `exp(x)`, `log(x)`, `sin(x)`, `sqrt(x)`,
-> `cos(x)`, `tan(x)`, `atan(x)`, `tanh(x)`, `abs(x)`, `floor(x)`, `ceil(x)`, and
-> `round(x)` preserve the scalar or tensor shape and dtype of one operand.
+> `cos(x)`, `tan(x)`, `atan(x)`, `tanh(x)`, `erf(x)`, `erfc(x)`, `abs(x)`,
+> `floor(x)`, `ceil(x)`, and `round(x)` preserve the scalar or tensor shape and dtype of one operand.
 >
 > Domain: Negation, absolute value, floor, ceil, and round admit active
 > signed integers and floats. The other operations admit active floats only.
@@ -3751,9 +3808,11 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: Each operation computes its named mathematical operation under the
 > IEEE exceptional-value and finalization rules. The transcendental
-> operations `exp`, `log`, `sin`, `cos`, `tan`, `atan`, and `tanh` (natural
-> exponential, natural logarithm, sine, cosine, and tangent of an argument in
-> radians, principal arctangent, hyperbolic tangent), and `sqrt`, are
+> operations `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and
+> `erfc` (natural exponential, natural logarithm, sine, cosine, and tangent of
+> an argument in radians, principal arctangent, hyperbolic tangent, the error
+> function `erf(x) = (2/sqrt(pi)) * integral from 0 to x of exp(-t*t) dt`, and
+> the complementary error function `erfc(x) = 1 - erf(x)`), and `sqrt`, are
 > correctly rounded: the result is the exact real value of the function at
 > the operand, rounded once, ties to even, to [04-NUM-8]'s arithmetic width of
 > the operand's dtype, with gradual underflow and overflow to the correctly
@@ -3767,9 +3826,13 @@ path even though bare `round` under `grad` remains a structural
 > apply: `exp(-inf)` is `+0` and `exp(+inf)` is `+inf`; `log(+0)` and
 > `log(-0)` are `-inf`, `log(+inf)` is `+inf`, and `log` of a value below zero
 > is NaN; `sin`, `cos`, and `tan` of an infinity are NaN; `atan(+-inf)` is
-> `+-pi/2` correctly rounded; `tanh(+-inf)` is `+-1`; `sqrt` of a value
-> below zero is NaN; and `sin`, `tan`, `atan`, `tanh`, and `sqrt` preserve a
-> signed zero while `exp(+-0)` and `cos(+-0)` are `1`. Every NaN result, including one from a NaN operand, finalizes to
+> `+-pi/2` correctly rounded; `tanh(+-inf)` is `+-1`; `erf(+-inf)` is
+> `+-1`; `erfc(-inf)` is `2` and `erfc(+inf)` is `+0`; `sqrt` of a value
+> below zero is NaN; and `sin`, `tan`, `atan`, `tanh`, `erf`, and `sqrt`
+> preserve a signed zero while `exp(+-0)`, `cos(+-0)`, and `erfc(+-0)` are
+> `1`. `erfc` is a primitive rather than `1 - erf(x)` because that difference
+> cancels for large positive `x`, and `erf` is a primitive rather than
+> `1 - erfc(x)` because that difference cancels near zero. Every NaN result, including one from a NaN operand, finalizes to
 > [04-NUM-2]'s canonical quiet NaN. IEEE status flags are not observable.
 > Reciprocal is direct
 > division of same-dtype one by x. On floats, round selects the nearest
@@ -3786,7 +3849,9 @@ path even though bare `round` under `grad` remains a structural
 > -g*y*y using the forward y=1/x; exp gives g*exp(x); log gives g/x; sin
 > gives g*cos(x); sqrt gives g/(2*sqrt(x)); cos gives -g*sin(x); tan gives
 > g/(cos(x)*cos(x)); atan gives g/(1+x*x); tanh gives g*(1-y*y) using the
-> forward y=tanh(x); abs gives g*sign(x), where
+> forward y=tanh(x); erf gives g*(k*exp(neg(x*x))) and erfc gives
+> neg(g*(k*exp(neg(x*x)))), with k the real value 2/sqrt(pi) rounded once to
+> the operand dtype and exp [05-OP-46]'s correctly rounded primitive; abs gives g*sign(x), where
 > sign(x)=(x>0)-(x<0), including zero for x=0 and NaN. Integer
 > differentiated inputs and float floor/ceil/round structurally reject
 > differentiation; integer rounding identities may be erased before AD.
@@ -3826,7 +3891,8 @@ path even though bare `round` under `grad` remains a structural
 
 #### Activation compositions
 
-> **[05-OP-48]** Signature: `sigmoid(x)`, `silu(x)`, and `gelu(x)` preserve one
+> **[05-OP-48]** Signature: `sigmoid(x)`, `silu(x)`, `gelu(x)`, `gelu_tanh(x)`, and
+> `standard_normal_cdf(x)` preserve one
 > float scalar or tensor's shape and dtype; `softmax(x,axis)` takes a float
 > tensor and an axis-domain i32 and returns the same tensor type.
 >
@@ -3836,13 +3902,17 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: The pointwise lowerings are section 3.3's primitive graphs:
 > sigmoid is `recip(add(const(1.0), exp(neg(x))))`, silu is
-> `mul(x, sigmoid(x))`, and gelu is `mul(x, sigmoid(mul(const(2.0), u)))`
-> with section 3.3's exact spelling of `u`. Softmax uses section 4.2's max-shifted
-> exponentials divided by their axis sum. Every exponential in these graphs
-> is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
+> `mul(m(x), sigmoid(x))`, gelu is `mul(m(x), Phi(x))` with section 3.3's
+> exact graph for `Phi`, standard_normal_cdf is `Phi(x)`, and gelu_tanh is
+> `mul(m(x), sigmoid(mul(const(2.0), u)))` with section 3.3's exact spelling
+> of `u`, where `m` is section 3.3's multiplicand guard: silu, gelu, and
+> gelu_tanh return `-0.0` at `-inf` and `+inf` at `+inf`. Softmax uses section 4.2's max-shifted
+> exponentials divided by their axis sum. Every exponential and complementary
+> error function in these graphs is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
 > operation without contraction, so each composition denotes exactly one
 > result bit pattern per input. Constants, each primitive intermediate, and
-> results retain the operand dtype; the formulas do not license an f64
+> results retain the operand dtype, except that `Phi` at f16 and bf16 is
+> section 3.3's f32 graph finalized once to storage; the formulas do not license an f64
 > evaluation funnel, a fused or library substitute for the stated graph, or
 > a lane-specific approximation.
 >

@@ -7546,8 +7546,24 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
 
 #[test]
 fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
-    // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
-    // Tanh approximation matches the host-runtime `activation_gelu_f32` helper.
+    // gelu_tanh(0) = 0; gelu_tanh(1) ≈ 0.84119; gelu_tanh(-1) ≈ -0.15881.
+    run_activation_parity(
+        "bucket3_gelu_tanh",
+        r#"
+def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu_tanh(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = gelu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu_tanh pointwise (tanh-approx)")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_gelu_exact_runs_in_eval_and_c_lanes() {
+    // gelu(x) = x * Phi(x): gelu(1) ≈ 0.8413447, gelu(-1) ≈ -0.1586553, which
+    // the tanh approximation misses by about 2.2e-4.
     run_activation_parity(
         "bucket3_gelu",
         r#"
@@ -7555,8 +7571,8 @@ def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu(x)
 
 input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
 actual = gelu_apply(input)
-expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-approx)")
+expected = to_tensor([cast(0.0, f32), cast(0.8413447, f32), cast(-0.1586553, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.00001, "gelu pointwise (exact)")
 "#,
     );
 }

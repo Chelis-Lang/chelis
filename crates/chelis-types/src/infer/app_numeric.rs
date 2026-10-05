@@ -23,8 +23,12 @@ pub(super) const TENSOR_OPS: &[&str] = &[
     "relu",
     "sigmoid",
     "tanh",
+    "erf",
+    "erfc",
     "silu",
     "gelu",
+    "gelu_tanh",
+    "standard_normal_cdf",
     "matmul",
     "layer_norm",
     "max_elem",
@@ -451,8 +455,22 @@ pub(super) fn operand_dtype_rejection(
             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_integer())
                 || matches!(resolved, Type::Prim(prim) if prim.is_integer())
         }
-        "exp" | "log" | "sin" | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-        | "gelu" | "recip" => {
+        "exp"
+        | "log"
+        | "sin"
+        | "tan"
+        | "atan"
+        | "sqrt"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "recip" => {
             matches!(
                 resolved,
                 Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
@@ -499,8 +517,12 @@ pub(super) fn operand_dtype_rejection(
             | "relu"
             | "sigmoid"
             | "tanh"
+            | "erf"
+            | "erfc"
             | "silu"
             | "gelu"
+            | "gelu_tanh"
+            | "standard_normal_cdf"
             | "recip"
     );
     let resolved_int_prim = match resolved {

@@ -24,6 +24,8 @@ pub enum Kernel {
     TanF32,
     AtanF32,
     TanhF32,
+    ErfF32,
+    ErfcF32,
     ExpF64,
     LogF64,
     SinF64,
@@ -31,11 +33,13 @@ pub enum Kernel {
     TanF64,
     AtanF64,
     TanhF64,
+    ErfF64,
+    ErfcF64,
 }
 
 impl Kernel {
     /// Every kernel, in amalgamation order.
-    pub const ALL: [Kernel; 14] = [
+    pub const ALL: [Kernel; 18] = [
         Kernel::ExpF32,
         Kernel::LogF32,
         Kernel::SinF32,
@@ -43,6 +47,8 @@ impl Kernel {
         Kernel::TanF32,
         Kernel::AtanF32,
         Kernel::TanhF32,
+        Kernel::ErfF32,
+        Kernel::ErfcF32,
         Kernel::ExpF64,
         Kernel::LogF64,
         Kernel::SinF64,
@@ -50,6 +56,8 @@ impl Kernel {
         Kernel::TanF64,
         Kernel::AtanF64,
         Kernel::TanhF64,
+        Kernel::ErfF64,
+        Kernel::ErfcF64,
     ];
 
     /// The amalgamation's name for the kernel (`expf`, `exp`, ...).
@@ -62,6 +70,8 @@ impl Kernel {
             Kernel::TanF32 => "tanf",
             Kernel::AtanF32 => "atanf",
             Kernel::TanhF32 => "tanhf",
+            Kernel::ErfF32 => "erff",
+            Kernel::ErfcF32 => "erfcf",
             Kernel::ExpF64 => "exp",
             Kernel::LogF64 => "log",
             Kernel::SinF64 => "sin",
@@ -69,6 +79,8 @@ impl Kernel {
             Kernel::TanF64 => "tan",
             Kernel::AtanF64 => "atan",
             Kernel::TanhF64 => "tanh",
+            Kernel::ErfF64 => "erf",
+            Kernel::ErfcF64 => "erfc",
         }
     }
 
@@ -83,6 +95,8 @@ impl Kernel {
             Kernel::TanF32 => "chelis_cr_tanf",
             Kernel::AtanF32 => "chelis_cr_atanf",
             Kernel::TanhF32 => "chelis_cr_tanhf",
+            Kernel::ErfF32 => "chelis_cr_erff",
+            Kernel::ErfcF32 => "chelis_cr_erfcf",
             Kernel::ExpF64 => "chelis_cr_exp",
             Kernel::LogF64 => "chelis_cr_log",
             Kernel::SinF64 => "chelis_cr_sin",
@@ -90,6 +104,34 @@ impl Kernel {
             Kernel::TanF64 => "chelis_cr_tan",
             Kernel::AtanF64 => "chelis_cr_atan",
             Kernel::TanhF64 => "chelis_cr_tanh",
+            Kernel::ErfF64 => "chelis_cr_erf",
+            Kernel::ErfcF64 => "chelis_cr_erfc",
+        }
+    }
+
+    /// The C floating type the entry takes and returns: `float` for the
+    /// binary32 kernels, `double` for the binary64 ones. The entry name alone
+    /// does not say (`chelis_cr_erf` is binary64).
+    pub fn c_type(self) -> &'static str {
+        match self {
+            Kernel::ExpF32
+            | Kernel::LogF32
+            | Kernel::SinF32
+            | Kernel::CosF32
+            | Kernel::TanF32
+            | Kernel::AtanF32
+            | Kernel::TanhF32
+            | Kernel::ErfF32
+            | Kernel::ErfcF32 => "float",
+            Kernel::ExpF64
+            | Kernel::LogF64
+            | Kernel::SinF64
+            | Kernel::CosF64
+            | Kernel::TanF64
+            | Kernel::AtanF64
+            | Kernel::TanhF64
+            | Kernel::ErfF64
+            | Kernel::ErfcF64 => "double",
         }
     }
 
@@ -104,7 +146,7 @@ impl Kernel {
 /// The amalgamation split at its section markers: the prelude, then each kernel's
 /// section in amalgamation order. Panics if the amalgamation does not have exactly
 /// one section per kernel in [`Kernel::ALL`] order, which the crate's tests check.
-fn sections() -> (&'static str, [&'static str; 14]) {
+fn sections() -> (&'static str, [&'static str; 18]) {
     let mut starts = AMALGAMATION
         .match_indices(SECTION_MARKER)
         .map(|(at, _)| at)
@@ -116,7 +158,7 @@ fn sections() -> (&'static str, [&'static str; 14]) {
     );
     let prelude = &AMALGAMATION[..starts[0]];
     starts.push(AMALGAMATION.len());
-    let bodies: [&'static str; 14] =
+    let bodies: [&'static str; 18] =
         std::array::from_fn(|index| &AMALGAMATION[starts[index]..starts[index + 1]]);
     for (kernel, body) in Kernel::ALL.into_iter().zip(bodies) {
         let expected = format!("{SECTION_MARKER}{}: ", kernel.section_name());

@@ -201,6 +201,70 @@ tanh f32 bd649383 bd6456d8 # #2959 tanh witness
 tanh f32 41a00000 3f800000 # saturates near 1
 tanh f32 c1a00000 bf800000 # saturates near -1
 tanh f32 0da24260 0da24260 # tiny argument
+erf f32 00000000 00000000 # +0
+erf f32 80000000 80000000 # -0
+erf f32 7f800000 3f800000 # +inf
+erf f32 ff800000 bf800000 # -inf
+erf f32 7fc00000 7fc00000 # canonical NaN
+erf f32 ffc00000 7fc00000 # negative quiet NaN
+erf f32 7fc12345 7fc00000 # quiet NaN with payload
+erf f32 7f800001 7fc00000 # signaling NaN
+erf f32 ffa00001 7fc00000 # negative signaling NaN with payload
+erf f32 00000001 00000001 # smallest subnormal
+erf f32 80000001 80000001 # -smallest subnormal
+erf f32 007fffff 00906eb9 # largest subnormal
+erf f32 00800000 00906ebb # smallest normal
+erf f32 7f7fffff 3f800000 # largest finite
+erf f32 ff7fffff bf800000 # -largest finite
+erf f32 3f800000 3f57bb3d # 1
+erf f32 bf800000 bf57bb3d # -1
+erf f32 3f000000 3f053f7b # 0.5
+erf f32 0da24260 0db71709 # tiny argument
+erf f32 8da24260 8db71709 # tiny negative argument
+erf f32 c0000000 bf7ecd71 # erfc near 2
+erf f32 40400000 3f7ffe8d # erfc tail
+erf f32 40c00000 3f800000 # erf saturates near 1
+erf f32 c0c00000 bf800000 # erf saturates near -1
+erf f32 40624630 3f7ffff6 # Phi argument at x = -5.0
+erf f32 410e8d80 3f800000 # Phi argument at x = -12.6
+erf f32 41ce79a5 3f800000 # Phi argument at x = -36.5
+erf f32 41d93924 3f800000 # Phi argument at x = -38.4
+erf f32 c1fff900 bf800000 # Phi argument at x = 45.25
+erf f32 41fff900 3f800000 # Phi argument at x = -45.25
+erf f32 4120e000 3f800000 # erfcf result near the smallest subnormal
+erf f32 4121999a 3f800000 # erfcf result +0
+erfc f32 00000000 3f800000 # +0
+erfc f32 80000000 3f800000 # -0
+erfc f32 7f800000 00000000 # +inf
+erfc f32 ff800000 40000000 # -inf
+erfc f32 7fc00000 7fc00000 # canonical NaN
+erfc f32 ffc00000 7fc00000 # negative quiet NaN
+erfc f32 7fc12345 7fc00000 # quiet NaN with payload
+erfc f32 7f800001 7fc00000 # signaling NaN
+erfc f32 ffa00001 7fc00000 # negative signaling NaN with payload
+erfc f32 00000001 3f800000 # smallest subnormal
+erfc f32 80000001 3f800000 # -smallest subnormal
+erfc f32 007fffff 3f800000 # largest subnormal
+erfc f32 00800000 3f800000 # smallest normal
+erfc f32 7f7fffff 00000000 # largest finite
+erfc f32 ff7fffff 40000000 # -largest finite
+erfc f32 3f800000 3e21130b # 1
+erfc f32 bf800000 3febdd9f # -1
+erfc f32 3f000000 3ef5810a # 0.5
+erfc f32 0da24260 3f800000 # tiny argument
+erfc f32 8da24260 3f800000 # tiny negative argument
+erfc f32 c0000000 3fff66b8 # erfc near 2
+erfc f32 40400000 37b94efb # erfc tail
+erfc f32 40c00000 23c67c0b # erf saturates near 1
+erfc f32 c0c00000 40000000 # erf saturates near -1
+erfc f32 40624630 3519e518 # Phi argument at x = -5.0
+erfc f32 410e8d80 04339ed4 # Phi argument at x = -12.6
+erfc f32 41ce79a5 00000000 # Phi argument at x = -36.5
+erfc f32 41d93924 00000000 # Phi argument at x = -38.4
+erfc f32 c1fff900 40000000 # Phi argument at x = 45.25
+erfc f32 41fff900 00000000 # Phi argument at x = -45.25
+erfc f32 4120e000 00000000 # erfcf result near the smallest subnormal
+erfc f32 4121999a 00000000 # erfcf result +0
 exp f64 0000000000000000 3ff0000000000000 # +0
 exp f64 8000000000000000 3ff0000000000000 # -0
 exp f64 7ff0000000000000 7ff0000000000000 # +inf
@@ -360,3 +424,67 @@ tanh f64 bfac927060000000 bfac8adb0955400f # #2959 tanh witness
 tanh f64 4034000000000000 3ff0000000000000 # saturates near 1
 tanh f64 c034000000000000 bff0000000000000 # saturates near -1
 tanh f64 39b4484bfeebc2a0 39b4484bfeebc2a0 # tiny argument
+erf f64 0000000000000000 0000000000000000 # +0
+erf f64 8000000000000000 8000000000000000 # -0
+erf f64 7ff0000000000000 3ff0000000000000 # +inf
+erf f64 fff0000000000000 bff0000000000000 # -inf
+erf f64 7ff8000000000000 7ff8000000000000 # canonical NaN
+erf f64 fff8000000000000 7ff8000000000000 # negative quiet NaN
+erf f64 7ff8000000012345 7ff8000000000000 # quiet NaN with payload
+erf f64 7ff0000000000001 7ff8000000000000 # signaling NaN
+erf f64 fff4000000000001 7ff8000000000000 # negative signaling NaN with payload
+erf f64 0000000000000001 0000000000000001 # smallest subnormal
+erf f64 8000000000000001 8000000000000001 # -smallest subnormal
+erf f64 000fffffffffffff 00120dd750429b6c # largest subnormal
+erf f64 0010000000000000 00120dd750429b6d # smallest normal
+erf f64 7fefffffffffffff 3ff0000000000000 # largest finite
+erf f64 ffefffffffffffff bff0000000000000 # -largest finite
+erf f64 3ff0000000000000 3feaf767a741088b # 1
+erf f64 bff0000000000000 bfeaf767a741088b # -1
+erf f64 3fe0000000000000 3fe0a7ef5c18edd2 # 0.5
+erf f64 39b4484bfeebc2a0 39b6e2e12dc3773d # tiny argument
+erf f64 b9b4484bfeebc2a0 b9b6e2e12dc3773d # tiny negative argument
+erf f64 c000000000000000 bfefd9ae142795e3 # erfc near 2
+erf f64 4008000000000000 3fefffd1ac4135f9 # erfc tail
+erf f64 4018000000000000 3ff0000000000000 # erf saturates near 1
+erf f64 c018000000000000 bff0000000000000 # erf saturates near -1
+erf f64 400c48c6001f0ac0 3feffffecc35d0df # Phi argument at x = -5.0
+erf f64 4021d1aff0b7657e 3ff0000000000000 # Phi argument at x = -12.6
+erf f64 4039cf34ace92036 3ff0000000000000 # Phi argument at x = -36.5
+erf f64 403b27247aff148f 3ff0000000000000 # Phi argument at x = -38.4
+erf f64 c03fff1ffcefea90 bff0000000000000 # Phi argument at x = 45.25
+erf f64 403fff1ffcefea90 3ff0000000000000 # Phi argument at x = -45.25
+erf f64 403b333333333333 3ff0000000000000 # erfc result subnormal
+erf f64 403b4ccccccccccd 3ff0000000000000 # erfc result +0
+erfc f64 0000000000000000 3ff0000000000000 # +0
+erfc f64 8000000000000000 3ff0000000000000 # -0
+erfc f64 7ff0000000000000 0000000000000000 # +inf
+erfc f64 fff0000000000000 4000000000000000 # -inf
+erfc f64 7ff8000000000000 7ff8000000000000 # canonical NaN
+erfc f64 fff8000000000000 7ff8000000000000 # negative quiet NaN
+erfc f64 7ff8000000012345 7ff8000000000000 # quiet NaN with payload
+erfc f64 7ff0000000000001 7ff8000000000000 # signaling NaN
+erfc f64 fff4000000000001 7ff8000000000000 # negative signaling NaN with payload
+erfc f64 0000000000000001 3ff0000000000000 # smallest subnormal
+erfc f64 8000000000000001 3ff0000000000000 # -smallest subnormal
+erfc f64 000fffffffffffff 3ff0000000000000 # largest subnormal
+erfc f64 0010000000000000 3ff0000000000000 # smallest normal
+erfc f64 7fefffffffffffff 0000000000000000 # largest finite
+erfc f64 ffefffffffffffff 4000000000000000 # -largest finite
+erfc f64 3ff0000000000000 3fc4226162fbddd5 # 1
+erfc f64 bff0000000000000 3ffd7bb3d3a08445 # -1
+erfc f64 3fe0000000000000 3fdeb02147ce245c # 0.5
+erfc f64 39b4484bfeebc2a0 3ff0000000000000 # tiny argument
+erfc f64 b9b4484bfeebc2a0 3ff0000000000000 # tiny negative argument
+erfc f64 c000000000000000 3fffecd70a13caf2 # erfc near 2
+erfc f64 4008000000000000 3ef729df6503422a # erfc tail
+erfc f64 4018000000000000 3c78cf81557d20b6 # erf saturates near 1
+erfc f64 c018000000000000 4000000000000000 # erf saturates near -1
+erfc f64 400c48c6001f0ac0 3ea33ca2f213382c # Phi argument at x = -5.0
+erfc f64 4021d1aff0b7657e 388673e67c4adb73 # Phi argument at x = -12.6
+erfc f64 4039cf34ace92036 038621fd7ce0bc56 # Phi argument at x = -36.5
+erfc f64 403b27247aff148f 000000000000001b # Phi argument at x = -38.4
+erfc f64 c03fff1ffcefea90 4000000000000000 # Phi argument at x = 45.25
+erfc f64 403fff1ffcefea90 0000000000000000 # Phi argument at x = -45.25
+erfc f64 403b333333333333 0000000000000002 # erfc result subnormal
+erfc f64 403b4ccccccccccd 0000000000000000 # erfc result +0

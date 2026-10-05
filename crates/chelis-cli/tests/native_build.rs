@@ -738,8 +738,28 @@ fn nan_inventory_arity(name: &str) -> usize {
     match name {
         "add" | "sub" | "mul" | "div" | "floor_div" | "mod" | "min" | "max" | "min_elem"
         | "max_elem" => 2,
-        "neg" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "atan" | "tanh" | "relu"
-        | "sigmoid" | "silu" | "gelu" | "floor" | "ceil" | "round" | "recip" | "abs" => 1,
+        "neg"
+        | "sqrt"
+        | "exp"
+        | "log"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "atan"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "relu"
+        | "sigmoid"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "floor"
+        | "ceil"
+        | "round"
+        | "recip"
+        | "abs" => 1,
         other => panic!("classify the arity of new float builtin `{other}` in this oracle"),
     }
 }
@@ -1123,6 +1143,8 @@ fn nan_atom_coverage(
         Id::Atan => (RiscOp::Atan, BuiltinInventory),
         Id::Tanh => (RiscOp::Tanh, BuiltinInventory),
         Id::Softmax => (RiscOp::Softmax { axis: 0 }, Rows),
+        Id::Erf => (RiscOp::Erf, BuiltinInventory),
+        Id::Erfc => (RiscOp::Erfc, BuiltinInventory),
         Id::Abs => (RiscOp::Abs, BuiltinInventory),
         Id::Floor => (RiscOp::Floor, BuiltinInventory),
         Id::Ceil => (RiscOp::Ceil, BuiltinInventory),
@@ -2191,6 +2213,114 @@ fn compound_activations_match_eval_on_libm_misrounding_inputs_through_the_static
         }
     }
     assert_lanes_agree("chelis#2952 compounds", rows);
+}
+
+/// spec/05 section 3.3's `Phi` witnesses: the signed zeros, the infinities,
+/// NaN, the deep left tail, the `|x| = 64` bound, the largest finite
+/// magnitudes, and the binade boundaries where the graph errs most.
+const PHI_WITNESSES: [f64; 22] = [
+    0.0,
+    -0.0,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    f64::NAN,
+    1.0,
+    -0.75,
+    -3.0,
+    -5.0,
+    -12.6,
+    -13.5,
+    -36.5,
+    63.75,
+    -63.75,
+    64.0,
+    -64.0,
+    -65.0,
+    1e-30,
+    f64::MAX,
+    f64::MIN,
+    // Binade boundaries of `Phi` at f32 and f64, its largest errors found.
+    -4.900_964_260_101_318,
+    -27.256_566_083_845_673,
+];
+
+/// The witnesses as `width`'s storage bits, rounded once from f64.
+fn phi_witness_bits(width: &NanWidth) -> Vec<u64> {
+    PHI_WITNESSES
+        .iter()
+        .map(|x| match width.name {
+            "f16" => u64::from(chelis_types::f16_from_f64_rne(*x).to_bits()),
+            "bf16" => u64::from(chelis_types::bf16_from_f64_rne(*x).to_bits()),
+            "f32" => u64::from((*x as f32).to_bits()),
+            _ => x.to_bits(),
+        })
+        .collect()
+}
+
+/// [05-OP-48] and [05-OP-46]: `gelu`, `gelu_tanh`, `silu`, `standard_normal_cdf`,
+/// `erf`, and `erfc` agree bit for bit between eval and a built static library
+/// at every float width, through both the scalar ABI (the host helpers) and a
+/// tensor argument (the IR lowering), on the `Phi` witnesses.
+#[test]
+fn exact_gelu_family_matches_eval_on_the_phi_witnesses_through_the_static_library_abi() {
+    const UNARY: [&str; 6] = [
+        "gelu",
+        "gelu_tanh",
+        "silu",
+        "standard_normal_cdf",
+        "erf",
+        "erfc",
+    ];
+    let widths: Vec<(&NanWidth, Vec<u64>)> = ["f16", "bf16", "f32", "f64"]
+        .iter()
+        .map(|name| {
+            let width = width_named(name);
+            (width, phi_witness_bits(width))
+        })
+        .collect();
+    let mut program = String::new();
+    let mut body = String::new();
+    for (width, inputs) in &widths {
+        let (w, n) = (width.name, inputs.len());
+        for op in UNARY {
+            program.push_str(&format!(
+                "def s_{op}_{w}(x: {w}) -> {w} = {op}(x)\n\
+                 def t_{op}_{w}(x: tensor[{n}, {w}]) -> tensor[{n}, {w}] = {op}(x)\n"
+            ));
+            body.push_str(&c_scalar_calls(
+                &format!("s_{op}_{w}"),
+                &format!("s_{op}_{w}"),
+                width,
+                inputs,
+            ));
+            body.push_str(&c_tensor_call(
+                &format!("t_{op}_{w}"),
+                &format!("t_{op}_{w}"),
+                width,
+                inputs,
+            ));
+        }
+    }
+    let (_, c) = run_static_library("phi_witnesses", &program, &body);
+
+    let mut rows = Vec::new();
+    for (width, inputs) in &widths {
+        let w = width.name;
+        for op in UNARY {
+            let eval = eval_tensor_body("", &format!("{op}(x)"), width, inputs);
+            for (index, (input, expected)) in inputs.iter().zip(&eval).enumerate() {
+                for lane in ["s", "t"] {
+                    let label = format!("{lane}_{op}_{w}");
+                    rows.push((
+                        format!("{label}({input:#x})"),
+                        c_result(&c, &label, index),
+                        *expected,
+                    ));
+                }
+            }
+        }
+    }
+    assert_lanes_agree("section 3.3 Phi witnesses", rows);
 }
 
 /// The chelis#2961 witnesses: inputs at which a C compiler's fold of a

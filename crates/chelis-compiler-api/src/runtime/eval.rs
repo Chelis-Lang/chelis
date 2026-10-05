@@ -5305,8 +5305,12 @@ impl<'a> EvalContext<'a> {
             "relu" => numeric_unop(args, None, Some(FloatUnOp::Relu)),
             "sigmoid" => numeric_unop(args, None, Some(FloatUnOp::Sigmoid)),
             "tanh" => numeric_unop(args, None, Some(FloatUnOp::Tanh)),
+            "erf" => numeric_unop(args, None, Some(FloatUnOp::Erf)),
+            "erfc" => numeric_unop(args, None, Some(FloatUnOp::Erfc)),
             "silu" => numeric_unop(args, None, Some(FloatUnOp::Silu)),
             "gelu" => numeric_unop(args, None, Some(FloatUnOp::Gelu)),
+            "gelu_tanh" => numeric_unop(args, None, Some(FloatUnOp::GeluTanh)),
+            "standard_normal_cdf" => numeric_unop(args, None, Some(FloatUnOp::StandardNormalCdf)),
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }

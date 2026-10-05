@@ -1663,7 +1663,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 4 and WireDag version 25 are
+**Current integration state.** Execution version 4 and WireDag version 27 are
 the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
 101 distinct numeric leaves: 82 verified transports and 19 numeric operations,
 with zero exception rows. It includes the shape-dependency and opaque

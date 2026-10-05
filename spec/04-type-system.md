@@ -2084,7 +2084,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, cos, tan, atan, tanh, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, tanh, erf, erfc, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is

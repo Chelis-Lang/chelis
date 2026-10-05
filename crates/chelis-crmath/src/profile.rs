@@ -13,7 +13,7 @@
 //! integer-float conversions. The table is three fixtures, read at compile time:
 //!
 //! - `tests/fixtures/canary.txt` and `tests/fixtures/binary64_worst_cases.txt`: the
-//!   seven transcendentals at both widths (special cases, thresholds, and CORE-MATH's
+//!   nine transcendentals at both widths (special cases, thresholds, and CORE-MATH's
 //!   hardest-to-round inputs);
 //! - `tests/fixtures/profile_obligations.txt`: arithmetic, the explicit fused
 //!   multiply-add, comparisons, conversions, and the expression shapes that
@@ -278,6 +278,8 @@ primitives! {
     ("tan", 32, 1, F32, Some("chelis_cr_tanf(a)"), KERNEL),
     ("atan", 32, 1, F32, Some("chelis_cr_atanf(a)"), KERNEL),
     ("tanh", 32, 1, F32, Some("chelis_cr_tanhf(a)"), KERNEL),
+    ("erf", 32, 1, F32, Some("chelis_cr_erff(a)"), KERNEL),
+    ("erfc", 32, 1, F32, Some("chelis_cr_erfcf(a)"), KERNEL),
     ("exp", 64, 1, F64, Some("chelis_cr_exp(a)"), KERNEL),
     ("log", 64, 1, F64, Some("chelis_cr_log(a)"), KERNEL),
     ("sin", 64, 1, F64, Some("chelis_cr_sin(a)"), KERNEL),
@@ -285,6 +287,8 @@ primitives! {
     ("tan", 64, 1, F64, Some("chelis_cr_tan(a)"), KERNEL),
     ("atan", 64, 1, F64, Some("chelis_cr_atan(a)"), KERNEL),
     ("tanh", 64, 1, F64, Some("chelis_cr_tanh(a)"), KERNEL),
+    ("erf", 64, 1, F64, Some("chelis_cr_erf(a)"), KERNEL),
+    ("erfc", 64, 1, F64, Some("chelis_cr_erfc(a)"), KERNEL),
 }
 
 impl Primitive {

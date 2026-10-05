@@ -1,6 +1,8 @@
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::tier2::{lower_gelu, lower_sigmoid, lower_silu};
+use chelis_ir::tier2::{
+    lower_gelu, lower_gelu_tanh, lower_sigmoid, lower_silu, lower_standard_normal_cdf,
+};
 use chelis_types::types::Prim;
 use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars};
 
@@ -21,6 +23,27 @@ fn lower_tanh(
     _parent_span: Option<&str>,
 ) -> chelis_ir::dag::NodeId {
     dag.add_node(owner, RiscOp::Tanh, vec![x], ty.clone(), None)
+}
+
+// `erf` and `erfc` are [05-OP-46] Tier 1 primitives too.
+fn lower_erf(
+    owner: chelis_ir::dag::Owner,
+    dag: &mut Dag,
+    x: chelis_ir::dag::NodeId,
+    ty: &TensorType,
+    _parent_span: Option<&str>,
+) -> chelis_ir::dag::NodeId {
+    dag.add_node(owner, RiscOp::Erf, vec![x], ty.clone(), None)
+}
+
+fn lower_erfc(
+    owner: chelis_ir::dag::Owner,
+    dag: &mut Dag,
+    x: chelis_ir::dag::NodeId,
+    ty: &TensorType,
+    _parent_span: Option<&str>,
+) -> chelis_ir::dag::NodeId {
+    dag.add_node(owner, RiscOp::Erfc, vec![x], ty.clone(), None)
 }
 
 fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> ScalarValue {
@@ -109,5 +132,63 @@ fn reduced_float_scalar_activations_are_rank_zero_tier2_instances() {
             op.name(),
             prim.name()
         );
+    }
+}
+
+/// Every section 3.3 graph and the [05-OP-46] `erf`/`erfc` agree between the
+/// evaluator's scalar lane and the IR's tensor evaluation of the `tier2`
+/// lowering, at every float dtype, on the witnesses of the `Phi` graph: the
+/// signed zeros, the infinities, NaN, the deep left tail, and `|x| = 64`.
+#[test]
+fn section_3_3_graphs_agree_between_the_scalar_lane_and_the_ir_on_the_witnesses() {
+    let lowerings: [(FloatUnOp, ActivationLowerer); 8] = [
+        (FloatUnOp::Sigmoid, lower_sigmoid),
+        (FloatUnOp::Silu, lower_silu),
+        (FloatUnOp::Gelu, lower_gelu),
+        (FloatUnOp::GeluTanh, lower_gelu_tanh),
+        (FloatUnOp::StandardNormalCdf, lower_standard_normal_cdf),
+        (FloatUnOp::Tanh, lower_tanh),
+        (FloatUnOp::Erf, lower_erf),
+        (FloatUnOp::Erfc, lower_erfc),
+    ];
+    let witnesses = [
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        1.0,
+        -0.75,
+        -3.0,
+        -5.0,
+        -9.336,
+        -12.6,
+        -36.5,
+        63.75,
+        -63.75,
+        64.0,
+        -64.0,
+        -65.0,
+        1e-30,
+    ];
+    for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for (op, lower) in lowerings {
+            for image in witnesses {
+                let Ok(input) = scalar_from_f64("activation_surface_parity", prim, image) else {
+                    continue;
+                };
+                let scalar = float_unop(op, input).unwrap();
+                let ir = evaluate_tier2(prim, input, lower);
+                let both_nan = scalar.as_f64_lossy().is_nan() && ir.as_f64_lossy().is_nan();
+                assert!(
+                    both_nan || scalar == ir,
+                    "{} at {}({image}): scalar {:?}, IR {:?}",
+                    op.name(),
+                    prim.name(),
+                    scalar,
+                    ir
+                );
+            }
+        }
     }
 }

@@ -3062,7 +3062,7 @@ loss = (mean(x, 0) : tensor[f32])
             f32_lane_value(f32::tanh, x),
         );
 
-        // spec/05 section 3.3 pins `gelu` as `x*sigmoid(2u)` with
+        // spec/05 section 3.3 pins `gelu_tanh` as `x*sigmoid(2u)` with
         // `u = sqrt(2/pi)*(x + 0.044715*x^3)`; the tanh spelling below is the
         // same function, `0.5*(1+tanh(u)) = sigmoid(2u)`, and agrees with it
         // well inside `TOL` at this input. Its `Const` operands (sqrt(2/pi),
@@ -3073,13 +3073,16 @@ loss = (mean(x, 0) : tensor[f32])
             0.5 * x * (1.0 + (c * (x + k * x * x * x)).tanh())
         };
         let (dtype, values) = run_f64_kernel(
-            "def g(x: tensor[1, f64]) -> tensor[1, f64] = gelu(x)\n",
+            "def g(x: tensor[1, f64]) -> tensor[1, f64] = gelu_tanh(x)\n",
             &[x],
         );
-        assert_eq!(dtype, CHELIS_DTYPE_F64, "gelu output must be tagged f64");
+        assert_eq!(
+            dtype, CHELIS_DTYPE_F64,
+            "gelu_tanh output must be tagged f64"
+        );
         assert!(
             (values[0] - gelu_ref).abs() < TOL,
-            "f64 gelu({x}) = {:?}, expected within {TOL} of {gelu_ref:?}",
+            "f64 gelu_tanh({x}) = {:?}, expected within {TOL} of {gelu_ref:?}",
             values[0],
         );
     }

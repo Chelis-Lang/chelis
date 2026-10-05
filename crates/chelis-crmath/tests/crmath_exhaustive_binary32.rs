@@ -1,6 +1,6 @@
 //! Exhaustive binary32 manual gate (spec/design/correctly_rounded_math.md section 8,
 //! test 3; `docs/manual_gates.md`). Ignored by default: it evaluates all 2^32 inputs
-//! of each of the seven functions.
+//! of each of the nine functions.
 //!
 //! For each input `x`, the exact value `v = f(x)` lies within half an f64 ULP of the
 //! correctly rounded f64 result `z`, so it lies between `z`'s two f64 neighbours.
@@ -77,7 +77,7 @@ fn threads() -> u64 {
 }
 
 #[test]
-#[ignore = "manual gate: every binary32 input of the seven functions; see docs/manual_gates.md"]
+#[ignore = "manual gate: every binary32 input of the nine functions; see docs/manual_gates.md"]
 fn every_binary32_input_is_correctly_rounded() {
     let workers = threads();
     let span = 1_u64 << 32;

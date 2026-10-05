@@ -810,8 +810,8 @@ tensor/reduction additions stayed in `chelis-std`.)
   `scaled_dot_product_attention`, multi-head attention, grouped-query attention
   - **Acknowledged limitations (Batch 3 shipped 3j-pre):**
     - `GELU` ships as the tanh approximation
-      (`0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`) because `erf` is
-      not a Chelis primitive. This is the OpenAI/BERT/GPT-2 form, not the
+      (`0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`) because `erf` was
+      not then a Chelis primitive. This is the OpenAI/BERT/GPT-2 form, not the
       exact `erf`-based GELU. Switching to exact GELU is deferred until
       `erf` lands as a primitive.
     - `SiLU`/`GELU`/`RMSNorm` ship as **rank-1 variants** (`tensor[n, f32]`)

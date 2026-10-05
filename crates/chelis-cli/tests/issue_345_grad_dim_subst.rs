@@ -115,20 +115,20 @@ fn row_e_rank_poly_form() -> String {
     )
 }
 
-/// gelu sibling — the backward materializes the tanh-approx constant
+/// gelu_tanh sibling — the backward materializes the tanh-approx constant
 /// `Const 0.7978845608028654` at the annotated type, the second node
 /// kind the issue reported (rank-1, sig form).
 fn gelu_sig_form() -> String {
     format!(
         "module Repro.Issue345Gelu\n\
          sig gelu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
-         def gelu_fwd(x) = gelu(x)\n\
+         def gelu_fwd(x) = gelu_tanh(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(gelu_fwd(x), 0) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
     )
 }
 
-/// d/dx sum(gelu(x)) at [2, -1] under the tanh approximation, as
+/// d/dx sum(gelu_tanh(x)) at [2, -1] under the tanh approximation, as
 /// printed by the host evaluator (the numeric oracle both lanes must
 /// match within f32 noise).
 const GELU_GRAD: [f64; 2] = [1.0860992566236183, -0.08296408384578256];
