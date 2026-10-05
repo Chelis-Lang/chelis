@@ -94,7 +94,8 @@ fn emit_c_does_not_require_native_tools() {
 /// The `/usr/bin` clang is a shim that gives the compiler it runs the selected
 /// SDK. A clang named directly in `CHELIS_CC` has none, so the build sets
 /// `SDKROOT` for it, and the line `--emit-c` prints must carry that or it fails
-/// where the build's own compile succeeds.
+/// where the build's own compile succeeds. Scripts split the line into words
+/// and execute them without a shell, so the test runs it that way too.
 #[cfg(target_os = "macos")]
 #[test]
 fn emit_c_compile_line_builds_with_a_directly_named_clang() {
@@ -124,9 +125,12 @@ fn emit_c_compile_line_builds_with_a_directly_named_clang() {
         .lines()
         .find_map(|line| line.strip_prefix("Compile: "))
         .expect("a compile line");
-    // A shell holding only what the build passes its tools from this process.
+    // Split the line as a shell would, then execute the words directly, with
+    // only what the build passes its tools from this process.
     let mut shell = Process::new("/bin/sh");
-    shell.env_clear().args(["-c", line]);
+    shell
+        .env_clear()
+        .args(["-c", "eval \"set -- $1\"; exec \"$@\"", "sh", line]);
     for name in chelis_backend_c::toolchain::TOOL_ENVIRONMENT {
         if let Some(value) = std::env::var_os(name) {
             shell.env(name, value);

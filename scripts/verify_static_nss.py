@@ -11,9 +11,9 @@ built-in files and dns services.
 This check runs each binary's first GitHub API request inside pinned distribution
 images whose hosts line names such a plugin, with no network and an API base under
 the reserved .invalid domain. The request cannot succeed. It must fail as an ordinary
-error that names the host, which shows the lookup ran and returned. A lookup that
-ends the process with a signal fails the check, and so does an image whose hosts
-line no longer names a plugin the image carries.
+error whose message names the host and a DNS failure, which shows the lookup ran and
+returned. A lookup that ends the process with a signal fails the check, and so does
+an image whose hosts line no longer reaches a plugin the image carries.
 
 Usage: python3 scripts/verify_static_nss.py --chelis PATH --chelisup PATH
 """
@@ -69,15 +69,20 @@ def docker(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def plugin_services(nsswitch: str) -> list[str]:
-    """The services the hosts line names that glibc does not build in, in order."""
+    """The services glibc does not build in that a lookup of a name missing from
+    /etc/hosts reaches, in order. Under the default actions glibc continues past
+    every result but success, which no service gives for the probe host, so
+    those are the services before the hosts line's first action item."""
     for raw in nsswitch.splitlines():
         line = raw.split("#", 1)[0].strip()
         if line.startswith("hosts:"):
-            return [
-                word
-                for word in line.removeprefix("hosts:").split()
-                if not word.startswith("[") and word not in BUILTIN_SERVICES
-            ]
+            reached = []
+            for word in line.removeprefix("hosts:").split():
+                if word.startswith("["):
+                    break
+                if word not in BUILTIN_SERVICES:
+                    reached.append(word)
+            return reached
     return []
 
 
@@ -96,7 +101,7 @@ def witness(image: str, run: Docker) -> str:
         if f"libnss_{service}.so.2" in carried:
             return service
     raise CheckFailed(
-        "its hosts line names no NSS plugin the image carries, so it cannot show the crash"
+        "its hosts line reaches no NSS plugin the image carries, so it cannot show the crash"
     )
 
 
@@ -114,7 +119,12 @@ def judge(returncode: int, output: str) -> str:
     named = [line for line in output.splitlines() if PROBE_HOST in line]
     if not named:
         raise CheckFailed(f"failed before its host lookup: {tail[0]}")
-    return named[0].strip()
+    looked_up = [line for line in named if "dns error" in line]
+    if not looked_up:
+        raise CheckFailed(
+            f"failed without a lookup error for the host: {named[0].strip()}"
+        )
+    return looked_up[0].strip()
 
 
 def probe(image: str, name: str, binary: Path, run: Docker) -> str:
