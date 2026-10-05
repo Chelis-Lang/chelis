@@ -128,6 +128,8 @@ fn a_literal_cast_to_a_primitive_is_the_suffixed_literal_and_nothing_else_collap
         ("cast(1.1f32, f64)", "type: (t-prim {} f32)} 1.1)"),
         ("cast(1.1f32, f32)", "type: (t-prim {} f32)} 1.1)"),
         ("cast(1.1f64, f64)", "type: (t-prim {} f64)} 1.1)"),
+        ("cast(1, bool)", "type: (t-prim {} i32)} 1)"),
+        ("cast(1.0, bool)", "type: (t-prim {} f32)} 1.0)"),
     ] {
         let text = deep(&format!("x = {cast}\n"));
         assert_contains(&text, "(cast ", cast);
@@ -211,6 +213,7 @@ fn a_declaration_rejects_a_literal_whose_kind_cannot_bind() {
         ("x: i32 = 1.5\n", "cannot bind at i32"),
         ("def f() -> i64 = 2.0\n", "cannot bind at i64"),
         ("b: bool = 1\n", "cannot bind at bool"),
+        ("s: string = 1\n", "cannot bind at string"),
         ("xs: tensor[2, i32] = [1.5, 2]\n", "cannot bind at i32"),
     ] {
         let error = desugar_error(source);
@@ -419,6 +422,7 @@ fn every_binder_of_to_tensor_is_rejected_at_surf_ingress() {
         "def to_tensor(x: i32) -> i32 = x\n",
         "sig to_tensor: i32 -> i32\ndef to_tensor(x) = x\n",
         "to_tensor = 1\n",
+        "import Std.Sort (to_tensor)\nr = 1\n",
         "def sample() = {\n  to_tensor = fn (xs: List[i32]) -> xs\n  xs: tensor[2, i32] = [1, 2]\n  xs\n}\n",
         // chelis#3152
         "def mk(l: List[f32]) -> tensor[2, f32] = to_tensor(l)\n\

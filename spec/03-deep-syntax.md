@@ -834,16 +834,18 @@ explicit call. Explicit `borrow` and `copy` nodes remain explicit.
 
 A numeric literal is printed bare only where re-reading the printed program
 binds it, unsuffixed, at its `type` and gives the same Deep: outside every
-dtype-stating construct when its `type` is the `spec/04-type-system.md` §5.3
-default for its token, and inside a declaration or under a dtype argument when
-its `type` equals the dtype that construct states. A cast's literal operand of a primitive type is
-always printed with its suffix, since a bare operand would fold the cast into
-the literal. Whether a printed literal stands in a dtype-stating construct is
-decided on the printed Surf by the same rule desugaring applies. The
-`surf_literal_style` marker may add a suffix at the default but never removes
-one. A literal whose `type` is a dtype binder is printed bare inside a cast or
-dtype-stating construct that states that binder; elsewhere it has no Surf
-representation and resugaring rejects it.
+dtype-stating construct, and not as a literal element of a `to_tensor` call
+without a dtype argument, when its `type` is the `spec/04-type-system.md` §5.3
+default for its token; and inside a declaration or under a dtype argument when
+its `type` equals the dtype that construct states. A cast's literal operand of
+a primitive type is always printed with its suffix, since a bare operand would
+fold the cast into the literal, and so is a literal element of a `to_tensor`
+call without a dtype argument, which has no default. Whether a printed literal
+stands in a dtype-stating construct is decided on the printed Surf by the same
+rule desugaring applies. The `surf_literal_style` marker may add a suffix at
+the default but never removes one. A literal whose `type` is a dtype binder is
+printed bare inside a cast or dtype-stating construct that states that binder;
+elsewhere it has no Surf representation and resugaring rejects it.
 
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use

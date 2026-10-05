@@ -187,6 +187,7 @@ fn a_declaration_binds_its_literal_and_every_check_still_applies() {
         accepted(source);
     }
     assert!(root_type("x: f64 = 1.1\n", "x").contains("f64"));
+    assert!(root_type("x = cast(1, bool)\n", "x").contains("bool"));
 
     for (source, needles) in [
         ("x: f64 = neg(1.1)\n", &["whole initializer"][..]),
@@ -199,8 +200,8 @@ fn a_declaration_binds_its_literal_and_every_check_still_applies() {
         ("x: f16 = 70000.0\n", &["f16"][..]),
         ("x: f64 = 1.1f32\n", &[][..]),
         ("type P = f64\nx: P = 1.1\n", &[][..]),
-        ("x = (1.1 : f64)\n", &[][..]),
-        ("out = {\n  y = (1.1 : f64)\n  y\n}\n", &[][..]),
+        ("x = (1.1 : f64)\n", &["1.1f64"][..]),
+        ("out = {\n  y = (1.1 : f64)\n  y\n}\n", &["1.1f64"][..]),
         ("shape: List[i64] = [2, 3]\n", &[][..]),
         (
             "def main() -> i64 = add(2147483648, 0i64)\n",
@@ -224,6 +225,14 @@ fn a_dtype_argument_is_checked_against_the_leaf_dtype_and_never_converts() {
         ("x = to_tensor([[1, 2], [3, 4]], i64)\n", "i64"),
         ("x = {\n  f64 = 2\n  to_tensor([1.5], f64)\n}\n", "f64"),
         ("x = to_tensor([1.5f64, 2.5], f64)\n", "f64"),
+        (
+            "def k[p: Float](v: p) -> tensor[1, p] = to_tensor([cast(1.5, p)], p)\nx = k(1.0f64)\n",
+            "f64",
+        ),
+        (
+            "def k[p: Float](v: p) -> tensor[1, p] = to_tensor([v], p)\nx = k(1.0f64)\n",
+            "f64",
+        ),
     ] {
         let ty = root_type(source, "x");
         assert!(
@@ -246,6 +255,10 @@ fn a_dtype_argument_is_checked_against_the_leaf_dtype_and_never_converts() {
             &["never converts"][..],
         ),
         ("x = to_tensor([1.5], f64, f64)\n", &[][..]),
+        (
+            "def k[p: Float](v: f32) -> tensor[1, p] = to_tensor([v], p)\n",
+            &["never converts"][..],
+        ),
     ] {
         rejected(source, needles);
     }
@@ -323,6 +336,8 @@ fn every_deep_binder_of_to_tensor_is_reserved() {
         "(def {} to_tensor (lit {type: (t-prim {} i32)} 1))",
         "(defsig {} to_tensor (t-fn {} (t-prim {} i32) (t-prim {} i32)))\n\
          (def {} to_tensor (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))",
+        "(import {surf_path: \"Std.Sort\"} std.sort (to_tensor))\n\
+         (def {} r (lit {type: (t-prim {} i32)} 1))",
     ] {
         let errors = deep_rejection(source).unwrap_or_else(|| panic!("accepted: {source}"));
         assert!(errors.contains("ReservedName"), "{source}: {errors}");
@@ -430,7 +445,8 @@ fn expected(site: Site, literal: &str, dtype: &str) -> Expected {
     let default = if float { "f32" } else { "i32" };
     let own = suffix.unwrap_or(default).to_string();
     let float_dtype = dtype.starts_with('f') || dtype == "bf16";
-    let admits = !float || float_dtype;
+    let numeric_dtype = dtype != "bool";
+    let admits = numeric_dtype && (!float || float_dtype);
     let stated = |count: usize| match (suffix, admits) {
         (Some(_), _) => Expected::Literals {
             dtype: own.clone(),
@@ -492,7 +508,7 @@ fn every_site_gives_its_literal_the_stated_dtype_and_survives_resugaring() {
         "1.5", "-1.5", "0.1", "7", "-7", "1.5f64", "1.5f32", "-1.5f64", "7i64", "7i8", "7f64",
         "2.5bf16",
     ];
-    const DTYPES: [&str; 7] = ["f32", "f64", "bf16", "f16", "i8", "i32", "i64"];
+    const DTYPES: [&str; 8] = ["f32", "f64", "bf16", "f16", "i8", "i32", "i64", "bool"];
     let mut failures = Vec::new();
     let mut cases = 0usize;
     for site in Site::ALL {
@@ -544,7 +560,7 @@ fn every_site_gives_its_literal_the_stated_dtype_and_survives_resugaring() {
             }
         }
     }
-    assert!(cases > 900, "the matrix shrank to {cases} cases");
+    assert!(cases > 1000, "the matrix shrank to {cases} cases");
     assert!(
         failures.is_empty(),
         "{} of {cases} cases failed:\n\n{}",

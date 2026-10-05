@@ -935,7 +935,7 @@ their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
-The second argument of `cast`, and the optional second argument of a call to the reserved name `to_tensor` (§P10b), is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
+The second argument of `cast`, and the optional second argument of a call to the reserved name `to_tensor` (§P10b), is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast is likewise a dtype. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
 
 ### P10: Numeric Literals
 
@@ -1096,8 +1096,9 @@ written in one of two ways:
   `sig`. The desugarer emits the `to_tensor` call.
 
 A numeric literal takes its dtype from its suffix (§P10a) or else from a
-**dtype-stating construct** that directly contains it, never from a callee's
-signature or from anything further away. The closed set is exactly
+**dtype-stating construct** that directly contains it, when its kind admits
+the stated dtype, and never from a callee's signature or from anything
+further away. The closed set is exactly
 (`spec/04-type-system.md` §5.6 states the full rule):
 
 - **Declaration**: the declared type of the binding or function result whose
@@ -1127,9 +1128,10 @@ constructs around the macro call.
 narrow to the `f32` default and then widen. A cast to a binder keeps its
 `cast` node, because at an integer member the cast converts a float literal.
 Suffixed literals keep their suffix binding (§P10a; `cast(1.1f32, f64)` widens
-the `f32` value), and a float literal under an integer target keeps its
-default and then uses the checked target-finalization rule: an integral value
-casts exactly, while a fractional value traps `domain`. See
+the `f32` value), and a float literal under an integer target, or any
+numeric literal under `bool`, keeps its default and then uses the checked
+target-finalization rule: an integral value casts exactly, a fractional value
+under an integer target traps `domain`, and `cast(1, bool)` is `true`. See
 `spec/04-type-system.md` §5.2 and [04-NUM-14] for the full statement.
 
 **Tensor elements state their dtype.** A literal element of a `to_tensor`
@@ -1506,9 +1508,10 @@ AccumArg      <- 'accumulator' S '=' S PrecType  # spec/04 §5.7; `accumulator`
                                                   # stays an ordinary identifier
 AppExpr       <- AtomExpr CallArgs?
                / TransformExpr CallArgs?
-# A call whose callee is the reserved identifier 'to_tensor' takes an
-# optional second argument that is a PrecType, spelled as an Ident, not an
-# Expr (§P9, §P10b).
+# A call whose callee is the reserved identifier 'to_tensor' parses its
+# arguments as ordinary CallArgs; desugaring requires an optional second
+# argument to be an identifier naming a dtype, a primitive or a
+# dtype-bounded binder in scope, never a value (§P9, §P10b).
 
 # ── Atoms ──
 

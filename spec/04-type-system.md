@@ -1353,7 +1353,7 @@ dimension to the caller-visible input world. Both of the following are
 ;; TYPE ERROR: the return-only dim parameter m collapses with the
 ;; param-position dim parameter n.
 
-;; def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0], f32)
 ;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
@@ -1363,7 +1363,7 @@ Three deliberate boundaries of this rule:
 - a body-internal concrete pin whose literal does *not* occur in any
   declared parameter position is tolerated even when the def has
   parameters (`def f[k](x: tensor[2, f32]) -> tensor[k, f32] =
-  to_tensor([1.0, 2.0, 3.0])` is accepted with `k := 3`) — the guard
+  to_tensor([1.0, 2.0, 3.0], f32)` is accepted with `k := 3`) — the guard
   compares resolved dimensions, not provenance, so a body-internal
   literal that happens to *equal* a parameter dim is conservatively
   rejected, and one that differs is conservatively accepted;
@@ -2038,7 +2038,8 @@ contains it, never by a callee's signature or by anything further away:
 
 1. a literal suffix (§5.5) binds the literal at that dtype;
 2. otherwise, a dtype-stating construct that directly contains the literal
-   (§5.6) binds it at the dtype the construct states;
+   (§5.6) binds it at the dtype the construct states, when the literal's kind
+   admits that dtype;
 3. otherwise, the literal binds at its default, except that a literal element
    of a `to_tensor` argument has no default: an unsuffixed one in a call
    without a dtype argument is a type error (§5.6).
@@ -2053,10 +2054,14 @@ literals are already bound.
 
 The default is the **user-facing contract** and is non-overridable except by
 the mechanisms above. Whichever dtype they select, the literal binds there
-under [04-LIT-2]. An expression ascription `(e : T)` is not a dtype-stating
-construct: it checks that the already-bound value has type `T` and does not
-select or replace a literal's dtype. A suffix or default that disagrees with
-a stated or ascribed dtype is a type error, at both top-level and block
+under [04-LIT-2]. A declaration and a dtype argument also check the literals
+they state a dtype for: a suffix that disagrees with the stated dtype, or a
+literal whose kind does not admit it, is a type error (§5.6). A cast never
+rejects its literal operand for that reason; it converts a literal that its
+target does not bind (§5.6). An expression ascription `(e : T)` is not a
+dtype-stating construct: it checks that the already-bound value has type `T`
+and does not select or replace a literal's dtype, so a suffix or default that
+disagrees with an ascribed dtype is a type error, at both top-level and block
 scope. Nested ascriptions retain every checking constraint.
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
@@ -2073,16 +2078,16 @@ scope. Nested ascriptions retain every checking constraint.
 
 > **[04-LIT-2]** A numeric literal SHALL bind at its dtype by one
 > finalization of its value there. Its dtype is its suffix (§5.5), the dtype a
-> §5.6 dtype-stating construct states for it, each admissible instantiation of
-> a dtype binder such a construct states, the §5.3 default, or, for a literal
-> pattern, the scrutinee's primitive ([04-PAT-1]). An integer dtype admits
-> the value exactly or rejects the literal, and a float dtype rounds it per
-> [04-NUM-2]. A literal whose value at any of its dtypes is out of range or
-> non-finite SHALL be rejected at every ingress before any evaluation or
-> lowering lane runs. Rounding a nonzero value to zero or to a subnormal is
-> ordinary rounding, not a rejection. An explicit `cast` of an already-bound
-> value is an operation under [04-NUM-14], not a literal, and may produce an
-> infinity.
+> §5.6 dtype-stating construct states for it when its kind admits that dtype,
+> each member its kind admits of a dtype binder such a construct states, the
+> §5.3 default, or, for a literal pattern, the scrutinee's primitive
+> ([04-PAT-1]). An integer dtype admits the value exactly or rejects the
+> literal, and a float dtype rounds it per [04-NUM-2]. A literal whose value
+> at any of its dtypes is out of range or non-finite SHALL be rejected at
+> every ingress before any evaluation or lowering lane runs. Rounding a
+> nonzero value to zero or to a subnormal is ordinary rounding, not a
+> rejection. An explicit `cast` of an already-bound value is an operation
+> under [04-NUM-14], not a literal, and may produce an infinity.
 
 ### 5.4 Precision Compatibility Table
 
@@ -2199,6 +2204,9 @@ directly contains. The closed set of dtype-stating constructs is exactly:
   literal or its unary negation: `x: f64 = 1.1`, `def f() -> i8 = -128`. A
   declared tensor type with element dtype `p` states `p` for every literal
   element of a tensor-literal initializer: `xs: tensor[2, f64] = [1.1, 2.2]`.
+  A declared type states a dtype only as written: a type alias states none,
+  even one that names a primitive or a tensor type, so under `type P = f64`
+  the literal in `x: P = 1.1` keeps its default and the binding is rejected.
 - **Cast.** `cast(e, p)`, where `e` is a numeric literal or its unary negation
   and `p` is a primitive or a dtype-bounded binder. The named conversions
   `cast_trunc`, `cast_saturate`, and `cast_wrap` state no dtype.
@@ -2222,9 +2230,10 @@ call, not by the macro body it is substituted into.
 **Binding.** An unsuffixed literal binds at the stated `p` under [04-LIT-2]
 when its kind admits `p`. An integer literal admits every numeric dtype, and
 at a float `p` it is [04-LIT-1]'s cross-family form; a float literal admits
-only a float dtype. For a binder `p` the literal binds at every admissible
-instantiation ([04-INF-6]), so the range and finiteness checks apply at every
-member of `p`'s bound, and an unbounded binder is rejected ([04-DTYPE-1]).
+only a float dtype; no numeric literal admits a non-numeric primitive such as
+`bool` or `string`. For a binder `p` the literal binds at each member of `p`'s
+bound that its kind admits, so the range and finiteness checks apply at each
+of those members, and an unbounded binder is rejected ([04-DTYPE-1]).
 Otherwise:
 
 - A suffixed literal binds at its suffix (§5.5). A declaration or a dtype
@@ -2232,20 +2241,33 @@ Otherwise:
   literal: `xs: tensor[3, f32] = [1.0, 2.0f64, 3.0]` and
   `to_tensor([1.0f64], f32)` are rejected. A cast converts it:
   `cast(1.1f32, f64)` widens the `f32` value.
-- A float literal under an integer `p`, or any numeric literal under `bool`,
-  cannot bind at `p`. In a declaration or under a dtype argument this is a
-  type error. A cast keeps the literal's default and converts the value under
-  [04-NUM-14]: `cast(2.0, i32)` is `2`, and `cast(2.5, i32)` traps `domain`.
+- A float literal under an integer `p`, or any numeric literal under a
+  non-numeric `p` such as `bool` or `string`, cannot bind at `p`. In a
+  declaration or under a dtype argument this is a type error that names the
+  literal and `p`: `x: i32 = 1.5` and `b: bool = 1` are rejected. A cast keeps
+  the literal's default and converts the value under [04-NUM-14]:
+  `cast(2.0, i32)` is `2`, `cast(2.5, i32)` traps `domain`, and
+  `cast(1, bool)` is `true`.
 
-**A cast of a bound literal denotes the literal.** `cast(1.1, f64)` binds the
-decimal at `f64`, exactly `0x3ff199999999999a`, and is the same value as
-`1.1f64`; it never rounds through the `f32` default first, which would yield
-`1.100000023841858`. Likewise `cast(3000000000, i64)` binds at `i64`, which is
-what lets an integer outside the `i32` range be written without a suffix.
+**A cast its target binds denotes the literal.** A cast denotes its literal
+operand, with no conversion, exactly when the literal is unsuffixed, its kind
+admits the target, and the target is a primitive; that target is then a
+numeric primitive, and the cast is the same value as the literal with the
+target's suffix (§5.5). `cast(1.1, f64)` binds the decimal at `f64`, exactly
+`0x3ff199999999999a`, and is the same value as `1.1f64`; it never rounds
+through the `f32` default first, which would yield `1.100000023841858`.
+Likewise `cast(3000000000, i64)` binds at `i64`, which is what lets an
+integer outside the `i32` range be written without a suffix.
 Range and finiteness are checked at `p`: `cast(2147483648, i32)` is a range
 error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
 at `f16`, whereas `cast(70000.0f32, f16)` converts a finite `f32` value and
-yields infinity under [04-NUM-14].
+yields infinity under [04-NUM-14]. Every other cast of a literal converts it
+under [04-NUM-14]: a suffixed literal, a float literal under an integer
+target, and any numeric literal under `bool`, as listed above. A cast to a
+dtype binder also keeps its conversion: the literal binds at each member its
+kind admits, where the conversion is the identity, and at any other member the
+cast converts the literal's default value, so `cast(2.5, p)` under
+`p: Numeric` traps `domain` at `i32` (`spec/03-deep-syntax.md` §6.4).
 
 **Tensor elements state their dtype.** No default applies to a literal
 element of a `to_tensor` argument: an unsuffixed literal element of a
@@ -2282,8 +2304,9 @@ quantity it is: an extent is `i64` and an axis is `i32`, so a
 context-inferred `[2, 2]` would hide exactly the distinction the dtype exists
 to carry.
 
-(A dtype-bounded binder stated by a declaration or by a dtype argument, rather
-than by a cast, is not fully implemented; see chelis#3148.)
+(An unsuffixed literal bound at a dtype-bounded binder by a declaration or by
+a dtype argument, rather than by a cast, is not fully implemented; see
+chelis#3148.)
 
 ### 5.7 Mixed-Precision Accumulator Parameter
 
@@ -3492,13 +3515,15 @@ Scope:
 **Reserved intrinsic names.** `to_tensor` is reserved. No binder in any scope
 may bind it: not a top-level or package `def`, `sig`, `macro`, or binding,
 not a function, lambda, or macro parameter, not a block binding or pattern
-binder, and not an import or alias. A program that binds it is rejected as
+binder, and not an imported name. The reef-package exemption above does not
+apply to a reserved name. A program that binds it is rejected as
 `ReservedName` at every ingress, Surf and Deep, before any lane runs, and the
 rejection is semantic, not a style rule. `cast`, `cast_trunc`,
 `cast_saturate`, and `cast_wrap` are keywords (`spec/02-surf-syntax.md` §1)
-and cannot be bound at all. These constructs state literal dtypes (§5.6),
-which are decided from the source text where the literal is written; a
-binding that rebound one would change what a literal means at a distance.
+and cannot be bound at all. `cast` and `to_tensor` state literal dtypes
+(§5.6), which are decided from the source text where the literal is written;
+a binding that rebound `to_tensor` would change what a literal means at a
+distance.
 
 ---
 

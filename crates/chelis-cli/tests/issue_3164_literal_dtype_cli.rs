@@ -147,6 +147,9 @@ t: i8 = -128
 u = cast(-3000000000, i64)
 v = to_tensor([-1.5, 2], f64)
 w: f16 = 0.1
+y = cast(1, bool)
+def kb[p: Float](x: p) -> tensor[1, p] = to_tensor([cast(1.5, p)], p)
+kb_value = kb(1.0f64)
 ";
 
 const SUFFIXED: &str = "\
@@ -162,11 +165,13 @@ k = to_tensor([[1i64, 2i64], [3i64, 4i64]])
 m = to_tensor([1.5f64])
 n = to_tensor([1.1f64, 2.2f64])
 q = neg(1.1f64)
-r = cast(1.1f32, f64)
+r = 1.100000023841858f64
 t = sub(neg(127i8), 1i8)
 u = neg(3000000000i64)
 v = to_tensor([neg(1.5f64), 2f64])
 w = 0.1f16
+y = true
+kb_value = to_tensor([1.5f64])
 ";
 
 #[test]
@@ -230,7 +235,7 @@ fn every_rejected_spelling_is_refused_by_check_eval_and_build() {
             &["`to_tensor` is reserved"][..],
         ),
         (
-            "module Demo.Main\ndef to_tensor(x: i32) -> i32 = x\n",
+            "import Std.Sort (to_tensor)\nr = 1\n",
             &["`to_tensor` is reserved"][..],
         ),
         // chelis#3152
@@ -255,6 +260,38 @@ fn every_rejected_spelling_is_refused_by_check_eval_and_build() {
         let file = format!("rejected{index}.ch");
         common::write_file(&directory.path().join(&file), source);
         assert_rejected_everywhere(directory.path(), &file, needles, source);
+    }
+}
+
+/// §8.6: the reef-package exemption from builtin shadowing does not reach a
+/// reserved name, so a package module cannot bind `to_tensor` either.
+#[test]
+fn a_reef_package_module_cannot_bind_to_tensor() {
+    for (index, body) in [
+        "def to_tensor(x: i32) -> i32 = x\n\nr = to_tensor(1)\n",
+        "def f(to_tensor: i32) -> i32 = to_tensor\n\nr = f(1)\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = tempdir().expect("tempdir");
+        let package = directory.path().join(format!("demo{index}"));
+        common::write_file(
+            &package.join("reef.toml"),
+            &format!(
+                "schema = \"1\"\n\n[package]\nname = \"demo{index}\"\nversion = \"0.1.0\"\n\
+                 compiler = \"={}\"\nmodule_prefix = \"Demo\"\n",
+                common::COMPILER_VERSION
+            ),
+        );
+        let source = format!("module Demo.Main\n\n{body}");
+        common::write_file(&package.join("src/main.ch"), &source);
+        assert_rejected_everywhere(
+            &package,
+            "src/main.ch",
+            &["`to_tensor` is reserved"],
+            &source,
+        );
     }
 }
 
