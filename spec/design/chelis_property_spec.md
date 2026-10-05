@@ -393,7 +393,10 @@ obligation; `name` is `invariant:<Type>:<producer>`; `status` is one of
 or `"fuzz"` (Tier C); `samples`/`seed` mirror the property records;
 `counterexample` and `reason` are optional. A `counterexample` keys the
 producer's inputs by **positional placeholder** (`__arg0`, `__arg1`, ...),
-not by source parameter name. `arith_model:"real"` is
+not by source parameter name. A placeholder the module itself spells is
+suffixed (`__arg0_1`, ...) so it never aliases that name; every solver symbol
+the prover generates is fresh against the names in its goal in the same way.
+`arith_model:"real"` is
 present on `proof_tier:"smt"` records (the SMT-over-reals caveat — see
 the Tier B note below). A `status:"error"` record is a declaration-time
 covered-or-rejected / signature-rejection failure and carries only

@@ -33,7 +33,8 @@ use chelis_types::types::Prim;
 
 mod smt_lower;
 use smt_lower::{
-    ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith, surf_expr_to_smt,
+    ContractAbstraction, ContractSymbols, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith,
+    surf_expr_to_smt,
 };
 
 mod beacon;
@@ -45,6 +46,7 @@ use crate::composition::{
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
+use crate::smt_names::NameSupply;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1321,27 +1323,40 @@ fn try_surf_induction(
         Ok(plan) => plan,
         Err(reason) => return induction_unsupported(property, seed, reason),
     };
-    let k_name = "__chelis_induction_k";
-    let value_name = "__chelis_induction_value";
-    let base_recursive_name = "__chelis_induction_base_recursive";
-    if plan
-        .variables
-        .iter()
-        .any(|(name, _)| name == k_name || name == value_name || name == base_recursive_name)
-    {
-        return induction_unsupported(property, seed, "reserved induction symbol collision");
+    // chelis#3236: the induction symbols are fresh against every name the plan
+    // uses (binders, model parameters, and every name in the proposition,
+    // preconditions, and model body), so none can alias a user name.
+    let mut names = NameSupply::new();
+    for (name, _) in &plan.variables {
+        names.reserve(name);
     }
+    for name in &plan.model_params {
+        names.reserve(name);
+    }
+    for expr in plan.preconditions.iter().chain([
+        &plan.proposition,
+        &plan.outer_call,
+        &plan.condition,
+        &plan.base_expr,
+        &plan.step_expr,
+        &plan.recursive_call,
+    ]) {
+        names.reserve_expr(expr);
+    }
+    let k_name = names.fresh("__chelis_induction_k");
+    let value_name = names.fresh("__chelis_induction_value");
+    let base_recursive_name = names.fresh("__chelis_induction_base_recursive");
 
     use crate::solver::{ArithOp, SmtExpr};
     let zero = SmtExpr::IntLit(0);
-    let k = SmtExpr::Var(k_name.to_string());
+    let k = SmtExpr::Var(k_name.clone());
     let successor = SmtExpr::Arith(
         ArithOp::Add,
         Box::new(k.clone()),
         Box::new(SmtExpr::IntLit(1)),
     );
-    let induction_value = SmtExpr::Var(value_name.to_string());
-    let base_recursive_value = SmtExpr::Var(base_recursive_name.to_string());
+    let induction_value = SmtExpr::Var(value_name.clone());
+    let base_recursive_value = SmtExpr::Var(base_recursive_name.clone());
 
     let base_var_subst = BTreeMap::from([(plan.variable.clone(), zero.clone())]);
     let base_outer = substitute_smt_vars(&plan.outer_call, &base_var_subst);
@@ -1379,7 +1394,7 @@ fn try_surf_induction(
                 .filter(|(name, _)| name != &plan.variable)
                 .cloned()
                 .collect();
-            variables.push((base_recursive_name.to_string(), plan.model_return_sort));
+            variables.push((base_recursive_name, plan.model_return_sort));
             variables
         },
         preconditions: base_pre,
@@ -1438,13 +1453,13 @@ fn try_surf_induction(
         .iter()
         .map(|(name, sort)| {
             if name == &plan.variable {
-                (k_name.to_string(), *sort)
+                (k_name.clone(), *sort)
             } else {
                 (name.clone(), *sort)
             }
         })
         .collect();
-    step_variables.push((value_name.to_string(), plan.model_return_sort));
+    step_variables.push((value_name, plan.model_return_sort));
     let step_goal = crate::tier_b::SmtProperty {
         variables: step_variables,
         preconditions: step_pre,
@@ -2153,21 +2168,76 @@ fn normalize_successor_predecessor(expr: &crate::solver::SmtExpr) -> crate::solv
     }
 }
 
-/// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
-/// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
-/// `None` to fall through to Tier C (the property did not lower, or the
-/// solver timed out / errored).
-fn try_surf_tier_b(
+/// A Surf property lowered for Tier B: the postcondition (`None` when it did
+/// not lower), the preconditions (`None` unless every one lowered), the
+/// contract abstraction that minted symbols during lowering, and the first
+/// scalar-`grad` capability boundary met while lowering the postcondition.
+struct LoweredSurfTierBGoal {
+    postcondition: Option<crate::solver::SmtExpr>,
+    preconditions: Option<Vec<crate::solver::SmtExpr>>,
+    abstraction: ContractAbstraction,
+    grad_diagnostic: Option<String>,
+}
+
+/// Lower a Surf property for Tier B with contract-abstraction symbols fresh
+/// against every other name in the goal (chelis#3236).
+///
+/// Lowering never reads a minted symbol by name, so a discovery pass with
+/// placeholder spellings yields exactly the goal's other names: the property
+/// binders and every free or bound name in the lowered postcondition and
+/// preconditions. When that pass minted any symbol, the goal is lowered again
+/// with the `__contract_std_*` symbols made fresh against those names, so a
+/// binder or module name spelled like a contract symbol stays its own
+/// variable instead of inheriting the contract's assumptions.
+fn lower_surf_tier_b_goal(
     decls: &[Decl],
     trusted_contract_decls: &[Decl],
     property: &Property,
-    options: &PropertyRunOptions,
-    seed: u64,
-) -> Option<PropertyOutcome> {
-    let contracts = expanded_contracts(property);
-    let contract_abstraction = RefCell::new(ContractAbstraction::for_contracts(
-        &contracts,
+    contracts: &[String],
+) -> LoweredSurfTierBGoal {
+    let discovery = lower_surf_tier_b_pass(
+        decls,
         trusted_contract_decls,
+        property,
+        contracts,
+        ContractSymbols::Discovery,
+    );
+    if !discovery.abstraction.minted_symbols() {
+        return discovery;
+    }
+    let (Some(postcondition), Some(preconditions)) =
+        (&discovery.postcondition, &discovery.preconditions)
+    else {
+        return discovery;
+    };
+    let mut names = NameSupply::new();
+    for param in &property.params {
+        names.reserve(&param.name);
+    }
+    names.reserve_expr(postcondition);
+    for precondition in preconditions {
+        names.reserve_expr(precondition);
+    }
+    lower_surf_tier_b_pass(
+        decls,
+        trusted_contract_decls,
+        property,
+        contracts,
+        ContractSymbols::Fresh(names),
+    )
+}
+
+fn lower_surf_tier_b_pass(
+    decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    property: &Property,
+    contracts: &[String],
+    symbols: ContractSymbols,
+) -> LoweredSurfTierBGoal {
+    let contract_abstraction = RefCell::new(ContractAbstraction::for_contracts(
+        contracts,
+        trusted_contract_decls,
+        symbols,
     ));
     let grad_diagnostic = RefCell::new(None);
     let postcondition = surf_expr_to_smt(
@@ -2181,10 +2251,54 @@ fn try_surf_tier_b(
             grad_diagnostic: Some(&grad_diagnostic),
         },
     );
+    let preconditions: Option<Vec<crate::solver::SmtExpr>> = property
+        .preconditions
+        .iter()
+        .map(|e| {
+            surf_expr_to_smt(
+                e,
+                &InlineCtx {
+                    decls,
+                    depth: 0,
+                    max_depth: 3,
+                    call_stack: vec![],
+                    contracts: Some(&contract_abstraction),
+                    grad_diagnostic: None,
+                },
+            )
+        })
+        .collect();
+    LoweredSurfTierBGoal {
+        postcondition,
+        preconditions,
+        abstraction: contract_abstraction.into_inner(),
+        grad_diagnostic: grad_diagnostic.into_inner(),
+    }
+}
+
+/// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
+/// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
+/// `None` to fall through to Tier C (the property did not lower, or the
+/// solver timed out / errored).
+fn try_surf_tier_b(
+    decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    property: &Property,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> Option<PropertyOutcome> {
+    let contracts = expanded_contracts(property);
+    let lowered = lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts);
+    let LoweredSurfTierBGoal {
+        postcondition,
+        preconditions,
+        abstraction,
+        grad_diagnostic,
+    } = lowered;
     let postcondition = match postcondition {
         Some(postcondition) => postcondition,
         None if options.tier == "smt-only" => {
-            let reason = grad_diagnostic.into_inner()?;
+            let reason = grad_diagnostic?;
             return Some(PropertyOutcome::new(
                 property.name.clone(),
                 PropertyStatus::Unsupported,
@@ -2223,27 +2337,7 @@ fn try_surf_tier_b(
     if variables.len() != property.params.len() {
         return None;
     }
-    let preconditions: Vec<crate::solver::SmtExpr> = property
-        .preconditions
-        .iter()
-        .filter_map(|e| {
-            surf_expr_to_smt(
-                e,
-                &InlineCtx {
-                    decls,
-                    depth: 0,
-                    max_depth: 3,
-                    call_stack: vec![],
-                    contracts: Some(&contract_abstraction),
-                    grad_diagnostic: None,
-                },
-            )
-        })
-        .collect();
-    if preconditions.len() != property.preconditions.len() {
-        return None;
-    }
-    let abstraction = contract_abstraction.into_inner();
+    let preconditions = preconditions?;
     if abstraction.requires_normal_cdf() && !abstraction.used_normal_cdf() {
         return Some(PropertyOutcome::new(
             property.name.clone(),

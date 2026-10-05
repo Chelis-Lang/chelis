@@ -36,6 +36,7 @@ use chelis_unord::UnordMap;
 use std::collections::BTreeMap;
 
 use crate::discharge::{Goal, GoalShape};
+use crate::smt_names::NameSupply;
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::special_fn_envelope::{SpecialFnEnvelope, SpecialFnRegistry};
 use crate::tier_b::SmtProperty;
@@ -126,6 +127,12 @@ impl Transformation for AbstractSubterm {
         let mut new_variables = prop.variables.clone();
         let mut new_preconditions = prop.preconditions.clone();
         let mut postcondition = prop.postcondition.clone();
+        // chelis#3236: every abstraction variable is fresh against the WHOLE
+        // goal (declared variables, every free/bound name in the preconditions
+        // and postcondition) and against the abstraction variables minted
+        // before it. A user binder spelled `__erf_abs_0` must stay a distinct,
+        // unconstrained variable; aliasing it would hand it the envelope bounds.
+        let mut names = NameSupply::for_property(prop);
 
         for (fresh_counter, site) in sites.iter().enumerate() {
             // A certified envelope must be committed for this function, else
@@ -155,8 +162,9 @@ impl Transformation for AbstractSubterm {
                 return vec![goal.clone()];
             };
 
-            // Fresh variable, named by function: `__<fn>_abs_<n>`.
-            let fresh_name = format!("__{}_abs_{}", site.fn_name, fresh_counter);
+            // Fresh variable, named by function: `__<fn>_abs_<n>` unless the
+            // goal already uses that spelling.
+            let fresh_name = names.fresh(&format!("__{}_abs_{}", site.fn_name, fresh_counter));
             new_variables.push((fresh_name.clone(), SmtSort::Real));
 
             // Bounds as preconditions: env_lo <= fresh_var <= env_hi.

@@ -77,6 +77,12 @@ pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> 
 /// This is the primary entry point for Tier B when the caller has already
 /// parsed the property into SmtExpr form.
 pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
+    // chelis#3236: two declarations of one name would become one solver
+    // constant in every name-keyed lowering map. Reject the goal before any
+    // engine (or the test-forced result) can read it as proved.
+    if let Some(name) = crate::smt_names::first_duplicate_variable(&property.variables) {
+        return TierBResult::Error(crate::smt_names::duplicate_variable_reason(name));
+    }
     if let Some(forced) = forced_smt_result_from_env() {
         return forced;
     }
@@ -639,7 +645,9 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
             SmtSort::Bool => tm.boolean_sort(),
         };
         let var = tm.mk_const(cvc5_sort, name);
-        vars.insert(name.clone(), var);
+        if vars.insert(name.clone(), var).is_some() {
+            return TierBResult::Error(crate::smt_names::duplicate_variable_reason(name));
+        }
         sorts.insert(name.clone(), *sort);
     }
 
@@ -848,7 +856,9 @@ fn validate_model_independently(
         else {
             continue;
         };
-        env.insert(name.clone(), value);
+        if env.insert(name.clone(), value).is_some() {
+            return Err(crate::smt_names::duplicate_variable_reason(name));
+        }
     }
     for (index, pre) in property.preconditions.iter().enumerate() {
         if eval_exact_bool(pre, &env, 0) == Some(false) {
@@ -1428,6 +1438,12 @@ fn lower_to_cvc5_with_sqrt_domains(
                             .to_string(),
                     );
                 }
+            }
+            // One binder list is one scope: a repeated binder would overwrite
+            // its sibling in the extended map below (chelis#3236). Binding a
+            // name the enclosing scope declares is ordinary shadowing.
+            if let Some(name) = crate::smt_names::first_duplicate_variable(bindings) {
+                return Err(crate::smt_names::duplicate_variable_reason(name));
             }
             let bound_vars = quantifier_bound_vars(tm, bindings);
             let mut extended_vars = vars.clone();

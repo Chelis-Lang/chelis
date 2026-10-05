@@ -22,6 +22,7 @@ use crate::contracts::{
     NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_MONOTONICITY, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION,
     QUANTILE_BOUNDARY, QUANTILE_MONOTONICITY, QUANTILE_RANGE,
 };
+use crate::smt_names::NameSupply;
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
 const NESTED_GRAD_SMT_BOUNDARY: &str = "scalar grad SMT lowering does not support nested gradients";
@@ -63,6 +64,35 @@ struct QuantileContractCall {
     q: SmtExpr,
 }
 
+/// How a [`ContractAbstraction`] spells the solver symbols it mints for
+/// abstracted contract calls (chelis#3236).
+///
+/// Lowering never looks a minted symbol up by name, so the spelling cannot
+/// change which user-origin names a lowered goal contains. The property
+/// runner exploits that: a discovery pass lowers with placeholder spellings
+/// only to learn every name the goal uses, and the final pass mints the
+/// `__contract_std_*` symbols fresh against that set, so no minted symbol can
+/// alias a property binder, a free name, or another minted symbol.
+#[derive(Debug, Clone, Default)]
+pub(super) enum ContractSymbols {
+    /// Placeholder spellings for the discovery pass, whose lowered goal is
+    /// read only for the names it uses and is never solved.
+    #[default]
+    Discovery,
+    /// The final pass: `__contract_std_*` stems made fresh against the
+    /// supply's taken names.
+    Fresh(NameSupply),
+}
+
+impl ContractSymbols {
+    fn mint(&mut self, family: &str, index: usize) -> String {
+        match self {
+            Self::Discovery => format!("__contract_discovery_{family}_{index}"),
+            Self::Fresh(names) => names.fresh(&format!("__contract_std_{family}_{index}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct ContractAbstraction {
     normal_cdf_enabled: bool,
@@ -76,10 +106,15 @@ pub(super) struct ContractAbstraction {
     quantile_has_unsupported_contract: bool,
     quantile_symbols: Vec<String>,
     quantile_calls: Vec<QuantileContractCall>,
+    symbols: ContractSymbols,
 }
 
 impl ContractAbstraction {
-    pub(super) fn for_contracts(contracts: &[String], trusted_contract_decls: &[Decl]) -> Self {
+    pub(super) fn for_contracts(
+        contracts: &[String],
+        trusted_contract_decls: &[Decl],
+        symbols: ContractSymbols,
+    ) -> Self {
         let normal_cdf_reflection = contracts.iter().any(|id| id == NORMAL_CDF_REFLECTION);
         let normal_cdf_range =
             normal_cdf_reflection || contracts.iter().any(|id| id == NORMAL_CDF_RANGE);
@@ -102,6 +137,7 @@ impl ContractAbstraction {
             quantile_has_unsupported_contract,
             quantile_symbols: trusted_quantile_symbols(trusted_contract_decls),
             quantile_calls: Vec::new(),
+            symbols,
         }
     }
 
@@ -119,6 +155,12 @@ impl ContractAbstraction {
 
     pub(super) fn used_quantile(&self) -> bool {
         !self.quantile_calls.is_empty()
+    }
+
+    /// Whether lowering abstracted at least one contract call into a minted
+    /// solver symbol.
+    pub(super) fn minted_symbols(&self) -> bool {
+        self.used_normal_cdf() || self.used_quantile()
     }
 
     pub(super) fn has_unsupported_quantile_contract(&self) -> bool {
@@ -277,7 +319,7 @@ impl ContractAbstraction {
         {
             return None;
         }
-        let symbol = format!("__contract_std_normal_cdf_{}", self.normal_cdf_calls.len());
+        let symbol = self.symbols.mint("normal_cdf", self.normal_cdf_calls.len());
         self.normal_cdf_calls.push(ContractCall {
             symbol: symbol.clone(),
             arg: args[0].clone(),
@@ -295,7 +337,7 @@ impl ContractAbstraction {
             return None;
         }
         let dataset = dataset_identity(dataset_expr)?;
-        let symbol = format!("__contract_std_quantile_{}", self.quantile_calls.len());
+        let symbol = self.symbols.mint("quantile", self.quantile_calls.len());
         self.quantile_calls.push(QuantileContractCall {
             symbol: symbol.clone(),
             dataset,

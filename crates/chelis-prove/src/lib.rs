@@ -45,6 +45,7 @@ pub mod obligation_engine;
 pub mod obligations;
 pub mod opaque;
 pub mod property_runner;
+pub mod smt_names;
 pub mod solver;
 pub mod std_graph;
 pub mod tier_a;
