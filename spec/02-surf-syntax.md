@@ -8,8 +8,11 @@ Deep desugaring shown as **⟹** with the target Deep s-expression.
 
 ### 0.1 Canonical Surf and the bidirectional contract
 
-Canonical Surf is the one repository and output spelling for each grammatical
-construct. The normal parser also accepts the explicitly value-preserving
+Canonical Surf defines the formatting of each grammatical construct, rather
+than one spelling per program. Authored operator sugar, including `|>`, is
+preserved by `fmt`. Deep decompilation prints calls for normalized pipes and
+canonical operator sugar for recognized operator builtins. The
+normal parser also accepts the explicitly value-preserving
 input families in P10-P12: numeric radix/digit-separator/exponent spellings,
 float bodies carrying decimal digits beyond the shortest round-trippable
 spelling, equivalent valid string escapes, whitespace before a parenthesized
@@ -28,6 +31,12 @@ Before replacing any input, the command MUST preflight every path and reject a
 symbolic link or a file with multiple hard links. Each individual replacement
 MUST be atomic. If a later replacement fails, every earlier replacement MUST be
 restored byte-for-byte before the command reports failure.
+For `migrate pipes`, explicit `--keep-going` with `--check` or `--inplace`
+selects independent per-file processing instead: every file MUST receive its
+own complete expanded-Deep preservation proof; a rejected file MUST remain
+unchanged, later files MUST still be attempted, and any failure MUST produce
+a nonzero exit with a per-file failure summary. The default remains a batch
+transaction.
 Migration MUST NOT guess a replacement for an identifier that v0.19 reserves.
 It MUST reject that input with a diagnostic directing the author to rename the
 identifier manually before rerunning migration.
@@ -86,8 +95,8 @@ normalize_deep(desugar(resugar(desugar(surf))))
   = normalize_deep(desugar(surf))
 ```
 
-The formatting law is syntactic: it chooses one repository spelling from any
-parser-accepted Surf input. The third law is the semantic retraction after
+The formatting law is syntactic: it chooses a stable spelling for the authored
+Surf constructs. The third law is the semantic retraction after
 Deep has erased comments, whitespace, and distinctions among equivalent Surf
 sugars; it does not require `resugar(desugar(surf))` to reproduce authored
 bytes. It compares macro programs after expansion, because public Deep is
@@ -102,6 +111,36 @@ agrees exactly with the ordered metadata names. Contradictory, malformed,
 absent, or dynamically unresolved selectors fail resugaring; the round-trip
 laws do not authorize dropping or reconstructing the operative child.
 
+### 0.2 Pipe sugar and explicit grouping
+
+> **[02-PIPE-1]** `|>` exists only in Surf. Desugaring SHALL normalize
+> `x |> f(y)` to `f(x, y)` before literal dtype selection, with bare `f`
+> meaning `f(x)`. `cast(T)`, each named cast rung (`cast_trunc(T)`,
+> `cast_saturate(T)`, `cast_wrap(T)`), bare `copy`, and bare `realize`
+> stages normalize to their corresponding operand forms. General authored
+> lambdas remain function values applied to the carried expression; no
+> arbitrary beta reduction or capture-prone substitution is permitted.
+
+> **[02-PIPE-2]** Pipes SHALL NOT mix at the same ungrouped expression boundary
+> with non-pipe binary or unary operators, postfix field access or tuple
+> projection (including qualified callees), type ascription, record update,
+> or open-ended `if`, `match`, or lambda forms. This rule is symmetric:
+> a pipe in an ungrouped condition, branch, scrutinee, or lambda body also
+> requires grouping. Parentheses,
+> argument lists, and delimited blocks establish independent expression
+> boundaries. Thus `(a * b) |> f`, `a * (b |> f)`,
+> `(if c then a else b) |> f`, and `x |> (fn (v) -> v + y)` are valid;
+> `a * b |> f`, `-x |> f`, `if c then a else b |> f`, and
+> `x |> fn (v) -> v + y`, `x |> f.1`, and `r.field |> f` are rejected with
+> a grouping diagnostic. `x |> (f.1)`, `(x |> f).1`, `(r.field) |> f`,
+> `if c then (x |> f) else y`, and `fn (v) -> (v |> f)` are valid.
+
+> **[02-PIPE-3]** Formatting SHALL preserve authored pipe sugar and comments,
+> be type-independent and idempotent. Deep SHALL contain only the normalized
+> operation and no pipe spelling-restoration metadata. Diagnostics SHALL
+> refer to authored stage spans and source, not synthesized call text.
+
+
 ---
 
 ## 1. Keywords
@@ -111,10 +150,11 @@ Lexically reserved. These words cannot be used as identifiers.
 ```
 def  sig  type  dim  macro  match  with  fn  module  import
 export  if  then  else  grad  vmap  jit  realize  copy  tensor
-cast  cast_trunc  par  do  quote  unquote  splice  true  false
+cast  cast_trunc  cast_saturate  cast_wrap  par  do  quote  unquote
+splice  true  false
 ```
 
-**Total: 29.**
+**Total: 31.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
 `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
@@ -132,7 +172,7 @@ Final. Binding power from lowest to highest:
 
 | BP | Operators | Assoc | Deep form |
 |----|-----------|-------|-----------|
-| 1 | `\|>` | left | `(pipe {} ...)` |
+| 1 | `\|>` | left | nested `app` (first-argument insertion) |
 | 2 | `\|\|` | left | `(app {} (var {} or) ...)` |
 | 3 | `&&` | left | `(app {} (var {} and) ...)` |
 | 4 | `==` `!=` | none | `eq` / `neq` |
@@ -148,7 +188,7 @@ Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b =
 Every operator row desugars with the authored operand order preserved: an
 application row `a OP b` becomes `(app {} (var {} op) a' b')` with `a'`
 first, no row swaps its operands, and `|>` keeps its stage order in the
-`pipe` node. `a > b` therefore desugars to the `gt` built-in, whose result
+application chain. `a > b` therefore desugars to the `gt` built-in, whose result
 is defined as `cmplt(b, a)` over the already-evaluated operand values
 (`spec/05-risc-primitives.md` §3.2), not to an operand-swapped `cmplt`
 application. Combined with Deep's left-to-right application-argument
@@ -157,10 +197,11 @@ operand expressions are observed in authored order. (`&&` and `||` are
 eager like every other application; there is no short-circuit special
 case.)
 
-In a pipe stage, `x |> cast(p)` and `x |> cast_trunc(p)` insert `x` as
-the value argument of the corresponding two-argument cast. The
-one-argument spelling is valid only after `|>`; `cast(p)` and
-`cast_trunc(p)` are not standalone expressions.
+In a pipe stage, `x |> cast(p)`, `x |> cast_trunc(p)`,
+`x |> cast_saturate(p)` and `x |> cast_wrap(p)` insert `x` as the value
+argument of the corresponding two-argument cast. The one-argument spelling
+is valid only after `|>`; `cast(p)` and the named forms `cast_trunc(p)`,
+`cast_saturate(p)` and `cast_wrap(p)` are not standalone expressions.
 
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
@@ -204,6 +245,10 @@ def forward(x, w, b) = add(matmul(x, w), b)
 | `import Foo.Bar` | Qualified access only | `(import {} foo.bar ())` |
 
 Qualified access (`Foo.Bar.baz`) is always available after any import form. Selective import additionally brings names into unqualified scope.
+
+A source file belongs to the reef package whose manifest is found by walking up from the file's own directory. Every command classifies a file this way, and the directory a command runs in plays no part in which package a file belongs to or in what its imports resolve to. An explicit package option is a declared input and the one way to name another package: `chelis prove --package DIR` links a file with no `module` declaration as an entry of the package at `DIR`, and rejects a file that declares a `module` when the file's own location finds a different package. A file in a package that is not one of its modules (`spec/01-nomenclature.md` §6.5 decides which files are) is an entry of the package whose manifest the walk finds, and it imports that package's modules and dependencies as one of its modules does. A file that belongs to no package resolves its imports against the compiler-bundled `chelis-std` runtime under the same binding, visibility, and collision rules as a package module, and an import of a module it cannot reach that way, including every module outside `chelis-std`, is an error that names the module.
+
+**Import and local declaration collision.** A module never both imports a name into unqualified scope and declares it. When a selective import names a name, or an `import M (..)` brings it in because `M` exports it, and the module also declares the same name at top level (a definition, signature, top-level binding, type, constructor, macro, dimension, or property), every command rejects the module with a diagnostic that names the name, the import, and the local declaration. No precedence rule chooses either binding. A qualified-only `import M` brings no name into unqualified scope and so never collides: `M.name` stays available beside a local `name`. Parameters and block-local bindings are not top-level declarations; they shadow an imported name under ordinary lexical scoping. A package entry and a file that belongs to no package follow the same rule.
 
 A qualified reference names the module path followed by the exported name. The
 trailing name may be a value or a **constructor**, and the whole reference may
@@ -473,7 +518,7 @@ alias heuristic and no implicit collection fallback.
 
 An unbounded listed name may be unused; it denotes a vacuous universal
 quantifier and is preserved by canonical Surf/Deep round-tripping. A listed
-name with a dtype-family bound must occur in the declared type as §P4c
+name with a dtype bound must occur in the declared type as §P4c
 requires.
 
 The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
@@ -554,9 +599,9 @@ Writing `def f[a, b](x: &tensor[3, p])` (where `p` is not in
 See `spec/04-type-system.md` §5.8 for the type-system semantics and
 the `TensorPrec` representation that backs this surface rule.
 
-#### P4c: Dtype-Family Bounds
+#### P4c: Dtype Bounds
 
-A binder in a `[..]` clause may declare a **dtype-family bound**,
+A binder in a `[..]` clause may declare a **dtype bound**,
 written after the binder name:
 
 ```text
@@ -564,15 +609,26 @@ sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) = ...
 
 def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
+
+def widen[p: {f32, f64}](x: p) -> p = ...
 ```
 
-The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
-binder to the active dtypes of that family per
-`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
+The bound is either a family name -- one of `Float`, `Int`, or
+`Numeric` -- or an **explicit dtype set** written `{d1, d2, ...}`, a
+brace-delimited comma-separated list of active dtype names. Both forms
+restrict the binder per `spec/04-type-system.md` §5.9 [04-DTYPE-2]: a
+family name to the active dtypes of that family, and a set to exactly
+the dtypes it lists. Any other name in the
 bound position is a syntax error, so an ADT name never becomes a
 silent bound and a user type named `Float` is unaffected outside this
 position. A binder with no bound keeps its existing meaning: an
 unconstrained type variable, not a dtype.
+
+A one-member set is written `{f64}`; there is no bare-dtype bound
+spelling, so a bound is always a family name or a braced set. The
+braces are required and carry the meaning: `p: f64` is a syntax error
+rather than a bound, because a binder restricted to exactly one dtype
+is a set of one and not a type ascription.
 
 A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and
 `d-rank` name in the signature appears exactly once. Listing a
@@ -583,11 +639,18 @@ declaration: a standalone `sig` carries it, and a matching `def` must
 not carry a second list.
 
 A bounded binder is a type binder only. Using one in a dimension slot
-or as a rank spread is an error, since a dtype family cannot name an
+or as a rank spread is an error, since a dtype bound cannot name an
 extent.
 
-The formatter prints a bound as `name: Family` with one space after the
-colon and preserves the authored binder order.
+The formatter prints a family bound as `name: Family` with one space
+after the colon, and a set bound as `name: {d1, d2}` with one space
+after the colon, no space inside the braces, one space after each
+comma, and its members in `spec/04-type-system.md` §1.1 declaration
+order rather than the authored order. It preserves the authored binder
+order. The two differ because a binder list is ordered -- its sequence
+is the declaration's, and an explicit type application reads it -- while
+§5.9 makes a set bound unordered, so its members have no authored
+sequence worth keeping.
 
 ### P4a: Canonical Surf Style
 
@@ -610,7 +673,7 @@ Additional canonical style rules:
 
 - use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
   bindings such as `result = expr`
-- prefer pipe-first composition for eligible linear flows
+- use pipes or calls according to which makes the dataflow clearer
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
 
@@ -833,6 +896,8 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} i32)} 0))` | |
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
 | `cast_trunc(e, i32)` | `(cast {} e' (t-prim {} i32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
+| `cast_saturate(e, i8)` | `(cast {} e' (t-prim {} i8) saturate)` | Named saturating cast to a signed integer ([05-OP-23]) |
+| `cast_wrap(e, i8)` | `(cast {} e' (t-prim {} i8) wrap)` | Named wrapping signed-integer cast ([05-OP-24]) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
@@ -864,7 +929,8 @@ and `(if c then f else g)(x)` applies the selected function. A transform is
 self-delimiting, so `vmap(process)(xs)` likewise represents application whose
 callee is the transform value rather than an ordinary chained-call alias.
 
-`grad`, `vmap`, `jit`, `cast`, and `cast_trunc` require their call-like special form;
+`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `cast_saturate`, and `cast_wrap` require
+their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
@@ -1012,37 +1078,61 @@ names nor the retired names may be rebound as type variables under
 
 ### P10b: Contextual Tensor-Literal Inference
 
-When a tensor literal `[e1, e2, ...]` appears in a position with a **known
-element type**, the unsuffixed numeric literals in the tensor body adopt that
-element type instead of the §P10 default. The closed set of "known-element-type"
-positions is exactly:
+A bracket literal `[e1, e2, ...]` is a `List`: it desugars to the `Cons`/`Nil`
+chain of its elements (`spec/03-deep-syntax.md` §6). Neither the spelling of its
+elements nor the position it stands in selects another kind. A tensor is
+written in one of two ways:
 
-1. the right-hand side of a `let`-binding whose declared type is a tensor
-   type — `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` makes the literals
-   bind at `f64`
-2. the corresponding argument position of a call to a function with a
-   declared signature whose parameter at that position is a tensor type
-3. the body expression of a function with a declared return type that is a
-   tensor type, when the body is itself a tensor literal
-4. the first argument of an explicit `cast(literal, p)` expression — the
-   literals bind at `p`, which may also be a dtype-family-bounded type binder;
-   the literal then binds at each admissible instantiation
-   (`spec/04-type-system.md` §5.6)
+- as a `to_tensor` call, `to_tensor([1.0, 2.0, 3.0])`, in any position. Its
+  argument is an ordinary `List`, so its numeric literals bind at their suffix
+  or the §P10 default: `to_tensor([1.1f64, 2.2f64])` is a `tensor[2, f64]`,
+  and `to_tensor([1.1, 2.2])` a `tensor[2, f32]`, wherever the call stands;
+- as a **tensor literal**: a bare bracket literal whose own declaration states
+  a tensor type. That is the right-hand side of a binding whose declared type,
+  by inline annotation or standalone `sig`, is a tensor type, or the body of a
+  `def` whose declared result type is a tensor type. A `def`'s inline result
+  type decides; a `def` without one takes the result type of its standalone
+  `sig`. The desugarer emits the `to_tensor` call. A bare bracket literal that
+  its declaration converts is rejected where a lexical binding named
+  `to_tensor` is in scope, because the conversion would resolve to that
+  binding.
 
-Position 4 applies to a bare scalar numeric literal as well as to a
-tensor-literal body: `cast(1.1, f64)` binds the decimal at
-`f64` directly (the desugarer emits `(lit {type: (t-prim {} f64)} 1.1)`),
-not "narrow to the f32 default, then widen". Suffixed literals keep their
+A position with a **known element type** gives a literal that dtype instead
+of the §P10 default. The closed set of such positions is exactly:
+
+- **Position 1**: the right-hand side of a `let`-binding whose declared type
+  is a tensor type, when it is a tensor literal —
+  `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` makes the literals bind at `f64`
+- **Position 3**: the body of a function with a declared return type that is
+  a tensor type, when the body is a tensor literal
+- **Position 4**: the first argument of an explicit `cast(literal, p)`
+  expression, where the literal is a bare scalar numeric literal or its unary
+  negation — it binds at `p`, which may also be a dtype-bounded type binder;
+  the literal then binds at each admissible instantiation
+  (`spec/04-type-system.md` §5.6)
+
+A callee's declared parameter type and a `cast` never make a bracket literal a
+tensor: a bare bracket literal passed as an argument or cast stays a `List`.
+A tensor argument or tensor cast operand is a `to_tensor` call whose elements
+carry the dtype they keep, e.g. `f(to_tensor([1.0f64, 2.0f64]))`.
+
+Position 4 adopts a bare scalar numeric literal: `cast(1.1, f64)` binds the
+decimal at `f64` directly (the desugarer emits
+`(lit {type: (t-prim {} f64)} 1.1)`), not "narrow to the f32 default, then
+widen". A unary negation folds into the literal first, so `cast(-1.1, f64)`
+binds `-1.1` at `f64`; an explicit `neg(1.1)` call is an ordinary operand
+whose literal keeps the §P10 default. Suffixed literals keep their
 suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
 float literal under an integer `p` keeps its float source type and then
 uses the checked target-finalization rule: an integral value casts exactly,
 while a fractional value traps `domain`. See `spec/04-type-system.md` §5.2
 and [04-NUM-14] for the full statement.
 
-Outside this closed set, numeric literals in a tensor body fall back to the
-§P10 literal defaults: integer literals to `i32`, float literals to `f32`.
-A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
-`tensor[3, i32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
+Outside this closed set, numeric literals keep the §P10 literal defaults:
+integer literals to `i32`, float literals to `f32`. In an unannotated binding,
+`to_tensor([1, 2, 3])` evaluates to `tensor[3, i32]` and
+`to_tensor([1.0, 2.0, 3.0])` to `tensor[3, f32]`, while a bare `[1, 2, 3]` is
+a `List i32`.
 
 **Mixed suffixes inside a contextual literal.** A suffixed entry inside a
 contextual tensor literal is well-formed only if its suffix matches the
@@ -1268,7 +1358,7 @@ A property's optional `TypeBinders` is the declaration's complete explicit
 binder list under §P4b/§P4c. It scopes every quantifier type, `where`
 precondition, predicate body, and expression-valued property option. Duplicate
 or forbidden binder names and undeclared type, dimension, or rank variables
-reject exactly as they do for `def`; dtype-family bounds use the same
+reject exactly as they do for `def`; dtype bounds use the same
 representation and validity rules. Omitting the list preserves the existing
 monomorphic property spelling.
 
@@ -1384,8 +1474,10 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 
 # ── Operator expressions ──
 
+# The [02-PIPE-2] grouping guard applies to each expression after parsing.
+# Unparenthesized mixed operators or open-ended forms cannot contain '|>'.
 PipeExpr      <- UpdateExpr (S '|>' S (CastPipeStage / UpdateExpr))*
-CastPipeStage <- ('cast' / 'cast_trunc') S '(' S Ident S ')'
+CastPipeStage <- ('cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap') S '(' S Ident S ')'
 UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
 OrExpr        <- AndExpr (S '||' S AndExpr)*
 AndExpr       <- CmpExpr (S '&&' S CmpExpr)*
@@ -1400,7 +1492,10 @@ AnnotExpr     <- AccessExpr (S ':' S TypeExpr)?
 AccessExpr    <- AppExpr AccessStep*
 AccessStep    <- '.' IntLit                              # tuple index
                / '.' (Ident / TypeIdent) CallArgs?        # field / module path, optionally applied
-CallArgs      <- '(' S (Expr (S ',' S Expr)* (S ',')?)? S ')'
+CallArgs      <- '(' S ((Expr (S ',' S Expr)* (S ',' S AccumArg)? / AccumArg)
+                  (S ',')?)? S ')'
+AccumArg      <- 'accumulator' S '=' S PrecType  # spec/04 §5.7; `accumulator`
+                                                  # stays an ordinary identifier
 AppExpr       <- AtomExpr CallArgs?
                / TransformExpr CallArgs?
 
@@ -1440,7 +1535,7 @@ TransformExpr <- TransformKw S '(' S Expr
                   (S ',' S TransformArg)? (S ',')? S ')'
                / 'realize' / 'copy'
 TransformKw   <- 'grad' / 'vmap' / 'jit' / 'realize'
-               / 'cast' / 'cast_trunc' / 'copy'
+               / 'cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap' / 'copy'
 TransformArg  <- PrecType / ('wrt' / 'axis') S '=' S Expr
 
 RecordExpr    <- CtorName S RecordBody
@@ -1545,7 +1640,8 @@ Keyword       <- ('def' / 'sig' / 'type' / 'dim'
                / 'macro'
                / 'match' / 'with' / 'fn' / 'module' / 'import'
                / 'export' / 'if' / 'then' / 'else' / 'grad'
-               / 'vmap' / 'jit' / 'cast' / 'cast_trunc' / 'realize' / 'copy'
+               / 'vmap' / 'jit' / 'cast' / 'cast_trunc' / 'cast_saturate'
+               / 'cast_wrap' / 'realize' / 'copy'
                / 'par' / 'true' / 'false' / 'tensor'
                / 'do' / 'quote' / 'unquote' / 'splice'
                / 'effect' / 'handler' / 'perform' / 'resume' / 'borrow'
@@ -1643,6 +1739,7 @@ true                              ⟹  (lit {type: (t-prim {} bool)} true)
 
 -- Application
 f(x, y)                           ⟹  (app {} (var {} f) x' y')
+f(x, y, accumulator=p)            ⟹  (app {accumulator: (t-prim {} p)} (var {} f) x' y')
 
 -- Arithmetic (all via derived built-ins)
 a + b                             ⟹  (app {} (var {} add) a' b')
@@ -1666,7 +1763,7 @@ a || b                            ⟹  (app {} (var {} or) a' b')
 !a                                ⟹  (app {} (var {} not) a')
 
 -- Pipe
-x |> f |> g                       ⟹  (pipe {} x' (var {} f) (var {} g))
+x |> f |> g                       ⟹  (app {} (var {} g) (app {} (var {} f) x'))
 
 -- Control flow
 if c then a else b                ⟹  (if {} c' a' b')
@@ -1754,6 +1851,13 @@ function value is applied through a grouped callee, `(f(x))(y)`, which the
 `AtomExpr CallArgs?` production represents without flattening the two calls.
 Transform callees use the explicit `TransformExpr CallArgs?` production.
 
+A call's argument list may end with the one named argument
+`accumulator=<dtype>`, the explicit accumulator of spec/04 §5.7:
+`sum(x, 0i32, accumulator=f64)`. It follows every positional argument and
+desugars to the `app` node's `accumulator` metadata (spec/03 §1.1). Only a
+call of the built-in `matmul`, `sum`, or `einsum` admits it; on any other
+callee it is a type error.
+
 ### 6.2 Bindings
 
 Surf has one binding surface:
@@ -1775,9 +1879,9 @@ negative zero.
 
 ### 6.4 Transform Recognition
 
-`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
+`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `cast_saturate`, `cast_wrap`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
 
-`cast_trunc(x, T)` is the named truncating float-to-integer cast of [05-OP-6]; it shares the `cast` node shape and differs only by carrying the `trunc` mode selector.
+`cast_trunc(x, T)`, `cast_saturate(x, T)` and `cast_wrap(x, T)` are the named lossy casts of [05-OP-6], [05-OP-23] and [05-OP-24]; each shares the `cast` node shape and differs only by carrying its `trunc`, `saturate` or `wrap` mode selector.
 
 ### 6.5 TypeIdent in Expression Position
 
@@ -1792,7 +1896,7 @@ After `type Name =`, the parser checks if the next non-whitespace token is `|`. 
 ## 7. Deep Vocabulary Boundary
 
 `typealias`, `record-update`, and `pat-tuple` are active members of the closed
-public Deep vocabulary. The complete 62-tag inventory and its compile-time
+public Deep vocabulary. The complete 61-tag inventory and its compile-time
 totality rule live in `spec/03-deep-syntax.md` §2 and §2.13; this Surf chapter
 does not maintain a second count.
 
@@ -1856,7 +1960,7 @@ def activate(act: Activation, x: tensor[batch, hidden_dim, f32]) -> tensor[batch
 def forward(w1, b1, w2, b2, act, x) = {
   h = matmul(x, w1)
     |> add(b1)
-    |> fn (z) -> activate(act, z)
+    |> (fn (z) -> activate(act, z))
   add(matmul(h, w2), b2)
 }
 ```

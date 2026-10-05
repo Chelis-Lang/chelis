@@ -176,11 +176,17 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
                             .cast_scalar("cast", inner)
                             .ok()
                     }
-                    chelis_deep::CastMode::Trunc => {
-                        if !inner.prim().is_float() || !target.is_integer() {
+                    chelis_deep::CastMode::Named(mode) => {
+                        if crate::infer::expr_record::named_cast_pair_error(
+                            mode,
+                            Some(inner.prim()),
+                            target,
+                        )
+                        .is_some()
+                        {
                             return None;
                         }
-                        crate::cast_trunc_scalar("cast_trunc", inner, target).ok()
+                        crate::named_cast_scalar(mode, inner, target).ok()
                     }
                 }
             }

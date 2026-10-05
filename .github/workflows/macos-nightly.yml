@@ -51,13 +51,13 @@ jobs:
       # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
       # toolchain change on the macos-latest image -- would then stay green
       # here until a cache-key change or a cache eviction forces the cold
-      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
-      # override) and no cvc5 cache, so it does not share either cache and is
-      # the authoritative cold-build proof for the SHIPPED artifact; treat a
-      # release-job cvc5 failure as real even when this nightly lane is green.
-      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
-      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
-      # the same PR so both cold paths are proven before release relies on it.
+      # path. The release.yml darwin job keeps no Rust cache and no cvc5
+      # cache, so it is the authoritative cold-build proof for the SHIPPED
+      # artifact; treat a release-job cvc5 failure as real even when this
+      # nightly lane is green. If a cvc5/toolchain bump is in the diff, force a
+      # cold build by renaming this job's cache family (its `shared-key`, e.g.
+      # `smt-darwin-arm64-v2`) AND bumping the cvc5 CACHE_SCHEMA in the same PR
+      # so both cold paths are proven before release relies on it.
       #
       # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
       # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
@@ -92,8 +92,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          key: smt-darwin-arm64
-          cache-on-failure: true
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: smt-darwin-arm64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
@@ -163,8 +164,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           shared-key: macos-workspace
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
       - name: Install Python binding dependencies
         run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
@@ -212,7 +214,7 @@ jobs:
 
       - name: Clippy macOS solver-free features
         if: matrix.shard == 1
-        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+        run: cargo clippy --workspace --all-targets --features chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
@@ -242,9 +244,10 @@ jobs:
 
   # The ownership-ledger targets require their package's feature, so the
   # featureless workspace shards skip them. This job runs the gate's two
-  # commands verbatim on the macOS link path. It has its own runner because
-  # shard 1 already uses most of its allowance; it reads the shards' cache
-  # and never saves over it.
+  # commands verbatim on the macOS link path; each derives its targets from
+  # Cargo metadata, so adding a target edits no list here. It has its own
+  # runner because shard 1 already uses most of its allowance; it reads the
+  # shards' cache and never saves over it.
   macos-ownership-ledger:
     name: macOS Ownership Ledger
     runs-on: macos-latest
@@ -261,6 +264,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           shared-key: macos-workspace
           save-if: false
 
@@ -272,12 +276,15 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
 
+      - name: Ownership-ledger runtime tests
+        run: python3 scripts/ownership_ledger_tests.py chelis-runtime
+
       - name: Ownership-ledger compiler-api tests
-        run: cargo nextest run -p chelis-compiler-api --features ownership-ledger --test builtin_named_kernel_inputs --test dropout_fixed_stream_api --test fixed_control_host_c --test generated_header_native_probe --test invocation_local_random --test issue_1684_entry_cleanup --test issue_1685_multi_root_cleanup --test issue_2445_match_arm_ownership --test issue_2485_region_entry_terminals --test issue_2508_list_step_ownership --test issue_2522_data_type_c_lane --test issue_2576_option_items_render --test issue_2577_filter_named_predicate --test issue_2781_loop_result_captured_by_a_loop --test key_admission_lanes --test key_affinity_lanes --test key_alias_lowering --test key_extent_lanes --test key_operand_random_c --test key_operations_c --test key_root_lanes --test key_split_count_lanes --test key_surface_lanes --test key_tensor_forms --test local_ascription_activation --test rule_d_entered_lanes --test untaken_arm_gradients
+        run: python3 scripts/ownership_ledger_tests.py chelis-compiler-api
 
       # Runs last: it rebuilds ./target/debug/chelis with an instrumented runtime.
       - name: Ownership-ledger CLI tests
-        run: cargo nextest run -p chelis-cli --features ownership-ledger --test issue_1314_json_bigint_ledger
+        run: python3 scripts/ownership_ledger_tests.py chelis-cli
 
   macos-smoke:
     name: macOS Smoke

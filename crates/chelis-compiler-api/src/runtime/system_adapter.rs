@@ -1,10 +1,13 @@
-//! Default host adapter for the eight covered evaluator filesystem and process
-//! operations. Their policy wrapper checks permission before calling this adapter.
+//! Default host adapter for the covered evaluator filesystem, process, and
+//! clock operations. Their policy wrapper checks permission before calling
+//! this adapter.
 
 use std::ffi::OsString;
 use std::path::Path;
 
-use super::system::{EvalProcessOutput, EvalSystem, EvalSystemError, EvalSystemOperation};
+use super::system::{
+    EvalClockReading, EvalProcessOutput, EvalSystem, EvalSystemError, EvalSystemOperation,
+};
 
 pub(super) struct DefaultEvalSystem;
 
@@ -98,18 +101,20 @@ impl EvalSystem for DefaultEvalSystem {
         program: &str,
         args: &[String],
     ) -> Result<EvalProcessOutput, EvalSystemError> {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|source| EvalSystemError::System {
+        chelis_runtime::host_process::spawn_process(program, args).map_err(|source| {
+            EvalSystemError::System {
                 operation: EvalSystemOperation::ProcessRun,
                 path_or_program: program.to_string(),
                 source,
-            })?;
-        Ok(EvalProcessOutput {
-            exit_status: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            }
         })
+    }
+
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading> {
+        chelis_runtime::host_clock::read_wall_clock()
+    }
+
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading> {
+        chelis_runtime::host_clock::read_monotonic_clock()
     }
 }

@@ -101,15 +101,18 @@ midpoint.
 
 **Status:** shipped.
 
-This remains the public style foundation for all remaining Phase 3 work:
+The pipe-first promotion policy is superseded by #3130. Pipes remain Surf
+sugar preserved by `fmt`; decompilation emits calls. Choose pipes for a readable
+sequence of transformations and calls for nested arguments. The remaining style
+foundation is:
 
-- pipe-first decompiler output
+- ordinary call decompiler output
 - short-form block bindings
 - width-aware multiline pipe layout
 - examples and docs that read like human-written Surf rather than typed Deep debug text
 
-All new examples introduced in `3h`, `3g`, `3i`, and `3f` should continue to follow
-this style.
+New examples should use the form that makes their dataflow clearest, grouping
+pipes explicitly when combined with other operators or open-ended forms.
 
 ### 3a: Package System (Shells + Reef)
 
@@ -421,6 +424,8 @@ more C-side ownership risk exactly where the language is getting broader.
 
 - `chelis build` emits generated source/header plus `chelis_runtime.h` and
   `libchelis_runtime.a`
+- It invokes the native toolchain for an executable or static library;
+  `--emit-c` selects source-only emission (`spec/08-backends.md` §7).
 - `chelis_runtime.c` stops being an emitted build artifact
 - `chelis build` stages the runtime the CLI carries and rejects a set
   `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1; chelis#1354 replaced the
@@ -610,38 +615,24 @@ The checked-in illustrative Reef package at
 inference. Includes date/time types, exact decimal arithmetic, autoregressive generation
 with KV caching, optimizer variants, and learning rate scheduling.
 
-### Std.Time
+### Std.Datetime
 
-Pure Chelis standard library module for dates and durations.
-Its public callables currently raise an explicit #2779 error until the
-exact [05-OP-35] calendar and duration behavior is implemented. The surface
-below is the intended contract, not a current acceptance claim.
-
-- `Date` type: year, month, day. Constructed via
-  `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
-- `Duration` type: days, hours, minutes, seconds. Constructed via
-  `duration(cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64))`.
-- Arithmetic: `add_days(date, n)`, `sub_days(date, n)`, `days_between(date1, date2)`.
-- Comparison and ordering on dates.
-- Formatting: `date_to_string(date)` → ISO 8601 (`"2024-01-15"`).
-- Parsing: `parse_date(string)` → `Option[Date]`.
-- Queries: `day_of_week(date)`, `day_of_year(date)`, `is_leap_year(year)`.
-- No timezone handling in v1 — UTC only. Timezone support deferred.
+`Std.Datetime` (#2859), the successor of `Std.Time`, is a pure Chelis
+standard-library module of opaque, validated dates, times, instants, offsets,
+durations, periods, and date and instant columns over years -9999..9999, governed
+by [05-OP-73]. Its rounding modes come from `Std.Rounding` ([05-OP-74]).
+`spec/design/std_datetime.md` is the design of record and stages zones, business
+calendars, columnar kernels, and the clock after it.
 
 ### Std.Decimal
 
-Pure Chelis standard library module for fixed-point exact arithmetic.
-
-- `Decimal` type: exact representation with configurable scale.
-- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, i64))`.
-- Arithmetic: `decimal_add`, `decimal_sub`, `decimal_mul`, `decimal_div` with explicit
-  rounding mode.
-- Rounding modes: `round_half_up`, `round_half_even` (banker's rounding), `round_down`,
-  `round_up`.
-- Comparison and ordering.
-- Conversion: `decimal_to_float(d)` → `Float`, `decimal_to_string(d)` → `String`.
-- Property: `0.1 + 0.2 == 0.3` is true with Decimal arithmetic.
-- Not a tensor dtype — host-value type only. Exact, not fast.
+`Std.Decimal` (#2778) is a pure Chelis standard-library module of opaque, exact
+decimals, a coefficient of at most 38 digits over a power of ten with at most 38
+fractional digits, governed by [05-OP-76]. Arithmetic is exact or fails, every
+operation that drops digits takes a `Rounding` from `Std.Rounding` ([05-OP-74]), and
+`decimal_to_f64` and `decimal_to_f32` are its named lossy boundary to binary floats.
+It is a host-value type, not a tensor dtype. `spec/design/std_decimal.md` is the
+design of record.
 
 ### Std.Nn.Generate
 
@@ -750,7 +741,7 @@ loop (`fold` where the accumulator carries step count + model parameters).
 
 All modules are pure Chelis code shipped as part of `chelis-std` via the reef package
 system. `Date` is internally an ADT with integer fields. `Decimal` is internally a
-scaled integer representation. `KVCache` is a `List` of layer caches. Optimizers and
+sign, five base-10^9 limbs, and a scale. `KVCache` is a `List` of layer caches. Optimizers and
 schedulers are pure functions over tensors and scalars. No C runtime additions needed —
 these are host-value computations (Time, Decimal, Schedule) and tensor computations
 (Generate, Optim) using existing primitives.
@@ -761,9 +752,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 - Date parsing: ISO 8601 round-trip
 - Date comparison: ordering works correctly across year boundaries
 - Date utilities: `Duration`, `day_of_year`, and `is_leap_year` evaluate with expected values
-- Decimal: `decimal("0.1") + decimal("0.2") == decimal("0.3")`
-- Decimal: banker's rounding matches expected behavior
-- Decimal: division with explicit rounding mode
+- Decimal: `decimal_add(decimal("0.1"), decimal("0.2"))` equals `decimal("0.3")`
+- Decimal: every `Rounding` mode, in division, rounding, and float conversion, equals
+  an independent exact-rational reference on the evaluator and in compiled C
+- Decimal: every failure reports its exact `<function>: <kind>: <detail>` message
 - Generate: greedy generation produces correct tokens for a trivial model
 - Generate: temperature sampling with the same key produces reproducible output;
   a second use of that key is rejected
@@ -778,10 +770,13 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the `Std.Decimal` package surface and
-the #2779 `Std.Time` rejection (the ML
+This is the owning executable oracle for the `Std.Decimal` package surface (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
-0.4.0). A later
+0.4.0). `cargo nextest run -p chelis-cli --test std_decimal_oracle` compares every
+`Std.Decimal` callable on the evaluator and in compiled C with the exact-rational
+reference `scripts/decimal_reference.py`, and `std_decimal_failures` pins its failure
+messages. The `Std.Datetime` surface's owning oracle is `std_datetime_oracle`, with its
+manual gate `std_datetime_every_day_of_the_range_in_compiled_c`. A later
 phase-completion claim still requires a fresh-context red team and any documented manual
 gates.
 
@@ -818,8 +813,8 @@ tensor/reduction additions stayed in `chelis-std`.)
   `scaled_dot_product_attention`, multi-head attention, grouped-query attention
   - **Acknowledged limitations (Batch 3 shipped 3j-pre):**
     - `GELU` ships as the tanh approximation
-      (`0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`) because `erf` is
-      not a Chelis primitive. This is the OpenAI/BERT/GPT-2 form, not the
+      (`0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`) because `erf` was
+      not then a Chelis primitive. This is the OpenAI/BERT/GPT-2 form, not the
       exact `erf`-based GELU. Switching to exact GELU is deferred until
       `erf` lands as a primitive.
     - `SiLU`/`GELU`/`RMSNorm` ship as **rank-1 variants** (`tensor[n, f32]`)
@@ -1025,10 +1020,10 @@ released shell referenced by the canonical ecosystem table. `chelis v0.1.7` clea
 last documented core blockers for the first Nautilus shell release.
 
 **Goal:** A reef package providing the numerical methods that sit between raw tensor
-primitives and domain applications. The scipy competitor for Chelis — `scipy.stats` +
+primitives and domain applications. The scipy analogue for Chelis — `scipy.stats` +
 `scipy.optimize` + `scipy.integrate` + `scipy.linalg` + `scipy.special` under one shell.
 
-**Prerequisite:** 3h (core numeric primitives), 3i (`Std.Time` for time-series stats),
+**Prerequisite:** 3h (core numeric primitives), 3i and `Std.Datetime` (#2859) for time-series stats,
 3j-pre (compiler release binary, expanded `Std.Nn`/`Std.Loss`/`Std.Init` surface).
 
 ### Implementation Strategy
@@ -1289,7 +1284,7 @@ curves, stochastic processes, order books. Built entirely on `chelis-std` + `nau
 `coral`. Contains only finance-specific logic.
 
 **Prerequisite:** 3j (nautilus — distributions, optimization, SDE solvers), 3k (coral —
-for loading/manipulating financial data), 3i (Std.Time for dates, Std.Decimal for cash
+for loading/manipulating financial data), 3i and Std.Datetime (#2859) for dates, Std.Decimal for cash
 amounts).
 
 ### Key Design Decision: Instruments as Dicts, Not Closed ADTs
@@ -1309,7 +1304,7 @@ requires understanding the type system's extension points).
 |---|---|---|
 | `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, explicit keys, cumsum |
 | `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, explicit keys |
-| `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Time` |
+| `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Datetime` |
 | `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, explicit keys, cumsum, einsum |
 | `Shoals.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
 
@@ -1372,9 +1367,7 @@ reference `@property` functions:
 Convention (cross-cutting, applies to every domain shell): properties are co-located
 with the implementation code they constrain — same repo, same package, version-
 controlled together. Properties are NOT a separate shell. `chelis prove src/` runs them
-all against the shipped exports. Status of the underlying tool: `chelis prove` with
-first-class `@property` annotations is **demo-blocking, scoped, ready to build** for
-the first commercial CProof prospect. Full conventions: `chelis_trust_stack.md`,
+all against the shipped exports. Full conventions: `chelis_trust_stack.md`,
 `chelis_property_spec.md`.
 
 **Reference implementations.** Shoals' delivery scope now includes a `references/`
@@ -1383,7 +1376,7 @@ directory alongside `properties/`. Each standard model in `Shoals.Pricing`,
 textbook-formula reference (Black-Scholes call/put + Greeks, Heston, Vasicek, CIR,
 vanilla Monte Carlo, VaR/CVaR via historical simulation). The optimized `src/`
 implementation is verified against the reference by
-`@property matches_textbook_reference forall(...)` in `properties/pricing.ch`. Customers
+`@property matches_textbook_reference forall(...)` in `properties/pricing.ch`. Users
 write their own references only for proprietary models. Full design:
 `chelis_reference_implementations_spec.md`.
 
@@ -1401,7 +1394,7 @@ DAG path cannot execute.
 **Manual gate.** Wall-clock ~5 minutes on AMD Ryzen AI Max+ 395 (driven by the
 host evaluator's 20K MC sample loop on Shoals). The test is marked `#[ignore]`
 to keep `cargo test --workspace` under the 60-second inner-loop budget defined
-in `AGENTS.md` / `CLAUDE.md`. Run before any release tag whose pitch includes Shoals
+in `AGENTS.md` / `CLAUDE.md`. Run before any release tag whose release notes claim Shoals
 end-to-end pricing. Skips with a clear message if a Shoals checkout is not
 present (set `CHELIS_SHOALS_PATH` or place `shoals/` as a sibling of the
 chelis monorepo root).
@@ -1435,7 +1428,7 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
 | `Octant.Symbolic` | The ~30-node `SymExpr` AST. | `chelis-std` |
 | `Octant.Lower` (deterministic path) | SymExpr → Deep for every form where the LaTeX uniquely determines the computation. Special functions route through `Nautilus.Special` / `Nautilus.Distributions`; integrals through `Nautilus.Integrate`; matrix ops through `Nautilus.LinAlg`. | `Nautilus.Special`, `Nautilus.Distributions`, `Nautilus.LinAlg`, `Nautilus.Integrate` |
 | `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). Excludes the Greek pattern matches that need Shoals context (deferred to 3o). | typed Deep from the compiler |
-| `Octant.Provenance` | Source-span annotations on every Deep node produced by Octant lowering. Contract: every lowered Deep node's metadata map carries `provenance` (raw LaTeX fragment) and `source_span` (line, column, length). This is the core value proposition — the audit trail that proves compiled code implements the formula. | nothing new — Deep nodes already carry a metadata slot |
+| `Octant.Provenance` | Source-span annotations on every Deep node produced by Octant lowering. Contract: every lowered Deep node's metadata map carries `provenance` (raw LaTeX fragment) and `source_span` (line, column, length). This is Octant's central purpose — the audit trail that proves compiled code implements the formula. | nothing new — Deep nodes already carry a metadata slot |
 
 ### Test Plan
 
@@ -1458,8 +1451,8 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
   fragment (for example a shape-mismatched `\sigma \sqrt{T}`) produces a
   `chelis check` error whose message surfaces the originating LaTeX source
   span, not just the Deep node id. This pins the audit-trail semantics — the
-  presence-only provenance check is not enough by itself to prove the core
-  value proposition.
+  presence-only provenance check is not enough by itself to prove the
+  audit-trail guarantee.
 - **Out-of-scope LaTeX invariant test (Cross-Sub-Phase Invariant §3.2):** fed
   `\begin{theorem}`, a TikZ block, and "please integrate `\int e^{-x^2}`", the
   parser returns diagnostics naming the offending token — it must never
@@ -1508,7 +1501,7 @@ rendering pattern matches, and the `Octant.Notebook` cell runtime. Provenance
 extends to cover the new node kinds using the `3n` contract.
 
 **Prerequisite:** `3l` (shoals — `Shoals.Stochastic`, `Shoals.Pricing`,
-`Shoals.Curves`) green, `3i` green (`Std.Time` is a direct dependency of the
+`Shoals.Curves`) green, `3i` green (`Std.Datetime` is a direct dependency of the
 yield curve / day count lowering path, not only a transitive dep through
 `shoals`), **and** `3n` (octant Part A) green.
 
@@ -1518,7 +1511,7 @@ Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Datetime` |
 | `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`, `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`. Configurable variable-name conventions. | 3n render surface |
 | `Octant.Notebook` | Cell runtime — formula, parameter, execution, Greek cells. Not a Jupyter kernel. Cells produce Deep, execution runs compiled C, rendering is mathematical notation. UI layer (web / VS Code / Cove extension / standalone) is a separate implementation decision. | full 3n Octant surface |
 | `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. No Deep node produced by Octant lowering may be missing a span. | 3n provenance surface |
@@ -1563,8 +1556,7 @@ completion claim.
   indefinitely by complex-number support (Phase 5f).
 
 **Effort:** medium to large. The LLM-assisted lowering path is the novel piece
-and depends on the SSD → SDFT → RLVR coding-model pipeline being mature enough
-to produce correct Deep fragments for SDE / MC / calibration notation. Greek
+and depends on a coding model that reliably produces correct Deep fragments for SDE / MC / calibration notation. Greek
 rendering, notebook cell runtime, and provenance extension are mechanical by
 comparison.
 
@@ -1635,7 +1627,7 @@ The refreshed skill should teach:
 - list/tensor bridge (`pad_sequences`, `stack`, `to_tensor`)
 - file I/O and `IO` effect
 - CSV/JSON parsing
-- `Std.Time` and `Std.Decimal` host-program idioms
+- `Std.Datetime` and `Std.Decimal` host-program idioms
 - package imports (`Std.*`, `Nautilus.*`, `Coral.*`, `Shoals.*`)
 - dataframe operations (`coral`), including NaN handling and Parquet I/O
 - numerical methods (`nautilus`), including the nalgebra-backed LinAlg surface
@@ -1703,7 +1695,7 @@ specifications above, not deferred post-phase work. The tier structure is:
 
 Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
-- `school` — classical ML (scikit-learn competitor). Depends on `chelis-std` + `nautilus`
+- `school` — machine learning: classical models and the neural-network surface. Depends on `chelis-std` + `nautilus`
   + `coral`.
 - `darwin` — evolutionary algorithms (GA, genetic programming over the Deep AST, ES,
   PBT, NAS). Depends on `chelis-std` + `nautilus`; optionally uses `coral` for evolving
@@ -1726,8 +1718,7 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
 `chelis prove` scope has expanded from a CLI-flag property testing tool to first-class
 executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
-full design. Implementation remains deferred until after the RLVR pipeline (Phase 4)
-but the design is locked.
+full design. The design is locked.
 
 ---
 
@@ -1776,7 +1767,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 (The ML modules in this block — `Std.Nn.Generate`, AdamW/LAMB optimizers, schedulers —
 since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed.)
 
-- `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
+- `Std.Datetime` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
 - generation keeps the pure greedy path (`generate`) distinct from the keyed
   sampled path (`generate_with`)
@@ -1876,7 +1867,7 @@ unshipped shell. `3l` depends on `3j` and `3k`. `3n` can proceed against `3j`, w
 `3f` goes truly last because it must cover the complete ecosystem including the domain
 shells.
 
-`school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), `hull`
+`school` (machine learning, classical models and neural networks), `darwin` (evolutionary algorithms), `hull`
 (executable language specification), `hydrostatic` (automated static analysis on the
 tensor DAG), and `beacon` (IR-native bound-propagation verification) are post-Phase-3
 shell stubs and do not appear as Phase 3 sub-phases.

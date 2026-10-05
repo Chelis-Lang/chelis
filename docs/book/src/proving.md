@@ -24,7 +24,7 @@ A Surf property can live in `properties/nonnegative.ch`:
 
 ```chelis-surf-fragment
 @property nonnegative forall(x: f32):
-  (x * x) >= 0.0
+  ((x * x) >= 0.0)
 ```
 
 From the directory containing `properties/` or `src/`, `chelis prove` discovers `.ch` and
@@ -45,6 +45,11 @@ solver. Check `status` and `proof_tier` together to see which method produced a 
 a command-line request alone does not establish the method used. An unsupported result does not
 establish the property. An explicit `.ch` file discovers properties in that file; imports can
 resolve names but are not additional discovery targets.
+
+The accepted tiers are `auto`, `fuzz-only`, `smt-only`, `induction-only`, and
+`beacon-only`. An unknown tier is a usage error before discovery or verification.
+With `auto`, an SMT proof reports zero samples even when `--samples` was supplied;
+the sample count and seed apply when sampling runs.
 
 ## Read the result
 

@@ -1,3 +1,7 @@
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 use chelis_deep::ExprCarrier;
 use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};

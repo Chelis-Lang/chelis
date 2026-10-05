@@ -2,16 +2,16 @@ epoch_text = " 7 "
 loss_text = "0.125"
 epoch = match to_int(epoch_text) with {
   | Some(n) => n
-  | None => cast(0, i64)
+  | None => 0i64
 }
 loss = match to_float(loss_text) with {
   | Some(value) => value
-  | None => cast(1.0, f64)
+  | None => 1.0f64
 }
 checkpoint = string_trim("  ckpt  ")
 path = string_concat(checkpoint, string_concat("-", epoch |> to_string |> string_concat(".safetensors")))
 stem = string_slice(path, 5, 1)
-under_threshold = (loss < cast(0.5, f64))
+under_threshold = (loss < 0.5f64)
 has_ckpt = string_contains(path, "ckpt")
 has_prefix = string_starts_with(path, "ckpt-")
 has_suffix = string_ends_with(path, ".safetensors")

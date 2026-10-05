@@ -53,5 +53,5 @@ artifact identity is separate.
 
 Acceptance: typed positive/negative goal tests; real current-main shim tests;
 unknown, witness, qualifier, hull and large-tree transport tests; a generated
-gallery network through both CLI and deployed C Note. Source-only and mock-only
+gallery network through both the CLI and a deployed downstream consumer. Source-only and mock-only
 success do not certify the deployed path.

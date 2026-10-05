@@ -239,7 +239,7 @@ fn exported_literal_list_field_precedes_later_tuple_tensor() {
     let built = assert_cmd::Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "--allow-style-violations"])
+        .args(["build", "--emit-c", "--allow-style-violations"])
         .arg(&source)
         .args(["--target", "c", "-o"])
         .arg(&out)

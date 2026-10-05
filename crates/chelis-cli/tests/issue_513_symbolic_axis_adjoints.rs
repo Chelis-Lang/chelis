@@ -474,6 +474,7 @@ fn build_c(source: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -873,7 +874,7 @@ fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes()
     expect_grad_failure(
         &source,
         "gaterefused",
-        "elements but tensor has",
+        "elements but the tensor has",
         "runtime numel mismatch under grad",
     );
 
@@ -908,13 +909,13 @@ fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes()
     let run = StdCommand::new(&bin).output().expect("run emitted program");
     assert!(
         !run.status.success(),
-        "C binary must abort on the runtime numel mismatch; stdout={}",
+        "C binary must fail on the runtime numel mismatch; stdout={}",
         String::from_utf8_lossy(&run.stdout)
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("reshape numel mismatch"),
-        "C abort must name the reshape numel guard; stderr={stderr}"
+        stderr.contains("numeric trap: domain in reshape at i64"),
+        "the C failure must be the reshape count trap; stderr={stderr}"
     );
 }
 

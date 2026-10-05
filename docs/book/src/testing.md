@@ -11,7 +11,6 @@ no parameters, and a `unit` result. For a package whose module prefix is `Demo`:
 
 ```chelis-surf-fragment
 module Demo.Tests.Core
-
 def test_value() -> unit = test_assert(true, "value is valid")
 ```
 
@@ -24,8 +23,11 @@ chelis test tests/ --filter test_value
 ```
 
 With no path, `chelis test` searches `tests/` beneath the current directory. It discovers `.ch`
-files recursively. `--filter` matches a substring of the displayed `<file>::<test_name>`; it
-is useful for rerunning one test or group.
+files recursively and runs them in the Reef package that contains the path, found by walking
+up from the path itself, wherever the command runs. A discovered file that belongs to another
+package, such as one nested under the path with its own `reef.toml`, is an error; run that
+package's tests separately. `--filter` matches a substring of the displayed
+`<file>::<test_name>`; it is useful for rerunning one test or group.
 
 A passing suite exits `0`. A selected test that fails makes the suite exit `1` and reports the
 failed test and diagnostic. If no `.ch` files or runnable tests are found, or a filter selects

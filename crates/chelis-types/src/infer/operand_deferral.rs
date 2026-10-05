@@ -4,7 +4,8 @@
 //! decides what its operands must be; this module only records that the
 //! decision could not be made yet and which call has to be re-entered once it
 //! can. The replay itself lives with the deferred shape ledger in
-//! `checked.rs`, beside the six per-route rules chelis#1489 registered there.
+//! `checked/deferred_shape.rs`, which also replays the six per-route rules
+//! chelis#1489 registered.
 
 use super::*;
 
@@ -27,6 +28,7 @@ use super::*;
 /// typed, and accepting it is how chelis#1512's witnesses reached the backend.
 pub(super) struct UnresolvedOperandSite<'a> {
     node: &'a DeepNode,
+    pub(super) source_site: CheckSite<'a>,
     kids: &'a [deep::Expr],
     fname: &'a str,
     env: &'a Env,
@@ -41,10 +43,16 @@ impl<'a> UnresolvedOperandSite<'a> {
     ) -> Self {
         Self {
             node,
+            source_site: CheckSite::Node(node),
             kids,
             fname,
             env,
         }
+    }
+
+    pub(super) fn with_site(mut self, site: CheckSite<'a>) -> Self {
+        self.source_site = site;
+        self
     }
 
     /// Suspend this call's decision. The eager pass keeps publishing whatever
@@ -77,6 +85,7 @@ impl<'a> UnresolvedOperandSite<'a> {
                 kids: self.kids.to_vec(),
                 func_name: self.fname.to_string(),
                 env: Box::new(self.env.clone()),
+                location: self.source_site.owned_location(),
             },
             Vec::new(),
             arg_tys.to_vec(),
@@ -137,6 +146,7 @@ impl<'a> UnresolvedOperandSite<'a> {
             kids: self.kids.to_vec(),
             func_name: self.fname.to_string(),
             env: Box::new(self.env.clone()),
+            location: self.source_site.owned_location(),
         };
         product.defer_shape_check(rule, Vec::new(), arg_tys.to_vec(), result_ty.clone());
     }
@@ -176,6 +186,11 @@ impl<'a> DtypeAdmissibilitySite<'a> {
         Self {
             site: UnresolvedOperandSite::new(node, kids, fname, env),
         }
+    }
+
+    pub(super) fn with_site(mut self, site: CheckSite<'a>) -> Self {
+        self.site = self.site.with_site(site);
+        self
     }
 
     /// Suspend this call's dtype decision on an unresolved operand TYPE.
@@ -234,6 +249,7 @@ impl ShapeRouteKind {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn defer_or_check_shape_route(
     route: ShapeRouteKind,
+    site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: Vec<Type>,
@@ -256,6 +272,7 @@ pub(super) fn defer_or_check_shape_route(
                 route,
                 node: node.clone(),
                 kids: kids.to_vec(),
+                location: site.owned_location(),
             },
             Vec::new(),
             arg_tys,
@@ -263,11 +280,13 @@ pub(super) fn defer_or_check_shape_route(
         );
         return result;
     }
-    check_shape_route_signature(&route, node, kids, &arg_tys, vg, subst, errors)
+    check_shape_route_signature(site, &route, node, kids, &arg_tys, vg, subst, errors)
 }
 
 /// The one entry both the eager pass and the ledger replay call.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_shape_route_signature(
+    site: CheckSite<'_>,
     route: &ShapeRouteKind,
     node: &DeepNode,
     kids: &[deep::Expr],
@@ -277,14 +296,17 @@ pub(super) fn check_shape_route_signature(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     match route {
-        ShapeRouteKind::Permute => check_permute_signature(node, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Shrink => check_shrink_signature(node, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Stride => check_stride_signature(node, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Pad => check_pad_signature(node, kids, arg_tys, vg, subst, errors),
+        ShapeRouteKind::Permute => {
+            check_permute_signature(site, node, kids, arg_tys, subst, errors)
+        }
+        ShapeRouteKind::Shrink => check_shrink_signature(site, node, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Stride => check_stride_signature(node, site, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Pad => check_pad_signature(node, site, kids, arg_tys, vg, subst, errors),
         ShapeRouteKind::ReduceWindow { name } => {
-            check_reduce_window_signature(node, kids, name, arg_tys, subst, errors)
+            check_reduce_window_signature(node, site, kids, name, arg_tys, subst, errors)
         }
         ShapeRouteKind::Reshape { input_var_name } => check_reshape_signature(
+            site,
             node,
             kids,
             input_var_name.as_deref(),
@@ -323,6 +345,7 @@ pub(super) fn replay_dtype_admissibility(
     arg_tys: &[Type],
     vg: &mut VarGen,
     subst: &mut Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     resuspend: bool,
@@ -339,6 +362,7 @@ pub(super) fn replay_dtype_admissibility(
         arg_tys,
         env,
         subst,
+        adt_reg,
         errors,
         &mut route_observed,
         suspension,
@@ -353,7 +377,6 @@ pub(super) fn replay_dtype_admissibility(
         node,
         Some(func_name),
         arg_tys,
-        env,
         subst,
         errors,
         &mut route_observed,

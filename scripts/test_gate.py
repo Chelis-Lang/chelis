@@ -61,7 +61,20 @@ def _load_oracle_module():
     return mod
 
 
+def _load_ledger_module():
+    """Load the ownership-ledger derivation the gate's ledger commands run."""
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "ownership_ledger_tests", here / "ownership_ledger_tests.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
 gate = _load_module()
+ledger = _load_ledger_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PR_CONTRACT_ACK_YML = (
@@ -71,12 +84,10 @@ PR_PACKAGE_EXPANSION_YML = (
     REPO_ROOT / ".github" / "workflows" / "pr-package-expansion.yml"
 )
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
+CI_CACHE_WARM_YML = REPO_ROOT / ".github" / "workflows" / "ci-cache-warm.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
-DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@"
-    "0b5faba5025fade929194b46a9e52e43fec63462"
-)
+DEVENV_SETUP_ACTION = "./.github/actions/vendor/ci/actions/setup-devenv"
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
@@ -501,7 +512,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "22bb60c2b83fcbfb653b74d3366418937adb23e43d34e7ba1d767204d854f217"
+    "3a27a6745ad437c437f29f1a026e594da3bb57bd0fb06362c710aeaf51d044e2"
 )
 
 
@@ -727,6 +738,10 @@ NON_GATE_WORKFLOWS = {
     # Shared planning validation checks the locked store through its pinned
     # action; it runs no compiler command owned by the developer gate.
     "openspec-store.yml",
+    # Writes the Rust build caches that read-only CI restores, from main only.
+    # It repeats consumer build commands to warm their caches; it gates
+    # nothing (scripts/test_ci_cache_policy.py owns its contract).
+    "ci-cache-warm.yml",
 }
 
 
@@ -754,6 +769,14 @@ class StageUnionTests(unittest.TestCase):
     def test_lint_stage_does_not_repeat_the_workspace_build(self):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
+
+    def test_core_off_configuration_is_linted_before_closure_is_checked(self):
+        for stage in ("lint-and-unit", "lint-and-unit-nix"):
+            commands = gate.STAGES[stage]
+            self.assertLess(commands.index(gate.CLIPPY_CORE_WITHOUT_MIGRATION),
+                            commands.index(gate.CONFIGURATION_CLOSURE))
+        self.assertNotIn("--workspace", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
+        self.assertIn("--no-default-features", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
 
     def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
         arguments = dict(tests_only=False, support_only=False, partition=None)
@@ -880,27 +903,37 @@ class StageUnionTests(unittest.TestCase):
         commands = gate.selected_stage_commands(
             "integration", tests_only=False, support_only=True, partition=None,
         )
+        metadata = ledger.cargo_metadata(REPO_ROOT)
         for command, package in (
+            (gate.OWNERSHIP_LEDGER_RUNTIME_TESTS, "chelis-runtime"),
             (gate.OWNERSHIP_LEDGER_API_TESTS, "chelis-compiler-api"),
             (gate.OWNERSHIP_LEDGER_CLI_TESTS, "chelis-cli"),
         ):
             with self.subTest(package=package):
+                # The gate names the package; the derivation owns the list.
                 self.assertEqual(
-                    command[:7],
+                    command,
+                    [gate.MANAGED_PYTHON, "scripts/ownership_ledger_tests.py",
+                     package],
+                )
+                derived = ledger.ledger_command(package, metadata)
+                self.assertEqual(
+                    derived[:7],
                     ["cargo", "nextest", "run", "-p", package, "--features",
                      "ownership-ledger"],
                 )
-                self.assertNotIn("--profile", command)
-                self.assertNotIn("--lib", command)
-                names = command[8::2]
-                self.assertEqual(command[7::2], ["--test"] * len(names))
+                self.assertNotIn("--profile", derived)
+                self.assertNotIn("--lib", derived)
+                names = derived[8::2]
+                self.assertTrue(names)
+                self.assertEqual(derived[7::2], ["--test"] * len(names))
                 self.assertEqual(names, sorted(set(names)))
                 self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
                 self.assertEqual(commands.count(command), 1)
 
     def test_ownership_ledger_commands_select_exactly_the_gated_targets(self):
-        # A static --test list can silently miss a newly gated target, and a
-        # featureless workspace run skips it, so derive the owed set from Cargo.
+        # A featureless workspace run skips a gated target, so the owed set
+        # comes from Cargo and every gated target must reach a gate command.
         metadata = json.loads(subprocess.run(
             ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
             cwd=REPO_ROOT, check=True, stdout=subprocess.PIPE, text=True,
@@ -914,8 +947,14 @@ class StageUnionTests(unittest.TestCase):
             and "ownership-ledger" in target.get("required-features", [])
         )
         selected = []
-        for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
+        for gate_command in (
+            gate.OWNERSHIP_LEDGER_RUNTIME_TESTS,
+            gate.OWNERSHIP_LEDGER_API_TESTS,
+            gate.OWNERSHIP_LEDGER_CLI_TESTS,
+        ):
+            command = ledger.ledger_command(gate_command[-1], metadata)
             package = command[command.index("-p") + 1]
+            self.assertEqual(package, gate_command[-1])
             self.assertEqual(command[command.index("--features") + 1], "ownership-ledger")
             selected.extend(
                 (package, command[index + 1])
@@ -1037,10 +1076,8 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
-    def test_chelis_std_generated_artifacts_are_checked_continuously_and_locally(self):
-        command = (
-            "<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check"
-        )
+    def test_chelis_std_bundle_reproducibility_is_checked_continuously_and_locally(self):
+        command = "<managed-python> scripts/check_std_bundle_reproducible.py"
         self.assertIn(
             command,
             [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
@@ -1322,11 +1359,11 @@ class ListOutputTests(unittest.TestCase):
 
         # `gate_environment` probes the interpreter through subprocess.run,
         # which also reaches Popen; only the gate's own child commands
-        # carry an explicit `env`, so let everything else through.
+        # stream output; interpreter identity queries must reach real Python.
         real_popen = gate.subprocess.Popen
 
         def fake_popen(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             seen.append(dict(kwargs["env"]))
             return _Stub()
@@ -1361,6 +1398,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         for environment in seen:
             self.assertEqual(environment[gate.ORACLE_BINARY_ENV], expected)
+            self.assertTrue(environment["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
 
     def test_run_commands_exports_no_handoff_without_a_preceding_build(self):
         seen, _ = self._recorded_child_environments(
@@ -1376,12 +1414,12 @@ class ListOutputTests(unittest.TestCase):
         # oracle reaches it costs a whole workspace clippy, fmt, the lint
         # pass, three rustdoc stages and two guards first.
         launched: list[list[str]] = []
-        # Only the gate's own child commands carry an explicit `env`;
-        # `gate_environment`'s interpreter probe must still run.
+        # Interpreter identity queries must still run with their explicit env;
+        # the gate's child commands must not launch.
         real_popen = gate.subprocess.Popen
 
         def record(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             launched.append(list(command))
             raise AssertionError("no command may launch")
@@ -1810,7 +1848,7 @@ def _ci_job_block(job: str) -> str:
         return _workflow_job_block(PR_PACKAGE_EXPANSION_YML, job)
     if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
-    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle'}:
+    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle', 'module-oracles'}:
         return _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), job)
     return _workflow_job_block(CI_YML, job)
 
@@ -1989,38 +2027,66 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return steps[0]
 
 
-def _assert_shared_rust_cache_writer_contract(workflow: str, *, macos: bool = False) -> None:
-    """Require exactly one reviewed writer for each shared cache namespace."""
-    census: list[tuple[str, dict[str, str]]] = []
-    for job, block in _workflow_job_blocks(workflow).items():
-        census.extend((job, inputs) for inputs in _rust_cache_steps(block))
+# The reviewed writer of each shared cache namespace these parity tests census:
+# (workflow file, job, save-if). CI restores without saving (`cache-mode:
+# read`), so the workspace family is written by ci-cache-warm.yml from main.
+SHARED_RUST_CACHE_WRITERS = {
+    "linux-workspace": (
+        "ci-cache-warm.yml",
+        "linux-workspace",
+        "${{ github.ref == 'refs/heads/main' }}",
+    ),
+    "macos-workspace": (
+        "macos-nightly.yml",
+        "macos-workspace-shard",
+        "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}",
+    ),
+}
 
-    expected = {
-        "linux-workspace": (
-            "ci-fast",
-            "${{ github.ref == 'refs/heads/main' }}",
-        ),
-        "macos-workspace": (
-            "macos-workspace-shard",
-            "${{ matrix.shard == 1 }}",
-        ),
+# Every workflow with a job in either shared namespace.
+SHARED_RUST_CACHE_WORKFLOWS = (
+    "ci.yml",
+    "ci-cache-warm.yml",
+    "heavy-e2e.yml",
+    "macos-nightly.yml",
+    "pr-package-expansion.yml",
+)
+
+
+def _shared_rust_cache_workflow_texts(ci_text: str | None = None) -> dict[str, str]:
+    """Read the censused workflows, optionally replacing ci.yml's text."""
+    texts = {
+        name: (CI_YML.parent / name).read_text()
+        for name in SHARED_RUST_CACHE_WORKFLOWS
     }
-    expected = {key: value for key, value in expected.items() if (key == "macos-workspace") == macos}
-    for shared_key, expected_writer in expected.items():
+    texts["ci.yml"] = CI_YML.read_text() if ci_text is None else ci_text
+    return texts
+
+
+def _assert_shared_rust_cache_writer_contract(workflows: dict[str, str]) -> None:
+    """Require exactly one reviewed writer for each shared cache namespace."""
+    census: list[tuple[str, str, dict[str, str]]] = []
+    for name, workflow in workflows.items():
+        for job, block in _workflow_job_blocks(workflow).items():
+            census.extend(
+                (name, job, inputs) for inputs in _rust_cache_steps(block)
+            )
+
+    for shared_key, expected_writer in SHARED_RUST_CACHE_WRITERS.items():
         namespace = [
-            (job, inputs)
-            for job, inputs in census
+            (name, job, inputs)
+            for name, job, inputs in census
             if inputs.get("shared-key") == shared_key
         ]
         writers = [
-            (job, inputs.get("save-if", "true"))
-            for job, inputs in namespace
+            (name, job, inputs.get("save-if", "true"))
+            for name, job, inputs in namespace
             if inputs.get("save-if", "true") != "false"
         ]
         if len(writers) != 1:
             raise AssertionError(
                 f"{shared_key} must have exactly one writer across the "
-                f"workflow, found {writers}"
+                f"workflows, found {writers}"
             )
         if writers[0] != expected_writer:
             raise AssertionError(
@@ -2057,6 +2123,28 @@ def _assert_hash_partition_contract(
 
 def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
     _assert_hash_partition_contract(shard_block, expected_count=4)
+
+
+MODULE_ORACLES_FILTERSET = "${{ needs.module-oracles-plan.outputs.filterset }}"
+
+
+def _assert_negates_module_oracles(job_block: str) -> None:
+    """The job waits for the module-oracles plan and negates its filterset.
+
+    `ci_change_owned.py module-oracles` derives that filterset from the
+    `module-oracles` test exclusions; a lane that drops it runs those tests
+    against its own, shorter budget (chelis#3100).
+    """
+    if not re.search(r"(?m)^    needs: (module-oracles-plan|\[[^\]]*\bmodule-oracles-plan\b[^\]]*\])$", job_block):
+        raise AssertionError("the job does not need module-oracles-plan")
+    expressions = re.findall(r"cargo nextest run [^\n]*? -E '([^']*)'", job_block)
+    if len(expressions) != 1:
+        raise AssertionError(f"expected one nextest filter, found {len(expressions)}")
+    expression = expressions[0]
+    if not (expression.startswith("not (") and expression.endswith(f" | {MODULE_ORACLES_FILTERSET})")):
+        raise AssertionError(
+            "the nextest filter does not negate the module-oracles filterset"
+        )
 
 
 def _assert_read_only_workspace_cache(job_block: str) -> None:
@@ -2267,7 +2355,8 @@ class CiParityTests(unittest.TestCase):
             "binary_id(/^chelis-python::capacity_census_bindings$/) | "
             "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
             "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
-            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)) "
+            f"| {MODULE_ORACLES_FILTERSET})' "
             "--partition hash:${{ matrix.shard }}/4"
         )
 
@@ -2278,9 +2367,10 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("shard: [1, 2, 3, 4]", shard_block)
-        self.assertNotIn("    needs:", shard_block)
+        self.assertIn("    needs: module-oracles-plan\n", shard_block)
         self.assertIn("contents: read", shard_block)
         _assert_executable_run_once(shard_block, command)
+        _assert_negates_module_oracles(shard_block)
 
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
         self.assertIn(
@@ -2301,6 +2391,25 @@ class CiParityTests(unittest.TestCase):
     def test_generalize_sweep_partition_contract_has_no_gap_or_overlap(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
         _assert_generalize_sweep_partition_contract(shard_block)
+
+    def test_workspace_and_generalization_lanes_negate_the_module_oracles(self):
+        for job in ("full-workspace", "generalize-sweep-oracle-shard"):
+            with self.subTest(job=job):
+                _assert_negates_module_oracles(_ci_job_block(job))
+
+    def test_module_oracles_negation_rejects_a_dropped_filterset_or_need(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        dropped_term = shard_block.replace(f" | {MODULE_ORACLES_FILTERSET}", "", 1)
+        dropped_need = shard_block.replace("    needs: module-oracles-plan\n", "", 1)
+        un_negated = shard_block.replace(
+            f" | {MODULE_ORACLES_FILTERSET})'",
+            f") | {MODULE_ORACLES_FILTERSET}'",
+            1,
+        )
+        for mutated in (dropped_term, dropped_need, un_negated):
+            self.assertNotEqual(mutated, shard_block)
+            with self.assertRaises(AssertionError):
+                _assert_negates_module_oracles(mutated)
 
     def test_generalize_sweep_partition_contract_rejects_a_missing_shard(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
@@ -2391,6 +2500,10 @@ class CiParityTests(unittest.TestCase):
             "macos-workspace-shard": (
                 "junit-macos-workspace-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
+            ),
+            "module-oracles": (
+                "junit-linux-module-oracles-${{ matrix.shard }}",
+                "target/nextest/module-oracles/junit.xml",
             ),
         }
         for job, (artifact, path) in expectations.items():
@@ -2569,12 +2682,14 @@ class CiParityTests(unittest.TestCase):
             _assert_executable_run_once(mutated, command)
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
-        _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
-        _assert_shared_rust_cache_writer_contract(CI_YML.with_name("macos-nightly.yml").read_text(), macos=True)
+        _assert_shared_rust_cache_writer_contract(
+            _shared_rust_cache_workflow_texts()
+        )
         workspace_inputs = _rust_cache_inputs(
-            _ci_job_block("ci-fast")
+            _workflow_job_block(CI_CACHE_WARM_YML, "linux-workspace")
         )
         read_only_jobs = (
+            "ci-fast",
             "change-owned-shard",
             "package-expansion-shard",
             "dtype-phase3-oracle",
@@ -2592,7 +2707,8 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertEqual(macos_inputs.get("shared-key"), "macos-workspace")
         self.assertEqual(
-            macos_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+            macos_inputs.get("save-if"),
+            "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}",
         )
         for job in read_only_jobs:
             with self.subTest(job=job):
@@ -2649,7 +2765,9 @@ class CiParityTests(unittest.TestCase):
             AssertionError,
             "linux-workspace.*exactly one writer",
         ):
-            _assert_shared_rust_cache_writer_contract(mutated)
+            _assert_shared_rust_cache_writer_contract(
+                _shared_rust_cache_workflow_texts(mutated)
+            )
 
     def test_cache_input_parser_normalizes_or_rejects_yaml_equivalents(self):
         cases = (
@@ -2718,7 +2836,9 @@ class CiParityTests(unittest.TestCase):
                     1,
                 )
                 with self.assertRaisesRegex(AssertionError, error):
-                    _assert_shared_rust_cache_writer_contract(mutated)
+                    _assert_shared_rust_cache_writer_contract(
+                        _shared_rust_cache_workflow_texts(mutated)
+                    )
 
     def test_read_only_cache_contract_rejects_a_second_cache_step(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
@@ -3253,6 +3373,23 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             "Nix package jobs must stay separate from the canonical Cargo gate",
         )
 
+    def test_native_nix_linux_checks_run_hosted_even_for_main_dispatch(self):
+        # #3090: native package acceptance must not depend on the protected
+        # runner starting. The same complete recipe runs on a hosted builder.
+        block = _workflow_job_blocks(_read_nix_packages_workflow())["nix-linux-x86-64"]
+        self.assertIn("    runs-on: ubuntu-latest\n", block)
+        self.assertNotIn("chelis-ci-warm-x64", block)
+        self.assertNotIn("fromJSON", block)
+
+    def test_protected_or_event_dependent_linux_route_fails_recipe_lock(self):
+        workflow = _read_nix_packages_workflow()
+        for route in ("chelis-ci-warm-x64", "${{ github.ref == 'refs/heads/main' && 'no-such-runner' || 'ubuntu-latest' }}"):
+            with self.subTest(route=route):
+                mutated = workflow.replace("    runs-on: ubuntu-latest\n", f"    runs-on: {route}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+                    _assert_nix_intentional_events_only(mutated)
+
     def test_each_native_job_rejects_the_wrong_runner_system(self):
         text = _read_nix_packages_workflow()
         self.assertEqual(text.count("name: Verify the runner system"), 2)
@@ -3381,8 +3518,8 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             ),
             "event-dependent runner": (
                 text.replace(
-                    "chelis-ci-warm-x64",
-                    "no-such-runner",
+                    "runs-on: ubuntu-latest",
+                    "runs-on: no-such-runner",
                     1,
                 ),
                 "reviewed native recipe",
@@ -3535,6 +3672,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
+            "run: cargo test -p chelis-cli --features smt --test prove\n",
             "cargo test -p chelis-prove --features z3",
             'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",

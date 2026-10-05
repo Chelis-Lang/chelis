@@ -6,6 +6,7 @@
 use chelis_unord::{UnordMap, UnordSet};
 use std::fmt;
 
+pub use chelis_deep::NamedCastMode;
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
@@ -503,6 +504,9 @@ pub enum FusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -513,6 +517,91 @@ pub enum FusedStepOp {
 ///
 /// `CmpLt` and `Lt` intentionally remain distinct source identities even
 /// though both use the same ordered comparison kernel.
+impl FusedStepOp {
+    /// [05-OP-46]'s transcendental operations, which no device lane may
+    /// compute until it has correctly rounded kernels of its own.
+    pub const fn transcendental_name(self) -> Option<&'static str> {
+        match self {
+            Self::Exp => Some("exp"),
+            Self::Log => Some("log"),
+            Self::Sin => Some("sin"),
+            Self::Cos => Some("cos"),
+            Self::Tan => Some("tan"),
+            Self::Atan => Some("atan"),
+            Self::Tanh => Some("tanh"),
+            Self::Erf => Some("erf"),
+            Self::Erfc => Some("erfc"),
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::FloorDiv
+            | Self::TruncDiv
+            | Self::MaxElem
+            | Self::MinElem
+            | Self::Neg
+            | Self::Recip
+            | Self::Sqrt
+            | Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round => None,
+        }
+    }
+
+    /// The [05-OP-46] operations a device lane may not compute: the
+    /// transcendentals, and `sqrt`, whose correct rounding neither device
+    /// lane establishes (Metal compiles with fast math, and the HIP runtime
+    /// compile does not pin a correctly rounded square root).
+    pub const fn device_fenced_name(self) -> Option<&'static str> {
+        match self {
+            Self::Sqrt => Some("sqrt"),
+            _ => self.transcendental_name(),
+        }
+    }
+}
+
+/// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
+/// device lane has no correctly rounded kernels for [05-OP-46]'s
+/// transcendentals or `sqrt`, so a DAG that computes one, directly or inside
+/// a fused chain, is rejected through [05-UNS-1] rather than computed with a
+/// vendor library.
+pub fn reject_device_correctly_rounded_ops(
+    nodes: &[DagNode],
+    target: &'static str,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
+    for node in nodes {
+        let name = match &node.op {
+            RiscOp::Exp => Some("exp"),
+            RiscOp::Log => Some("log"),
+            RiscOp::Sin => Some("sin"),
+            RiscOp::Cos => Some("cos"),
+            RiscOp::Tan => Some("tan"),
+            RiscOp::Atan => Some("atan"),
+            RiscOp::Tanh => Some("tanh"),
+            RiscOp::Erf => Some("erf"),
+            RiscOp::Erfc => Some("erfc"),
+            RiscOp::Sqrt => Some("sqrt"),
+            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            return Err(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
+                format!(
+                    "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
+                ),
+                chelis_types::unsupported::Stage::Codegen(target),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-46]",
+                    "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonKind {
@@ -773,7 +862,7 @@ pub enum RiscOp {
     /// Element-wise truncating division (round toward zero) — the
     /// C/Rust integer `/` quotient (chelis#178). **Integer operands
     /// only.** This is the exact quotient semantics chelis-std's
-    /// `Std.Decimal` arithmetic relies on. Non-differentiable;
+    /// `Std.Decimal` limb arithmetic relies on. Non-differentiable;
     /// `grad` rejects it. See `spec/05-risc-primitives.md` §2.1.
     TruncDiv,
     /// Exact signed remainder, with DivZero traps at the stored width
@@ -825,6 +914,10 @@ pub enum RiscOp {
     /// intact so its zero-at-zero adjoint is not replaced by MaxElem's
     /// first-operand tie rule.
     Relu,
+    /// [05-OP-48] identity retained through AD; one float tensor input.
+    Softmax {
+        axis: usize,
+    },
     /// AD-only [05-OP-43] selector. Inputs are `(x, cotangent)`; output is the
     /// complete cotangent exactly where `0 < x`, and exact positive zero
     /// otherwise (including both zeros and NaN).
@@ -839,6 +932,9 @@ pub enum RiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1171,12 +1267,13 @@ pub enum RiscOp {
     Cast {
         new_precision: Prim,
     },
-    /// The [05-OP-6] named truncating float-to-integer cast
-    /// (`cast_trunc`). A separate op rather than a mode flag on `Cast`
-    /// so every backend, evaluator, and adjoint site is forced by
-    /// exhaustive matching to state its disposition instead of
-    /// inheriting the checked default's.
-    CastTrunc {
+    /// A named lossy cast of the chelis#759 ladder: `cast_trunc`
+    /// ([05-OP-6]), `cast_saturate` ([05-OP-23]) or `cast_wrap` ([05-OP-24]). A separate op rather than a mode flag on `Cast` so
+    /// every backend, evaluator, and adjoint site is forced by exhaustive
+    /// matching to state its disposition instead of inheriting the checked
+    /// default's, and the rung is an enum so each site states it per rung.
+    NamedCast {
+        mode: NamedCastMode,
         new_precision: Prim,
     },
 
@@ -1271,6 +1368,7 @@ pub enum RiscOp {
 /// typed source instead of a Python allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiscAtomIdentity {
+    Softmax,
     ReluAdjoint,
     Relu,
     ExtremaAdjoint,
@@ -1309,6 +1407,9 @@ pub enum RiscAtomIdentity {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1342,6 +1443,8 @@ pub enum RiscAtomIdentity {
     Shape,
     Cast,
     CastTrunc,
+    CastSaturate,
+    CastWrap,
     Matmul,
     Gather,
     Scatter,
@@ -1351,6 +1454,7 @@ pub enum RiscAtomIdentity {
 
 impl RiscAtomIdentity {
     pub const ALL: &[Self] = &[
+        Self::Softmax,
         Self::ReluAdjoint,
         Self::Relu,
         Self::ExtremaAdjoint,
@@ -1389,6 +1493,9 @@ impl RiscAtomIdentity {
         Self::Cos,
         Self::Tan,
         Self::Atan,
+        Self::Tanh,
+        Self::Erf,
+        Self::Erfc,
         Self::Abs,
         Self::Floor,
         Self::Ceil,
@@ -1422,6 +1529,8 @@ impl RiscAtomIdentity {
         Self::Shape,
         Self::Cast,
         Self::CastTrunc,
+        Self::CastSaturate,
+        Self::CastWrap,
         Self::Matmul,
         Self::Gather,
         Self::Scatter,
@@ -1433,6 +1542,7 @@ impl RiscAtomIdentity {
         match self {
             Self::ReluAdjoint => "ReluAdjoint",
             Self::Relu => "relu",
+            Self::Softmax => "softmax",
             Self::ExtremaAdjoint => "ExtremaAdjoint",
             Self::Count => "count",
             Self::MinElem => "min_elem",
@@ -1469,6 +1579,9 @@ impl RiscAtomIdentity {
             Self::Cos => "cos",
             Self::Tan => "tan",
             Self::Atan => "atan",
+            Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1502,6 +1615,8 @@ impl RiscAtomIdentity {
             Self::Shape => "shape",
             Self::Cast => "cast",
             Self::CastTrunc => "cast_trunc",
+            Self::CastSaturate => "cast_saturate",
+            Self::CastWrap => "cast_wrap",
             Self::Matmul => "matmul",
             Self::Gather => "gather",
             Self::Scatter => "scatter",
@@ -1580,6 +1695,7 @@ impl RiscOp {
         match self {
             Self::ReluAdjoint { .. } => Semantic(Id::ReluAdjoint),
             Self::Relu => Semantic(Id::Relu),
+            Self::Softmax { .. } => Semantic(Id::Softmax),
             Self::ExtremaAdjoint { .. } => Semantic(Id::ExtremaAdjoint),
             Self::Count { .. } => Semantic(Id::Count),
             Self::MinElem => Semantic(Id::MinElem),
@@ -1622,6 +1738,9 @@ impl RiscOp {
             Self::Cos => Semantic(Id::Cos),
             Self::Tan => Semantic(Id::Tan),
             Self::Atan => Semantic(Id::Atan),
+            Self::Tanh => Semantic(Id::Tanh),
+            Self::Erf => Semantic(Id::Erf),
+            Self::Erfc => Semantic(Id::Erfc),
             Self::Abs => Semantic(Id::Abs),
             Self::Floor => Semantic(Id::Floor),
             Self::Ceil => Semantic(Id::Ceil),
@@ -1660,7 +1779,11 @@ impl RiscOp {
             Self::Stride { .. } => Semantic(Id::Stride),
             Self::Shape { .. } => Semantic(Id::Shape),
             Self::Cast { .. } => Semantic(Id::Cast),
-            Self::CastTrunc { .. } => Semantic(Id::CastTrunc),
+            Self::NamedCast { mode, .. } => Semantic(match mode {
+                NamedCastMode::Trunc => Id::CastTrunc,
+                NamedCastMode::Saturate => Id::CastSaturate,
+                NamedCastMode::Wrap => Id::CastWrap,
+            }),
             Self::BlasMatmul { .. } => Semantic(Id::Matmul),
             Self::Gather { .. } => Semantic(Id::Gather),
             Self::ScatterAdd { .. } => Semantic(Id::Scatter),
@@ -1949,6 +2072,9 @@ impl RiscOp {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -2027,7 +2153,7 @@ impl RiscOp {
             // so it has no real-valued envelope to bound. The CHECKED
             // `cast` stays targetable because its float-to-float leg is
             // real-valued and its integer leg only admits exact values.
-            RiscOp::CastTrunc { .. } => false,
+            RiscOp::NamedCast { .. } => false,
 
             // `OneHot` produces a discrete 0/1 indicator from an integer
             // index; it is an internal lowering marker (dag.rs) consumed
@@ -2074,6 +2200,10 @@ impl RiscOp {
             // the zero-at-zero convention cannot collapse to MaxElem's tie
             // rule. Beacon has not yet registered dedicated transformers.
             RiscOp::Relu | RiscOp::ReluAdjoint => false,
+
+            // [05-OP-48] remains a retained composition identity. Beacon
+            // has no dedicated transformer for an undecomposed Softmax.
+            RiscOp::Softmax { .. } => false,
 
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
@@ -2276,7 +2406,7 @@ impl DagNode {
     /// |---|---|---|
     /// | `OperandValues` | integer `Add` `Sub` `Mul` `Neg` `Abs` | overflow |
     /// | | `FloorDiv` `TruncDiv` `Mod`, integer `Div` | division by zero, `MIN / -1` |
-    /// | | `Cast` `CastTrunc` into an integer or bool width | domain, overflow |
+    /// | | `Cast` `NamedCast` into an integer or bool width | domain, overflow |
     /// | | integer `Sum` `ProdReduce`, integer `ReduceWindow` | overflow |
     /// | | integer `FusedElem` | its steps' overflow and division |
     /// | `MeanDivisor` | float `Div` | a lowered `mean`'s empty count |
@@ -2294,7 +2424,7 @@ impl DagNode {
     /// under its activation ([`TrapSeeds::is_claim_sized`]) is gated whatever
     /// its class, and where its activation is false it produces zeros of its
     /// declared type. Every same-shape producer's operand agreement (the
-    /// evaluator's "tensor shapes must match" and the C lane's
+    /// evaluator's `Domain` trap of spec/04 section 4.7 and the C lane's
     /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
     /// the kernel, not a gated check: a false activation leaves it in place,
     /// except at a claim-sized node, which then reads no operand. A result's
@@ -2326,7 +2456,7 @@ impl DagNode {
             // Read the cast's OWN target, not the node's output type: if a
             // lowering ever let them drift, deriving the class from the
             // output type would silently switch the check off.
-            RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
+            RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } => {
                 value_check(new_precision.is_integer() || *new_precision == Prim::Bool)
             }
             RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => value_check(integer),
@@ -2336,7 +2466,8 @@ impl DagNode {
                 integer && matches!(reducer, ReduceWindowKind::Sum | ReduceWindowKind::Mean),
             ),
             RiscOp::FusedElem { .. } => value_check(integer),
-            RiscOp::MaxReduce { .. }
+            RiscOp::Softmax { .. }
+            | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. } => RuntimeCheck::EmptyAxis,
@@ -2389,6 +2520,9 @@ impl DagNode {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
@@ -2967,7 +3101,8 @@ impl Dag {
     /// be empty at run time: anything but a nonzero literal extent.
     fn reduced_axis_may_be_empty(&self, node: &DagNode) -> bool {
         let axis = match &node.op {
-            RiscOp::MaxReduce { axis }
+            RiscOp::Softmax { axis }
+            | RiscOp::MaxReduce { axis }
             | RiscOp::MinReduce { axis }
             | RiscOp::Argmax { axis }
             | RiscOp::Argmin { axis } => *axis,
@@ -3004,7 +3139,7 @@ impl Dag {
                 };
                 !matches!(
                     (start.as_lit(), end, extent(axis)),
-                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                    (Some(start), Some(end), Some(extent)) if start <= end && end <= extent
                 )
             }),
             RiscOp::Stride { strides } => strides
@@ -3550,11 +3685,15 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::UniformLike
         | RiscOp::Dropout
         | RiscOp::DropoutReplay => shape_source_for_axis(dag, *node.inputs.first()?, axis),
@@ -3562,7 +3701,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
@@ -4768,6 +4907,9 @@ mod tests {
             RiscOp::Cos,
             RiscOp::Tan,
             RiscOp::Atan,
+            RiscOp::Tanh,
+            RiscOp::Erf,
+            RiscOp::Erfc,
             RiscOp::Abs,
             RiscOp::Floor,
             RiscOp::Ceil,
@@ -4838,7 +4980,8 @@ mod tests {
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
-            RiscOp::CastTrunc {
+            RiscOp::NamedCast {
+                mode: NamedCastMode::Trunc,
                 new_precision: Prim::Int32,
             },
             RiscOp::FusedElem { ops: vec![] },
@@ -4863,6 +5006,7 @@ mod tests {
             },
             RiscOp::ScatterElements { axis: 0 },
             RiscOp::Relu,
+            RiscOp::Softmax { axis: 0 },
             RiscOp::ReluAdjoint,
         ]
     }
@@ -5073,8 +5217,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            67,
-            "one_of_every_risc_op must list all 67 classified samples"
+            71,
+            "one_of_every_risc_op must list all 71 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5083,9 +5227,10 @@ mod tests {
         let excluded = all.len() - targetable;
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
-        // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
-        // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (34); stochastic (the two
+        // (5 binary/cmp + 16 unary, including `round`, the chelis#2957
+        // `tanh` primitive, and the `erf` and `erfc` primitives), 5
+        // reductions, 6 movement, 4 memory/blas value nodes (Const,
+        // ConstTensor, Load, BlasMatmul), and Cast are targetable (37); stochastic (the two
         // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
@@ -5100,13 +5245,15 @@ mod tests {
         // baked draws with the two key-operand draws and adds their two
         // AD replays (+2 = 27). The four explicit key derivations produce
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
-        // branch's key join (+1 = 32).
+        // branch's key join (+1 = 32). The internal extrema adjoint
+        // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
+        // composition has no dedicated transformer (+1 = 34).
         assert_eq!(
-            targetable, 34,
+            targetable, 37,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 33,
+            excluded, 34,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -5114,6 +5261,10 @@ mod tests {
         // reclassification (not just a count drift) is caught.
         assert!(RiscOp::Add.is_verifier_targetable());
         assert!(RiscOp::Exp.is_verifier_targetable());
+        assert!(
+            !RiscOp::Softmax { axis: 0 }.is_verifier_targetable(),
+            "retained Softmax requires its own transformer before verifier admission"
+        );
         assert!(
             RiscOp::Compare(ComparisonKind::CmpLt).is_verifier_targetable(),
             "Compare(CmpLt) drives erf64 branch-and-bound; must be targetable"
@@ -5134,7 +5285,8 @@ mod tests {
             "argmax returns discrete indices, not a real envelope"
         );
         assert!(
-            !RiscOp::CastTrunc {
+            !RiscOp::NamedCast {
+                mode: NamedCastMode::Trunc,
                 new_precision: Prim::Int32
             }
             .is_verifier_targetable(),
@@ -5181,6 +5333,10 @@ mod tests {
             RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
             RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftRight),
         ]);
+        discovery_cases.extend(NamedCastMode::ALL.iter().map(|&mode| RiscOp::NamedCast {
+            mode,
+            new_precision: Prim::Int32,
+        }));
         discovery_cases.extend(
             [
                 ReduceWindowKind::Min,

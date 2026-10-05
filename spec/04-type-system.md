@@ -3,6 +3,9 @@
 **Scope:** ADTs, Hindley-Milner inference, numeric precision types, named tensor
 dimensions, fitness scoring, annotated checked Deep, effects, and linearity.
 
+**Terminology:** a *lane* is one execution path, such as the evaluator or a compiled
+target, as defined in [spec/01 §1.8](01-nomenclature.md#18-lanes).
+
 ---
 
 ## 0. Checked Deep Contract
@@ -135,13 +138,22 @@ Chelis-specific variants.
   integer, not a parameterization of either. **Rationale and scope limit:** no
   array-computation library carries decimal - numpy, PyTorch, and JAX all
   decline it - because it is a database and dataframe type. Chelis already
-  serves that need twice: `Std.Decimal` is the standard-library scalar type
-  (built on `trunc_div` scale shifts, see `spec/05-risc-primitives.md` §2.1),
-  and `Std.Io.Parquet` is the interop surface. These names are therefore
-  reserved for the **Arrow and parquet interchange boundary only** and are
-  explicitly NOT tensor element types. They are also the only reserved
-  names that are parameterized, which is itself a reason to keep them off that
-  path: every other `Prim` is a bare name.
+  serves that need twice: `Std.Decimal` is the standard-library exact decimal
+  scalar (`spec/05-risc-primitives.md` [05-OP-76]: at most 38 significant
+  digits, scale 0..38), and `Std.Io.Parquet` is the interop surface. These
+  names are therefore reserved for the **Arrow and parquet interchange
+  boundary only** and are explicitly NOT tensor element types. They are also
+  the only reserved names that are parameterized, which is itself a reason to
+  keep them off that path: every other `Prim` is a bare name. At that
+  boundary a `decimal128` or `decimal256` value whose exact value lies in
+  [05-OP-76]'s value set converts to that exact `Std.Decimal`; any other
+  value is a `domain` failure and is never rounded; and a `Std.Decimal`
+  value reaches a declared (precision, scale) only through an explicit
+  [05-OP-74] rounding mode. Exporting a `Std.Decimal` value `v` at a declared
+  precision `p` and scale `s` is a `domain` failure when
+  `|round(v, s) · 10^s| >= 10^p`, where `round(v, s)` is `v` rounded to a
+  multiple of `10^-s` by that mode; the failure names `v` and the declared
+  (precision, scale), and the export never saturates or truncates.
 
 **Not reserved, and deliberately so: scaled and block-scaled formats.**
 `qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling
@@ -526,6 +538,14 @@ scrutinee type at all.
 > guarded arm SHALL reject the program with a diagnostic, and SHALL NOT drop the
 > guard, drop the arm, or select an arm whose guard is `false`.
 
+> **[04-PAT-3]** A constructor pattern SHALL contain exactly one sub-pattern
+> for each positional field of its resolved variant, in declaration order.
+> A different count is an `ArityMismatch` type error at that pattern, naming
+> the constructor, the expected field count, and the supplied sub-pattern
+> count. This applies at every pattern depth and checker ingress, before
+> evaluation or lowering; a wildcard arm does not make an invalid pattern
+> admissible.
+
 ### 2.5 Opaque Types
 
 A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`
@@ -625,10 +645,10 @@ secondary type errors:
    the check unit declares any opaque type.
 6. Forging: Deep `cast` into the type (both `t-prim` and `t-adt`
    target shapes), `cast` out of an opaque value, and
-   `{type: (t-adt ...)}` literal metadata -- which is reachable from
-   BOTH surfaces, because Surf expression ascription
-   (`0.5 : Probability`) and block-binding ascription desugar to
-   exactly that metadata.
+   `{type: (t-adt ...)}` literal metadata. Surf expression ascription
+   (`0.5 : Probability`) and block-binding ascription of a literal to an
+   opaque type are also rejected outside its defining module; checking an
+   ascription does not authorize constructing the opaque type.
 
 **The sixth rejection (unexported references).** An out-of-module
 reference to an *unexported* binding of the defining module whose
@@ -663,6 +683,10 @@ opaque scrutinee only with irrefutable patterns; with §2.4's
 irrefutable-arm rule, `| x =>`, `| q @ x =>`, and `| _ =>` all cover
 such a match without naming constructors.
 
+**Equality over opaque values.** Structural `eq` and `neq` ([05-OP-36]) are
+admitted on opaque values outside the defining module, since equality
+inspects no field through the surface.
+
 **Error contract.** The violation message names the type, the defining
 module, and the exported producers of that module with signatures;
 location context is the enclosing def name embedded in the message:
@@ -690,7 +714,7 @@ checker.
 
 **Gating.** `chelis check` is a scorer-with-exit-code: for a file target it
 always reports a fitness score and the full error list, and its exit code
-mirrors that list (`0` iff empty, non-zero otherwise; Issue #207). A directory
+mirrors that list (`0` iff empty, non-zero otherwise). A directory
 target reports one score per checked file inside the envelope of §6.4
 § Directory mode, and [04-FIT-25] states its exit rule in the same terms.
 A declaration error such
@@ -814,7 +838,7 @@ type binder is governed by [04-INF-6] and is checked at every admissible
 instantiation.
 
 An operation restriction on an inferred scalar-or-tensor operand constrains
-its numeric dtype; it does not turn a dtype-family bound into a family of
+its numeric dtype; it does not turn a dtype bound into a family of
 tensor types. An authored `p: Float`, for example, still admits only float
 primitive types, never `tensor[..., f32]`. Restrictions transported by
 function values retain that distinction. A failing transported restriction
@@ -937,7 +961,7 @@ differently.
 > same signature, or with a type or shape containing either is a type error
 > reported at the declaration, and the declaration's scheme is its declared
 > signature, never a narrowing of it. A wildcard slot that the body resolves
-> to an authored binder takes that binder's type. A dtype-family bound
+> to an authored binder takes that binder's type. A dtype bound
 > ([04-DTYPE-2]) restricts the admissible instantiations without making the
 > binder concrete.
 >
@@ -1000,7 +1024,7 @@ an argument instead of reading the top-level binding.
 
 An operation's static admission requirements determine which operand types it
 accepts and any required relationship between its operand and result types.
-They include dtype-family restrictions and collection-constructor requirements.
+They include dtype-bound restrictions and collection-constructor requirements.
 They are distinct from value-dependent conditions for which the operation's
 specification requires a runtime check.
 
@@ -1029,6 +1053,23 @@ specification requires a runtime check.
 > specification. Calls SHALL satisfy the callee's checked contract, including
 > in recursive and indirect calls, without reconstructing admission
 > requirements by inspecting the callee's body.
+>
+> A builtin is a function value exactly when its whole operation contract
+> travels with the value: its type scheme states that contract completely, or
+> the scheme carries the operation's checked relation between operands and
+> result. A builtin named as a value performs, for effect checking, the
+> effects a call to it performs, as an anonymous function that calls it does.
+> A builtin whose contract needs anything more, such as a statically
+> resolvable axis ([05-AXIS-1]), an operand restriction, or a result type that
+> a rule outside its scheme computes from the operand types, is applicable
+> only by name. Naming
+> such a builtin anywhere other than as the callee of an application is a
+> `TypeMismatch`, whether the name is bound, passed as an argument or as the
+> callback of a higher-order operation or transform, placed in an aggregate,
+> or returned. The diagnostic names the builtin and suggests an explicitly
+> typed lambda that calls it, such as `fn (x: tensor[3, f32]) -> sum(x, 0i32)`.
+> A lexical binding that reuses a builtin's name is an ordinary value and is
+> not affected.
 
 For example, a generic function applying `mean` to `tensor[3, p]` requires
 `p:Float`; a bare `p` or `p:Numeric` admits types that the operation rejects.
@@ -1042,7 +1083,7 @@ to a list at its first application within the enclosing declaration under
 [04-INF-1]. The identity function needs no operation-admission restriction
 and may generalize without an annotation.
 
-Insufficient dtype-family admission is a `PrecisionMismatch`. Other
+Insufficient dtype-bound admission is a `PrecisionMismatch`. Other
 insufficient static operation-admission contracts retain the diagnostic kind
 required by the operation's specification, or use `TypeMismatch` when that
 specification assigns no more specific kind.
@@ -1126,14 +1167,9 @@ constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
 obligation an `if` condition does, discharged by unifying its type with
 `bool`; [04-PAT-2] states what it does at run time.
 
-**Pipe:**
-```
-    Γ ⊢ e₁ : τ₁
-    Γ ⊢ e₂ : τ₁ → τ₂
-    Γ ⊢ e₃ : τ₂ → τ₃
-    ──────────────────────────────────────
-    Γ ⊢ (pipe {} e₁ e₂ e₃) : τ₃
-```
+Surf pipes normalize to applications before type inference, including contextual
+literal typing, under spec/02 §0.2. The application rule above governs them;
+there is no separate Deep pipe typing rule.
 
 **Tuple:**
 ```
@@ -1299,6 +1335,12 @@ legitimate:
   `examples/hello_tensor.ch` shape: `def main[n]() -> tensor[n, f32]`
   whose body builds a `tensor[3, f32]`.
 
+At run time a return-only dim parameter takes its value from the first site,
+in evaluation order, that produces an extent for it, such as a block binding
+whose ascription names it. Every later site that names it, the declared
+result included, is a claim under §4.7: execution checks equality and traps
+`Domain` on mismatch.
+
 What the body must **not** do is couple the promised-independent output
 dimension to the caller-visible input world. Both of the following are
 `DimensionMismatch` type errors:
@@ -1407,19 +1449,19 @@ rank-uniform-list guarantee above is unaffected.
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
 ;; def make_mixed[k]() -> List[tensor[k, f32]] = {
-;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
-;;                  [cast(3.0, f32), cast(4.0, f32)]])
+;;   a = to_tensor([1.0f32, 2.0f32])
+;;   b = to_tensor([[1.0f32, 2.0f32],
+;;                  [3.0f32, 4.0f32]])
 ;;   [a, b]  ;; DimensionMismatch: list element rank mismatch
 ;; }
 
 ;; CORRECT: flatten the rank-2 element to rank-1 first
 ;; def make_uniform[k]() -> List[tensor[k, f32]] = {
-;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   a = to_tensor([1.0f32, 2.0f32])
 ;;   b_flat = reshape(
-;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
-;;                [cast(3.0, f32), cast(4.0, f32)]]),
-;;     [cast(4, i64)])
+;;     to_tensor([[1.0f32, 2.0f32],
+;;                [3.0f32, 4.0f32]]),
+;;     [4i64])
 ;;   [a, b_flat]
 ;; }
 ```
@@ -1694,7 +1736,7 @@ An optional `[..]` list after the property name is the declaration's complete
 explicit type, dimension, and rank binder list under [04-INF-6] and §5.8.1.
 Those binders are rigid and scope the property quantifier types, preconditions,
 predicate body, and expression-valued options. Duplicate, forbidden, unlisted,
-and dtype-family-bounded names follow the same rules as a function
+and dtype-bounded names follow the same rules as a function
 declaration. That same binder scope applies to tensor precision slots
 throughout those property positions.
 
@@ -1838,7 +1880,11 @@ The zero-cotangent and target-independent execution rules are [05-OP-7] and
 `expand(x, axis, size)` and `insert(x, axis, size)` each accept any `i64`
 `size`. A literal produces a literal result extent; an in-scope symbolic
 dimension may preserve its name; and every other expression produces a fresh
-runtime extent. A static negative size is a type error. A runtime negative
+runtime extent. A name occurring anywhere in `size` that denotes both a value
+binding (a parameter, a local or a top-level binding) and an in-scope
+dimension (a dimension binder of the enclosing definition, or a dimension a
+tensor type in scope carries) is a type error, because the two readings can
+denote different extents. A static negative size is a type error. A runtime negative
 size traps `Domain` before allocation or access.
 
 Each operation has exactly one result shape. `expand` sets the extent at
@@ -1999,17 +2045,26 @@ defaults can be overridden in three ways:
 
 1. an explicit literal suffix (§5.5) attached to the literal token
 2. a known element type in the surrounding position (§5.6)
-3. an explicit `cast` around the literal expression
+3. an explicit `cast` whose operand is a bare scalar literal or its unary
+   negation (§5.6 position 4)
 
 There is **no implicit precision promotion** from these defaults to any other
-type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, i32]`, not
-`tensor[3, i64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
-`tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
-type must say so via suffix, declared element type, or `cast`.
+type. `to_tensor([1, 2, 3])` in an unannotated position is `tensor[3, i32]`,
+not `tensor[3, i64]`. `to_tensor([1.0, 2.0, 3.0])` in an unannotated position
+is `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
+type must say so with a suffix, a declared element type, or, for a bare scalar
+literal or its unary negation, a `cast` that takes it directly as its operand.
+A `cast` of any other expression, `cast(neg(1.1), f64)` and
+`cast(to_tensor([1.1, 2.2]), f64)` included, converts a value whose literals
+are already bound.
 
 The default is the **user-facing contract** and is non-overridable except by
 the three mechanisms above. Whichever dtype they select, the literal binds
-there under [04-LIT-2].
+there under [04-LIT-2]. An expression ascription `(e : T)` or scalar
+binding annotation checks that the already-bound value has type `T`; it does
+not select or replace a literal's dtype. A mismatched suffix or default is
+a type error, at both top-level and block scope. Nested ascriptions retain
+every checking constraint.
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
 > declared primitive family: integer atoms denote only integer primitives,
@@ -2049,7 +2104,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, tanh, erf, erfc, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
@@ -2126,29 +2181,46 @@ and Deep (`spec/03-deep-syntax.md` §6.4).
 
 ### 5.6 Contextual Tensor-Literal Inference
 
-When a tensor literal appears in a position with a **known element type**, the
-numeric literals in the tensor body adopt that element type instead of the
-literal default in §5.3. The closed set of "known-element-type" positions is
-exactly:
+A bracket literal is a `List`, whatever its elements and wherever it stands. A
+**tensor literal** is a bare bracket literal whose own binding or function
+result declares a tensor type (`spec/02-surf-syntax.md` §P10b): the declaration
+converts it, and no other context does. A `to_tensor` call converts its
+argument, which is an ordinary `List`: its numeric literals bind at their
+suffix or the §5.3 default, so `to_tensor([1.1f64, 2.2f64])` is a
+`tensor[2, f64]` and `to_tensor([1.1, 2.2])` a `tensor[2, f32]` wherever the
+call stands.
 
-1. the right-hand side of a binding whose declared type is a tensor type, e.g.
-   `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
-2. the corresponding argument position of a call whose callee has a declared
-   signature whose parameter at that position is a tensor type, e.g.
-   `f(xs)` where `f : tensor[3, f64] -> ...`
-3. the body expression of a function with a declared return type that is a
-   tensor type, when the body is a tensor literal
-4. the first argument of a `cast(literal, p)` expression, where `p` is a
-   precision type literal or a dtype-family-bounded type binder
-   ([04-DTYPE-2]) — the literal body adopts `p`
+A position with a **known element type** gives a literal that dtype instead of
+the literal default in §5.3. The closed set of such positions is exactly:
 
-Position 4 applies to a **bare scalar numeric literal** as well as to a
-tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
-at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
-`f32` default and then widen (which would yield the f32-truncation value
-`1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
-at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
-work. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
+- **Position 1**: the right-hand side of a binding whose declared type is a
+  tensor type, when the right-hand side is a tensor literal, e.g.
+  `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Its numeric literals adopt the
+  element type.
+- **Position 3**: the body of a function whose declared return type is a
+  tensor type, when the body is a tensor literal. Its numeric literals adopt
+  the element type.
+- **Position 4**: the first argument of a `cast(literal, p)` expression, where
+  the literal is a bare scalar numeric literal or its unary negation and `p` is
+  a precision type literal or a dtype-bounded type binder ([04-DTYPE-2]). The
+  literal adopts `p`.
+
+A callee's declared parameter type and a `cast` never make a bracket literal a
+tensor: a bare bracket literal passed as an argument or cast stays a `List`,
+and a tensor argument or tensor cast operand is a `to_tensor` call whose
+elements carry the dtype they keep, e.g. `cast(to_tensor([1.1f64, 2.2f64]), p)`.
+
+Position 4 adopts a **bare scalar numeric literal**. `cast(1.1, f64)` binds
+the decimal `1.1` at `f64` — exactly `0x3ff199999999999a` — it does NOT
+narrow to the §5.3 `f32` default and then widen (which would yield the
+f32-truncation value `1.100000023841858`). Likewise `cast(3000000000, i64)`
+binds the literal at `i64`, which is what makes the §5.3 out-of-i32-range
+escape hatch work. A unary negation of such a literal (`spec/02-surf-syntax.md`
+§P10) folds into one signed literal, which adopts `p` exactly as the literal
+would: `cast(-1.1, f64)` binds `-1.1` at `f64` and `cast(-3000000000, i64)`
+binds at `i64`. An explicit
+`neg(1.1)` call is an ordinary operand, whose literal keeps its §5.3 default
+before the cast converts the result. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
 finiteness checks apply at `p`: `cast(2147483648, i32)` is still a range
 error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
 at `f16`, whereas `cast(70000.0f32, f16)` casts a finite `f32` value and
@@ -2163,19 +2235,18 @@ float source type because a decimal cannot bind at an integer type; the
 explicit cast then applies [04-NUM-14], accepting only a finite integral
 value in range and trapping `Domain` on a fractional value.
 
-The set is closed on purpose. Positions 1–3 adopt **tensor-literal
+The set is closed on purpose. Positions 1 and 3 adopt **tensor-literal
 bodies** only: a tensor's element type is a single property of the value,
-stated once in its type, and the body is bulk data — a per-element suffix
-on a thousand-element weights literal is noise that buries the one
-element that differs. Position 4 adopts a **bare scalar**, but its target
-dtype is spelled at the site and the position exists for
-**expressibility**, not convenience: without it `cast(3000000000, i64)`
-cannot be written at all, and `cast(1.1, f64)` would round through the
-`f32` default. What no position does is adopt a **list literal, or a
-scalar against a remote callee signature** — position 2 reaches through a
-signature, but only into a tensor body — and none should be added for
-ergonomics alone. A structural argument — a shape list, a bounds pair, a
-stride step — is program rather than payload, and under
+stated once in the declaration that makes the bracket literal a tensor, and
+the body is bulk data — a per-element suffix on a thousand-element weights
+literal is noise that buries the one element that differs. Position 4 adopts
+a **bare scalar**, but its target dtype is spelled at the site and the
+position exists for **expressibility**, not convenience: without it
+`cast(3000000000, i64)` cannot be written at all, and `cast(1.1, f64)` would
+round through the `f32` default. What no position does is adopt a **list
+literal, or reach through a remote callee signature**, and none should be
+added for ergonomics alone. A structural argument — a shape list, a bounds
+pair, a stride step — is program rather than payload, and under
 `spec/05-risc-primitives.md` [05-DIM-1] its dtype states which KIND of
 quantity it is: an extent is `i64` and an axis is `i32`, so a
 context-inferred `[2, 2]` would hide exactly the distinction the dtype
@@ -2184,17 +2255,18 @@ agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
 context-dependent literals is paid on every audit.
 
-Outside this closed set, numeric literals in a tensor body fall back to the
-§5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
+Outside this closed set, numeric literals keep the §5.3 literal defaults:
+integer literals to `i32`, float literals to `f32`.
 
 A tensor literal with mixed-suffix entries is well-formed only if every
 suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
 `f32`-context is a type error: the f64-suffixed literal at index 1 has an
 explicit dtype that disagrees with the surrounding `f32` element type.
 
-A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
-`tensor[3, i32]`, not `tensor[3, i64]`. The fallback to the §5.3
-default is the spec contract; no stage may silently widen it.
+`to_tensor([1, 2, 3])` in an unannotated position evaluates to
+`tensor[3, i32]`, not `tensor[3, i64]`, and a bare `[1, 2, 3]` there is a
+`List i32`. The fallback to the §5.3 default is the spec contract; no stage
+may silently widen it.
 
 ### 5.7 Mixed-Precision Accumulator Parameter
 
@@ -2216,6 +2288,11 @@ operands to `matmul` does not implicitly widen them. The accumulator
 parameter is what tells the backend to compute the inner sum at a wider
 precision and (where the result is the operand precision) downcast at the
 end.
+
+Surf spells the parameter as the call's final argument
+`accumulator=<dtype>` (spec/02 `CallArgs`), and Deep carries it as the `app`
+node's `accumulator` metadata (spec/03 §1.1). Any other call that supplies
+it is a type error.
 
 The accumulator is optional only on the user-facing Surf and Deep call
 surfaces. When it is omitted, the compiler resolves it to the documented
@@ -2365,7 +2442,7 @@ rejects name no type variable in any type position: a binder list does
 not rebind one, and the same rejection applies on Surf and Deep.
 An unbounded name may be listed without occurring in the signature; it is a
 vacuous universal quantifier and canonical round-tripping preserves it. A
-dtype-family-bounded binder must occur in the declared type (§5.9), so bounds
+dtype-bounded binder must occur in the declared type (§5.9), so bounds
 cannot be used as inert metadata.
 
 The internal type representation carries this through `TensorPrec`:
@@ -2392,15 +2469,18 @@ is a monomorphization bug, not user error.
 Every polymorphic call supplies a concrete precision before the backend
 boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
 calls and to generic definitions under [04-INF-9]. A polymorphic call's
-instantiation satisfies the checked contract, including its dtype-family
+instantiation satisfies the checked contract, including its dtype
 bounds under [04-DTYPE-2]. An inadmissible instantiation is a
 `PrecisionMismatch` at the call site with a citation to the governing section.
 
-### 5.9 Dtype-Family Bounds
+### 5.9 Dtype Bounds
 
-A declaration's type-binder list may constrain a binder to one **dtype
-family**: a named subset of the active primitive set of §1.1. There are three
-families.
+A declaration's type-binder list may constrain a binder to a **dtype bound**.
+A bound is written in one of two forms: a **family name**, or an **explicit
+dtype set**.
+
+A **dtype family** is a named subset of the active primitive set of §1.1.
+There are three families.
 
 | family | members |
 |---|---|
@@ -2413,20 +2493,45 @@ so a dtype §1.1 admits into a family is admitted by every bound naming that
 family. The reserved spellings of §1.1.1 belong to no family. `bool` and
 `string` belong to no family.
 
-> **[04-DTYPE-2]** A type binder that declares a dtype-family bound SHALL
-> occupy type positions only and SHALL be instantiated only at an active
-> primitive of §1.1 belonging to that family. The bound is part of the
+An **explicit dtype set** is written `{d1, d2, ...}` and admits exactly the
+dtypes it lists, in any order.
+
+```
+def widen[p: {f32, f64}](x: p) -> p = ...
+def approx[p: {f32, f64, bf16}](x: p) -> p = ...
+def scale[p: Float](x: p) -> p = ...
+```
+
+The two forms differ in how membership is decided, and that difference is
+normative. A family denotes whatever §1.1 admits into it, so activating a
+dtype widens every family that admits it without amending this section. An
+explicit set denotes its listed members and nothing else, so activating a
+dtype never widens one. A declaration that must exclude a dtype states the
+set it admits; a declaration that tracks a family names the family. Neither
+form is an abbreviation of the other, and a set that happens to enumerate a
+family's current members is not that family.
+
+> **[04-DTYPE-2]** A type binder that declares a dtype bound SHALL occupy type
+> positions only and SHALL be instantiated only at an active primitive of §1.1
+> the bound admits. The bound is part of the
 > declaration's scheme rather than a property of one call: instantiation
 > installs it on each fresh variable, unification propagates it through every
 > variable the bounded variable is identified with, and generalization
 > re-quantifies it, so the bound survives aliases, wrappers, higher-order
 > values, imports, and recursive calls. Unifying two bounded variables SHALL
-> yield the intersection of their families. An instantiation outside the bound
-> SHALL be a `PrecisionMismatch` naming the required family and the offending
+> yield the intersection of their families. Where either bound is an explicit
+> set, that intersection SHALL instead be the dtypes both bounds admit and is
+> itself an explicit set: a family and a set intersect as the set's members the
+> family admits, and two sets intersect as their common members.
+> An instantiation outside the bound
+> SHALL be a `PrecisionMismatch` naming the required bound and the offending
 > type; an empty intersection SHALL be a `PrecisionMismatch` naming both
-> families. A binder that declares no bound
+> families. Where either bound is an explicit set, that diagnostic SHALL name
+> both bounds. A binder that declares no bound
 > remains an unconstrained type variable admitting every type, not only a
-> dtype. A bound naming anything but a family of this section, a bounded
+> dtype. A bound that is neither a family of this section nor an explicit set,
+> an explicit set that is empty, repeats a dtype, or names anything but an
+> active primitive of §1.1, a bounded
 > binder used in a dimension slot or as a rank spread, and a bounded binder
 > that does not occur in the type it is declared for are each declaration
 > errors.
@@ -2437,7 +2542,7 @@ that declaration, and a bound written in the same declaration's `def` binder
 list is a declaration error. A `def` with no standalone signature carries its
 bounds in its own binder list.
 
-[04-INF-9] requires a generic body's necessary dtype-family restriction to
+[04-INF-9] requires a generic body's necessary dtype restriction to
 follow from this declared contract. Applying a float-only operation does not
 infer a `Float` bound on an otherwise unbounded or more broadly bounded
 authored binder, nor publish such a bound from an unannotated abstraction.
@@ -2479,7 +2584,9 @@ When full type checking fails, the compiler still infers types for as many sub-e
   (var {type: (t-tensor {} (d-name {} batch) (t-prim {} bf16))} y))
 ```
 
-The agent can read the annotated AST and see exactly which nodes type-checked and which didn't.
+The agent can use the fitness counters and diagnostics to locate failed checks.
+The compiler's checked-program product carries annotated Deep after successful
+type checking; the fitness report is a diagnostic document.
 
 > **[04-FIT-1]** `typed_nodes` and `total_nodes` SHALL report the type
 > inference product's checked-node counters, not a fabricated structural AST
@@ -2534,7 +2641,6 @@ shape is a change to a published interface.
 | `typed_nodes`, `untyped_nodes`, `total_nodes` | integer | always |
 | `unresolved_names` | array of string | always, possibly empty |
 | `errors` | array of diagnostic | always, possibly empty |
-| `typed_ast` | annotated Deep carrying a type on every node | always |
 | `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
 
 > **[04-FIT-18]** `score`, `components.parse`, `components.structure`,
@@ -2554,10 +2660,13 @@ shape is a change to a published interface.
 
 (The fixed-dtype report carrier requirement is not fully implemented; see chelis#1288.)
 
-> **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
-> SHALL be carried in the same typed value as the rest of the report.
-> They are members of the report's type -- `inferred_signatures` absent by
-> omission when not requested -- not separately spliced fragments.
+> **[04-FIT-13]** When requested, `inferred_signatures` SHALL be carried
+> in the same typed value as the rest of the report, absent by omission when
+> not requested. The report SHALL NOT carry a `typed_ast` member. Annotated
+> Deep belongs to the compiler's checked-program product, which represents
+> successful type checking; the fitness report carries the diagnostics and
+> measurements of a compilation attempt. A consumer SHALL NOT infer the
+> existence of a checked-program product from the presence of a report.
 
 #### Diagnostic fields
 
@@ -2612,6 +2721,27 @@ Each element of `errors` carries:
 > extent, so a consumer that reasons about ranges cannot tell whether the
 > compiler measured one.
 
+> **[04-FIT-27]** For a checker rejection of `to_list`,
+> `tensor_to_scalar`, `copy`, `cast`, `split_keys` (count), `expand`
+> (axis or size), `shrink` (arity, tensor, or bounds), `reshape`
+> (shape type, tensor input, or element count), a reduction's tensor input
+> or selected axis, or a function
+> application's argument count or tensor-dimension match, the diagnostic SHALL
+> retain the available location of the rejecting call or offending operand,
+> not substitute a containing declaration or unrelated argument. Its message
+> SHALL name the callee and rejected argument position; a per-axis mismatch
+> SHALL name the axis as well.
+> When that check knows a directional requirement and the value that failed
+> it, the diagnostic SHALL carry both in `expected` and `got`, and the human
+> message SHALL use those same values. The requirement is the operation's
+> admitted input, the callee parameter, or a declared type; `got` is the
+> actual operand or inferred body. Symmetric unification alone establishes
+> neither direction and SHALL NOT assign one: a caller that cannot establish
+> the direction leaves the pair absent instead of reversing or inventing it.
+> This diagnostic rule does not decide whether an unresolved type variable
+> should be rejected; the check's existing admission rule still decides that.
+
+
 #### Example
 
 Illustrative of the shape only; the atoms above are normative.
@@ -2635,8 +2765,7 @@ Illustrative of the shape only; the atoms above are normative.
       "span": {"span": "range", "offset": 786, "len": 20},
       "span_id": "surf:786..806"
     }
-  ],
-  "typed_ast": "... (annotated Deep with types on every node) ..."
+  ]
 }
 ```
 
@@ -2788,7 +2917,10 @@ the same diagnostics.
 > `kind` vocabulary member, its `message`, and its location as
 > [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
 > own line, in the order the checker reported it, so a rejection carrying
-> `N` diagnostics renders `N` lines. A debug rendering of a
+> `N` diagnostics renders `N` diagnostic summary lines. A renderer MAY
+> accompany them with excerpts of the authored source, identified by path,
+> line and column; an excerpt SHALL NOT show a synthesized expression in
+> place of the authored text. A debug rendering of a
 > producer-internal value is not a conforming rendering: it publishes
 > field names, absent-value markers, and variant spellings that
 > [04-FIT-14] keeps off the published interface. A diagnostic that cannot
@@ -2808,8 +2940,10 @@ Built-in effect vocabulary in the type layer:
 
 - `Accum` -- internal-only hook for associative gradient accumulation
 - `IO` -- host-side effects such as `print` and `debug`,
-  the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
-  `process_run`; `IO` is the single effect for host-side observable interaction
+  the file builtins (`read_file`, `write_file`, ...), subprocess exec via
+  `process_run`, and the clock reads `clock_wall_read` and
+  `clock_monotonic_read`; `IO` is the single effect for host-side observable
+  interaction
 - `Test` -- assertions whose failure is observed by the Chelis test runner
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
@@ -2846,7 +2980,8 @@ Inference and checking obey these rules:
   contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
-  `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
+  `file_exists`, `list_dir`, `mmap_file`), `process_run` (subprocess exec),
+  and the clock reads `clock_wall_read` and `clock_monotonic_read` ([05-OP-75]).
   Compiled host execution preserves these effects and their order under
   spec/05-risc-primitives.md [05-HOST-1..2]
 - `with device(device) { ... }` marks a resource region that is validated against the
@@ -3017,14 +3152,19 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   the earliest point after its last use that post-dominates that use on the applicable
   control-flow path. This is not a user-facing type error.
 - `copy(x)` reads `x` without consuming it and yields a fresh owned value.
-- `drop(x)` is an explicit consume. The compiler also inserts implicit last-use
-  drops for locals that are not otherwise consumed.
+- `drop(x)` is an explicit consume, and a terminal one: it ends the owner, and no
+  inserted copy keeps the owner usable after it ([04-LIN-11]). A `drop` after an
+  earlier ordinary consume is consuming fan-out like any other: the earlier use
+  receives the inserted copy. The compiler also inserts implicit last-use drops for
+  locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
 - Creating a closure whose body consumes a captured tensor consumes that outer binding
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
-  outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
-  subject below.
+  outer binding instead. Which binding a consuming capture lands on, and why a
+  borrowing capture forbids a later `drop` of the owner, are [04-LIN-2]'s subject below.
+- A tuple projection `p.i` or a field access `r.f` outside a destructuring `let` moves
+  that component out of its parent; [04-LIN-11] says when the parent stays usable.
 - A top-level function declaration ([04-INF-7]) is not a closure creation, and checking
   it never changes top-level ownership state. Because a declaration may be called after
   every top-level initializer, including from another module, its body is checked
@@ -3034,8 +3174,13 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   order. A consuming use of such a reference yields each call's owned result through a
   copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
   whose copy [04-LIN-9] refuses.
-- Ordinary consuming fan-out is handled by inserted copies, except on a
-  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
+- An *ordinary consume* is every consuming use except a `drop` ([04-LIN-11]), a
+  match scrutinee, a consuming closure capture ([04-LIN-2]), and a consume of a
+  key-carrying value ([04-LIN-9]) or of a destructured component (below). A
+  consuming call argument, `realize`, and the value a destructuring `let`
+  destructures are ordinary consumes. Ordinary consuming fan-out (a later use after
+  an earlier ordinary consume) is handled by inserted copies; a use after any other
+  consume is rejected. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
@@ -3078,7 +3223,13 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > each consume their own binding, and both closure creations are
 > accepted. The sole forwarding is a consuming capture of a destructured
 > component (or of an alias of one), which consumes the component's
-> carrier binding.
+> carrier binding. A borrowing capture holds its borrow for as long as the
+> closure value exists, and a closure value can be stored, returned, or
+> passed on, so after a closure that borrows an owner is created, a `drop`
+> call ([05-OP-67]) applied to that owner in the closure's scope, through any
+> name bound to it there, is rejected, whether or not the closure is called
+> again. A closure that captures a
+> `copy` of the owner leaves the original free to drop.
 
 These binding identities also govern runtime lookup: a named declaration's
 free references are not rebound by a caller's same-named local or parameter.
@@ -3163,7 +3314,8 @@ lexical binding, change which callable is selected, or memoize function results.
 > key-carrying argument, including the otherwise observational arguments of
 > a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
 > value is reached only by consuming that value: a destructuring `let` or
-> `match` pattern; a tuple projection, which takes each key-carrying
+> `match` pattern; a tuple projection, which moves the component out
+> ([04-LIN-11]) with a terminal consume, so it takes each key-carrying
 > component at most once and leaves the tuple unusable as a whole; a field
 > access, which consumes the whole value; or `vmap` over a key axis, which
 > gives each row to one application. Reading a consumed key's bits again in
@@ -3181,7 +3333,7 @@ lexical binding, change which callable is selected, or memoize function results.
 > unless it belongs solely to an already-checked key-derivation builtin's
 > closed operation relation ([04-INF-9], [05-OP-69]..[05-OP-72]). This
 > includes an authored type binder, even one
-> that names a tensor element dtype with or without a dtype-family bound, and
+> that names a tensor element dtype with or without a dtype bound, and
 > a variable that inference leaves free in the binding's type, whatever the
 > bound value is, since a tuple or a data value can hold a closure over it.
 > A closed relation variable is selected by that operation's contract, with
@@ -3206,6 +3358,19 @@ lexical binding, change which callable is selected, or memoize function results.
 > the generic is a value binding rather than a function, ascribes the
 > binding a type with no type parameter or writes its value where it is
 > used.
+
+> **[04-LIN-11]** A `drop` ([05-OP-67]) is a terminal consume: no inserted
+> copy can precede it on behalf of a later use, so every use of the dropped
+> owner after it, through any name bound to that owner and on every path
+> that reaches the use, is rejected. A tuple projection `p.i` or a field
+> access `r.f` outside a destructuring `let` moves that component out of its
+> parent. An ordinary consume of a moved component is consuming fan-out:
+> copy insertion repairs it, and the parent stays usable. A terminal consume
+> of a moved component (a `drop` of it, or any consume of a key-carrying
+> component under [04-LIN-9]) leaves that component and every projection
+> overlapping it unusable afterwards, and leaves the parent unusable as a
+> whole, while every disjoint component stays usable: after `drop(p.0)`,
+> `p.1` is accepted and `p` and `p.0` are rejected.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
@@ -3297,7 +3462,7 @@ Scope:
   checker runs and their call sites are rewritten with them, so a
   package-scoped `def sum` neither collides with the builtin table nor
   mis-dispatches — inside a package the user def genuinely wins (the
-  stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
+  stdlib's `Std.Test.fail` relies on this).
 - Function parameters and block-local bindings may reuse builtin names: they
   shadow the builtin under ordinary lexical scoping in every lane. A call to
   that unqualified name invokes the innermost local binding, including when
@@ -3327,7 +3492,11 @@ Scope:
 > class, not an input payload or sign. A pure bit-moving or selection
 > operation preserves NaN payload bits only when its governing operation atom
 > explicitly says it is bit-preserving. The width at which the op is COMPUTED
-> before finalization is fixed by [04-NUM-8], not by this atom.
+> before finalization is fixed by [04-NUM-8], not by this atom. These rules
+> are the only floating-point environment: no rounding mode, flush-to-zero,
+> denormals-are-zero, or other dynamic state of the process, host, or caller
+> in which a lane runs changes a result, and subnormal operands and results
+> are never flushed.
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
@@ -3412,6 +3581,16 @@ Scope:
 > it. The permission does not extend to transcendentals or any other op
 > where the bits could differ - those compute at f32 per the table. No
 > lane SHALL compute at any width wider than the one declared above.
+>
+> A correctly rounded primitive ([05-OP-46]) is defined by its result: the
+> exact real value of its function rounded once to the arithmetic width.
+> The precision a kernel uses internally to obtain that result, such as an
+> f32 kernel that evaluates in f64 or in multi-word arithmetic and rounds
+> once, is not an operation width and is not governed by this atom. Every
+> operation of a graph, including each primitive inside a composition, still
+> computes and finalizes at the declared width: evaluating a composition, or
+> a transcendental that is not correctly rounded, at f64 and narrowing the
+> result is non-conforming.
 >
 > REDUCED-precision computation - performing an op at an arithmetic width
 > narrower than the one declared above SUCH THAT THE RESULT BITS CAN

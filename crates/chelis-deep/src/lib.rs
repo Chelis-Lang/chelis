@@ -19,7 +19,6 @@ pub mod node;
 pub mod parser;
 pub mod path;
 mod pattern;
-pub mod pipe;
 pub mod printer;
 pub mod raw;
 pub mod role;
@@ -28,12 +27,16 @@ pub mod stamp_to_typed;
 pub mod tag;
 pub mod validate;
 
-pub use ast::{Atom, CastMode, Expr, ExprCarrier, MetaExpr, UnknownFormData, cast_mode_of};
+pub use ast::{
+    Atom, CastMode, Expr, ExprCarrier, MetaExpr, NamedCastMode, UnknownFormData, cast_mode_of,
+};
 pub mod annotations;
 pub use annotations::Metadata;
 mod annotations_codec;
 mod annotations_transform;
-pub use dtype_bounds::{DTYPE_BOUNDS_KEY, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds};
+pub use dtype_bounds::{
+    BoundDtype, DTYPE_BOUNDS_KEY, DtypeBound, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds,
+};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use literal_source::{
@@ -57,3 +60,7 @@ pub use stamp_to_typed::{
     stamp_runtime_exprs, stamp_to_typed,
 };
 pub use tag::DeepTag;
+
+/// Current Deep grammar: Surf-only pipes, no `pipe` tag or spelling metadata.
+/// Persisted carriers bind their own bumped envelope versions to this grammar.
+pub const DEEP_FORMAT_VERSION: &str = "0.20";

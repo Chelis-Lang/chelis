@@ -276,8 +276,8 @@ mod tests {
 
     #[test]
     fn version_stamp_readable_from_fence() {
-        let block = render("chelis-surface-header", "1.2.3", "surface");
-        let found = find(&block, "chelis-surface-header").unwrap();
+        let block = render("chelis-surface", "1.2.3", "surface");
+        let found = find(&block, "chelis-surface").unwrap();
         assert_eq!(found.version, "1.2.3");
     }
 

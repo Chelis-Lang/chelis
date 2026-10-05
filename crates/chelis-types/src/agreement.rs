@@ -18,17 +18,13 @@ use crate::types::Prim;
 /// Callers cannot manufacture a tolerant identity from a string. An IR
 /// consumer maps its actual operation into this enum with an exhaustive
 /// match, so adding an IR operation cannot silently inherit a tolerance.
+/// Every operation is exact: [04-NUM-2] and [04-NUM-8] arithmetic is exact
+/// by construction and [05-OP-46] makes the transcendentals and `sqrt`
+/// correctly rounded, so no operation carries an identity of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgreementOp {
-    /// Every operation without an authored tolerance row.
+    /// Every operation; [05-OBS-3]'s table grants no row.
     Exact,
-    Atan,
-    Cos,
-    Exp,
-    Log,
-    Sin,
-    Sqrt,
-    Tan,
 }
 
 impl AgreementOp {
@@ -36,13 +32,6 @@ impl AgreementOp {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Exact => "exact",
-            Self::Atan => "atan",
-            Self::Cos => "cos",
-            Self::Exp => "exp",
-            Self::Log => "log",
-            Self::Sin => "sin",
-            Self::Sqrt => "sqrt",
-            Self::Tan => "tan",
         }
     }
 }
@@ -56,41 +45,12 @@ pub struct OpTolerance {
     pub max_ulps: u64,
 }
 
-/// The authoritative machine form of spec/05's Phase 3 tolerance table.
+/// The authoritative machine form of spec/05's [05-OBS-3] tolerance table.
 ///
-/// The list is sorted by canonical operation identity. Unlisted operations
-/// have a zero-ULP bound. In particular, ordinary arithmetic, comparisons,
-/// reductions, and compound builtins do not inherit a float tolerance.
-pub const OP_TOLERANCES: &[OpTolerance] = &[
-    OpTolerance {
-        op: AgreementOp::Atan,
-        max_ulps: 1,
-    },
-    OpTolerance {
-        op: AgreementOp::Cos,
-        max_ulps: 1,
-    },
-    OpTolerance {
-        op: AgreementOp::Exp,
-        max_ulps: 1,
-    },
-    OpTolerance {
-        op: AgreementOp::Log,
-        max_ulps: 1,
-    },
-    OpTolerance {
-        op: AgreementOp::Sin,
-        max_ulps: 1,
-    },
-    OpTolerance {
-        op: AgreementOp::Sqrt,
-        max_ulps: 0,
-    },
-    OpTolerance {
-        op: AgreementOp::Tan,
-        max_ulps: 1,
-    },
-];
+/// The table is empty: every operation has a zero-ULP bound, ordinary
+/// arithmetic, comparisons, reductions, compound builtins, and the
+/// correctly rounded transcendentals alike.
+pub const OP_TOLERANCES: &[OpTolerance] = &[];
 
 /// Return the operation's maximum ULP difference. Absence means exactness.
 pub fn tolerance_for(op: AgreementOp) -> u64 {

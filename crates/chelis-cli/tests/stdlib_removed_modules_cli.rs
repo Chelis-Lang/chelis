@@ -1,4 +1,5 @@
-//! The bundled runtime does not expose shell-level initializers or a tokenizer.
+//! The bundled runtime does not expose shell-level initializers, a tokenizer, or
+//! the `Std.Time` module that `Std.Datetime` replaced.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -13,6 +14,7 @@ fn removed_shell_modules_cannot_be_imported_from_chelis_std() {
         ("Std.Init.Kaiming", "kaiming_uniform"),
         ("Std.Init.XavierExt", "xavier_uniform"),
         ("Std.Tokenizer", "Tokenizer, encode"),
+        ("Std.Time", "date"),
     ] {
         let (_dir, reef_home, app_pkg) = make_app("removed-stdlib-module");
         write_file(

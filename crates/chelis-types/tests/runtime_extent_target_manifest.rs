@@ -78,15 +78,16 @@ impl Row {
 
     /// Whether the row's expectation is the complete selected inventory.
     ///
-    /// An `all` or `substring` row selects whatever the binary happens to
+    /// An `all` or `substring` row selects whatever its target happens to
     /// hold, so its expectation must be an equality: that is the case a
-    /// rename or an addition breaks, and the case this test exists for. An
-    /// `exact` row names its tests on the command line, so `cargo test
-    /// --exact` already fails loudly when one of them is gone, and a `--lib`
-    /// row's names are module paths this parser resolves only by convention.
-    /// Both of those are checked for containment instead.
+    /// rename or an addition breaks, and the case this test exists for. A
+    /// `--lib` row is held to it over the module file it names, so a test
+    /// added there under a substring selector fails here rather than in the
+    /// nightly oracle (chelis#2941). An `exact` row names its tests on the
+    /// command line, so `cargo test --exact` already fails loudly when one of
+    /// them is gone; it is checked for containment instead.
     fn requires_equality(&self) -> bool {
-        self.kind == "test" && !matches!(self.selector(), Selector::Exact)
+        !matches!(self.selector(), Selector::Exact)
     }
 }
 
@@ -298,10 +299,9 @@ fn collect_tests(
 ///
 /// A `lib` row names its tests by the module path the crate gives them, whose
 /// segments follow the source path below the crate's `src` directory.
-/// Reconstructing that from a
-/// single file is a convention rather than a resolution of the crate's module
-/// tree, which is the second reason `lib` rows are checked for containment
-/// only.
+/// Reconstructing that from a single file is a convention rather than a
+/// resolution of the crate's module tree, so a `lib` row's equality covers the
+/// file it names, not every test its substring could reach elsewhere.
 fn inventory_for(root: &Path, row: &Row) -> Scan {
     let source = root.join(&row.file);
     let file = parse_source(&source);
@@ -737,6 +737,28 @@ fn a_nested_library_source_rejects_a_shortened_module_name() {
         .collect();
     let error = check_row(&root, &row).expect_err("a shortened path must not resolve");
     assert!(error.contains("named tests are absent"), "{error}");
+}
+
+#[test]
+fn a_library_substring_row_must_register_every_selected_test() {
+    // The chelis#2941 shape: a `--lib` row held only to containment let two
+    // tests added under its substring selector reach `main` unregistered, and
+    // the drift surfaced only as a nightly oracle failure.
+    let root = workspace_root();
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(manifest_path()).expect("read the target manifest"),
+    )
+    .expect("valid manifest");
+    let mut row = parse_rows(&manifest)
+        .into_iter()
+        .find(|row| row.id == "ir_signature_entry_plan")
+        .expect("the nested signature entry receipt is required");
+    let dropped = row.expected.pop().expect("a registered test");
+    let error = check_row(&root, &row).expect_err("an unregistered library test is drift");
+    assert!(
+        error.contains(&format!("in the source but unregistered: [{dropped:?}]")),
+        "{error}"
+    );
 }
 
 #[test]

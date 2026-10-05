@@ -77,6 +77,18 @@ pub fn format_source(source: &str) -> Result<String, FormatError> {
     Ok(format_decls_with_comments(&decls, &comments))
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
+pub(crate) fn format_pipe_migration_source(
+    source: &str,
+    decls: &[Decl],
+) -> Result<String, FormatError> {
+    let (_, comments) = lexer::lex_with_comments(source)?;
+    if let Some(offset) = first_ambiguous_comment_offset(decls, &comments) {
+        return Err(FormatError::AmbiguousComment { offset });
+    }
+    Ok(format_decls_with_comments(decls, &comments))
+}
+
 /// Migrate the isolated v0.18 compatibility grammar to canonical Surf v0.19.
 ///
 /// Harmless aliases are also accepted by the normal parser. This explicit
@@ -251,6 +263,7 @@ fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
             migrate_expr(function, shadow);
             args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
         }
+        Expr::Accumulate(call, _, _) => migrate_expr(call, shadow),
         Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             items.iter_mut().for_each(|item| migrate_expr(item, shadow))
         }
@@ -293,7 +306,7 @@ fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
             // operation.
             migrate_expr(seed, shadow);
             for stage in stages.iter_mut() {
-                let Expr::Apply(function, args, _) = stage else {
+                let Expr::Apply(function, args, _) = &mut stage.expression else {
                     migrate_expr(stage, shadow);
                     continue;
                 };
@@ -1015,11 +1028,30 @@ fn format_type_arg(ty: &TypeExpr) -> String {
     }
 }
 
+fn format_open_form_child(expr: &Expr) -> String {
+    if matches!(expr, Expr::Pipe(..)) {
+        format!("({})", format_expr(expr))
+    } else {
+        format_expr(expr)
+    }
+}
+
 fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Lit(lit, _) => format_lit(lit),
         Expr::Var(name, _) | Expr::Constructor(name, _) => name.clone(),
         Expr::Apply(func, args, _) => format_apply(func, args),
+        Expr::Accumulate(call, precision, _) => match call.as_ref() {
+            Expr::Apply(func, args, _) => {
+                let call = format_apply(func, args);
+                let separator = if args.is_empty() { "" } else { ", " };
+                format!(
+                    "{}{separator}accumulator={precision})",
+                    &call[..call.len() - 1]
+                )
+            }
+            other => format_expr(other),
+        },
         Expr::List(items, _) => format!(
             "[{}]",
             items.iter().map(format_expr).collect::<Vec<_>>().join(", ")
@@ -1073,13 +1105,17 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Pipe(seed, stages, _) => format_pipe_expr(seed, stages),
         Expr::If(cond, then_expr, else_expr, _) => format!(
             "if {} then {} else {}",
-            format_expr(cond),
-            format_expr(then_expr),
-            format_expr(else_expr)
+            format_open_form_child(cond),
+            format_open_form_child(then_expr),
+            format_open_form_child(else_expr)
         ),
         Expr::Match(scrutinee, arms, _) => {
             let arms = arms.iter().map(format_arm).collect::<Vec<_>>().join("\n  ");
-            format!("match {} with {{\n  {}\n}}", format_expr(scrutinee), arms)
+            format!(
+                "match {} with {{\n  {}\n}}",
+                format_open_form_child(scrutinee),
+                arms
+            )
         }
         Expr::Lambda(params, body, _) => format!(
             "fn ({}) -> {}",
@@ -1088,7 +1124,7 @@ fn format_expr(expr: &Expr) -> String {
                 .map(format_param)
                 .collect::<Vec<_>>()
                 .join(", "),
-            format_expr(body)
+            format_open_form_child(body)
         ),
         Expr::Tuple(parts, _) => {
             let body = parts.iter().map(format_expr).collect::<Vec<_>>().join(", ");
@@ -1140,7 +1176,11 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Quote(expr, _) => format!("quote({})", format_expr(expr)),
         Expr::Unquote(expr, _) => format!("unquote({})", format_expr(expr)),
         Expr::Splice(expr, _) => format!("splice({})", format_expr(expr)),
-        Expr::Annotate(expr, ty, _) => format!("({} : {})", format_expr(expr), format_type(ty)),
+        Expr::Annotate(expr, ty, _) => format!(
+            "({} : {})",
+            wrap_if_absorbs(expr, Trailer::Ascription),
+            format_type(ty)
+        ),
         Expr::Block(bindings, body, _) if bindings.is_empty() => format_expr(body),
         Expr::Block(bindings, body, _) => format_block(bindings, body),
     }
@@ -1368,7 +1408,7 @@ fn format_call_callee(function: &Expr) -> String {
         // Ungrouped `f(x)(y)` is intentionally not canonical. Grouping the
         // first call makes call-result application explicit and preserves a
         // nested Deep `app` rather than flattening it to `f(x, y)`.
-        Expr::Apply(..)
+        Expr::Apply(..) | Expr::TupleGet(..) | Expr::Accumulate(..)
         // Prefix and keyword-led forms otherwise absorb the following call
         // into their body or tail: `if c then f else g(x)`,
         // `fn (x) -> x(y)`, `-f(y)`, and so on.
@@ -1419,56 +1459,125 @@ fn format_block(bindings: &[LetBinding], body: &Expr) -> String {
     format!("{{\n{}\n}}", lines.join("\n"))
 }
 
-fn format_pipe_expr(seed: &Expr, stages: &[Expr]) -> String {
-    format_pipe_layout(
-        None,
-        format_expr(seed),
-        stages.iter().map(format_pipe_stage).collect(),
-    )
+fn format_pipe_expr(seed: &Expr, stages: &[PipeStage]) -> String {
+    format_pipe_layout(None, format_pipe_seed(seed), format_pipe_stages(stages))
 }
 
-fn format_pipe_with_binding(head: &str, seed: &Expr, stages: &[Expr]) -> String {
+fn format_pipe_with_binding(head: &str, seed: &Expr, stages: &[PipeStage]) -> String {
     format_pipe_layout(
         Some(head),
-        format_expr(seed),
-        stages.iter().map(format_pipe_stage).collect(),
+        format_pipe_seed(seed),
+        format_pipe_stages(stages),
     )
 }
 
-/// Format a single pipe stage, compacting synthesized unary-builtin
-/// lambdas (`fn (v) -> realize(v)`, `fn (v) -> copy(v)`) back to the
-/// bare keyword form. Mirrors spec `01-nomenclature.md` §3.6: the
-/// decompiler/formatter may compact a lambda stage to call-stage sugar
-/// when the carried value is the only argument. Item 2b round-trip.
-fn format_pipe_stage(stage: &Expr) -> String {
-    if let Some(compacted) = compact_bare_unary_builtin_stage(stage) {
-        return compacted;
-    }
-    format_expr(stage)
+/// A token that can follow an expression's printed text and attach to it on
+/// re-parse.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trailer {
+    /// A further pipe stage, `|> stage`.
+    Pipe,
+    /// A type ascription, `: T`.
+    Ascription,
 }
 
-fn compact_bare_unary_builtin_stage(stage: &Expr) -> Option<String> {
-    let Expr::Lambda(params, body, _) = stage else {
-        return None;
-    };
-    let [only_param] = params.as_slice() else {
-        return None;
-    };
-    if only_param.ty.is_some() {
-        return None;
+/// Whether the printed form of `expr` ends in an open subexpression that the
+/// parser would extend over a following `trailer` (chelis#3128).
+///
+/// `if` and `fn` end in a full expression (the `else` branch, the body), so
+/// they absorb anything. A unary or borrow operand is parsed at the binding
+/// power just below postfix, so it absorbs an ascription but not a pipe. A
+/// pipe absorbs a further stage, which would flatten it into the outer pipe,
+/// and otherwise whatever its last stage absorbs. Every other printed form is
+/// closed: an atom, a call, a bracketed or braced form, or a binary operation
+/// or ascription, which print with their own parentheses.
+fn absorbs(expr: &Expr, trailer: Trailer) -> bool {
+    match expr {
+        Expr::If(..) | Expr::Lambda(..) => true,
+        Expr::Unary(..) | Expr::Borrow(..) => trailer == Trailer::Ascription,
+        Expr::Pipe(..) => true,
+        Expr::Block(bindings, body, _) if bindings.is_empty() => absorbs(body, trailer),
+        _ => false,
     }
-    let name = &only_param.name;
-    match body.as_ref() {
-        Expr::Realize(inner, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
-            Some("realize".to_string())
+}
+
+fn wrap_if_absorbs(expr: &Expr, trailer: Trailer) -> String {
+    if absorbs(expr, trailer) {
+        format!("({})", format_expr(expr))
+    } else {
+        format_expr(expr)
+    }
+}
+
+/// Whether the parser reads `stage`'s printed form back as one whole pipe
+/// stage. A stage is parsed as a prefix expression, so a postfix `.field` or
+/// `.0`, a record update's `with`, or a nested pipe's `|>` after it attaches
+/// to the enclosing pipe instead; so does the `.` of a qualified callee such
+/// as `M.f(x)`.
+fn is_prefix_stage(stage: &Expr) -> bool {
+    match stage {
+        Expr::Pipe(..) | Expr::Access(..) | Expr::TupleGet(..) | Expr::RecordUpdate(..) => false,
+        Expr::Apply(function, _, _) => {
+            !matches!(function.as_ref(), Expr::Access(..) | Expr::TupleGet(..))
         }
-        Expr::Copy(inner, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
-            Some("copy".to_string())
+        Expr::Accumulate(call, _, _) => is_prefix_stage(call),
+        Expr::Block(bindings, body, _) if bindings.is_empty() => is_prefix_stage(body),
+        _ => true,
+    }
+}
+
+fn pipe_stage_needs_parens(stage: &Expr, is_last: bool) -> bool {
+    !is_prefix_stage(stage) || (!is_last && absorbs(stage, Trailer::Pipe))
+}
+
+/// The seed of a pipe is followed by `|>`, so it is parenthesized when its
+/// printed form would absorb that stage.
+fn format_pipe_seed(seed: &Expr) -> String {
+    if let Expr::Accumulate(call, _, _) = seed
+        && let Expr::Apply(head, _, _) = call.as_ref()
+        && matches!(head.as_ref(), Expr::Access(..) | Expr::TupleGet(..))
+    {
+        return format!("({})", format_expr(seed));
+    }
+    match seed {
+        Expr::Unary(..)
+        | Expr::Borrow(..)
+        | Expr::If(..)
+        | Expr::Match(..)
+        | Expr::Lambda(..)
+        | Expr::RecordUpdate(..)
+        | Expr::Access(..)
+        | Expr::TupleGet(..) => format!("({})", format_expr(seed)),
+        Expr::Apply(head, _, _) if matches!(&**head, Expr::Access(..) | Expr::TupleGet(..)) => {
+            format!("({})", format_expr(seed))
         }
-        Expr::Cast(inner, precision, mode, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
-            Some(format!("{}({precision})", mode.keyword()))
-        }
-        _ => None,
+        _ => wrap_if_absorbs(seed, Trailer::Pipe),
+    }
+}
+
+fn format_pipe_stages(stages: &[PipeStage]) -> Vec<String> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| match stage.syntax {
+            PipeStageSyntax::Cast(_) | PipeStageSyntax::Copy | PipeStageSyntax::Realize => {
+                format_expr(stage)
+            }
+            _ => format_pipe_stage(stage, index + 1 == stages.len()),
+        })
+        .collect()
+}
+
+/// Keep authored stage syntax; group open-ended forms to preserve boundaries.
+fn format_pipe_stage(stage: &Expr, is_last: bool) -> String {
+    if matches!(
+        stage,
+        Expr::Lambda(..) | Expr::If(..) | Expr::Match(..) | Expr::Unary(..) | Expr::Borrow(..)
+    ) || pipe_stage_needs_parens(stage, is_last)
+    {
+        format!("({})", format_expr(stage))
+    } else {
+        format_expr(stage)
     }
 }
 
@@ -1527,6 +1636,7 @@ fn expression_span(expr: &Expr) -> chelis_deep::Span {
         | Expr::Var(_, span)
         | Expr::Constructor(_, span)
         | Expr::Apply(_, _, span)
+        | Expr::Accumulate(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
         | Expr::RecordUpdate(_, _, span)
@@ -1563,6 +1673,7 @@ fn wrap_simple(expr: &Expr) -> String {
         | Expr::Var(_, _)
         | Expr::Constructor(_, _)
         | Expr::Apply(_, _, _)
+        | Expr::Accumulate(_, _, _)
         | Expr::List(_, _)
         | Expr::Access(_, _, _)
         | Expr::TupleGet(_, _, _)
@@ -1602,6 +1713,7 @@ fn wrap_operand(expr: &Expr) -> String {
         | Expr::Var(_, _)
         | Expr::Constructor(_, _)
         | Expr::Apply(_, _, _)
+        | Expr::Accumulate(_, _, _)
         | Expr::List(_, _)
         | Expr::Record(_, _, _)
         | Expr::Access(_, _, _)

@@ -1,4 +1,5 @@
 use chelis_deep::DeepTag;
+use chelis_runtime::host_round::{FloatLayout, round_to_bits};
 use chelis_unord::UnordMap;
 use std::path::Path;
 
@@ -189,6 +190,64 @@ struct DeclaredResultClaim {
     /// Every declared dimension this invocation can resolve: a literal, or
     /// a binder a tensor parameter witnesses.
     axes: Vec<ResultAxisClaim>,
+    /// Declared dimensions whose binder no parameter declares, so only the
+    /// body can bind it (spec/04-type-system.md section 4.4.1). Each is
+    /// resolved where the claim is checked, against the first site of its
+    /// activation that produced the binder's extent; one the path has not
+    /// bound claims nothing, because the result is then its first site.
+    /// Grouped by binder in declared order, as the C lane's frames are.
+    first_sites: Vec<FirstSiteAxis>,
+}
+
+/// One declared result axis named by an output-inferred binder of
+/// `activation`.
+#[derive(Clone)]
+struct FirstSiteAxis {
+    axis: usize,
+    binder: String,
+    activation: u64,
+}
+
+/// The dimension-binder extents each executing activation has bound
+/// (spec/04-type-system.md section 4.4.1).
+///
+/// A parameter axis binds its binder when the activation starts. An
+/// output-inferred binder is bound by the first site, in evaluation order,
+/// that produces its extent, and every later site that names it is a claim
+/// against that site. The records are keyed by activation rather than kept
+/// in a lexical frame: a binder first bound inside a block stays bound after
+/// the block, and a callee's records never mix with its caller's.
+#[derive(Default)]
+pub(super) struct ActivationExtents {
+    current: u64,
+    next: u64,
+    bound: BTreeMap<(u64, String), (NamedResultSource, i64)>,
+}
+
+impl ActivationExtents {
+    /// Start a fresh activation; the returned key restores its caller.
+    fn enter(&mut self) -> u64 {
+        self.next += 1;
+        std::mem::replace(&mut self.current, self.next)
+    }
+
+    fn exit(&mut self, caller: u64) {
+        let ended = self.current;
+        self.bound.retain(|(activation, _), _| *activation != ended);
+        self.current = caller;
+    }
+
+    fn get(&self, activation: u64, binder: &str) -> Option<&(NamedResultSource, i64)> {
+        self.bound.get(&(activation, binder.to_string()))
+    }
+
+    fn current(&self, binder: &str) -> Option<&(NamedResultSource, i64)> {
+        self.get(self.current, binder)
+    }
+
+    fn bind(&mut self, binder: String, source: NamedResultSource, extent: i64) {
+        self.bound.insert((self.current, binder), (source, extent));
+    }
 }
 
 /// One declared result axis and the value it requires.
@@ -279,58 +338,6 @@ fn tensor_type_dim_exprs(expr: &Expr) -> Option<(&Expr, &[Expr])> {
     kids.split_last()
 }
 
-fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
-    if actual.is_nan() || expected.is_nan() {
-        return false;
-    }
-    if actual == expected {
-        return true;
-    }
-    if !actual.is_finite() || !expected.is_finite() {
-        return false;
-    }
-    (actual - expected).abs() <= tolerance
-}
-
-fn close_at_f64_width(actual: f64, expected: f64, tolerance: f64) -> bool {
-    if actual.is_nan() || expected.is_nan() {
-        return false;
-    }
-    if actual == expected {
-        return true;
-    }
-    if !actual.is_finite() || !expected.is_finite() {
-        return false;
-    }
-    (actual - expected).abs() <= tolerance
-}
-
-fn first_f32_mismatch(
-    actual: impl Iterator<Item = f32>,
-    expected: impl Iterator<Item = f32>,
-    tolerance: f32,
-) -> Option<usize> {
-    actual
-        .zip(expected)
-        .enumerate()
-        .find_map(|(index, (actual, expected))| {
-            (!close_at_f32_width(actual, expected, tolerance)).then_some(index)
-        })
-}
-
-fn first_f64_mismatch(
-    actual: impl Iterator<Item = f64>,
-    expected: impl Iterator<Item = f64>,
-    tolerance: f64,
-) -> Option<usize> {
-    actual
-        .zip(expected)
-        .enumerate()
-        .find_map(|(index, (actual, expected))| {
-            (!close_at_f64_width(actual, expected, tolerance)).then_some(index)
-        })
-}
-
 fn float_element_is_nan(value: ElementRef) -> bool {
     match value {
         ElementRef::F16(value) => value.is_nan(),
@@ -362,6 +369,19 @@ fn bind_checked_precision(
             Ok(())
         }
     }
+}
+
+/// The explicit accumulator dtype an `app` carries (spec/04 §5.7).
+fn explicit_accumulator(metadata: &Metadata) -> Option<Prim> {
+    let (tag, children) = tagged_expr_children(metadata.accumulator()?.expression())?;
+    (tag == DeepTag::TPrim)
+        .then(|| {
+            children
+                .first()
+                .and_then(symbol_name)
+                .and_then(prim_from_name)
+        })
+        .flatten()
 }
 
 fn checked_precision_leaf(actual: &Expr, caller_bindings: &UnordMap<String, Prim>) -> Option<Prim> {
@@ -714,15 +734,6 @@ fn actualize_tensor_entry_parameters(
         }
     }
     Ok(actualized)
-}
-
-fn render_shape(shape: &[usize]) -> String {
-    let dimensions = shape
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{dimensions}]")
 }
 
 fn decode_effect_kind(metadata: &Metadata) -> Result<EffectKind, EffectKindDecodeError<'_>> {
@@ -1235,10 +1246,6 @@ impl<'a> EvalContext<'a> {
             // unresolved parameter had lost; the folded application carries
             // the operand's own annotation, so there is nothing left to
             // re-derive. Fail closed so a new unfolded ingress is loud.
-            DeepTag::Pipe => Err("a pipe reached evaluation unfolded: every checker \
-                 entry folds a pipe into the application it denotes \
-                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
-                .to_string()),
             DeepTag::Cast => self.eval_cast(node),
             DeepTag::Realize => {
                 // Bucket 1: `realize` is identity in the host runtime,
@@ -1381,11 +1388,29 @@ impl<'a> EvalContext<'a> {
         // differs from its declared order carried misaligned
         // `field_names[i]` metadata against `fields[i]`.
         self.result_producer = ResultProducer::aggregate(ordered_producers);
-        Ok(RuntimeValue::Adt {
+        Ok(self.adt_value(ctor, ordered.into(), Some(declared)))
+    }
+
+    /// An ADT value of the constructor `ctor`. It stores the constructor's
+    /// declared source spelling as the name it renders, by the rule the
+    /// compiled lane stores (chelis#2889); a constructor with no linker name
+    /// keeps the name it has.
+    fn adt_value(
+        &self,
+        ctor: &str,
+        fields: Values,
+        field_names: Option<Vec<String>>,
+    ) -> RuntimeValue {
+        RuntimeValue::Adt {
             ctor: ctor.to_string(),
-            fields: ordered.into(),
-            field_names: Some(declared),
-        })
+            source_name: self
+                .constructor_names
+                .get(ctor)
+                .cloned()
+                .unwrap_or_else(|| ctor.to_string()),
+            fields,
+            field_names,
+        }
     }
 
     fn eval_access(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
@@ -1404,6 +1429,7 @@ impl<'a> EvalContext<'a> {
                 ctor,
                 fields,
                 field_names,
+                ..
             } => {
                 let declared = self
                     .adt_fields
@@ -1498,6 +1524,12 @@ impl<'a> EvalContext<'a> {
         if let Some(value) = self.bindings.get(name).cloned() {
             self.result_producer = self.bindings.result_producer(name).cloned();
             return Ok(value);
+        }
+        // A dimension binder a site of this activation bound, which outlives
+        // the block the site sits in (spec/04-type-system.md section 4.4.1).
+        if let Some((_, extent)) = self.activation_extents.current(name) {
+            self.result_producer = None;
+            return Ok(RuntimeValue::int64(*extent));
         }
         if let Some(value) = self.tensor_bindings.get(name) {
             // External tensor bindings enter the host evaluator through the
@@ -1599,11 +1631,7 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::List(Vec::new().into()));
         }
         if name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
-            return Ok(RuntimeValue::Adt {
-                ctor: name.to_string(),
-                fields: Vec::new().into(),
-                field_names: None,
-            });
+            return Ok(self.adt_value(name, Vec::new().into(), None));
         }
         Err(format!("unknown runtime name `{name}`"))
     }
@@ -1684,8 +1712,10 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
 
-        // `dropout` is not in the host builtin table: every dropout the host
-        // walk reaches draws here from the interpreter's handler.
+        // A `dropout` application draws here, ahead of the generic builtin
+        // route, so its declared-result claims are checked against the draw.
+        // `eval_builtin`'s `dropout` arm runs the same kernel for any other
+        // route that dispatches the builtin by name.
         if var_name(func) == Some("dropout") && self.active_builtin_symbol("dropout") {
             let mut args = Vec::with_capacity(kids.len().saturating_sub(1));
             for arg in &kids[1..] {
@@ -1712,7 +1742,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 3
             && kids[2..].iter().any(|axis| var_name(axis).is_some())
         {
-            return self.eval_named_axis_reduction_app(reduce_name, kids);
+            return self.eval_named_axis_reduction_app(reduce_name, kids, node.metadata);
         }
 
         // chelis#339 site A twin: a named-axis EXPAND app — the axis slot
@@ -1726,7 +1756,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
         {
-            return self.eval_named_axis_reduction_app(expand_name, kids);
+            return self.eval_named_axis_reduction_app(expand_name, kids, node.metadata);
         }
 
         let arg_type_exprs = kids[1..]
@@ -1796,11 +1826,7 @@ impl<'a> EvalContext<'a> {
                 return Ok(RuntimeValue::List(items));
             }
             self.result_producer = ResultProducer::aggregate(arg_producers);
-            return Ok(RuntimeValue::Adt {
-                ctor: name.to_string(),
-                fields: args.into(),
-                field_names: None,
-            });
+            return Ok(self.adt_value(name, args.into(), None));
         }
 
         if let Some(name) = self.active_builtin_name(func) {
@@ -1809,8 +1835,10 @@ impl<'a> EvalContext<'a> {
                 let width = expect_int_arg(&args, 1)?;
                 // Preserve the operation precondition before the local claim.
                 if width < 0 {
-                    return Err(format!(
-                        "pad_sequences_to requires non-negative width, got {width}"
+                    return Err(chelis_abi::failure::negative_target_extent(
+                        "pad_sequences_to",
+                        1,
+                        width,
                     ));
                 }
                 for claim in claims {
@@ -1821,8 +1849,10 @@ impl<'a> EvalContext<'a> {
                     )?;
                 }
             }
-            let builtin_result =
-                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
+            let builtin_result = match explicit_accumulator(node.metadata) {
+                Some(accumulator) => accumulated_builtin_value(name, &args, accumulator),
+                None => self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref()),
+            };
             // The checked builtin catalog owns the numeric operation set.
             // Mixed-domain equality is trusted only for numeric arguments;
             // recursive container comparison can include authored strings.
@@ -1841,7 +1871,14 @@ impl<'a> EvalContext<'a> {
                             )
                         }))
             }) || (name == "concat"
-                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
+                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))))
+                // These run no callback and render every failure from their
+                // numeric arguments alone, never from an authored string, so
+                // a trap line in their failure is the runtime's own.
+                || matches!(
+                    name,
+                    "to_tensor" | "split" | "char_code" | "char_from_code" | "string_slice"
+                );
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
             } else {
@@ -1906,7 +1943,7 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };
-            let producer = if name == "index" && claims.iter().any(|claim| !claim.axes.is_empty()) {
+            let producer = if name == "index" && !self.claims_are_vacuous(claims) {
                 self.result_producer
                     .as_ref()
                     .and_then(ResultProducer::operation)
@@ -2019,6 +2056,7 @@ impl<'a> EvalContext<'a> {
                 .into_iter()
                 .map(|(axis, required)| ResultAxisClaim::literal(axis, required))
                 .collect(),
+            first_sites: Vec::new(),
         })
     }
 
@@ -2026,13 +2064,17 @@ impl<'a> EvalContext<'a> {
     ///
     /// A binder is resolved from its first witness among the tensor
     /// parameters, in signature order, which is the canonical side the entry
-    /// plan compares every later witness against. A binder no tensor
-    /// parameter declares has no witness here and adds nothing. Axes stay in
-    /// declared order, which the C lane's claim frame also follows.
+    /// plan compares every later witness against. With `first_sites`, a
+    /// binder in the declaration's [`chelis_ir::lower::DimBinderRoles`]
+    /// `return_only` set is bound by the body executing in that activation,
+    /// and the claim keeps the axis for [`EvalContext::resolve_first_sites`];
+    /// any other binder no tensor parameter declares adds nothing. Axes stay
+    /// in declared order, which the C lane's claim frame also follows.
     fn with_named_result_axes(
         claim: Option<DeclaredResultClaim>,
         declared: Option<&Expr>,
         witnesses: &[(String, NamedResultSource, usize)],
+        first_sites: Option<(u64, &chelis_ir::lower::DimBinderRoles)>,
     ) -> Result<Option<DeclaredResultClaim>, String> {
         let Some((_, dim_exprs)) = declared.and_then(tensor_type_dim_exprs) else {
             return Ok(claim);
@@ -2044,6 +2086,7 @@ impl<'a> EvalContext<'a> {
             return Ok(claim);
         }
         let mut named = Vec::new();
+        let mut first_site_axes = Vec::<FirstSiteAxis>::new();
         for (axis, dim_expr) in dim_exprs.iter().enumerate() {
             let Some((DeepTag::DName | DeepTag::DVar, kids)) = tagged_expr_children(dim_expr)
             else {
@@ -2054,6 +2097,23 @@ impl<'a> EvalContext<'a> {
             };
             let Some((_, source, size)) = witnesses.iter().find(|(name, _, _)| name == binder)
             else {
+                let binder = chelis_ir::lower::extent_binder_label(binder);
+                if let Some((activation, roles)) = first_sites
+                    && roles.return_only.contains(&binder)
+                {
+                    let at = first_site_axes
+                        .iter()
+                        .rposition(|site| site.binder == binder)
+                        .map_or(first_site_axes.len(), |last| last + 1);
+                    first_site_axes.insert(
+                        at,
+                        FirstSiteAxis {
+                            axis,
+                            binder,
+                            activation,
+                        },
+                    );
+                }
                 continue;
             };
             let required = i64::try_from(*size)
@@ -2064,15 +2124,17 @@ impl<'a> EvalContext<'a> {
                 source: Some(source.clone()),
             });
         }
-        if named.is_empty() {
+        if named.is_empty() && first_site_axes.is_empty() {
             return Ok(claim);
         }
         let mut claim = claim.unwrap_or(DeclaredResultClaim {
             rank: dim_exprs.len(),
             axes: Vec::new(),
+            first_sites: Vec::new(),
         });
         claim.axes.extend(named);
         claim.axes.sort_by_key(|axis| axis.axis);
+        claim.first_sites = first_site_axes;
         Ok(Some(claim))
     }
 
@@ -2163,6 +2225,7 @@ impl<'a> EvalContext<'a> {
         Ok((!axes.is_empty()).then_some(DeclaredResultClaim {
             rank: actualized.dims.len(),
             axes,
+            first_sites: Vec::new(),
         }))
     }
 
@@ -2214,7 +2277,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_) => {}
         }
         let value = self.eval_expr(expr)?;
-        if claims.iter().all(|claim| claim.axes.is_empty()) {
+        if self.claims_are_vacuous(claims) {
             return Ok(value);
         }
         let producer = self
@@ -2426,11 +2489,14 @@ impl<'a> EvalContext<'a> {
                 claims.push(DeclaredResultClaim {
                     rank: claim.dims.len(),
                     axes,
+                    first_sites: Vec::new(),
                 });
             }
             return self.eval_under_result_claim(region.initializer(), &claims);
         }
-        let lowering = lowering.for_local_ascription_region(region);
+        let lowering = lowering
+            .for_local_ascription_region(region)
+            .claiming_parameter_binders_at_activation();
         let mut scoped_types = UnordMap::new();
         let mut staged_inputs = UnordMap::new();
         for (name, value) in self.bindings.to_sorted() {
@@ -2494,13 +2560,21 @@ impl<'a> EvalContext<'a> {
                     .to_string(),
             );
         }
-        let producer_operation = chelis_ir::axis_sources::local_dim_guard_sites(dag)?
-            .first()
-            .map(|(_, claim)| claim.op)
-            .ok_or_else(|| {
-                "host runtime: checked local tensor ascription produced no local guard site"
-                    .to_string()
-            })?;
+        let producer_operation = match chelis_ir::axis_sources::local_dim_guard_sites(dag)?.first()
+        {
+            Some((_, claim)) => claim.op,
+            // An ascription at its binder's first producing site owes no
+            // comparison and so has no guard site; its value's producer still
+            // names the operation a later result claim reports.
+            None => chelis_ir::axis_sources::result_extent_sites(dag, roots[0])
+                .first()
+                .map(|site| site.operation())
+                .ok_or_else(|| {
+                    "host runtime: checked local tensor ascription produced neither a local \
+                     guard site nor a producing operation"
+                        .to_string()
+                })?,
+        };
         let prepared = chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(
             dag,
             &roots,
@@ -2514,6 +2588,7 @@ impl<'a> EvalContext<'a> {
         for claim in inherited_result_claims {
             self.check_declared_result_claim(claim, &value, producer_operation)?;
         }
+        self.observe_local_named_sites(&lowering, region, &value, producer_operation)?;
         self.result_producer = Some(ResultProducer::tensor(producer_operation));
         Ok(value)
     }
@@ -2746,7 +2821,7 @@ impl<'a> EvalContext<'a> {
                     &authored,
                     &args,
                 )?;
-                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses)?;
+                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses, None)?;
                 formal_claims.extend(claim);
             }
         }
@@ -2770,6 +2845,13 @@ impl<'a> EvalContext<'a> {
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
+        // A caller's first-site axes resolve in the caller's activation,
+        // whose sites have all run by the time its callee produces the
+        // result: the callee only ever sees concrete axes.
+        let inherited_claims = &inherited_claims
+            .iter()
+            .map(|claim| self.resolve_first_sites(claim))
+            .collect::<Vec<_>>();
         match callable {
             RuntimeValue::Closure {
                 checked_function: _,
@@ -2820,6 +2902,7 @@ impl<'a> EvalContext<'a> {
                 if let Some(name) = active_declaration.as_ref() {
                     self.active_declaration_names.push(name.clone());
                 }
+                let caller_activation = self.activation_extents.enter();
                 let value = (|| {
                     // A dimension variable declared by a tensor parameter is
                     // also an exact runtime i64 value in the callee frame.
@@ -2953,10 +3036,31 @@ impl<'a> EvalContext<'a> {
                         &param_types,
                         &args,
                     )?;
+                    // The parameters bind their binders before the body runs;
+                    // the body's sites bind the rest.
+                    for (name, source, size) in &named_result_witnesses {
+                        let size = i64::try_from(*size).map_err(|_| {
+                            format!("dimension binder `{name}` exceeds the exact i64 range")
+                        })?;
+                        self.activation_extents.bind(
+                            chelis_ir::lower::extent_binder_label(name),
+                            source.clone(),
+                            size,
+                        );
+                    }
+                    // The body's first sites bind exactly the declaration's
+                    // return-only binders, the set its named sites read.
+                    let roles = match (active_declaration.as_deref(), self.session.as_ref()) {
+                        (Some(name), Some(session)) => session
+                            .checked_subexpr_lowering_context()
+                            .dim_binder_roles(name),
+                        _ => chelis_ir::lower::DimBinderRoles::default(),
+                    };
                     let declaration_claim = Self::with_named_result_axes(
                         declaration_claim,
                         declared_result,
                         &named_result_witnesses,
+                        Some((self.activation_extents.current, &roles)),
                     )?;
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {
@@ -3019,10 +3123,33 @@ impl<'a> EvalContext<'a> {
                     //
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
+                    let late_first_sites = declaration_claim
+                        .as_ref()
+                        .filter(|claim| !claim.first_sites.is_empty())
+                        .map(|claim| DeclaredResultClaim {
+                            rank: claim.rank,
+                            axes: Vec::new(),
+                            first_sites: claim.first_sites.clone(),
+                        });
                     let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
                     claims.extend_from_slice(inherited_claims);
-                    self.eval_under_result_claim(&body, &claims)
+                    let value = self.eval_under_result_claim(&body, &claims)?;
+                    // The declared result is a later site of every binder
+                    // the body bound, including one whose first site ran
+                    // after the returned value's producer, where the claim
+                    // above found it unbound.
+                    if let Some(claim) = late_first_sites {
+                        let producer = self
+                            .result_producer
+                            .as_ref()
+                            .and_then(ResultProducer::operation)
+                            .unwrap_or("return")
+                            .to_owned();
+                        self.check_declared_result_claim(&claim, &value, &producer)?;
+                    }
+                    Ok(value)
                 })();
+                self.activation_extents.exit(caller_activation);
                 if active_declaration.is_some() {
                     let popped = self.active_declaration_names.pop();
                     debug_assert_eq!(popped.as_ref(), active_declaration.as_ref());
@@ -3073,29 +3200,30 @@ impl<'a> EvalContext<'a> {
         let target_prim = prim_from_name(target)
             .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
-        // [05-OP-6]: the truncating rung has its own sealed kernel and
-        // its own trap brand. The checker has already pinned the pair to
-        // float source / integer target.
-        if chelis_deep::cast_mode_of(kids)
+        // Each named rung has its own sealed kernel and its own trap
+        // brand. The checker has already pinned the pair to the rung's
+        // admitted sources and integer targets.
+        if let chelis_deep::CastMode::Named(mode) = chelis_deep::cast_mode_of(kids)
             .map_err(|selector| format!("`{selector}` is not a recognized cast mode selector"))?
-            == chelis_deep::CastMode::Trunc
         {
             let result = match value {
                 RuntimeValue::Scalar(payload) => {
-                    chelis_types::cast_trunc_scalar("cast_trunc", payload.value(), target_prim)
+                    chelis_types::named_cast_scalar(mode, payload.value(), target_prim)
                         .map(RuntimeValue::from_scalar_value)
                         .map_err(|trap| trap.to_string())
                 }
-                RuntimeValue::Tensor(tensor) => cast_trunc_tensor_value(tensor, target_prim),
-                // The checker pins the source to a float scalar or
-                // tensor ([05-OP-6]), so this arm is unreachable for a
-                // well-typed program. It names no value: rendering one
-                // here would need a third numeric formatter, which
+                RuntimeValue::Tensor(tensor) => named_cast_tensor_value(mode, tensor, target_prim),
+                // The checker pins the source to a numeric scalar or
+                // tensor, so this arm is unreachable for a well-typed
+                // program. It names no value: rendering one here would
+                // need a third numeric formatter, which
                 // `spec/design/faithful_observation.md` B2.4 forbids.
                 _ => Err(format!(
-                    "unsupported cast_trunc operand for target {}; \
-                     [05-OP-6] requires a float scalar or tensor source",
-                    target_prim.name()
+                    "unsupported {} operand for target {}; \
+                     {} requires a scalar or tensor source",
+                    mode.keyword(),
+                    target_prim.name(),
+                    mode.atom()
                 )),
             };
             return if numeric_input {
@@ -3151,7 +3279,8 @@ impl<'a> EvalContext<'a> {
         value: &RuntimeValue,
         producer: &str,
     ) -> Result<(), String> {
-        self.mark_numeric_trap_from_trusted_result(claim.verdict(value, producer))
+        let verdict = self.resolve_first_sites(claim).verdict(value, producer);
+        self.mark_numeric_trap_from_trusted_result(verdict)
     }
 
     fn check_declared_shape_claim(
@@ -3160,7 +3289,99 @@ impl<'a> EvalContext<'a> {
         shape: &[usize],
         producer: &str,
     ) -> Result<(), String> {
-        self.mark_numeric_trap_from_trusted_result(claim.shape_verdict(shape, producer))
+        let verdict = self
+            .resolve_first_sites(claim)
+            .shape_verdict(shape, producer);
+        self.mark_numeric_trap_from_trusted_result(verdict)
+    }
+
+    /// Whether no claim checks an axis here: none is declared, and no first
+    /// site has bound a binder one names.
+    fn claims_are_vacuous(&self, claims: &[DeclaredResultClaim]) -> bool {
+        claims
+            .iter()
+            .all(|claim| self.resolve_first_sites(claim).axes.is_empty())
+    }
+
+    /// `claim` with each first-site axis resolved against the site that
+    /// bound its binder in the claim's activation, after the declared axes,
+    /// as the C lane checks its first-site frames after the declared frame.
+    /// An axis whose binder that activation has not bound is dropped.
+    fn resolve_first_sites(&self, claim: &DeclaredResultClaim) -> DeclaredResultClaim {
+        let mut resolved = DeclaredResultClaim {
+            rank: claim.rank,
+            axes: claim.axes.clone(),
+            first_sites: Vec::new(),
+        };
+        for site in &claim.first_sites {
+            if let Some((source, required)) =
+                self.activation_extents.get(site.activation, &site.binder)
+            {
+                resolved.axes.push(ResultAxisClaim {
+                    axis: site.axis,
+                    required: *required,
+                    source: Some(source.clone()),
+                });
+            }
+        }
+        resolved
+    }
+
+    /// Relate the named sites of a local tensor ascription region to the
+    /// other sites of the executing activation (spec/04-type-system.md
+    /// section 4.4.1): a binder the activation has not bound is bound here,
+    /// and one it has bound is a section 4.7 claim this site's extent must
+    /// meet, trapping `Domain` at `producer` otherwise.
+    fn observe_local_named_sites(
+        &mut self,
+        lowering: &chelis_ir::lower::SubexprLoweringContext,
+        region: &chelis_ir::lower::LocalAscriptionBindingRegion,
+        value: &RuntimeValue,
+        producer: &str,
+    ) -> Result<(), String> {
+        let RuntimeValue::Tensor(tensor) = value else {
+            return Ok(());
+        };
+        for site in lowering.local_ascription_named_sites(region) {
+            let Some(&observed) = tensor.value.shape.get(site.axis) else {
+                continue;
+            };
+            let observed = i64::try_from(observed)
+                .map_err(|_| format!("extent `{}` exceeds the exact i64 range", site.binder))?;
+            match self.activation_extents.current(&site.binder) {
+                Some((_, required)) if *required != observed => {
+                    let required = *required;
+                    return self.mark_numeric_trap_from_trusted_result(Err(format!(
+                        "extent `{}`: claimed = {required}, {producer} axis {} = {observed}\n\
+                         numeric trap: domain in {producer} at i64",
+                        site.binder, site.axis
+                    )));
+                }
+                Some(_) => {}
+                // Only an output-inferred binder may be bound by a site
+                // (spec/04-type-system.md section 4.4.1). Any other binder is
+                // a parameter's, and an activation without its record, such
+                // as a lambda's, cannot claim it: refuse as the lowering does
+                // for a binder it cannot resolve.
+                None if !site.output_inferred => {
+                    return Err(format!(
+                        "local tensor ascription `{}` cannot resolve authored extent `{}` in \
+                         this activation",
+                        site.binding, site.binder
+                    ));
+                }
+                None => self.activation_extents.bind(
+                    site.binder.clone(),
+                    NamedResultSource {
+                        claim: site.binder,
+                        parameter: site.binding,
+                        axis: site.axis,
+                    },
+                    observed,
+                ),
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn mark_numeric_trap_from_trusted_result<T>(
@@ -3368,13 +3589,22 @@ impl<'a> EvalContext<'a> {
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.
             "abs" => numeric_unop(args, Some(IntUnOp::Abs), Some(FloatUnOp::Abs)),
+            // [05-OP-36]: unit and two List, tuple, Dict, Option or ADT values
+            // compare structurally to one bool scalar, and `neq` is the
+            // complement. Scalars, strings and direct tensor operands keep
+            // their own comparison.
+            "eq" | "neq" if is_recursive_equality_operand(args) => {
+                let equal = runtime_values_equal(&args[0], &args[1])?;
+                Ok(RuntimeValue::Bool(equal == (name == "eq")))
+            }
             "eq" => compare_eq(args),
-            "neq" => compare_runtime(args, CompareOp::Ne),
-            "cmplt" => ordered_compare(args, CompareOp::Lt),
-            "lt" => ordered_compare(args, CompareOp::Lt),
-            "gt" => ordered_compare(args, CompareOp::Gt),
-            "gte" => ordered_compare(args, CompareOp::Gte),
-            "lte" => ordered_compare(args, CompareOp::Lte),
+            "neq" => compare_runtime(args, CompareOp::Ne, "neq"),
+            "cmplt" => ordered_compare(args, CompareOp::Lt, "cmplt"),
+            "lt" => ordered_compare(args, CompareOp::Lt, "lt"),
+            "gt" => ordered_compare(args, CompareOp::Gt, "gt"),
+            "gte" => ordered_compare(args, CompareOp::Gte, "gte"),
+            "lte" => ordered_compare(args, CompareOp::Lte, "lte"),
+            "dropout" => self.eval_dropout_builtin(args),
             "uniform_like" => {
                 let key = expect_key_arg(args, 0, "uniform_like")?;
                 let template = expect_tensor_arg(args, 1)?;
@@ -3398,13 +3628,13 @@ impl<'a> EvalContext<'a> {
             // would hide.
             "and" => match (args.first(), args.get(1)) {
                 (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-                    tensor_bool_binop(lhs, rhs, |a, b| a && b).map(RuntimeValue::Tensor)
+                    tensor_bool_binop(lhs, rhs, "and", |a, b| a && b).map(RuntimeValue::Tensor)
                 }
                 _ => bool_binop(args, |lhs, rhs| lhs && rhs),
             },
             "or" => match (args.first(), args.get(1)) {
                 (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-                    tensor_bool_binop(lhs, rhs, |a, b| a || b).map(RuntimeValue::Tensor)
+                    tensor_bool_binop(lhs, rhs, "or", |a, b| a || b).map(RuntimeValue::Tensor)
                 }
                 _ => bool_binop(args, |lhs, rhs| lhs || rhs),
             },
@@ -3426,27 +3656,21 @@ impl<'a> EvalContext<'a> {
             "char_code" => {
                 let value = expect_string_arg(args, 0)?;
                 let mut chars = value.chars();
-                let character = chars.next().ok_or_else(|| {
-                    "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]"
-                        .to_string()
-                })?;
-                if chars.next().is_some() {
-                    return Err(
-                        "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]"
-                            .to_string(),
-                    );
+                match (chars.next(), chars.next()) {
+                    (Some(character), None) => {
+                        Ok(RuntimeValue::int64(i64::from(u32::from(character))))
+                    }
+                    _ => Err(chelis_abi::failure::char_code_not_one_scalar(
+                        value.chars().count(),
+                    )),
                 }
-                Ok(RuntimeValue::int64(i64::from(u32::from(character))))
             }
             "char_from_code" => {
                 let code = expect_int_arg(args, 0)?;
                 let character = u32::try_from(code)
                     .ok()
                     .and_then(char::from_u32)
-                    .ok_or_else(|| {
-                        "Domain: char_from_code requires a Unicode scalar value [05-OP-58]"
-                            .to_string()
-                    })?;
+                    .ok_or_else(|| chelis_abi::failure::char_from_code_invalid(code))?;
                 Ok(RuntimeValue::String(character.to_string()))
             }
             "string_concat" => Ok(RuntimeValue::String(format!(
@@ -3458,8 +3682,11 @@ impl<'a> EvalContext<'a> {
                 let value = expect_string_arg(args, 0)?;
                 let start = expect_int_arg(args, 1)?;
                 let len = expect_int_arg(args, 2)?;
-                if start < 0 || len < 0 {
-                    return Err("string_slice requires non-negative start and length".to_string());
+                // [05-OP-58]: a negative start or length is a domain error.
+                for (argument, value) in [("start", start), ("length", len)] {
+                    if value < 0 {
+                        return Err(chelis_abi::failure::string_slice_negative(argument, value));
+                    }
                 }
                 let chars = value.chars().collect::<Vec<_>>();
                 let start = start as usize;
@@ -3488,14 +3715,16 @@ impl<'a> EvalContext<'a> {
             ))),
             "to_int" => {
                 let value = expect_string_arg(args, 0)?;
-                Ok(match value.trim().parse::<i64>() {
-                    Ok(parsed) => RuntimeValue::Adt {
+                Ok(match chelis_runtime::text_parse::to_int(&value) {
+                    Some(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::int64(parsed)].into(),
                         field_names: None,
                     },
-                    Err(_) => RuntimeValue::Adt {
+                    None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -3503,14 +3732,16 @@ impl<'a> EvalContext<'a> {
             }
             "to_float" => {
                 let value = expect_string_arg(args, 0)?;
-                Ok(match value.trim().parse::<f64>() {
-                    Ok(parsed) => RuntimeValue::Adt {
+                Ok(match chelis_runtime::text_parse::to_float(&value) {
+                    Some(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::float64(parsed)].into(),
                         field_names: None,
                     },
-                    Err(_) => RuntimeValue::Adt {
+                    None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -3524,12 +3755,10 @@ impl<'a> EvalContext<'a> {
             "index" => {
                 let list = expect_list_arg(args, 0)?;
                 let index = expect_int_arg(args, 1)?;
-                if index < 0 {
-                    return Err(format!("index requires non-negative index, got {index}"));
-                }
-                list.get(index as usize).cloned().ok_or_else(|| {
-                    format!("index {index} out of bounds for list of len {}", list.len())
-                })
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|position| list.get(position).cloned())
+                    .ok_or_else(|| chelis_abi::failure::list_index_out_of_bounds(index, list.len()))
             }
             "append" => {
                 let mut list = expect_list_arg(args, 0)?;
@@ -3538,7 +3767,7 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .ok_or_else(|| "append expects 2 arguments".to_string())?,
                 );
-                Ok(RuntimeValue::List(list.into()))
+                Ok(RuntimeValue::List(list))
             }
             "concat" => match (args.first(), args.get(1).and_then(RuntimeValue::as_i64)) {
                 (Some(RuntimeValue::List(parts)), Some(axis))
@@ -3551,27 +3780,31 @@ impl<'a> EvalContext<'a> {
                 _ => {
                     let mut lhs = expect_list_arg(args, 0)?;
                     lhs.extend(expect_list_arg(args, 1)?);
-                    Ok(RuntimeValue::List(lhs.into()))
+                    Ok(RuntimeValue::List(lhs))
                 }
             },
             "take" => {
                 let list = expect_list_arg(args, 0)?;
                 let count = expect_int_arg(args, 1)?;
                 if count < 0 {
-                    return Err(format!("take requires non-negative count, got {count}"));
+                    return Err(chelis_abi::failure::list_argument_negative(
+                        "take", "count", count,
+                    ));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().take(count as usize).collect(),
+                    list.iter().take(count as usize).cloned().collect(),
                 ))
             }
             "skip" => {
                 let list = expect_list_arg(args, 0)?;
                 let count = expect_int_arg(args, 1)?;
                 if count < 0 {
-                    return Err(format!("skip requires non-negative count, got {count}"));
+                    return Err(chelis_abi::failure::list_argument_negative(
+                        "skip", "count", count,
+                    ));
                 }
                 Ok(RuntimeValue::List(
-                    list.into_iter().skip(count as usize).collect(),
+                    list.iter().skip(count as usize).cloned().collect(),
                 ))
             }
             // [05-OP-67]: the explicit one-argument consume. The checker
@@ -3736,16 +3969,83 @@ impl<'a> EvalContext<'a> {
                 let callback = args[1].clone();
                 let n = expect_int_arg(args, 2)?;
                 if n < 0 {
-                    return Err(format!(
-                        "tensor_scan requires a non-negative length, got {n}"
+                    // The guard runs before any callback, so the trap line is
+                    // the runtime's own and not an authored `fail`.
+                    return self.mark_numeric_trap_from_trusted_result(Err(
+                        chelis_abi::failure::negative_length("tensor_scan", n),
                     ));
                 }
                 let precision = match &initial {
                     RuntimeValue::Scalar(payload) => payload.dtype(),
                     RuntimeValue::Bool(_) => Prim::Bool,
+                    RuntimeValue::Tensor(state) => {
+                        // [05-HOST-1]: a tensor state stacks to
+                        // `[n] ++ state_shape` at its own precision. The
+                        // empty result keeps every state extent, and a
+                        // zero-sized state still runs the callback n times.
+                        let state_shape = state.value.shape.clone();
+                        let precision = state.precision;
+                        let callback_type_children = arg_type_exprs
+                            .get(1)
+                            .and_then(Option::as_ref)
+                            .and_then(checked_function_children);
+                        let initial_type = arg_type_exprs.first().cloned().flatten();
+                        let callback_arg_types = [
+                            initial_type.clone(),
+                            callback_type_children.and_then(|children| children.get(1).cloned()),
+                        ];
+                        let mut elements = Vec::new();
+                        let mut acc = initial.clone();
+                        for i in 0..n as usize {
+                            acc = self.apply_resolved_callable_with_arg_types(
+                                callback.clone(),
+                                vec![acc, RuntimeValue::int64(i as i64)],
+                                &callback_arg_types,
+                                initial_type.as_ref(),
+                            )?;
+                            let RuntimeValue::Tensor(next) = &acc else {
+                                return Err(format!(
+                                    "tensor_scan callback must return a tensor state, got {}",
+                                    describe_argument(Some(&acc))
+                                ));
+                            };
+                            // The checker fixes the state's dtype, so a changed
+                            // dtype is a checker desync. [05-HOST-1] makes the
+                            // shape invariant too; a callback whose declared
+                            // state admits another shape fails here, as soon as
+                            // its application returns.
+                            if next.precision != precision {
+                                return Err(
+                                    "tensor_scan callback changed the state's dtype".to_string()
+                                );
+                            }
+                            if next.value.shape != state_shape {
+                                let extents = |shape: &[usize]| {
+                                    shape
+                                        .iter()
+                                        .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+                                        .collect::<Vec<_>>()
+                                };
+                                return self.mark_numeric_trap_from_trusted_result(Err(
+                                    chelis_abi::failure::tensor_scan_state_changed(
+                                        &extents(&state_shape),
+                                        &extents(&next.value.shape),
+                                    ),
+                                ));
+                            }
+                            let storage = next.value.storage();
+                            elements.extend((0..storage.len()).map(|k| storage.scalar_at(k)));
+                        }
+                        let mut shape = Vec::with_capacity(state_shape.len() + 1);
+                        shape.push(n as usize);
+                        shape.extend(state_shape);
+                        return Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_scalars(
+                            precision, shape, &elements,
+                        )));
+                    }
                     other => {
                         return Err(format!(
-                            "tensor_scan expects a scalar initial value (numeric or bool), got {other:?}"
+                            "tensor_scan expects a scalar or tensor initial value, got {other:?}"
                         ));
                     }
                 };
@@ -3765,7 +4065,7 @@ impl<'a> EvalContext<'a> {
                 // stay exact at full i64 (a scan accumulating above 2^53
                 // no longer collapses through f64 storage).
                 let mut ints: Vec<i64> = Vec::new();
-                let mut floats: Vec<f64> = Vec::new();
+                let mut floats: Vec<chelis_types::ScalarValue> = Vec::new();
                 let mut acc = initial;
                 let callback_type_children = arg_type_exprs
                     .get(1)
@@ -3801,7 +4101,7 @@ impl<'a> EvalContext<'a> {
                             }
                             match payload.value().as_i64_exact() {
                                 Some(v) => ints.push(v),
-                                None => floats.push(payload.as_f64_lossy()),
+                                None => floats.push(payload.value()),
                             }
                         }
                         RuntimeValue::Bool(b) => {
@@ -3822,7 +4122,7 @@ impl<'a> EvalContext<'a> {
                     }
                 }
                 let tensor = if precision.is_float() {
-                    RuntimeTensorValue::from_wide("tensor_scan", precision, vec![n], floats)?
+                    RuntimeTensorValue::from_scalars(precision, vec![n], &floats)
                 } else {
                     RuntimeTensorValue::from_wide_int("tensor_scan", precision, vec![n], ints)?
                 };
@@ -3953,11 +4253,13 @@ impl<'a> EvalContext<'a> {
                 Ok(match dict_lookup(&dict, key) {
                     Some(value) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![value.clone()].into(),
                         field_names: None,
                     },
                     None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -3995,7 +4297,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
                 upsert_dict_entry(&mut dict, key, value);
-                Ok(RuntimeValue::Dict(dict.into()))
+                Ok(RuntimeValue::Dict(dict))
             }
             "dict_merge" => {
                 let mut lhs = expect_dict_arg(args, 0)?;
@@ -4004,7 +4306,7 @@ impl<'a> EvalContext<'a> {
                     ensure_dict_key_supported(&key)?;
                     upsert_dict_entry(&mut lhs, key, value);
                 }
-                Ok(RuntimeValue::Dict(lhs.into()))
+                Ok(RuntimeValue::Dict(lhs))
             }
             "dict_keys" => {
                 let dict = expect_dict_arg(args, 0)?;
@@ -4102,9 +4404,7 @@ impl<'a> EvalContext<'a> {
                 };
                 let (shape, data) =
                     nested_list_to_tensor_data(&values, precision, &expected_shape)?;
-                let storage =
-                    chelis_types::finalize_tensor("to_tensor", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("to_tensor", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(shape, storage),
                 )))
@@ -4121,9 +4421,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
                 let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
-                let storage =
-                    chelis_types::finalize_tensor("pad_sequences", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("pad_sequences", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width], storage),
                 )))
@@ -4136,9 +4434,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
                 let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
-                let storage =
-                    chelis_types::finalize_tensor("pad_sequences_to", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("pad_sequences_to", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width.max(0) as usize], storage),
                 )))
@@ -4149,38 +4445,51 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::String(text))
             }
             "round_to" => {
-                // [05-OP-1]: per-dtype at declared widths, f64 and f32
-                // only, dispatched STRICTLY on the operand's own dtype --
-                // no widen/round/re-narrow lane exists ([04-NUM-8] has no
-                // exception vocabulary), and unsupported float widths fail
-                // loudly here exactly as they do at check time.
+                // [05-OP-1]: exact decimal rounding of the operand's stored
+                // value at its own float width, through the runtime's one
+                // definition shared with compiled host code. A non-finite
+                // operand passes through with its stored bits unchanged.
                 let places = expect_int_arg(args, 1)?;
-                match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
-                        let rounded =
-                            super::numeric_text::round_to_f64_impl(payload.as_f64_lossy(), places)?;
-                        Ok(RuntimeValue::float64(rounded))
-                    }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
-                        let rounded = super::numeric_text::round_to_f32_impl(
-                            payload.as_f64_lossy() as f32,
-                            places,
-                        )?;
-                        RuntimeValue::scalar_like_float(Prim::F32, f64::from(rounded))
-                    }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                        Err(format!(
-                            "round_to: unsupported operand dtype {} ([05-OP-1] authors \
-                             decimal rounding for f64 and f32 only; cast the operand \
-                             explicitly)",
-                            payload.dtype().name()
-                        ))
-                    }
-                    other => Err(format!(
+                let Some(RuntimeValue::Scalar(payload)) = args.first() else {
+                    return Err(format!(
                         "expected float arg at index 0, got {}",
-                        describe_argument(other)
-                    )),
-                }
+                        describe_argument(args.first())
+                    ));
+                };
+                let value = payload.value();
+                let rounded =
+                    match value.element_ref() {
+                        ElementRef::F64(x) if x.is_finite() => {
+                            f64::from_bits(round_to_bits(x.to_bits(), FloatLayout::F64, places))
+                        }
+                        ElementRef::F32(x) if x.is_finite() => f64::from(f32::from_bits(
+                            round_to_bits(u64::from(x.to_bits()), FloatLayout::F32, places) as u32,
+                        )),
+                        ElementRef::F16(x) if x.is_finite() => half::f16::from_bits(round_to_bits(
+                            u64::from(x.to_bits()),
+                            FloatLayout::F16,
+                            places,
+                        )
+                            as u16)
+                        .to_f64(),
+                        ElementRef::Bf16(x) if x.is_finite() => half::bf16::from_bits(
+                            round_to_bits(u64::from(x.to_bits()), FloatLayout::BF16, places) as u16,
+                        )
+                        .to_f64(),
+                        ElementRef::F64(_)
+                        | ElementRef::F32(_)
+                        | ElementRef::F16(_)
+                        | ElementRef::Bf16(_) => return Ok(RuntimeValue::from_scalar_value(value)),
+                        _ => {
+                            return Err(format!(
+                                "expected float arg at index 0, got {}",
+                                describe_argument(args.first())
+                            ));
+                        }
+                    };
+                // Each rounded value is exact at its own width, so this
+                // construction performs no further rounding.
+                RuntimeValue::scalar_like_float(payload.dtype(), rounded)
             }
             // Host-lane CSV I/O (chelis#903) over the canonical
             // List[Dict[string,string]] text-table carrier.
@@ -4259,14 +4568,11 @@ impl<'a> EvalContext<'a> {
                 let column = expect_string_arg(args, 2)?;
                 super::csv::csv_str_at(value, row_idx, &column).map(RuntimeValue::String)
             }
-            // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
-            //
-            // Current eval/test implementation of subprocess exec. Arguments
-            // pass straight to the OS as argv, without implicit shell, glob,
-            // `$VAR`, or backtick interpolation. The C and HIP build backends
-            // currently reject this builtin; compiled host parity remains
-            // required by [05-HOST-2] and tracked by chelis#1297. This
-            // evaluator boundary does not implement that separate lane.
+            // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout,
+            // stderr)`. Arguments pass straight to the OS as argv, without
+            // implicit shell, glob, `$VAR`, or backtick interpolation. The
+            // result comes from the runtime's one decoding, shared with
+            // compiled host code (chelis#1297).
             "process_run" => {
                 let cmd = expect_string_arg(args, 0)?;
                 let raw_args = expect_list_arg(args, 1)?;
@@ -4281,21 +4587,22 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                let output = self.system.run_process(&cmd, &argv)?;
-                // A process killed by a signal has no exit code; report -1 so
-                // callers can distinguish it from a clean exit 0.
-                let exit_code = output.exit_status.map_or(-1_i64, i64::from);
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let raw = self.system.run_process(&cmd, &argv)?;
+                let output = chelis_runtime::host_process::decode_process_output(&cmd, raw)?;
                 Ok(RuntimeValue::Tuple(
                     vec![
-                        RuntimeValue::int64(exit_code),
-                        RuntimeValue::String(stdout),
-                        RuntimeValue::String(stderr),
+                        RuntimeValue::int64(output.exit_code),
+                        RuntimeValue::String(output.stdout),
+                        RuntimeValue::String(output.stderr),
                     ]
                     .into(),
                 ))
             }
+            // [05-OP-75]: `(seconds, nanoseconds)` from one policy-checked
+            // host reading, through the runtime definition compiled host
+            // code also calls.
+            "clock_wall_read" => Ok(clock_time_value(self.system.clock_wall_read()?)),
+            "clock_monotonic_read" => Ok(clock_time_value(self.system.clock_monotonic_read()?)),
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
                 let contents = expect_string_arg(args, 1)?;
@@ -4389,6 +4696,16 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 3)?;
                 let mode = expect_string_arg(args, 4)?;
                 tensor_scatter_value(&base, &indices, &updates, axis, &mode)
+                    .map(RuntimeValue::Tensor)
+            }
+            // [05-OP-52]: `scatter_replace` is the replace-mode instance of
+            // `scatter`.
+            "scatter_replace" => {
+                let base = expect_tensor_arg(args, 0)?;
+                let indices = expect_tensor_arg(args, 1)?;
+                let updates = expect_tensor_arg(args, 2)?;
+                let axis = expect_int_arg(args, 3)?;
+                tensor_scatter_value(&base, &indices, &updates, axis, "replace")
                     .map(RuntimeValue::Tensor)
             }
             "scatter_elements" => {
@@ -4498,12 +4815,11 @@ impl<'a> EvalContext<'a> {
                     )?))
                 }
                 Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide(
-                        "scalar_to_tensor",
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_scalars(
                         payload.dtype(),
                         vec![],
-                        vec![payload.as_f64_lossy()],
-                    )?))
+                        &[payload.value()],
+                    )))
                 }
                 Some(RuntimeValue::Bool(value)) => {
                     Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
@@ -4551,7 +4867,7 @@ impl<'a> EvalContext<'a> {
                 if cond {
                     Ok(RuntimeValue::Unit)
                 } else {
-                    Err(format!("assert failed: {label}"))
+                    Err(chelis_runtime::host_assert::assert_message(&label))
                 }
             }
             "test_assert_eq" => {
@@ -4565,10 +4881,10 @@ impl<'a> EvalContext<'a> {
                 if runtime_values_equal(actual, expected)? {
                     Ok(RuntimeValue::Unit)
                 } else {
-                    Err(format!(
-                        "assert_eq ({label}): expected {}, got {}",
-                        render_value(expected),
-                        render_value(actual)
+                    Err(chelis_runtime::host_assert::assert_eq_message(
+                        &label,
+                        &render_value(expected),
+                        &render_value(actual),
                     ))
                 }
             }
@@ -4579,20 +4895,20 @@ impl<'a> EvalContext<'a> {
                 if actual.precision != expected.precision
                     || actual.value.shape != expected.value.shape
                 {
-                    return Err(format!(
-                        "assert_eq_tensor ({label}): expected tensor shape {:?} at {}, got {:?} at {}",
-                        expected.value.shape,
+                    return Err(chelis_runtime::host_assert::eq_tensor_header_message(
+                        &label,
+                        &expected.value.shape,
                         expected.precision.name(),
-                        actual.value.shape,
-                        actual.precision.name()
+                        &actual.value.shape,
+                        actual.precision.name(),
                     ));
                 }
                 for index in 0..actual.value.storage().len() {
                     if actual.value.storage().scalar_at(index)
                         != expected.value.storage().scalar_at(index)
                     {
-                        return Err(format!(
-                            "assert_eq_tensor ({label}): first mismatch at row-major index {index}"
+                        return Err(chelis_runtime::host_assert::eq_tensor_mismatch_message(
+                            &label, index,
                         ));
                     }
                 }
@@ -4613,8 +4929,8 @@ impl<'a> EvalContext<'a> {
                 let label = expect_string_arg(args, 3)?;
                 let tensor_prim = actual.value.prim();
                 if tensor_prim != expected.value.prim() || tensor_prim != tolerance.dtype() {
-                    return Err(format!(
-                        "assert_close_tensor ({label}): actual, expected, and tolerance must have one common active float dtype"
+                    return Err(chelis_runtime::host_assert::close_common_dtype_message(
+                        &label,
                     ));
                 }
                 if !tensor_prim.is_float() {
@@ -4624,10 +4940,10 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 if actual.value.shape != expected.value.shape {
-                    return Err(format!(
-                        "assert_close_tensor ({label}): shape mismatch, expected {}, got {}",
-                        render_shape(&expected.value.shape),
-                        render_shape(&actual.value.shape)
+                    return Err(chelis_runtime::host_assert::close_shape_message(
+                        &label,
+                        &expected.value.shape,
+                        &actual.value.shape,
                     ));
                 }
                 let tolerance_f64 = tolerance.as_f64_lossy();
@@ -4636,8 +4952,9 @@ impl<'a> EvalContext<'a> {
                         tolerance.dtype(),
                         tolerance.value().element_ref(),
                     );
-                    return Err(format!(
-                        "assert_close_tensor ({label}): invalid tolerance {rendered_tolerance} (must be finite and non-negative)"
+                    return Err(chelis_runtime::host_assert::close_tolerance_message(
+                        &label,
+                        &rendered_tolerance,
                     ));
                 }
                 if actual.value.len() != expected.value.len() {
@@ -4652,46 +4969,54 @@ impl<'a> EvalContext<'a> {
                     actual.value.storage().view(),
                     expected.value.storage().view(),
                 ) {
-                    (StorageView::F64(actual), StorageView::F64(expected)) => first_f64_mismatch(
-                        actual.iter().copied(),
-                        expected.iter().copied(),
-                        tolerance_f64,
-                    ),
-                    (StorageView::F32(actual), StorageView::F32(expected)) => first_f32_mismatch(
-                        actual.iter().copied(),
-                        expected.iter().copied(),
-                        tolerance_f64 as f32,
-                    ),
-                    (StorageView::F16(actual), StorageView::F16(expected)) => first_f32_mismatch(
-                        actual.iter().map(|value| value.to_f32()),
-                        expected.iter().map(|value| value.to_f32()),
-                        tolerance_f64 as f32,
-                    ),
-                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => first_f32_mismatch(
-                        actual.iter().map(|value| value.to_f32()),
-                        expected.iter().map(|value| value.to_f32()),
-                        tolerance_f64 as f32,
-                    ),
+                    (StorageView::F64(actual), StorageView::F64(expected)) => {
+                        chelis_runtime::host_assert::first_f64_mismatch(
+                            actual.iter().copied(),
+                            expected.iter().copied(),
+                            tolerance_f64,
+                        )
+                    }
+                    (StorageView::F32(actual), StorageView::F32(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().copied(),
+                            expected.iter().copied(),
+                            tolerance_f64 as f32,
+                        )
+                    }
+                    (StorageView::F16(actual), StorageView::F16(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().map(|value| value.to_f32()),
+                            expected.iter().map(|value| value.to_f32()),
+                            tolerance_f64 as f32,
+                        )
+                    }
+                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => {
+                        chelis_runtime::host_assert::first_f32_mismatch(
+                            actual.iter().map(|value| value.to_f32()),
+                            expected.iter().map(|value| value.to_f32()),
+                            tolerance_f64 as f32,
+                        )
+                    }
                     _ => unreachable!("common active-float dtype check makes storage exhaustive"),
                 };
                 if let Some(index) = mismatch {
                     let actual = actual.value.storage().scalar_at(index);
                     let expected = expected.value.storage().scalar_at(index);
-                    let nan_suffix = if float_element_is_nan(actual.element_ref())
-                        || float_element_is_nan(expected.element_ref())
-                    {
-                        " (NaN is never close)"
-                    } else {
-                        ""
-                    };
+                    let either_nan = float_element_is_nan(actual.element_ref())
+                        || float_element_is_nan(expected.element_ref());
                     let rendered_actual =
                         chelis_types::format_element(tensor_prim, actual.element_ref());
                     let rendered_expected =
                         chelis_types::format_element(tensor_prim, expected.element_ref());
                     let rendered_tolerance =
                         chelis_types::format_element(tensor_prim, tolerance.value().element_ref());
-                    return Err(format!(
-                        "assert_close_tensor ({label}): at index {index} expected {rendered_expected}, got {rendered_actual}, tol {rendered_tolerance}{nan_suffix}"
+                    return Err(chelis_runtime::host_assert::close_mismatch_message(
+                        &label,
+                        index,
+                        &rendered_expected,
+                        &rendered_actual,
+                        &rendered_tolerance,
+                        either_nan,
                     ));
                 }
                 Ok(RuntimeValue::Unit)
@@ -4803,7 +5128,14 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("{name} requires non-negative axis, got {axis}"));
                 }
                 if count < 0 {
-                    return Err(format!("{name} requires non-negative extent, got {count}"));
+                    // A runtime negative size fails the non-negativity guard
+                    // before allocation (spec/04-type-system.md section 4.7),
+                    // rendered as every lane renders it.
+                    return Err(chelis_abi::failure::negative_target_extent(
+                        if name == "insert" { "insert" } else { "expand" },
+                        axis as usize,
+                        count,
+                    ));
                 }
                 // One shape per operation (spec/04-type-system.md section
                 // 4.7.2), so the name selects the evaluator rather than a
@@ -4833,6 +5165,15 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
+                // [05-OP-11]: an execution-time zero extent traps `Domain` as
+                // `mean` at the result dtype, before the composition runs.
+                if tensor.value.shape[axis] == 0 {
+                    return Err(chelis_types::NumericTrap::Domain {
+                        op: "mean",
+                        prim: tensor.precision,
+                    }
+                    .to_string());
+                }
                 eval_composed_unary(&tensor, |dag, decl, x, ty| {
                     tier2::lower_mean(decl.into(), dag, x, axis, ty, None)
                 })
@@ -5014,8 +5355,12 @@ impl<'a> EvalContext<'a> {
             "relu" => numeric_unop(args, None, Some(FloatUnOp::Relu)),
             "sigmoid" => numeric_unop(args, None, Some(FloatUnOp::Sigmoid)),
             "tanh" => numeric_unop(args, None, Some(FloatUnOp::Tanh)),
+            "erf" => numeric_unop(args, None, Some(FloatUnOp::Erf)),
+            "erfc" => numeric_unop(args, None, Some(FloatUnOp::Erfc)),
             "silu" => numeric_unop(args, None, Some(FloatUnOp::Silu)),
             "gelu" => numeric_unop(args, None, Some(FloatUnOp::Gelu)),
+            "gelu_tanh" => numeric_unop(args, None, Some(FloatUnOp::GeluTanh)),
+            "standard_normal_cdf" => numeric_unop(args, None, Some(FloatUnOp::StandardNormalCdf)),
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -5044,9 +5389,26 @@ enum Step<'a> {
     },
 }
 
-/// Structural equality for `test_assert_eq`. Every nested container walk,
-/// including a dictionary candidate search, runs from an explicit stack so
-/// value depth cannot consume the native stack (chelis#2592).
+/// Whether `args` is a pair `eq` and `neq` compare by [05-OP-36]'s recursive
+/// rule rather than as scalars, strings or direct tensors.
+fn is_recursive_equality_operand(args: &[RuntimeValue]) -> bool {
+    let recursive = |value: &RuntimeValue| {
+        matches!(
+            value,
+            RuntimeValue::Unit
+                | RuntimeValue::List(_)
+                | RuntimeValue::Tuple(_)
+                | RuntimeValue::Dict(_)
+                | RuntimeValue::Adt { .. }
+        )
+    };
+    matches!(args, [lhs, rhs] if recursive(lhs) && recursive(rhs))
+}
+
+/// [05-OP-36]'s structural equality, for `eq`, `neq` and `test_assert_eq`.
+/// Every nested container walk, including a dictionary candidate search, runs
+/// from an explicit stack so value depth cannot consume the native stack
+/// (chelis#2592).
 pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
     let mut steps = vec![Step::Pair(lhs, rhs)];
     // The result of the last child comparison is consumed by its parent
@@ -5116,9 +5478,10 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
                     | (RuntimeValue::Closure { .. }, _)
                     | (_, RuntimeValue::Closure { .. })
                     | (RuntimeValue::Transform { .. }, _)
-                    | (_, RuntimeValue::Transform { .. }) => {
-                        Err("assert_eq does not admit functions or resource handles".to_string())
-                    }
+                    | (_, RuntimeValue::Transform { .. }) => Err(
+                        "[05-OP-36] equality does not admit functions or resource handles"
+                            .to_string(),
+                    ),
                     _ => Ok(false),
                 });
             }
@@ -5225,6 +5588,17 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
         }
     }
     returned.expect("the root comparison returns a result")
+}
+
+/// [05-OP-75]: a checked clock reading as its `(seconds, nanoseconds)` tuple.
+fn clock_time_value(time: system::EvalClockTime) -> RuntimeValue {
+    RuntimeValue::Tuple(
+        vec![
+            RuntimeValue::int64(time.seconds),
+            RuntimeValue::int64(time.nanoseconds),
+        ]
+        .into(),
+    )
 }
 
 /// [05-OP-33]: admit the complete result before deriving any keys.
@@ -5363,6 +5737,9 @@ fn stage_kernel_argument(
                 vec![payload.as_i64()],
             )?
             .value)
+        }
+        RuntimeValue::Scalar(payload) if payload.dtype() == prim => {
+            Ok(RuntimeTensorValue::from_scalars(prim, vec![], &[payload.value()]).value)
         }
         RuntimeValue::Scalar(payload) => Ok(RuntimeTensorValue::from_wide(
             "kernel argument",
@@ -5550,6 +5927,7 @@ mod legacy_capture_order_tests {
             ),
             declared_signatures: signatures,
             adt_fields: collect_adt_ctor_fields(checked.exprs()),
+            constructor_names: collect_constructor_source_names(checked.exprs()),
             adt_registry: checked.adt_registry().clone(),
             tensor_bindings: tensors,
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
@@ -5561,6 +5939,7 @@ mod legacy_capture_order_tests {
             cancel: None,
             system: system::EvalSystemBoundary::permissive(),
             failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
         }
     }
 
@@ -6281,7 +6660,12 @@ mod legacy_capture_order_tests {
         for (module, value) in [("Left", 3), ("Right", 5)] {
             std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
         }
-        let compiled = crate::compile_reef_context(directory.path(), directory.path()).unwrap();
+        let compiled = crate::compile_reef_context(
+            directory.path(),
+            directory.path(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap();
         let library = compiled.checked_library();
         let tensors = UnordMap::new();
         let mut ctx = context(library, &tensors);
@@ -6424,8 +6808,7 @@ mod legacy_capture_order_tests {
                 matches!(
                     error.kind,
                     chelis_types::errors::CheckErrorKind::TypeMismatch
-                ) && error.message
-                    == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
+                ) && error.message.contains("() -> tensor[2, f32]")
             }),
             "{}",
             messages(&report.errors)

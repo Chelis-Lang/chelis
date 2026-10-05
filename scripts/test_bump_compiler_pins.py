@@ -4,7 +4,9 @@ Run via: `python3 -m unittest scripts.test_bump_compiler_pins` from repo root,
 or `python3 scripts/test_bump_compiler_pins.py`.
 """
 
+import contextlib
 import importlib.util
+import io
 import re
 import subprocess
 import sys
@@ -191,97 +193,8 @@ class BumpHullManifestPinTests(unittest.TestCase):
         self.assertIn('"chelis_version_pinned"', bump_mod.HULL_MANIFEST.read_text())
 
 
-class CleanUntrackedDistTests(unittest.TestCase):
-    """`chelis reef build` drops a `dist/` next to every package root it
-    builds. Only `packages/chelis-std/dist/` is a tracked artifact dir; the
-    release fixture keeps no `dist/`, so regenerating its lock must leave
-    the source tree clean. Lock that the cleanup removes the fixture's
-    `dist/` but never the chelis-std one.
-    """
-
-    def test_removes_dist_for_non_chelis_std_package(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "release_pipe_stage"
-            dist = pkg / "dist"
-            dist.mkdir(parents=True)
-            (dist / "artifact.chb").write_text("x")
-            bump_mod._clean_untracked_dist(pkg)
-            self.assertFalse(dist.exists(), "fixture dist/ must be removed")
-            self.assertTrue(pkg.exists(), "package root must remain")
-
-    def test_preserves_chelis_std_dist(self):
-        # The chelis-std dist dir is tracked; cleanup must skip it even if
-        # it exists. Point the module's CHELIS_STD_DIR at a temp dir so the
-        # guard's identity check fires without touching the real tree.
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "chelis-std"
-            dist = pkg / "dist"
-            dist.mkdir(parents=True)
-            (dist / "chelis-std-0.4.0.chb").write_text("x")
-            saved = bump_mod.CHELIS_STD_DIR
-            bump_mod.CHELIS_STD_DIR = pkg
-            try:
-                bump_mod._clean_untracked_dist(pkg)
-            finally:
-                bump_mod.CHELIS_STD_DIR = saved
-            self.assertTrue(dist.exists(), "chelis-std dist/ must be preserved")
-
-    def test_no_op_when_no_dist_present(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "pkg"
-            pkg.mkdir()
-            # Must not raise when there is nothing to clean.
-            bump_mod._clean_untracked_dist(pkg)
-            self.assertTrue(pkg.exists())
-
-
-class LockRegenerationWiringTests(unittest.TestCase):
-    """Guard the constants the regeneration path depends on so a future
-    edit cannot silently drop a category-4/5 target. These are the files
-    the 0.9.0 release failure traced to.
-    """
-
-    def test_bundle_dist_and_regen_script_are_wired(self):
-        self.assertTrue(
-            str(bump_mod.BUNDLE_DIST).endswith("crates/chelis-std-bundle/dist"),
-            bump_mod.BUNDLE_DIST,
-        )
-        self.assertTrue(
-            str(bump_mod.REGEN_BUNDLE_SCRIPT).endswith(
-                "scripts/regenerate_chelis_std_bundle.py"
-            ),
-            bump_mod.REGEN_BUNDLE_SCRIPT,
-        )
-        self.assertTrue(
-            bump_mod.REGEN_BUNDLE_SCRIPT.is_file(),
-            "the canonical bundle pipeline script must exist",
-        )
-
-    def test_pinned_lock_dirs_cover_fixture_and_chelis_std(self):
-        names = {p.name for p in bump_mod.PINNED_REAL_LOCK_DIRS}
-        self.assertIn("chelis-std", names)
-        self.assertIn("release_pipe_stage", names)
-        self.assertIn("nautilus_quantile_contract", names)
-        self.assertIn("nautilus", names)
-        # Every recorded lock dir must currently ship a reef.lock so the
-        # regeneration target is real, not aspirational.
-        for pkg_dir in bump_mod.PINNED_REAL_LOCK_DIRS:
-            self.assertTrue(
-                (pkg_dir / "reef.lock").is_file(),
-                f"{pkg_dir} must ship a reef.lock to regenerate",
-            )
-
-    def test_followup_lock_builds_do_not_overwrite_the_final_std_artifacts(self):
-        self.assertNotIn(
-            bump_mod.CHELIS_STD_DIR,
-            bump_mod.FOLLOWUP_LOCK_REBUILD_DIRS,
-            "the canonical bundle generator already refreshes the std root lock; "
-            "building it again would overwrite the final artifact bytes",
-        )
-        self.assertEqual(
-            set(bump_mod.FOLLOWUP_LOCK_REBUILD_DIRS),
-            set(bump_mod.PINNED_REAL_LOCK_DIRS) - {bump_mod.CHELIS_STD_DIR},
-        )
+class PinnedTomlInventoryTests(unittest.TestCase):
+    """Guard the real-manifest inventory the bump rewrites (category 2)."""
 
     def test_pinned_toml_inventory_covers_executable_package_examples(self):
         relative = {
@@ -546,6 +459,70 @@ class CompileFailFixtureLockTests(unittest.TestCase):
         finally:
             bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS = saved
         self.assertIn("does-not-exist", str(caught.exception))
+
+
+class ConformanceAssetRegenerationTests(unittest.TestCase):
+    """Category 6: a release PR must embed the agent surface its sources say."""
+
+    def _run_main(self, *extra):
+        """Run `main` with every other step stubbed; return the stubbed runner."""
+        stubs = {
+            "bump_workspace_cargo_toml": None,
+            "bump_compiler_pin": None,
+            "bump_json_compiler_pin": None,
+            "bump_hull_manifest_pin": None,
+        }
+        order = []
+        with mock.patch.multiple(
+            bump_mod,
+            **{name: mock.Mock(return_value=value) for name, value in stubs.items()},
+            regenerate_compile_fail_fixture_locks=mock.Mock(
+                side_effect=lambda _dry: order.append("compile-fail locks")
+            ),
+        ), mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            side_effect=lambda argv, **_: order.append(argv)
+            or subprocess.CompletedProcess(argv, 0),
+        ) as runner:
+            bump_mod.main(["0.18.12", *extra])
+        return runner, order
+
+    def test_main_regenerates_the_conformance_assets_last(self):
+        runner, order = self._run_main()
+        argv = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual(
+            argv, [[sys.executable, str(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT)]]
+        )
+        self.assertEqual(order, ["compile-fail locks", argv[0]])
+
+    def test_the_retired_dist_rebuild_flag_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                bump_mod.parse_args(["0.18.12", "--no-rebuild-dist"])
+
+    def test_dry_run_prints_the_step_without_running_it(self):
+        with mock.patch.object(bump_mod.subprocess, "run") as runner, mock.patch(
+            "builtins.print"
+        ) as printed:
+            bump_mod.regenerate_conformance_assets(dry_run=True)
+        runner.assert_not_called()
+        text = " ".join(str(c.args[0]) for c in printed.call_args_list)
+        self.assertIn("[dry-run] would regenerate crates/chelis-conformance/assets/", text)
+        self.assertIn("regenerate_conformance_assets.py", text)
+
+    def test_nonzero_exit_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_conformance_assets(dry_run=False)
+        self.assertIn("regenerate_conformance_assets.py", str(caught.exception))
+
+    def test_the_script_it_runs_exists(self):
+        self.assertTrue(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT.is_file())
 
 
 if __name__ == "__main__":

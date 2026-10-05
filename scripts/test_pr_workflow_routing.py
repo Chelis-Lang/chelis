@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 import yaml
+
+from scripts import ci_candidate_receipt
+from scripts import ci_pr_lifecycle_report
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +57,32 @@ RECEIPT_TRIGGER_WORKFLOWS = {
     "Changelog",
     "PR Contract Acknowledgements",
     "PR Base Retarget Validation",
+    "Secret scan",
 }
+
+
+def assert_candidate_cache_readonly(test: unittest.TestCase, workflow: dict) -> None:
+    """Candidate jobs must inherit a server-enforced read-only cache token."""
+    test.assertEqual(workflow.get("cache-mode"), "read")
+    for name, job in workflow["jobs"].items():
+        test.assertEqual(job.get("cache-mode", workflow["cache-mode"]), "read", name)
+
+
+def assert_base_ref_is_shell_data(test: unittest.TestCase, workflow: dict) -> dict:
+    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
+    owners = [step for step in steps if step.get("name") in {
+        "Record immutable candidate identity",
+        "Dispatch CI and Hull and hold the head receipt",
+    }]
+    test.assertEqual(len(owners), 1)
+    owner = owners[0]
+    test.assertEqual(owner.get("env", {}).get("BASE_REF"),
+                     "${{ github.event.pull_request.base.ref }}")
+    test.assertIn('"$BASE_REF"', owner["run"])
+    for step in steps:
+        test.assertNotIn("github.event.pull_request.base.ref", step.get("run", ""))
+    return owner
+
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
 
@@ -936,6 +967,13 @@ def assert_candidate_receipt_workflow(
         "github.event.workflow_run.head_sha",
         str(workflow["concurrency"]),
     )
+    # A run triggered by another event (Secret scan's push runs, the retarget
+    # coordinator's pull_request_target runs) skips its job; keying the group
+    # by event keeps such a skipped run from cancelling a collection.
+    test.assertIn(
+        "github.event.workflow_run.event",
+        str(workflow["concurrency"]["group"]),
+    )
     job = workflow["jobs"]["collect"]
     test.assertEqual(
         job["permissions"],
@@ -1389,6 +1427,21 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_manual_expansion_workflow(self, manual)
 
+    def test_receipt_triggers_are_the_collectors_mapped_workflows(self) -> None:
+        mapped = {
+            yaml.safe_load((ROOT / ".github/workflows" / name).read_text())["name"]
+            for name in ci_candidate_receipt.WORKFLOWS
+        }
+        self.assertEqual(mapped, RECEIPT_TRIGGER_WORKFLOWS)
+        trigger = actions_events(yaml.safe_load(RECEIPT.read_text()))
+        self.assertEqual(set(trigger["workflow_run"]["workflows"]), mapped)
+        self.assertEqual(
+            ci_pr_lifecycle_report.WORKFLOW_RUN_PARENTS[
+                ".github/workflows/pr-candidate-receipt.yml"
+            ],
+            mapped,
+        )
+
     def test_receipt_collector_cannot_checkout_or_execute_pr_content(self) -> None:
         workflow = copy.deepcopy(yaml.safe_load(RECEIPT.read_text()))
         workflow["jobs"]["collect"]["steps"].insert(
@@ -1406,6 +1459,73 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         workflow["jobs"]["collect"]["permissions"]["actions"] = "write"
         with self.assertRaises(AssertionError):
             assert_candidate_receipt_workflow(self, workflow)
+
+
+class CandidatePrivilegeTests(unittest.TestCase):
+    def test_candidate_cache_tokens_are_readonly(self) -> None:
+        # Package expansion checks out the candidate from a main dispatch, so
+        # it runs in the default branch's cache scope like a retarget.
+        for path in (CI, HULL, EXPANSION):
+            with self.subTest(workflow=path.name):
+                assert_candidate_cache_readonly(self, yaml.safe_load(path.read_text()))
+
+    def test_candidate_cache_write_grants_are_rejected(self) -> None:
+        for path in (CI, HULL, EXPANSION):
+            original = yaml.safe_load(path.read_text())
+            for mode in (None, "write", "write-only"):
+                workflow = copy.deepcopy(original)
+                workflow["cache-mode"] = mode
+                with self.subTest(workflow=path.name, mode=mode):
+                    with self.assertRaises(AssertionError):
+                        assert_candidate_cache_readonly(self, workflow)
+            workflow = copy.deepcopy(original)
+            workflow["jobs"][next(iter(workflow["jobs"]))]["cache-mode"] = "write"
+            with self.assertRaises(AssertionError):
+                assert_candidate_cache_readonly(self, workflow)
+
+    def test_base_refs_are_passed_as_environment_data(self) -> None:
+        for path in (CI, HULL, RETARGET):
+            with self.subTest(workflow=path.name):
+                assert_base_ref_is_shell_data(self, yaml.safe_load(path.read_text()))
+
+    def test_interpolating_base_ref_in_shell_is_rejected(self) -> None:
+        for path in (CI, HULL, RETARGET):
+            workflow = yaml.safe_load(path.read_text())
+            owner = assert_base_ref_is_shell_data(self, workflow)
+            owner["run"] = owner["run"].replace(
+                '"$BASE_REF"', '"${{ github.event.pull_request.base.ref }}"'
+            )
+            with self.assertRaises(AssertionError):
+                assert_base_ref_is_shell_data(self, workflow)
+
+    def test_git_valid_shell_active_refs_remain_literal_arguments(self) -> None:
+        for path in (CI, HULL, RETARGET):
+            owner = assert_base_ref_is_shell_data(self, yaml.safe_load(path.read_text()))
+            for branch in ("release-$(touch${IFS}injected)",
+                           "release-`touch${IFS}injected`", "release-normal"):
+                with self.subTest(workflow=path.name, branch=branch):
+                    subprocess.run(["git", "check-ref-format", "--branch", branch],
+                                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    with tempfile.TemporaryDirectory() as directory:
+                        temporary = Path(directory)
+                        recorder = temporary / "record.py"
+                        recorder.write_text(
+                            "import json, pathlib, sys\n"
+                            "pathlib.Path('arguments.json').write_text(json.dumps(sys.argv[1:]))\n"
+                        )
+                        run = re.sub(r"\$\{\{.*?\}\}", "safe-value", owner["run"])
+                        # Preserve the workflow's argument quoting and execute its shell.
+                        run = re.sub(r"^python3\s+scripts/\S+",
+                                     f'"{sys.executable}" "{recorder}"', run)
+                        environment = os.environ.copy()
+                        environment.update(BASE_REF=branch, RUNNER_TEMP=directory)
+                        subprocess.run(["bash", "-eu", "-c", run], cwd=directory,
+                                       env=environment, check=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+                        arguments = json.loads((temporary / "arguments.json").read_text())
+                        flag = "--expected-base-ref" if path == RETARGET else "--base-ref"
+                        self.assertEqual(arguments[arguments.index(flag) + 1], branch)
+                        self.assertFalse((temporary / "injected").exists())
 
 
 if __name__ == "__main__":

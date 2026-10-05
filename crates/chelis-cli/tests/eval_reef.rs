@@ -11,8 +11,12 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+/// A file belongs to the package found by walking up from the file itself
+/// (spec/02 §P2, chelis#2918). A file with no `module` declaration outside
+/// every package belongs to no package even when `eval` runs inside one, so
+/// it cannot import that package's modules.
 #[test]
-fn eval_file_uses_current_reef_package_for_ad_hoc_imports() {
+fn eval_file_outside_every_package_ignores_the_package_it_runs_in() {
     let dir = tempdir().expect("tempdir");
     let app_pkg = dir.path().join("demo");
     let external = dir.path().join("snippet.ch");
@@ -50,6 +54,69 @@ bench = answer()
         .current_dir(&app_pkg)
         .args(["eval", "--file", external.to_str().unwrap()])
         .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unresolved import `Demo.Special`").and(
+                predicate::str::contains("needs a `reef.toml` package manifest"),
+            ),
+        )
+        .stdout(predicate::str::contains("bench =").not());
+}
+
+/// A file with no `module` declaration inside a package belongs to that
+/// package wherever `eval` runs (spec/02 §P2, chelis#2918): from a directory
+/// outside every package it still imports the package's modules, and its
+/// `chelis-std` imports still resolve.
+#[test]
+fn eval_file_without_a_module_belongs_to_the_package_around_it_from_outside_every_package() {
+    let dir = tempdir().expect("tempdir");
+    let app_pkg = dir.path().join("demo");
+    write_file(
+        &app_pkg.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Demo"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &app_pkg.join("src/special.ch"),
+        r#"module Demo.Special
+def answer() -> i32 = 7
+"#,
+    );
+    let package_import = app_pkg.join("scratch.ch");
+    write_file(
+        &package_import,
+        r#"import Demo.Special (answer)
+bench = answer()
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(dir.path())
+        .args(["eval", "--file", package_import.to_str().unwrap()])
+        .assert()
         .success()
-        .stdout(predicate::str::is_empty().not());
+        .stdout("bench = 7\n");
+    let std_import = app_pkg.join("scalar.ch");
+    write_file(
+        &std_import,
+        r#"import Std.Scalar (abs)
+bench = abs(-3i64)
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(dir.path())
+        .args(["eval", "--file", std_import.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bench = 3"));
 }

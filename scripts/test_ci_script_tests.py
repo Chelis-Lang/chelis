@@ -22,7 +22,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(sum(map(len, identities)), len(set.union(*identities)))
         self.assertEqual(set.union(*identities), {t.id() for t in runner.flatten(suite)})
         self.assertTrue(all(identities))
-        self.assertIn("test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests.test_two_real_debug_regenerations_reach_a_byte_fixed_point", identities[1])
         for integration_class in (
             "test_capacity_census_native_execution.NativeExecutionIntegration.",
             "test_capacity_census_native_owners.NativeOwnerIntegration.",

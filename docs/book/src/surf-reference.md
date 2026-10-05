@@ -1,21 +1,22 @@
 # Surf Syntax Reference
 
 Surf is Chelis's source syntax. This page shows how to write its declarations and
-expressions. `spec/02-surf-syntax.md` defines the full grammar; `spec/03-deep-syntax.md`
-defines the corresponding Deep representation.
+expressions. The [Surf syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/02-surf-syntax.md) defines the full
+grammar; the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) defines the corresponding
+Deep representation.
 
-Fenced `chelis-surf` and `chelis-deep` blocks below are complete programs and are
-validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
+Fenced `chelis-surf` and `chelis-deep` blocks below are complete, canonically formatted
+programs and are validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
 construct and are not standalone programs.
 
 ## Modules
 
 One module per file. The `module` declaration is the first non-comment line. Module names
-are PascalCase and dot-separated. In a package with `module_prefix = "School"`,
-`src/nn/linear.ch` declares:
+are PascalCase and dot-separated. In a package with `module_prefix = "Shoals"`,
+`src/pricing/options.ch` declares:
 
 ```chelis-surf-fragment
-module School.Nn.Linear
+module Shoals.Pricing.Options
 ```
 
 A script or snippet can omit `module`. Package source must declare the name fixed by its
@@ -25,7 +26,6 @@ package prefix and path beneath the source root.
 
 ```chelis-surf-fragment
 -- line comment to end of line
-
 {- block comment,
    which {- nests -} cleanly -}
 ```
@@ -84,7 +84,7 @@ without a matching definition is rejected.
 There is no `let` keyword. Inside a block, `name = expr` introduces a binding; bindings are
 separated by newlines, and the final bare expression is the block's value. A block needs
 at least one binding and a final expression. For ordered expression sequencing, use
-semicolons in `do { first; second }`. `par { ... }` is reserved syntax and is currently
+semicolons in `do { first; second }`. `par { ... }` is reserved syntax and is
 rejected by the checker.
 
 ```chelis-surf-fragment
@@ -132,11 +132,12 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Booleans: `true`, `false`.
 - Unit: `()` is the unit value; `unit` is the unit type.
 - Tuples: `(a, b, c)`. `(a)` is grouping; a one-element tuple is `(a,)`.
-- Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
-  arguments to operators, for example the window and stride lists in
-  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. Brackets can also build a
-  `List`, depending on the expected type. A negative numeral is unary minus applied to a
-  literal, so write `f(-42)` to pass a negative argument.
+- Bracket literals: `[1.0, 2.0, 3.0]` builds a `List`, whatever its elements and
+  wherever it stands, and bracket lists pass list arguments to operators, for example
+  the window and stride lists in `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`.
+  `to_tensor([1.0, 2.0, 3.0])` builds a tensor, and so does a bracket literal whose own
+  binding or function result declares a tensor type. A negative numeral is unary minus
+  applied to a literal, so write `f(-42)` to pass a negative argument.
 
 Delimited nonempty lists may carry one trailing comma (or a trailing semicolon in
 `do`). The parser discards it and the formatter omits it; the comma in `(a,)`
@@ -148,12 +149,14 @@ Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `f
 rejects the resulting source diff. Malformed separators, a redundant leading zero on an
 integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
 
-A tensor literal's unsuffixed elements can adopt a known element type when the literal
-is assigned to a tensor-typed binding, passed to a declared tensor parameter, or used
-as a declared tensor return body. An unsuffixed literal passed directly to `cast`
-adopts the cast target, including a bare numeric scalar. These are the only adoption
-positions: an unannotated `[1, 2, 3]` uses `i32` elements, while a structural list
-such as the window sizes above needs explicit `i64` elements.
+A bare bracket literal's unsuffixed elements adopt the declared element type when its
+own tensor-typed binding or declared tensor return body makes it a tensor. An unsuffixed
+scalar passed directly to `cast` adopts the cast target. These are the only adoption
+positions. A tensor parameter or a `cast` never turns a bracket literal into a tensor,
+and `to_tensor` keeps each element's suffix or default, so a tensor argument states its
+element dtype: `f(to_tensor([1.0f64, 2.0f64]))`. An unannotated `to_tensor([1, 2, 3])`
+uses `i32` elements, and a structural list such as the window sizes above needs
+explicit `i64` elements.
 
 ## Operators
 
@@ -178,13 +181,25 @@ overloading and no infix bitwise operator; use the named builtins `bitand`, `bit
 `bitxor`, `shl`, `shr`, and `pow` for exponentiation.
 
 The pipe operator threads its left value as the first argument of the call on its right.
-`x |> f(y)` is `f(x, y)`. When the piped value belongs in a later position, pipe into a
-lambda:
+`x |> f(y)` is `f(x, y)`, and stages chain from left to right:
 
 ```chelis-surf-fragment
-hidden = matmul(x, w1)
-  |> add(b1)
-  |> relu
+hidden = matmul(x, w1) |> add(b1) |> relu
+```
+
+Use pipes when left-to-right stage order helps review a linear flow. Calls,
+operator sugar and pipes have equal standing. Pipes exist only in Surf: desugaring
+normalizes them before literal typing, and `chelis deep` and `chelis surf` print
+the resulting calls. `chelis fmt` preserves authored pipes.
+
+Explicitly group pipes mixed with another operator or an open-ended form:
+`(a * b) |> f`, `a * (b |> f)`, `(if c then a else b) |> f`, and
+`fn (v) -> (v |> f)` are valid. Ungrouped equivalents are rejected.
+
+When the piped value belongs in a later position, pipe into a lambda:
+
+```chelis-surf-fragment
+complement = p |> (fn (q) -> sub(1.0, q))
 ```
 
 ## Function application
@@ -210,6 +225,15 @@ A call result can be projected directly, which is how you read the two outputs o
 sorted_values = sort(diag, 0).0
 sorted_indices = sort(diag, 0).1
 ```
+
+`gather` determines its result shape from the selected axis, so its i32 axis
+must be a literal or an integer-cast-wrapped literal, including negative
+axes. Variables, helper calls and other computed expressions are rejected
+at checking, even if they return a constant. `sort` preserves the input
+shape and accepts computed i32 axes; invalid runtime axes trap in both
+execution lanes. Negative axes count from the end. These rules are
+specified by [05-AXIS-2] in `spec/05-risc-primitives.md`; reductions,
+`expand` and `insert` retain their static constant-or-named-axis rule.
 
 When projecting through nested tuples, group the inner numeric projection so
 the next suffix cannot merge with it as a float:
@@ -300,6 +324,20 @@ exported name, and `import M` makes only qualified access (`M.name`) available. 
 reference works for values, constructors, and types, and is the way to disambiguate two
 modules that export the same name.
 
+A module cannot both import a name into unqualified scope and declare it:
+`import Std.Scalar (max)`, or `import Std.Scalar (..)`, beside a local `def max` is an error
+in every command, and the diagnostic names both. Rename the local declaration, or import the
+module qualified (`import Std.Scalar`) and call `Std.Scalar.max`. Parameters and local
+bindings may still reuse an imported name.
+
+A file belongs to the Reef package found by walking up from the file's own directory,
+whatever directory a command runs in. A file inside a package but outside its source roots,
+such as a script beside `reef.toml` or a test under `tests/`, is an entry of that package and
+can import its modules, with or without a `module` line. A file outside every Reef package
+imports from the compiler-bundled `chelis-std` (`Std.*`) under the same rules.
+Importing any other module needs a `reef.toml` package manifest, and an import that names
+no reachable module is a `chelis check` error.
+
 With no `export` declaration, every top-level `def` and `type` is public. Once any `export`
 appears, only the listed names are public. Exporting a type also exports its constructors.
 
@@ -314,11 +352,10 @@ A module-level `dim` declares concrete named dimensions used across the file. Fu
 
 ```chelis-surf-fragment
 dim batch, vocab_size
-
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
 ```
 
-## Effects and handlers
+## Effects and device regions
 
 A function's effects can be annotated with a `! { ... }` suffix on its `sig` or
 `def`. `IO` is inferred from host operations such as `print`. Random draws take
@@ -331,13 +368,13 @@ def local_region() -> i32 = with device("cpu") { 1i32 }
 
 `with device("...")` takes a string literal. For a host-C build, only the exact
 device name `"cpu"` is accepted; other names are rejected before output is written.
-See [Effects and Handlers](effects.md) for the full model.
+See [Effects](effects.md) for the full model.
 
 ## Transforms
 
 `grad` and `vmap` use call syntax but are compiler transforms. Each requires a
 function argument, and their results are functions that can be called or bound to
-a name. Transform targets that are aliases of top-level functions can currently
+a name. Transform targets that are aliases of top-level functions can
 be rejected; use a direct, unshadowed top-level function when that occurs. See
 [Transforms](transforms.md) for supported target forms.
 
@@ -359,4 +396,5 @@ for details.
   a single uppercase letter is also valid for a value binding or parameter.
 - The parser enforces identifier roles; `chelis lint` checks additional naming
   conventions, including `def` and `type` declaration names. Run `chelis fmt`
-  to format source consistently. See `spec/01-nomenclature.md` for the full rules.
+  to format source consistently. See the [nomenclature specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md)
+  for the full rules.

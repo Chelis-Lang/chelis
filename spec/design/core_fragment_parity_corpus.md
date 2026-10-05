@@ -16,8 +16,9 @@ numbered chapter disagree, the chapter wins and this document has a bug.
 ## 1. What this deliverable is, and what it is not
 
 chelis#1362 guarantee 2 is *"`eval` and `build --target c` agree on observations
-and traps."* Nothing in the repository currently executes that guarantee over a
-corpus of real programs. #2102 is the evidence artifact that does, and it is also
+and traps."* #2102 executes the observation guarantee over the pinned real-program
+corpus. Its current required cases all expect values; the unsettled real-trap
+boundary remains explicit in §2.3 and §10. It is also
 the **only authority for `demo-path` tagging** on the launch ledger: an issue
 earns `demo-path` because it breaks a case this manifest pins, and for no other
 reason.
@@ -69,13 +70,10 @@ consistent with the conclusion here but is not its authority.
 
 Two qualifications belong with the claim rather than further down:
 
-- `[05-OBS-3]` **permits** a cross-lane value difference of 1 ULP for `atan`,
-  `cos`, `exp`, `log`, `sin` and `tan` — that is, permits different bytes. Byte
-  equality is the operative contract only because that atom's arithmetic-width
-  precondition is currently unmet; §3.2 states why. The corpus uses `exp`,
-  `log` and `sqrt` throughout, so when chelis#897 lands this section needs
-  revisiting in the same change set, and the receipt becomes over-strict for
-  those six until it is.
+- `[05-OBS-3]` grants no cross-lane value difference: the transcendentals and
+  `sqrt` are correctly rounded under `[05-OP-46]`, so the `exp`, `log` and
+  `sqrt` the corpus uses throughout must agree byte for byte, independent of
+  the arithmetic-width precondition §3.2 discusses.
 - A receipt that compared any other channel would be measuring something the
   spec does not bind across these two lanes (§2.2).
 
@@ -86,9 +84,8 @@ Two qualifications belong with the claim rather than further down:
 requires converting one channel into the other, and that conversion is where a
 harness accumulates its own defects rather than the compiler's.
 
-This is measured, not predicted. The existing Voyage probe
-(`Chelis-Lang/Voyage`, `probes/qcb-compiled/driver.py`, `_qx_to_eval_json`) takes
-exactly that route, and its hand-written converter fails on lists of tuples and
+This is measured, not predicted. The existing capture probe of the downstream
+benchmark corpus takes exactly that route, and its hand-written converter fails on lists of tuples and
 on tensor printing for about eight programs — failures attributable to the
 converter, not to either lane. Comparing stdout to stdout removes the converter
 from the system entirely, and a re-measurement over 44 of those captures,
@@ -150,8 +147,8 @@ pipeline positions, a normalised diagnostic identity, or a typed error code
 rather than raw bytes — is owed before the first trap case is admitted, and §10
 records it as residual rather than this section pretending it is settled.
 
-Nothing in the repository compares trap reasons across lanes today; the Voyage
-probe records exit status only. So this is new coverage, but coverage of a
+Nothing in the repository compares trap reasons across lanes today; the
+benchmark's capture probe records exit status only. So this is new coverage, but coverage of a
 criterion that is not yet the right one.
 
 ## 3. The comparison predicate
@@ -177,17 +174,11 @@ rather than silently rotting.
 
 ### 3.2 No tolerance, and why this receipt cannot grant one
 
-`[05-OBS-3]` permits a cross-lane value difference only for the seven listed
-transcendental operations, only within the listed bound, and only when **both
-lanes compute at `[04-NUM-8]`'s declared arithmetic width**. chelis#897 records
-that the evaluator currently computes float operations in f64 regardless of the
-declared width, so that precondition is unmet for float arithmetic. The atom is
-explicit that a lane pair failing the precondition *"is a failed comparison and
-may not be laundered through the table."*
-
-The receipt therefore runs with **no tolerance at all**, and this is the spec's
-instruction rather than a strictness preference. A float mismatch is a named,
-issue-linked failure.
+`[05-OBS-3]` grants no nonzero cross-lane value bound: arithmetic follows
+`[04-NUM-2]` and `[04-NUM-8]`, and transcendental operations and `sqrt` are
+correctly rounded under `[05-OP-46]`. The receipt compares complete stdout
+streams byte-exactly, with no numeric tolerance. A mismatch remains a failure;
+this evidence artifact cannot grant an allowance absent from the owning atom.
 
 ### 3.3 The comparison is per case, over complete streams
 
@@ -206,17 +197,20 @@ pinned, in two different places, for a reason.
 Each corpus contributes at one exact revision, recorded in the manifest, because
 the case set is a property of the manifest version:
 
-| corpus | repo | kind |
-|---|---|---|
-| C Note | `Chelis-Lang/c-note` | committed `.ch` files |
-| Sonar | `Chelis-Lang/sonar` | committed `.ch` files |
-| Voyage | `Chelis-Lang/Voyage` | **derived** programs, generated by a pinned probe |
+| corpus | kind |
+|---|---|
+| notebook corpus | committed `.ch` files |
+| verification corpus | committed `.ch` files |
+| benchmark corpus | **derived** programs, generated by a pinned probe |
 
-The Voyage row is the one that forces a schema decision. Its cases are not
-committed files: they are captured at run time by `probes/qcb-compiled/driver.py`
-during the `interp` phase, which intercepts each `chelis eval --file … --json`
-call and writes `cap/<task>/<n>/k.ch` plus its `inputs/`. A path into the Voyage
-tree cannot name such a case. The manifest therefore carries two source kinds
+Each corpus's identifier and repository are the manifest's `corpora` entries;
+the runner accepts only the identifiers in its closed `KNOWN_CORPORA` set.
+
+The benchmark row is the one that forces a schema decision. Its cases are not
+committed files: they are captured at run time by the benchmark's capture driver
+during its `interp` phase, which intercepts each `chelis eval --file … --json`
+call and writes `cap/<task>/<n>/k.ch` plus its `inputs/`. A path into the
+benchmark tree cannot name such a case. The manifest therefore carries two source kinds
 (§6.2): a committed case is pinned by `(repo, rev, path)`, and a derived case is
 pinned by `(repo, rev, generator, task, index)`.
 
@@ -251,7 +245,7 @@ The mode is not bookkeeping. An unsealed development build re-checks its source
 checkout for runtime-bundle freshness on every `build` invocation, so a
 concurrent writer to that checkout can change the binary's behaviour mid-run
 while its hash stays constant. This is observed, not hypothetical: a pinned
-before/after comparison over the Voyage corpus lost 68 programs mid-run to a
+before/after comparison over the benchmark corpus lost 68 programs mid-run to a
 validation gate mutating the checkout, with both binaries' hashes unchanged
 throughout. A hash alone does not pin an unsealed build, so the receipt fails on
 a development-mode compiler rather than merely noting it.
@@ -272,7 +266,7 @@ This is measured. chelis#2782: `chelis build --target c` prints a compile line
 carrying `-O2 -march=native` and no `-ffp-contract=off`
 (`crates/chelis-backend-c/src/toolchain.rs:52`). GNU C defaults to
 `-ffp-contract=fast`, so gcc fuses `a*b + c` into an FMA where the target has
-one; the interpreter does not fuse. Over the 190 Voyage programs that build, **91
+one; the interpreter does not fuse. Over the 190 benchmark programs that build, **91
 differ from `eval` in at least one value under the printed line, and 91 of 91
 match bit-for-bit once `-ffp-contract=off` is added.**
 
@@ -306,9 +300,8 @@ The receipt exits nonzero, with a named reason, when any of these holds:
    expected counts.
 
 Rule 3 is the one that matters most in practice and the reason the manifest is
-per case rather than a directory glob. Both C Note and Sonar carry directories of
-deliberately-failing probes (`c-note/fixtures/dischargeability/probes/`,
-`sonar/recon/probes/`). A glob would promote those into the required set, and a
+per case rather than a directory glob. Both committed corpora carry directories
+of deliberately-failing probes. A glob would promote those into the required set, and a
 deliberately-failing probe that fails identically in both lanes would then be
 counted as parity evidence — the exact vacuous pass this receipt exists to
 prevent. Under §6.2 such a file is either a required trap case with a declared
@@ -319,14 +312,14 @@ It compares the manifest's declared `expected_case_count` against the manifest's
 own case rows, so it catches a hand-edited or regenerated row drifting from the
 declared count. It does **not** compare either number against a measured
 outcome, so it is not the count-level golden assert that the existing manual
-Voyage census — which reproduces a pinned revision's exact build/accept/reject
+benchmark census — which reproduces a pinned revision's exact build/accept/reject
 totals — would become if it were wired.
 
 What pins expected outcomes here is stronger than a count and weaker in a
 different way: `expected` and `known_divergence` are recorded **per case**
 (§6.2), so a case that changes verdict is named rather than absorbed into a
 total that still adds up. A count-level assert remains owed for the derived
-Voyage third, where cases are generated rather than committed and a changed
+benchmark third, where cases are generated rather than committed and a changed
 generator can alter the population itself.
 
 ### 5.2 Observation non-vacuity, and the 32-element bound
@@ -355,9 +348,9 @@ Every Chelis source discovered in a pinned corpus that is not a required case
 carries an exclusion reason from a closed set (§6.3). A count is not a reason.
 Discovery walks `.ch` and `.dp`, the two forms `chelis eval --file` accepts; it
 previously globbed `.ch` alone, which made this sentence false for the two Deep
-programs Sonar carries at its pinned revision.
+programs the verification corpus carries at its pinned revision.
 
-The corpus already demonstrates why. Of the Voyage captures, six programs are
+The corpus already demonstrates why. Of the benchmark captures, six programs are
 rejected by `eval` itself, and **four of those six are rejected on the `sig`
 reserved word** (captures 48/0, 63/1, 73/1, 90/0; the other two are one type
 error and one unexpected end of input). A case that cannot parse and a case whose
@@ -365,8 +358,8 @@ lanes disagree are the same shape from outside — a nonzero exit and no
 comparable observation — and only a recorded reason distinguishes them.
 
 The same hazard is live in the committed corpora at their pinned revisions:
-23 of Sonar's 45 `.ch` files reference `int64`, retired in favour of `i64`, and
-`c-note/docs/qa_evidence/ground_truth/gordon.ch` is rejected at head by the
+23 of the verification corpus's 45 `.ch` files reference `int64`, retired in
+favour of `i64`, and one notebook-corpus program is rejected at head by the
 §12.5 redundant-grouping rule for property preconditions. Neither is a lane
 disagreement. Both would read as one without §6.3.
 
@@ -389,7 +382,7 @@ rather than the case.
 A receipt records the manifest version it ran. `demo-path` assignments cite the
 manifest version that justifies them (§7).
 
-Version 2 added the two Sonar `.dp` exclusion rows that discovery began finding
+Version 2 added the two verification-corpus `.dp` exclusion rows that discovery began finding
 when it stopped globbing `.ch` alone (§5.1 rule 3) — a row-set change, hence the
 bump — and corrected four exclusion notes, which on its own would not have
 warranted one. Version 3 moved twelve rows from `unmeasurable-by-probe` to their
@@ -403,7 +396,7 @@ Every row is one case. Required fields:
 | field | meaning |
 |---|---|
 | `case_id` | stable identity, unique across corpora; never reused after removal |
-| `corpus` | `c-note`, `sonar`, or `voyage` |
+| `corpus` | one of the runner's `KNOWN_CORPORA` identifiers |
 | `source` | `{kind: "committed", repo, rev, path}` or `{kind: "derived", repo, rev, generator, task, index}`. A committed case keeps its suffix when materialized, so a `.dp` program is handed to the compiler as Deep rather than parsed as Surf |
 | `expected` | `value` or `trap` — see below |
 | `roots` | the root names the case owes, in manifest entry order. Required and non-empty when `expected` is `value`: §5.2's blackout guard reads this field, so an empty list disarms it, and a value case owing no observation is a `library-only` exclusion. `roots` declares the **base** root name — the identity `[05-OBS-7]` gives the root — and that is the canonical spelling. A declared root is satisfied by its own `name = ` label **or** by any `name.`-prefixed label, because `[05-OBS-8]` expands a tuple-valued root into dotted positional names and a fixed-product ADT root into its field names. The dotted spelling is *accepted* in `roots` but is not canonical and should not be used: the same atom says an ADT whose constructor is not statically fixed "remains one bare root", so a dotted declaration turns red the moment that fixedness changes, while a base declaration survives either rendering |
@@ -513,7 +506,7 @@ authority. The procedure:
 No `demo-path` issue exists in the tracker today, because #2102 has never run.
 **chelis#2782 is the first**, and a reader should not assume a precedent exists
 for how the tag is applied. It qualifies on its own measurement: it breaks 91 of
-the 190 Voyage cases that build, which are pinned cases, which is the modifier's
+the 190 benchmark cases that build, which are pinned cases, which is the modifier's
 stated condition.
 
 ## 8. The acceptance oracle
@@ -523,12 +516,11 @@ One command, per `AGENTS.md` §"One Acceptance Oracle Per Phase":
 ```sh
 .venv/bin/python scripts/core_fragment_parity_receipt.py \
     --chelis <a sealed-runtime chelis binary> \
-    --corpus c-note=<pinned c-note checkout> \
-    --corpus sonar=<pinned sonar checkout> \
+    --corpus <corpus>=<pinned checkout of that corpus> \
     --out target/parity-receipt
 ```
 
-`--chelis` and at least one `--corpus` are required; the manifest defaults to
+`--chelis` and at least one `--corpus` are required, one per pinned corpus; the manifest defaults to
 `tests/corpus/core_fragment_parity/manifest.json`. Build the compiler under test
 with `cargo build -p chelis-cli --bin chelis --features sealed-runtime`, and to a
 target directory a default-feature build will not overwrite — §4.2's pin check
@@ -541,9 +533,9 @@ is written to `--out` and records the pins of §4, the per-case verdicts, the
 non-vacuity figures of §5, the exclusion ledger of §6.3, and every command
 executed, verbatim, in execution order.
 
-This oracle is **not** part of the default workspace pass. It needs the three
-corpora at their pinned revisions, a C toolchain, and a built compiler, so it is
-a documented manual gate under `AGENTS.md` §"Manual Gates". It is long-running by
+This oracle is **not** part of the default workspace pass. It needs every
+corpus actually pinned in the manifest (currently C Note and Sonar), a C
+toolchain, and a built compiler, so it is a documented manual gate under `AGENTS.md` §"Manual Gates". It is long-running by
 construction.
 
 `scripts/test_core_fragment_parity_receipt.py` is the separate, fast, default-run
@@ -553,9 +545,12 @@ running it.
 
 ## 9. First receipt, and what it measured
 
+Sections 9.1 and 9.2 describe the original measurement before the math correction.
+The current Linux release receipt is recorded in §9.3.
+
 Manifest version 3, run on macOS `arm64` with a sealed-runtime `chelis` built
 from this branch, staging receipt `mode: sealed`, runtime archive `de658fb0…`,
-over `Chelis-Lang/c-note` at `960a9beb` and `Chelis-Lang/sonar` at `9b26133f`:
+over the notebook and verification corpora at the revisions the manifest pins:
 
 | | |
 |---|---:|
@@ -570,9 +565,10 @@ over `Chelis-Lang/c-note` at `960a9beb` and `Chelis-Lang/sonar` at `9b26133f`:
 Exit 3: both failures are tracked known divergences, and #1362's ship rule still
 blocks while they are open.
 
-Cases: 11 from C Note, 2 from Sonar. Exclusions by corpus and reason:
+Cases: 11 from the notebook corpus, 2 from the verification corpus. Exclusions by
+corpus and reason:
 
-| reason | c-note | sonar |
+| reason | notebook | verification |
 |---|---:|---:|
 | `prove-only` | 49 | 15 |
 | `unmeasurable-by-probe` | 12 | 0 |
@@ -585,7 +581,7 @@ harness debt and migration debt respectively, not language defects:
 
 - **`unmeasurable-by-probe` is 12 of 12 mine**, and only those 12 are a lever.
   Each is a package member carrying an `import`
-  (`import CnoteEval.BlackScholes (bs_call, …)`); the receipt materializes one
+  (`import <Prefix>.BlackScholes (bs_call, …)`); the receipt materializes one
   file, so the import cannot resolve, and the resulting `UnboundVariable` is a
   property of the harness rather than of the program. Package-aware
   materialization would admit these 12 as candidate cases.
@@ -601,9 +597,9 @@ harness debt and migration debt respectively, not language defects:
   counterfactual test is what distinguishes the proximate symptom from the
   disqualifying property, and it was applied after the fact rather than at
   classification time.
-- **`retired-syntax` is 23 of 23 Sonar's**, all on the pre-0.19 integer dtype
-  spelling; the diagnostic names its own migration
-  (`chelis migrate surf --from 0.18`). Sonar contributes 2 cases out of 47 files
+- **`retired-syntax` is all 23 of the verification corpus's rows**, all on the
+  pre-0.19 integer dtype spelling; the diagnostic names its own migration
+  (`chelis migrate surf --from 0.18`). That corpus contributes 2 cases out of 47 files
   almost entirely for this reason, so migrating it is the single largest
   available increase in the corpus.
 
@@ -612,7 +608,7 @@ harness debt and migration debt respectively, not language defects:
 `greeks.ch` and `black_scholes/call.ch` both take a scalar-`wrt` gradient of a
 named top-level `def` — the form #1362's direct-transform table lists as
 "Supported; exact on both lanes" — and `build --target c` refuses while `eval`
-returns a value. All six c-note build refusals emit the same text, because
+returns a value. All six notebook-corpus build refusals emit the same text, because
 chelis#2755 records that the refusal message is generic; they are not one
 mechanism.
 
@@ -666,21 +662,40 @@ Every one of the 13 cases produces identical verdicts under the `emitted` and
 `no-fp-contract` profiles, so on clang/arm64 these cases are
 contraction-insensitive. That does not contradict chelis#2782, whose
 91-of-190 measurement was gcc on Linux aarch64 over recursive EMA/RSI/ATR/MACD
-series; c-note's closed-form pricing has no such recursion. It does mean **#2782
-earns `demo-path` from the Voyage third of the corpus, not from these two**, and
-the Voyage third is not in manifest version 3 (§10).
+series; the notebook corpus's closed-form pricing has no such recursion. It does
+mean **#2782 earns `demo-path` from the benchmark third of the corpus, not from
+these two**, and the benchmark third is not in manifest version 3 (§10).
+
+### 9.3 Linux release receipt after the math correction
+
+The 2026-10-03 sealed compiler from main `c39ff41ed2d2fb3ecc3d582bc3e3afa71ee89d36`
+passes all 13 required cases at the unchanged C Note and Sonar pins. All 13
+observations agree byte-exactly, with no truncated root, pin failure or missing
+root. See [the release evidence](../../docs/investigations/core_fragment_release_receipt_2026_10_03.md)
+for binary/archive/header digests, case results and reproduction commands.
+
+Both #2379 corpus rows now pass and have no `known_divergence` annotation. Their
+required status, expected values, roots and source revisions remain unchanged,
+as do all 119 exclusion rows. Manifest version 3 remains appropriate under §6.1:
+removing defect metadata does not change what the receipt is asked to prove.
+The corpus evidence no longer justifies #2379's `demo-path` modifier; its owner
+retains the wider issue and its independent acceptance scope.
+
+Voyage capture/provenance follow-up is #3051, assigned to Makis (`glampouras`),
+and does not add a release gate. No Voyage program or real trap case was measured
+by this receipt; the remaining scope limits in §10 still apply.
 
 ## 10. Residual scope
 
 Named, so a reader does not mistake this document for more than it is:
 
-- **The Voyage third is not in manifest version 3, and admitting it needs a
+- **The benchmark third is not in manifest version 3, and admitting it needs a
   decision this document has not made.** The schema carries the `derived` source
   kind that pins `(repo, rev, generator, task, index)`, and the runner
-  materializes such a case, but no Voyage rows are declared. Two things stand in
+  materializes such a case, but no benchmark rows are declared. Two things stand in
   the way, and only the first was previously recorded:
 
-  1. Its cases are captured at run time by `probes/qcb-compiled/driver.py`'s
+  1. Its cases are captured at run time by the benchmark capture driver's
      `interp` phase, which has to run first. This receipt consumes captures and
      does not generate them.
   2. **Every captured program reads its inputs from an absolute path baked into
@@ -691,7 +706,7 @@ Named, so a reader does not mistake this document for more than it is:
      directory and run there — cannot express that: `materialize_case` copies
      `inputs/` beside the program, where the program will not look.
 
-     **Decided: Voyage captures address their inputs relatively, and the
+     **Decided: benchmark captures address their inputs relatively, and the
      receipt's isolation model does not change.** The alternative — staging each
      case's inputs at its recorded absolute path — would require the receipt to
      write outside its own working directory into a fixed global location shared
@@ -699,18 +714,18 @@ Named, so a reader does not mistake this document for more than it is:
      exists to avoid. Relative addressing needs no change here at all: the runner
      already sets each lane's working directory to the isolated per-case
      directory, and `materialize_case` already stages `inputs/` there. The work
-     is on the capture side, in `probes/qcb-compiled/driver.py`, not in this
+     is on the capture side, in the benchmark capture driver, not in this
      receipt.
 
      That decision rests on behaviour the language does not yet specify.
      `[05-OP-60]` defines the path-taking primitives but states no resolution
      rule; measured on both lanes, a relative path resolves against the process
      working directory, and the two lanes agree on the value and on the failure.
-     chelis#2814 asks for the rule to be authored. Until it is, the Voyage third
+     chelis#2814 asks for the rule to be authored. Until it is, the benchmark third
      rests on an agreement that nothing pins.
 
      One consequence for §7, recorded here rather than by adding a step there: a
-     Voyage divergence traceable to the two lanes resolving a relative path
+     benchmark divergence traceable to the two lanes resolving a relative path
      differently is **chelis#2814's, not a `demo-path` row.** The receipt would
      report it correctly as an `observation-mismatch` or a `lane-split` on a
      pinned case, and §7 read literally would then tag it as a launch-gating
@@ -743,8 +758,7 @@ Named, so a reader does not mistake this document for more than it is:
   is covered positively and negatively in
   `scripts/test_core_fragment_parity_receipt.py`, but no real corpus case has
   driven it end to end, and this document does not claim otherwise. The
-  deliberately-failing probes in `c-note/fixtures/dischargeability/probes/` and
-  `sonar/recon/probes/` are the natural source, and they are currently
+  deliberately-failing probes in the two committed corpora are the natural source, and they are currently
   `prove-only` exclusions because they own no root to observe. Admitting a trap
   case needs someone to decide the expected trap per probe, which is §6.2's
   `outcome-undetermined` boundary doing its job rather than a gap in it.

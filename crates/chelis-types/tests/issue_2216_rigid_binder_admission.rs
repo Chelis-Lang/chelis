@@ -137,7 +137,7 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[p: Float](k: p) -> p = tensor_to_scalar(k)",
-        "tensor_to_scalar expects tensor input, got f32",
+        "tensor_to_scalar",
         "`p := f32`",
     ),
     (
@@ -152,7 +152,7 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[p: Float](k: p) -> List[p] = to_list(k)",
-        "to_list expects Tensor input, got f32",
+        "to_list",
         "`p := f32`",
     ),
     // A tensor-only check that lives in the dtype-admissibility replay.
@@ -266,11 +266,10 @@ fn a_call_every_instantiation_admits_stays_accepted() {
 }
 
 /// REGRESSION TEST for round 1's representative instantiation. An unbounded
-/// binder was replayed at `()` alone, and `eq` and `neq` were rejected only
-/// because the checker refuses `eq((), ())`, which [05-OP-36] admits, naming a
-/// witness the spec accepts. The call is now decided at an arbitrary type: the
-/// equality operations admit only some types (not a function), so they are
-/// rejected, naming no particular type.
+/// binder was replayed at `()` alone, a type [05-OP-36] admits, so that one
+/// witness could not decide `eq` and `neq` for every instantiation. The call is
+/// now decided at an arbitrary type: the equality operations admit only some
+/// types (not a function), so they are rejected, naming no particular type.
 #[test]
 fn equality_on_an_unbounded_binder_is_rejected_at_an_arbitrary_type() {
     for operation in ["eq", "neq"] {

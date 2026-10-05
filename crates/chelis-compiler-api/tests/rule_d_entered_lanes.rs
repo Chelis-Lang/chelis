@@ -272,8 +272,12 @@ fn dependency_contexts(library: &str) -> [CompiledContext; 2] {
              kind = \"path\"\npath = \"./mylib\"\n"
         ),
     );
-    let context = compile_reef_context(directory.path(), &root)
-        .unwrap_or_else(|error| panic!("{library}\n{error:?}"));
+    let context = compile_reef_context(
+        directory.path(),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_or_else(|error| panic!("{library}\n{error:?}"));
     let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     [context, decoded]
 }
@@ -1588,7 +1592,7 @@ const GATED_KINDS: [GatedKind; 11] = [
         d: None,
         lane: Lane::Host,
         expected: &[4.0],
-        trap: "must be a non-negative integer",
+        trap: "numeric trap: domain in pad at i64",
         c_trap: None,
     },
     GatedKind {

@@ -24,6 +24,7 @@ impl Default for TranscriptCapture {
 
 impl TranscriptCapture {
     pub fn new() -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self {
             lines: Arc::new(Mutex::new(Some(Vec::new()))),
         }
@@ -36,6 +37,7 @@ impl TranscriptCapture {
     /// Prepare normal result formatting before claiming, so a host's forced
     /// exit remains able to report completed effects if formatting stalls.
     pub fn finish(&self) -> Option<Vec<String>> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.lines.lock().expect("transcript capture lock").take()
     }
 
@@ -68,6 +70,7 @@ impl Drop for TranscriptCaptureGuard {
 /// Install a capture for evaluations started on the current thread. Nested
 /// installations restore the outer capture rather than clearing it.
 pub fn install_transcript_capture(capture: TranscriptCapture) -> TranscriptCaptureGuard {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     TranscriptCaptureGuard {
         previous: CURRENT.with(|slot| slot.replace(Some(capture))),
         _thread_bound: PhantomData,

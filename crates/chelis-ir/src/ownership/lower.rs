@@ -1089,8 +1089,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     ///
     /// One owner class is knowingly outside it: `materialize_function_ref`
     /// mints from a `Value::FunctionRef` that outlives the expression scope
-    /// that produced it, so such an owner takes the enclosing region (for
-    /// example the whole tuple in `(identity, 1i64)`). Narrowing it would mean
+    /// that produced it, so such an owner takes the region active where the
+    /// value is consumed (for example the whole `Some(identity)`). A record,
+    /// list or tuple literal consumes each item inside the item's own span, so
+    /// there the owner takes the item's region. Narrowing the rest would mean
     /// carrying a span on the `Value`, tracked as chelis#2319.
     fn with_expr_span<T>(
         &mut self,
@@ -1114,6 +1116,21 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         match &expr.kind {
             ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
             ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value, tail),
+            ConcreteHostExprKind::ExtentSites { value, .. } => {
+                // The sites read the value's extents after it is produced, so
+                // the value stays live through this expression; it is
+                // returned unchanged, as `debug` returns its argument.
+                let value = self.lower_expr(value, None)?;
+                let operand = self.borrow(value)?;
+                self.emit(Op::Apply {
+                    dest: None,
+                    label: "extent_sites".to_string(),
+                    kind: ApplyKind::Intrinsic,
+                    schema: OperationSchema::new(vec![super::ir::OwnershipUse::Borrow], None),
+                    args: vec![operand],
+                });
+                Ok(Value::Named(operand.owner))
+            }
             ConcreteHostExprKind::Int(value) => {
                 self.define(&ConcreteHostType::Int64, format!("literal {value}"))
             }
@@ -1443,10 +1460,22 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.classify_or_reject(ty, Placement::Value, None)?;
         let mut operands = Vec::with_capacity(items.len());
         for item in items {
-            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                lowerer.lower_expr(item, None)
-            })?;
-            operands.push(self.consume(value, None)?);
+            // Consume the operand at the item's own expression site. The C
+            // projection renders a site's actions where it emits that
+            // expression, so the copy of a shared value consumed at the
+            // enclosing site ran only after the whole literal: a later item's
+            // call had by then released the value the earlier item stored
+            // (chelis#2891). `lower_direct_call_argument` nests an argument's
+            // sites the same way, but `lower_call` still consumes the
+            // arguments at the call's own site.
+            operands.push(self.with_site(HostSiteKind::Argument, |lowerer| {
+                lowerer.with_expr_span(item, |lowerer| {
+                    lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                        let value = lowerer.lower_expr_at_site(item, None)?;
+                        lowerer.consume(value, None)
+                    })
+                })
+            })?);
         }
         self.apply(
             ty,
@@ -2707,7 +2736,8 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::FlatMap { ty, .. }
         | ConcreteHostExprKind::TensorCall { ty, .. }
         | ConcreteHostExprKind::ResultClaimScope { ty, .. }
-        | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),
+        | ConcreteHostExprKind::FormalIngress { ty, .. }
+        | ConcreteHostExprKind::ExtentSites { ty, .. } => ty.clone(),
     }
 }
 
@@ -2942,7 +2972,36 @@ fn lower_roots(
             Ok(())
         })?;
     }
+    // A compiled function reads a captured top-level binding through
+    // file-scope storage when it is called, and none of this unit's
+    // operations records that read. Release each captured binding only when
+    // the unit exits: a binding without a root sink can otherwise reach its
+    // last use here before the calls that read it (chelis#2624).
+    let captured = crate::host::captured_global_names(ctx.host);
     lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
+        for binding in ctx.host.globals.iter().rev() {
+            let label = crate::LoadStoreName::top_level(&binding.name);
+            if !captured
+                .iter()
+                .any(|name| *name == binding.name || name == label.as_str())
+            {
+                continue;
+            }
+            let Some(Place::Owner(owner)) = lowerer.lookup(&binding.name) else {
+                continue;
+            };
+            let info = lowerer.info(owner)?;
+            if lowerer.moved.contains(&owner)
+                || info.origin != OwnerOrigin::Owned
+                || !info.class.is_heap()
+            {
+                continue;
+            }
+            lowerer.emit(Op::Drop {
+                owner: Operand::move_(owner),
+            });
+            lowerer.moved.insert(owner);
+        }
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Exit)
     })?;

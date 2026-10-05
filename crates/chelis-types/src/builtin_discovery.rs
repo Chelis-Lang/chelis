@@ -3,7 +3,7 @@ use crate::builtins::{
     BUILTINS, BuiltinCapabilityDecl, BuiltinDecl, BuiltinSemanticDomain as Domain,
     BuiltinSiblingCaseId as Case,
 };
-use crate::types::{Prim, Type, TypeVarRestriction};
+use crate::types::{Prim, Type};
 use crate::unify::Subst;
 use std::collections::BTreeSet;
 
@@ -99,17 +99,12 @@ impl BuiltinDecl {
         let scalar_bound = if let Some(index) = governing {
             match operand(index)? {
                 Type::Var(variable) => match subst.tvar_restriction(*variable) {
-                    Some(
-                        TypeVarRestriction::ActiveFloat
-                        | TypeVarRestriction::ActiveInt
-                        | TypeVarRestriction::ActiveNumeric,
-                    ) => true,
-                    None
-                    | Some(
-                        TypeVarRestriction::FloatValue
-                        | TypeVarRestriction::IntValue
-                        | TypeVarRestriction::NumericValue,
-                    ) => {
+                    // Every §5.9 declaration bound bounds the same scalar
+                    // binder, so each answers this question the same way.
+                    // Asked as a predicate rather than a variant list so a
+                    // later bound form cannot fall out of it (chelis#2443).
+                    Some(restriction) if restriction.is_declaration_bound() => true,
+                    None | Some(_) => {
                         return Ok(BuiltinCaseSelection::ByOperand(BuiltinCaseObligation {
                             builtin: self.name,
                             arguments,
@@ -229,7 +224,7 @@ pub fn builtin_semantic_identities() -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TypeVar;
+    use crate::types::{TypeVar, TypeVarRestriction};
 
     #[test]
     fn operation_value_bounds_do_not_choose_a_scalar_case_before_binding() {

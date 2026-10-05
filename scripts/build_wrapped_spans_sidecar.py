@@ -16,10 +16,14 @@ The wrapped fixture inlines bodies from Octant's translation of
 
 The script is idempotent: running it again regenerates the sidecar
 to match the current Octant output.
+
+Usage:
+    python3 scripts/build_wrapped_spans_sidecar.py --octant-repo <octant checkout>
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -32,9 +36,8 @@ FIXTURE_DIR = REPO_ROOT / "crates/chelis-cli/tests/fixtures/octant/black_scholes
 WRAPPED_DP = FIXTURE_DIR / "call_price_wrapped.dp"
 WRAPPED_SIDECAR = FIXTURE_DIR / "call_price_wrapped.spans.json"
 
-OCTANT_REPO = Path("/home/jeff/Documents/scratch/octant")
-OCTANT_BIN = OCTANT_REPO / "target/release/octant"
-OCTANT_TEX = OCTANT_REPO / "references/black_scholes_call_function.tex"
+OCTANT_BIN = Path("target/release/octant")
+OCTANT_TEX = Path("references/black_scholes_call_function.tex")
 
 SYNTHESIZED_WRAP_MARKER = "__synthesized_wrap__"
 
@@ -47,22 +50,24 @@ def collect_span_ids_in_dp(dp_path: Path) -> list[str]:
     return re.findall(r'\{span:\s*"([^"]+)"', text)
 
 
-def run_octant_translate() -> dict:
-    if not OCTANT_BIN.exists():
+def run_octant_translate(octant_repo: Path) -> dict:
+    octant_bin = octant_repo / OCTANT_BIN
+    octant_tex = octant_repo / OCTANT_TEX
+    if not octant_bin.exists():
         raise SystemExit(
-            f"octant binary not found at {OCTANT_BIN}; "
+            f"octant binary not found at {octant_bin}; "
             "build with `cargo build --release` in the Octant repo first"
         )
-    if not OCTANT_TEX.exists():
-        raise SystemExit(f"Octant LaTeX source not found at {OCTANT_TEX}")
+    if not octant_tex.exists():
+        raise SystemExit(f"Octant LaTeX source not found at {octant_tex}")
     with tempfile.TemporaryDirectory() as td:
         out_dp = Path(td) / "tmp.dp"
         out_spans = Path(td) / "tmp.spans.json"
         subprocess.run(
             [
-                str(OCTANT_BIN),
+                str(octant_bin),
                 "translate",
-                str(OCTANT_TEX),
+                str(octant_tex),
                 "--output",
                 str(out_dp),
                 "--spans",
@@ -97,8 +102,8 @@ def synthesized_wrapper_entry() -> dict:
     }
 
 
-def build_sidecar() -> dict:
-    octant_sidecar = run_octant_translate()
+def build_sidecar(octant_repo: Path) -> dict:
+    octant_sidecar = run_octant_translate(octant_repo)
     octant_entries = {e["deep_node_id"]: e for e in octant_sidecar["spans"]}
     wrapped_ids_in_order = collect_span_ids_in_dp(WRAPPED_DP)
     seen = set()
@@ -125,7 +130,15 @@ def build_sidecar() -> dict:
 
 
 def main() -> int:
-    sidecar = build_sidecar()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--octant-repo",
+        type=Path,
+        required=True,
+        help="an Octant checkout with a release build of `octant`",
+    )
+    args = parser.parse_args()
+    sidecar = build_sidecar(args.octant_repo.resolve())
     WRAPPED_SIDECAR.write_text(json.dumps(sidecar, indent=2) + "\n")
     n = len(sidecar["spans"])
     print(f"wrote {WRAPPED_SIDECAR.relative_to(REPO_ROOT)} ({n} spans)")

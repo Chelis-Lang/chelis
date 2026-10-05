@@ -213,7 +213,7 @@ const GATED_SHAPES: [(&str, &str, &str); 11] = [
     (
         "negative pad",
         NEGATIVE_PAD,
-        "must be a non-negative integer",
+        "numeric trap: domain in pad at i64",
     ),
     (
         "call's named extent claim",
@@ -354,7 +354,7 @@ out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 }
 out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 ",
-        "must be a non-negative integer",
+        "numeric trap: domain in pad at i64",
     ),
     (
         "call's named extent claim",
@@ -894,7 +894,14 @@ fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> 
     let built = Command::cargo_bin("chelis")
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out_dir)
         .output()
         .unwrap();
@@ -992,7 +999,8 @@ def main() -> tensor[*, f32] = {
   pick(to_tensor({c}), a, b)
 }
 ";
-    let shape_error = "where expects condition and both branches to have identical shape";
+    // spec/04-type-system.md section 4.7: a `Domain` trap in `where`.
+    let shape_error = "numeric trap: domain in where at i64";
     let directory = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
     for (index, (condition, expected)) in [
@@ -1028,8 +1036,10 @@ def main() -> tensor[*, f32] = {
 /// [05-OP-53]: a uniform condition shaped unlike the branch it selects, by
 /// extent, by axis order, or with the unselected branch shaped like the
 /// selected one, is refused. The host interpreter fails with the typed shape
-/// error; the whole-program C refuses to build the graph, whose operand types
-/// already disagree.
+/// error; the whole-program C checks the operands' agreement before `where`
+/// reads them and fails when it runs, since the graph proves neither
+/// agreement nor a contradiction between the wildcard extents
+/// (runtime_extents.md C2.3, chelis#2642).
 ///
 /// Evidentiary status: REGRESSION TEST for every H row (at 1a026f823 each
 /// returns its selected branch); DISPOSITION LOCK for the C rows.
@@ -1068,16 +1078,15 @@ fn a_condition_shaped_unlike_its_selected_branch_is_refused_in_eval_file_and_c()
     for (index, (row, source)) in rows.iter().enumerate() {
         let stem = format!("where_selected_{index}");
         let h = h_file(directory.path(), &stem, source);
-        let h_refused = h.as_ref().is_err_and(|stderr| {
-            stderr.contains("where expects condition and both branches to have identical shape")
-        });
+        let h_refused = h
+            .as_ref()
+            .is_err_and(|stderr| stderr.contains("where operands disagree"));
         if !h_refused {
             failures.push(format!("{row}, H: {h:?}"));
         }
         let c = c_file(directory.path(), &stem, source);
         let c_refused = c.as_ref().is_err_and(|stderr| {
-            stderr.starts_with("build: ")
-                && stderr.contains("condition and branches must have exactly matching shape")
+            !stderr.starts_with("build: ") && stderr.contains("operands disagree at axis")
         });
         if !c_refused {
             failures.push(format!("{row}, C: {c:?}"));

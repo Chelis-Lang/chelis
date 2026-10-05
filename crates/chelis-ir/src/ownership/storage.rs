@@ -739,6 +739,7 @@ fn classify_nodes(
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::Relu
+                | RiscOp::Softmax { .. }
                 | RiscOp::ReluAdjoint
                 | RiscOp::Neg
                 | RiscOp::Recip
@@ -749,6 +750,9 @@ fn classify_nodes(
                 | RiscOp::Cos
                 | RiscOp::Tan
                 | RiscOp::Atan
+                | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Abs
                 | RiscOp::Floor
                 | RiscOp::Ceil
@@ -770,7 +774,7 @@ fn classify_nodes(
                 | RiscOp::OneHot { .. }
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
-                | RiscOp::CastTrunc { .. }
+                | RiscOp::NamedCast { .. }
                 | RiscOp::FusedElem { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Shrink { .. }

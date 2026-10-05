@@ -83,7 +83,7 @@ fn run_build_in(dir: &Path, source: &Path, output: Option<&Path>) -> std::proces
     let mut cmd = StdCommand::new(bin);
     cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(dir)
-        .args(["build", source.to_str().unwrap()]);
+        .args(["build", "--emit-c", source.to_str().unwrap()]);
     if let Some(out) = output {
         cmd.args(["-o", out.to_str().unwrap()]);
     }
@@ -95,7 +95,13 @@ fn run_build_target(dir: &Path, source: &Path, target: &str) -> std::process::Ou
     StdCommand::new(bin)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(dir)
-        .args(["build", source.to_str().unwrap(), "--target", target])
+        .args([
+            "build",
+            "--emit-c",
+            source.to_str().unwrap(),
+            "--target",
+            target,
+        ])
         .output()
         .expect("spawn chelis build")
 }

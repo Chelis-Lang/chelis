@@ -54,6 +54,11 @@ concurrency:
   group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
+# Candidate code also runs on workflow_dispatch in the base branch context.
+# Limit the cache capability independently of GITHUB_TOKEN permissions.
+# The Hull build restores the family ci-cache-warm.yml writes from main.
+cache-mode: read
+
 permissions:
   contents: read
   issues: read
@@ -582,6 +587,8 @@ jobs:
         continue-on-error: true
         if: ${{ github.event_name == 'pull_request' && steps.preflight-gate.outputs.gate == 'success' }}
         working-directory: candidate
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: >-
           python3 scripts/ci_candidate_identity.py
           --repository "${{ github.repository }}"
@@ -590,7 +597,7 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --pr-number "${{ github.event.pull_request.number }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
-          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --base-ref "$BASE_REF"
           --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
           --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
 
@@ -701,9 +708,12 @@ jobs:
         uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: conformance
+          save-if: false
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a
@@ -745,6 +755,6 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}

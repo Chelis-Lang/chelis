@@ -78,10 +78,52 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_construct_stack_count_has_only_ordinary_dimensions(self) -> None:
+        oracle.validate_contract(REPO_ROOT)
+        for clause in (
+            "A statically visible List literal of count n inserts d-lit n",
+            "An unknown List count inserts the ordinary wildcard dimension",
+            "A declared result extent at that wildcard position is a runtime claim",
+            "CountDim(xs) denotes d-lit n for a statically visible List literal",
+        ):
+            relative = "spec/registry/stdlib_numeric_manifest.md" if clause.startswith("CountDim") else "spec/05-risc-primitives.md"
+            with self.subTest(clause=clause):
+                relative = Path(relative)
+                original = (self.root / relative).read_text()
+                self.replace(relative, clause, "REMOVED")
+                self.assert_contract_fails("05-OP-35")
+                (self.root / relative).write_text(original)
+
+    def test_construct_contract_rejects_old_unrepresentable_spread_schemas(self) -> None:
+        for operation, decided, obsolete in [
+            ("squeeze", "(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)", "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]"),
+            ("stack", "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)", "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]"),
+            ("unsqueeze", "(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)", "(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]"),
+        ]:
+            with self.subTest(operation=operation):
+                relative = Path("spec/registry/stdlib_numeric_manifest.md")
+                original = (self.root / relative).read_text()
+                self.replace(relative, decided, obsolete)
+                self.assert_contract_fails("exact manifest mismatch")
+                (self.root / relative).write_text(original)
+
+    def test_construct_contract_requires_resolved_identity_and_computed_shape(self) -> None:
+        relative = Path("spec/05-risc-primitives.md")
+        for clause in [
+            "Concrete-rank schemas are instantiated for the resolved callable identity",
+            "The checker computes the result shape from the operand shape and normalized axis",
+            "A genuinely dynamic positional axis is a type error",
+        ]:
+            with self.subTest(clause=clause):
+                original = (self.root / relative).read_text()
+                self.replace(relative, clause, "REMOVED")
+                self.assert_contract_fails("05-OP-35")
+                (self.root / relative).write_text(original)
+
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 23 is explicitly\npresent", "wire v23 presence"),
-            ("spec/10-serialization.md", "versions 1 through 22", "wire old-version rejection"),
+            ("spec/10-serialization.md", "Schema version 27 is explicitly\npresent", "wire v27 presence"),
+            ("spec/10-serialization.md", "versions 1 through 26", "wire old-version rejection"),
             ("spec/10-serialization.md", "Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and\n`Scatter` wire operations", "wire paired sparse batch rank"),
             ("spec/10-serialization.md", "and every future version are decode errors before any IR\nnode is consumed", "wire future-version rejection"),
             ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),
@@ -283,10 +325,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_json_numeric_construction_never_implicitly_widens(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly i64",
-            "`JsonFloat(value)` accepts any float and widens it to f64",
+            "`JsonFloat(value, text)` accepts exactly `(f64, string)` and\n> `JsonInt(value)` accepts exactly i64",
+            "`JsonFloat(value, text)` accepts any float and widens it to f64",
         )
-        self.assert_contract_fails("OP-4.*exactly f64")
+        self.assert_contract_fails(r"OP-4.*exactly `\(f64, string\)`")
 
     def test_numeric_serialization_preserves_exact_json_variants(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -397,10 +439,44 @@ class ContractValidationTests(unittest.TestCase):
             "An integer-form token outside i64 range SHALL ingest as\n"
             "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
             " never\n"
-            "> selects a lossy float image for an integer-form token.",
-            "An integer-form token outside i64 range falls back to `JNum`.",
+            "> selects a lossy float image for an integer-form token",
+            "An integer-form token outside i64 range falls back to `JNum`",
         )
         self.assert_contract_fails("OP-2.*JsonBigInt")
+
+    def test_json_float_keeps_validated_token_text(self) -> None:
+        path = self.root / "spec/05-risc-primitives.md"
+        mutations = (
+            (
+                "`text` is\n> the token's exact spelling and `value` is the correctly-rounded f64 of\n> `text`",
+                "the token's spelling is discarded after rounding",
+                "OP-2.*exact spelling",
+            ),
+            (
+                "`value` is bit-identical to the correctly-rounded\n> f64 of `text`, which is finite; signed zero is distinguished",
+                "`value` is close to the f64 of `text`",
+                "OP-2.*bit-identical",
+            ),
+            (
+                "Construction does not check validity ([05-OP-4]); serialization\n> does ([05-OP-5])",
+                "Serialization trusts the stored pair",
+                r"OP-2.*Construction does not check validity",
+            ),
+            (
+                "A stored `JsonFloat` emits its `text` verbatim as the number\n> token after validating the pair under [05-OP-2]",
+                "A stored `JsonFloat` emits `to_string` of its f64",
+                "OP-5.*emits its `text` verbatim",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
 
     def test_uniform_like_uses_one_common_float_dtype_and_own_width_fma(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -1963,8 +2039,8 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-34.*recursive cotangent shape",
             ),
             (
-                "`JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes\n"
-                "> the cotangent of `y` to `x`",
+                "`JsonFloat(x, s)` followed by an executed `JsonFloat(y, t)` match\n"
+                "> routes the cotangent of `y` to `x`",
                 "JsonFloat match drops the field cotangent",
                 "OP-34.*JsonFloat",
             ),
@@ -2067,14 +2143,20 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 73)
-        self.assertEqual(len(set(rows)), 73)
+        self.assertEqual(len(rows), 283)
+        self.assertEqual(len(set(rows)), 283)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
+            "decimal::decimal_to_f16",
+            "decimal::decimal_to_bf16",
             "io/json::json_bigint",
             "io/json::load_json",
-            "time::date_lt",
+            "datetime::date_lt",
+            "datetime/business::business_day_offset",
+            "datetime/clock::clock_now",
+            "datetime/zone::zoned_from_local",
+            "datetime/columns::dates_add_months",
         ):
             with self.subTest(identity=identity):
                 self.assertIn(identity, identities)
@@ -2886,27 +2968,32 @@ class ContractValidationTests(unittest.TestCase):
         self.assert_contract_fails("OP-35.*never converts")
 
     def test_stdlib_decimal_contract_is_total(self) -> None:
-        block = self.repository_atom("05-OP-35")
+        block = self.repository_atom("05-OP-76")
         for clause in (
-            "The accepted decimal grammar is",
-            "canonical zero is `Decimal { coefficient: 0i64, scale: 0i64 }`",
-            "Addition, subtraction, multiplication, equality, and ordering use exact mathematical rationals",
-            "`decimal_to_string` emits the unique canonical non-exponent form",
+            "`|c| <= 10^38 - 1` and an integer scale `s` with `0 <= s <= 38`",
+            "each rational in the value set has exactly one representation",
+            "[05-OP-36] structural equality of two decimals is equality of the rationals they denote",
+            "so `decimal(decimal_to_string(x))` is `x`",
         ):
             with self.subTest(clause=clause):
                 self.assertIn(clause, block)
 
-    def test_decimal_parse_normalizes_before_representation_checks(self) -> None:
+    def test_decimal_failure_order_and_float_rounding_are_frozen(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "interpreted in exact arithmetic and normalized before either "
-                "representation\n> check",
-                "checked for i64 representation before normalization",
+                "each argument's own\n> validity from left to right, then `RejectInexact`, "
+                "then the result's range",
+                "the result's range, then `RejectInexact`, then each argument's own "
+                "validity",
             ),
             (
-                "removable trailing zeros do not cause `Overflow`",
-                "removable trailing zeros may cause `Overflow`",
+                "correctly rounded once to the target\n> format with ties to even",
+                "rounded to the target format by the host",
+            ),
+            (
+                "rounds to the infinity of `x`'s sign",
+                "fails `overflow`",
             ),
         )
         for old, new in mutations:
@@ -2915,7 +3002,7 @@ class ContractValidationTests(unittest.TestCase):
                 self.assertIn(old, original)
                 path.write_text(original.replace(old, new, 1), encoding="utf-8")
                 try:
-                    self.assert_contract_fails("OP-35")
+                    self.assert_contract_fails("OP-76")
                 finally:
                     path.write_text(original, encoding="utf-8")
 
@@ -2959,12 +3046,24 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_stdlib_time_contract_is_total(self) -> None:
-        block = self.repository_atom("05-OP-35")
+    def test_stdlib_datetime_contract_is_total(self) -> None:
+        block = self.repository_atom("05-OP-73")
         for clause in (
-            "Years `0000` through `9999` use exactly four digits",
-            "`day_of_week` fixes `1970-01-01` as Thursday",
-            "date comparisons are lexicographic on `(year, month, day)`",
+            "years 0..9999 as four digits",
+            "`date_weekday` (1970-01-01 is a Thursday)",
+            "`date_lt`, `date_lte`, `date_gt`, and `date_gte` order by epoch day",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, block)
+
+    def test_stdlib_datetime_zone_contract_is_total(self) -> None:
+        block = self.repository_atom("05-OP-73")
+        for clause in (
+            "`time_zone_offset_at(tz,i)` is the offset in force at `i`",
+            "`RejectNonUniqueLocal` fails `domain` in a fold and in a gap",
+            "`UseWrittenOffset` gives the instant `written - offset`",
+            "`+00:00` included, is present",
+            "`u-ca` tag whose value is `iso8601` or `gregory` is accepted",
         ):
             with self.subTest(clause=clause):
                 self.assertIn(clause, block)
@@ -2997,7 +3096,7 @@ class ContractValidationTests(unittest.TestCase):
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
-            "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
+            "`tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}`",
@@ -3009,15 +3108,15 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
-                "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",
+                "(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)",
                 "(&tensor[a,1,b,p],i32)->tensor[a,b,p]",
             ),
             (
-                "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]",
+                "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)",
                 "(List[tensor[d,p]],i32)->tensor[rows,d,p]",
             ),
             (
-                "(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]",
+                "(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)",
                 "(&tensor[d,p],i32)->tensor[1,d,p]",
             ),
             (
@@ -3055,10 +3154,10 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "all three are rank-polymorphic, bit-preserving reshape/concat"
-                "\n> operations",
+                "All three are bit-preserving reshape/concat operations with"
+                "\n> concrete-rank signature schemas",
                 "all three support only their current example ranks",
-                "rank-polymorphic",
+                "concrete-rank signature schemas",
             ),
             (
                 "compares its length and every\n> entry to the tensor's complete "
@@ -3102,7 +3201,7 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_stdlib_exact_domain_blanket_cannot_capture_decimal_or_calendar(self) -> None:
+    def test_stdlib_primitive_width_rule_cannot_become_a_blanket(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "Every primitive-width intermediate in a graph whose contract names a dtype",
@@ -3113,18 +3212,66 @@ class ContractValidationTests(unittest.TestCase):
     def test_date_difference_orientation_is_frozen(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "`days_between(lhs,rhs) = ordinal(lhs) - ordinal(rhs)`",
+            "`date_days_until(a,b)` is\n> `epoch_day(b) - epoch_day(a)`",
+            "`date_days_until(a,b)` is\n> `epoch_day(a) - epoch_day(b)`",
         )
-        self.assert_contract_fails("OP-35.*days_between")
+        self.assert_contract_fails("OP-73.*date_days_until")
 
-    def test_duration_overflow_is_on_the_final_days_field(self) -> None:
+    def test_zone_gap_orientation_is_frozen(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "final normalized `days` field has no i64 representation",
-            "any intermediate component total exceeds i64",
+            "`EarlierInstant` gives `dt - o_a`",
+            "`EarlierInstant` gives `dt - o_b`",
         )
-        self.assert_contract_fails("OP-35.*final normalized")
+        self.assert_contract_fails("OP-73.*EarlierInstant")
+
+    def test_zone_unknown_offset_resolves_under_every_policy(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "When the offset is absent, every policy gives",
+            "When the offset is absent, `UseWrittenOffset` gives",
+        )
+        self.assert_contract_fails("OP-73.*When the offset is absent")
+
+    def test_zone_first_tag_rule_is_elective_only(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "Otherwise an elective tag whose key",
+            "Otherwise a tag whose key",
+        )
+        self.assert_contract_fails("OP-73.*Otherwise an elective tag")
+
+    def test_zone_zero_period_keeps_the_zoned_value(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "returns `z` when\n> `p` is zero",
+            "re-resolves `z` when\n> `p` is zero",
+        )
+        self.assert_contract_fails("OP-73.*returns `z` when `p` is zero")
+
+    def test_zone_daylight_start_prevails_at_a_tie(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "a start prevailing over an end",
+            "an end prevailing over a start",
+        )
+        self.assert_contract_fails("OP-73.*a start prevailing")
+
+    def test_duration_range_failure_is_on_the_normalized_second(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "fails `domain`\n> when the normalized second leaves i64",
+            "fails `domain`\n> when any intermediate component total exceeds i64",
+        )
+        self.assert_contract_fails("OP-73.*normalized second")
+
+    def test_rounding_ties_to_even_takes_the_even_multiple(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "an exact tie\n> taking the even `k`",
+            "an exact tie\n> taking either multiple",
+        )
+        self.assert_contract_fails("OP-74.*even")
 
     def test_assert_close_finite_pairs_use_inclusive_tolerance(self) -> None:
         self.replace(
@@ -3138,12 +3285,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_negative_year_canonical_digit_count_is_exact(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "A negative year uses `-` followed by exactly\n"
-            "> `max(4, digits(|year|))` decimal digits, where `|year|` is the exact\n"
-            "> mathematical magnitude rather than an i64 `abs`",
-            "A negative year uses an implementation-defined number of digits",
+            "negative years as `-` and six digits",
+            "negative years with an implementation-defined number of digits",
         )
-        self.assert_contract_fails("OP-35.*negative year")
+        self.assert_contract_fails("OP-73.*six digits")
 
     def test_bool_counting_has_no_explicit_cast_compatibility_idiom(self) -> None:
         self.replace(

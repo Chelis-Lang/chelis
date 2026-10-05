@@ -12,6 +12,7 @@ fn hip_build_stages_companion_once_and_c_build_excludes_it() {
             .unwrap()
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .arg("build")
+            .arg("--emit-c")
             .arg(&source)
             .args(["--target", target, "--output"])
             .arg(&output)

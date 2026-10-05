@@ -1,5 +1,5 @@
 //! [05-OP-6] `cast_trunc` acceptance matrix
-//! (`spec/05-risc-primitives.md` §3.8; `spec/design/named_truncating_cast.md`
+//! (`spec/05-risc-primitives.md` §3.8; `spec/design/archive/named_truncating_cast.md`
 //! §8; the chelis#759 ladder's float-to-integer rung, which unblocks the
 //! chelis#1091 ecosystem break).
 //!
@@ -74,6 +74,7 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -155,11 +156,16 @@ fn agrees_with_the_checked_default_on_integral_values() {
 /// migration target, not call it future work.
 #[test]
 fn the_checked_default_teaches_cast_trunc_as_the_named_form() {
+    // The book's type reference names `cast_trunc` as the truncating form.
+    // A trap ends on its [04-NUM-9] line in every lane, so eval prints no
+    // hint after it, as compiled C prints none.
     let stderr = eval_expr("cast(1.9, i32)").expect_err("the checked default traps");
-    assert!(
-        stderr.contains("cast_trunc"),
-        "the fractional-cast hint must name `cast_trunc` now that it ships: {stderr}"
+    assert_eq!(
+        stderr.trim_end().lines().last(),
+        Some("numeric trap: domain in cast at i32"),
+        "the checked default must end on its trap line: {stderr}"
     );
+    assert!(!stderr.contains("cast_trunc"), "{stderr}");
 }
 
 // ===========================================================================
@@ -395,49 +401,35 @@ fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
 }
 
 /// The HOST tensor lane (a tensor built from scalar expressions, which
-/// carries `*` dims rather than lowering into the DAG) has no
-/// `cast_trunc` emission yet, and it must REJECT LOUDLY rather than fall
-/// through to an identity pass-through.
-///
-/// This is pinned deliberately, because the checked `cast`'s host arm
-/// ends in `_ => arg_vars[0].0.clone()` and therefore emits NO conversion
-/// at all for this shape -- it reinterprets the f32 buffer as i32. That
-/// is a pre-existing silent-wrong-answer path on `cast` (chelis#729 /
-/// chelis#730 territory, not fixed here). `cast_trunc` must not acquire
-/// the same hole by someone "fixing" this rejection with a fallback arm.
+/// carries `*` dims rather than lowering into the DAG) converts through the
+/// same per-element guard as the DAG lane (chelis#759), so it truncates
+/// exactly as eval does and traps with the same brand. The checked `cast`'s
+/// host arm still ends in an identity pass-through for this shape
+/// (chelis#729 / chelis#730 territory); `cast_trunc` must never acquire it.
 #[test]
-fn host_lane_tensor_cast_trunc_rejects_loudly_rather_than_passing_through() {
+fn host_lane_tensor_cast_trunc_converts_as_eval_does() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
     let program = "module M.Main\n\
                    def f() -> tensor[2, i32] = \
                    cast_trunc(to_tensor([1.9, sqrt(4.0)]), i32)\n\
                    out = print(f())\n";
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("m.ch");
-    write_file(&path, program);
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("out").to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis build should run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let evaluated = eval_program(program).expect("eval lane");
+    assert_eq!(evaluated, "tensor(shape=[2], data=[1, 2])");
+    let (stdout, stderr, ok) = c_lane_run(program, "ct_host_tensor").expect("C lane");
+    assert!(ok, "the host tensor lane must build and run: {stderr}");
+    assert_eq!(stdout.lines().next().unwrap_or("").trim(), evaluated);
+
+    let trapping = "module M.Main\n\
+                    def f() -> tensor[2, i8] = \
+                    cast_trunc(to_tensor([1.9, mul(300.5, 1.0)]), i8)\n\
+                    out = print(f())\n";
+    let (stdout, stderr, ok) = c_lane_run(trapping, "ct_host_tensor_trap").expect("C lane");
     assert!(
-        !out.status.success(),
-        "the host tensor lane has no cast_trunc emission; it must not build. \
-         If this starts passing, verify the emitted C actually CONVERTS rather \
-         than reinterpreting the buffer: stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("cast_trunc") && stderr.contains("float-to-integer only"),
-        "the rejection must be the typed [05-OP-6] one naming the op, not a \
-         generic failure: {stderr}"
+        !ok && stderr.contains("numeric trap: overflow in cast_trunc at i8"),
+        "the host tensor lane must trap with the eval brand; got ok={ok} \
+         stdout={stdout} stderr={stderr}"
     );
 }
 

@@ -544,11 +544,22 @@ fn to_int_builtin_rejects_non_string_input() {
 }
 
 #[test]
-fn mod_rejects_float_input() {
+fn mod_admits_float_input() {
+    // [05-OP-64]: float `mod` is C `fmod` (chelis#626).
+    check_ok(
+        r#"(def {} good
+            (app {} (var {} mod)
+                (lit {type: (t-prim {} f64)} 7.0)
+                (lit {type: (t-prim {} f64)} 3.0)))"#,
+    );
+}
+
+#[test]
+fn mod_rejects_mixed_float_widths() {
     check_err(
         r#"(def {} bad
             (app {} (var {} mod)
-                (lit {type: (t-prim {} f64)} 7.0)
+                (lit {type: (t-prim {} f32)} 7.0)
                 (lit {type: (t-prim {} f64)} 3.0)))"#,
         CheckErrorKind::TypeMismatch,
     );
@@ -772,18 +783,28 @@ fn if_branch_mismatch() {
 #[test]
 fn pipe_simple() {
     check_ok(
-        "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (var {} x)))
-         (def {} result (pipe {} (lit {type: (t-prim {} f32)} 1.0) (var {} f)))",
+        r#"
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {} f (fn {} (params {} x) (var {} x)))
+
+(def {} result (app {} (var {} f) (lit {type: (t-prim {} f32)} 1.0)))
+"#,
     );
 }
 
 #[test]
 fn pipe_chain() {
     check_ok(
-        "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-         (def {} f (fn {} (params {} x) (var {} x)))
-         (def {} result (pipe {} (lit {type: (t-prim {} f32)} 1.0) (var {} f) (var {} f)))",
+        r#"
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {} f (fn {} (params {} x) (var {} x)))
+
+(def {}
+  result
+  (app {} (var {} f) (app {} (var {} f) (lit {type: (t-prim {} f32)} 1.0))))
+"#,
     );
 }
 

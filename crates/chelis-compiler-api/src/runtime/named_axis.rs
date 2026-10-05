@@ -143,6 +143,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         reduce_name: &str,
         kids: &[Expr],
+        metadata: &Metadata,
     ) -> Result<RuntimeValue, String> {
         let operand_expr = kids
             .get(1)
@@ -184,7 +185,16 @@ impl<'a> EvalContext<'a> {
             make_var_with_type(placeholder, &operand_type, span),
         ];
         app_children.extend(kids[2..].iter().cloned());
-        let app_expr = Expr::node(DeepTag::App, Metadata::default(), app_children, span);
+        // The staged call keeps the authored accumulator (spec/04 §5.7).
+        let mut app_metadata = Metadata::default();
+        if let Some(accumulator) = metadata.accumulator() {
+            app_metadata
+                .insert(chelis_deep::annotations::MetadataValue::Accumulator(
+                    accumulator.clone(),
+                ))
+                .map_err(|error| format!("{reduce_name} accumulator: {error}"))?;
+        }
+        let app_expr = Expr::node(DeepTag::App, app_metadata, app_children, span);
         let scoped = UnordMap::from([(placeholder.to_string(), operand_type)]);
         let staged = UnordMap::from([(placeholder.to_string(), operand.value.clone())]);
         self.route_named_axis_expr(&app_expr, scoped, staged, reduce_name)
@@ -297,15 +307,20 @@ impl<'a> EvalContext<'a> {
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        // The lowering universe of a routed reduction is the program's own
-        // type environment and definition table, both fixed for this
-        // evaluation context. Lowering used to hand those two tables to a
-        // free `try_lower_*` entry, which sorted them, deep-cloned them and
-        // folded the pipes in every definition -- all of `chelis-std`
-        // included -- once per routed reduction (chelis#2207). The scope
-        // prepares that context once; cloning it here is four `Arc` bumps and
-        // releases the borrow on `self` that the input provider below needs.
-        let lowering_context = self.program.routing_lowering_context();
+        // A routed call is lowered from the checker-owned program artifact,
+        // including its local ascription sites and authored signatures. Type
+        // metadata alone cannot reconstruct either obligation (chelis#3092).
+        // The scope caches the prepared context, preserving the bounded
+        // whole-program fold cost of chelis#2207.
+        let checked = self.session.as_ref().ok_or_else(|| {
+            NamedAxisRouteError::Fatal(
+                "named-axis routing requires a checked program with local extent claims"
+                    .to_string(),
+            )
+        })?;
+        let lowering_context = self
+            .program
+            .routing_lowering_context(checked.program(), &self.declared_signatures);
         let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
             routed_expr,
             scoped_types,
@@ -331,7 +346,7 @@ impl<'a> EvalContext<'a> {
         let prepared =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
                 .map_err(|err| {
-                    if provider_failed {
+                    if provider_failed || super::transforms::is_numeric_trap_failure(&err) {
                         NamedAxisRouteError::Fatal(err)
                     } else {
                         NamedAxisRouteError::Fatal(format!(
@@ -347,7 +362,7 @@ impl<'a> EvalContext<'a> {
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.
-            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+            if super::transforms::is_numeric_trap_failure(&err) {
                 return NamedAxisRouteError::Fatal(err);
             }
             NamedAxisRouteError::Fatal(format!(
@@ -399,6 +414,7 @@ impl<'a> EvalContext<'a> {
         // the ingress form (identity when the dtypes already agree).
         let element = tensor.value.storage().scalar_at(0);
         let value = match element.as_i64_exact() {
+            _ if element.prim() == prim => element,
             Some(v) => chelis_types::scalar_from_i64("named_axis", prim, v)
                 .map_err(|trap| trap.to_string())?,
             None => chelis_types::scalar_from_f64("named_axis", prim, element.as_f64_lossy())

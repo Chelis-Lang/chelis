@@ -342,6 +342,7 @@ fn build_compile_run_grad(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -402,6 +403,7 @@ fn build_fail(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

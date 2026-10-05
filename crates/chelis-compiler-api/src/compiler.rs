@@ -9,7 +9,7 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
-    LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
+    LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
@@ -42,10 +42,10 @@ use crate::schema::{
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
     WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm, WireParam,
-    WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm,
+    WireNamedCastMode, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
+    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl,
+    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
@@ -151,6 +151,7 @@ impl CompilerError {
     /// `Diagnostic::kind` set at the eval-stage boundary, so it cannot be
     /// confused by a program whose own error text discusses cancellation.
     pub fn is_cancellation(&self) -> bool {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.errors
             .iter()
             .any(|diagnostic| diagnostic.kind() == chelis_vocab::DiagnosticKind::Cancelled)
@@ -206,6 +207,7 @@ pub(crate) fn cancelled_or(stage: &str, error: CompilerError) -> CompilerError {
 type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn parse(request: ParseRequest) -> Result<ParseResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match request.source_kind {
         SourceKind::Surf => {
             let decls = parse_surf(&request.source)?;
@@ -243,6 +245,7 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
 }
 
 pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let decls = parse_surf(&request.source)?;
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls).map_err(|error| {
         stage_error_with_span(
@@ -274,6 +277,7 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
 pub fn replace_function_body(
     request: crate::schema::ReplaceFunctionBodyRequest,
 ) -> Result<crate::schema::ReplaceFunctionBodyResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // The new body must be exactly one Deep expression, stamped in the
     // RuntimeExpr role it will occupy. Zero or many is a parse-stage
     // rejection, not a check failure.
@@ -310,6 +314,7 @@ pub fn replace_function_body(
 /// duplicate `defsig`, type errors, effects, and linearity violations are
 /// surfaced from that whole-module pipeline.
 pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("add-function", &request.module)?;
 
     let new_decl_exprs = parse_deep_authoring_decls("add-function", &request.new_decls)?;
@@ -333,6 +338,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
 }
 
 pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("deep-outline", &request.module)?;
     let outline = chelis_deep::authoring::outline(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
@@ -360,6 +366,7 @@ pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
 }
 
 pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("deep-references", &request.module)?;
     let refs = chelis_deep::authoring::references(&module, &request.symbol)
         .map_err(|err| authoring_error_to_compiler_error("deep-references", err))?;
@@ -374,6 +381,7 @@ pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesR
 }
 
 pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("deep-call-graph", &request.module)?;
     let graph = chelis_deep::authoring::call_graph(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-call-graph", err))?;
@@ -383,6 +391,7 @@ pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphRes
 }
 
 pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFunctionResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("replace-function", &request.module)?;
     check_preimage(
         &module,
@@ -406,6 +415,7 @@ pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFuncti
 }
 
 pub fn rename(request: RenameRequest) -> Result<RenameResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("rename", &request.module)?;
     check_preimage(
         &module,
@@ -432,6 +442,7 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
 }
 
 pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatureResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("change-signature", &request.module)?;
     check_preimage(
         &module,
@@ -470,6 +481,7 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
 }
 
 pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let module = parse_deep_authoring_module("add-property", &request.module)?;
     let new_decl_exprs = parse_deep_authoring_decls("add-property", &request.new_decls)?;
     let parsed = parse_add_function_decls(new_decl_exprs)?;
@@ -873,6 +885,7 @@ fn wire_deep_error_path(path: crate::fragment::DeepErrorPath) -> crate::schema::
 }
 
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind: request.source_kind,
@@ -902,12 +915,25 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
 }
 
 pub fn lower(request: LowerRequest) -> Result<LowerResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source_scoped(
         request.source_kind,
         &request.source,
         request.entry.as_deref(),
         Target::Eval,
     )?;
+    lower_result(compiled)
+}
+
+/// Lower Surf declarations the caller already holds. The declarations are the
+/// program that is checked and lowered; no source text is printed or parsed
+/// again (chelis#3172).
+pub fn lower_decls(decls: &[Decl], entry: Option<&str>) -> Result<LowerResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    lower_result(compile_decls_for_eval(decls, entry, Target::Eval)?)
+}
+
+fn lower_result(compiled: CompiledSource) -> Result<LowerResult> {
     let dag = wire_dag(&compiled.dag)
         .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
@@ -936,6 +962,7 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
 /// callable surface, where a merged manifest is the #817 defect; here the
 /// merged whole-program emission IS the product behavior.
 pub fn compile(request: CompileRequest) -> Result<CompileResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     Ok(compile_for_execution_impl(request, EntryStrictness::Legacy)?.compile_result)
 }
 
@@ -1116,7 +1143,8 @@ fn project_host_program_to_entry(
             }
             ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
             ConcreteHostExprKind::ResultClaimScope { body, .. } => collect_expr(body, bound, out),
-            ConcreteHostExprKind::FormalIngress { value, .. } => collect_expr(value, bound, out),
+            ConcreteHostExprKind::FormalIngress { value, .. }
+            | ConcreteHostExprKind::ExtentSites { value, .. } => collect_expr(value, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,
@@ -1556,6 +1584,7 @@ fn entry_lane_decision<'a>(
 /// manifest (#817) and never a debug assert. The C-source surface with
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     compile_for_execution_impl(request, EntryStrictness::Strict)
 }
 
@@ -1570,6 +1599,7 @@ pub fn compile_for_execution_with_observer(
     request: CompileRequest,
     observer: &mut dyn FnMut(crate::emission_observer::EmissionObservation<'_>),
 ) -> Result<CompiledExecutionArtifact> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
@@ -1594,6 +1624,7 @@ pub fn compile_for_execution_with_trace<T>(
     request: CompileRequest,
     project: impl FnOnce(crate::compilation_trace::CompilationObservation<'_>) -> T,
 ) -> Result<crate::compilation_trace::TracedCompilation<T>> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let mut capture = crate::compilation_trace::Capture::new();
     let mut project = Some(project);
     let mut observer = |observation: crate::compilation_trace::CompilationObservation<'_>| {
@@ -1661,6 +1692,7 @@ pub fn compile_for_execution_in_context(
     target: CompileTarget,
     entry_name: Option<&str>,
 ) -> Result<CompiledExecutionArtifact> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, manifest_target(target))?;
     // The in-context lane is a callable surface: strict entry integrity.
     execution_artifact_from_compiled(compiled, target, entry_name, EntryStrictness::Strict)
@@ -1802,6 +1834,7 @@ fn resolve_in_context_entry<'a>(
 /// `compile_error` here would read as internal desync rather than a
 /// not-yet-implemented capability.
 pub fn reef_context_hip_unsupported_error() -> CompilerError {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
         chelis_types::unsupported::UnsupportedKind::Construct(
             "reef-context compilation (a `project_root=` with \
@@ -1894,7 +1927,6 @@ fn execution_artifact_from_compiled_observed(
     let collect_trace = observer
         .as_ref()
         .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
     {
@@ -1916,17 +1948,6 @@ fn execution_artifact_from_compiled_observed(
     #[cfg(feature = "emission-observer")]
     let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
     let func_name = execution_c_symbol(entry_name);
-
-    // Reject host-runtime-only builtins early for any compiled-backend
-    // target so both public compiler APIs preserve the owning builtin's
-    // specific diagnostic. The fallible emitter independently rejects an
-    // unknown compiled-lane builtin; this gate improves ordering and context,
-    // and is not the correctness boundary. See spec/05-risc-primitives.md
-    // §3.6 and spec/design/loud_unsupported.md §C6.3.
-    if let Some(host_program) = host_program {
-        reject_host_only_builtins(host_program, build_target)?;
-        reject_eval_only_builtins(host_program, build_target)?;
-    }
 
     match target {
         CompileTarget::C => {
@@ -2438,6 +2459,7 @@ fn execution_artifact_from_compiled_observed(
 }
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     eval_for_target(request, Target::Eval)
 }
 
@@ -2445,6 +2467,7 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
 /// the local evaluator, but lane assignment, required inputs, and surfaced
 /// roots are exactly the contract the requested backend would consume.
 pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, None)
 }
@@ -2459,6 +2482,7 @@ pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResul
 /// wire tensors fail before entry; genuinely dead and unrelated bindings are
 /// not decoded. Host execution still owns lowering errors and executed effects.
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     eval_selected_for_target(request, selected_root_names, Target::Eval)
 }
 
@@ -2467,8 +2491,37 @@ pub fn eval_selected_for_target(
     selected_root_names: &[String],
     target: Target,
 ) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, Some(selected_root_names))
+}
+
+/// Evaluate the selected roots of a program the caller has already checked,
+/// through a manifest computed for `target`. The checked compilation is
+/// lowered and run as it is: a caller that checks a program and then
+/// evaluates it never re-checks a re-printed copy (chelis#3129). Selection
+/// follows [`eval_selected`] with no tensor bindings.
+pub fn eval_checked_selected_for_target(
+    checked: crate::pipeline::CheckedCompilation,
+    selected_root_names: &[String],
+    target: Target,
+) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_checked_for_eval(checked, target)?;
+    eval_compiled(&compiled, BTreeMap::new(), Some(selected_root_names))
+}
+
+/// [`eval_selected`] over Surf declarations the caller has already parsed or
+/// assembled. The declarations are the program checked and run; they are
+/// never printed and parsed again (chelis#3129).
+pub fn eval_decls_selected(
+    decls: &[Decl],
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: &[String],
+) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
+    eval_compiled(&compiled, bindings, Some(selected_root_names))
 }
 
 /// Compile the source once, then evaluate it once per entry in `test_roots`,
@@ -2492,6 +2545,7 @@ pub fn eval_selected_for_target(
     note = "use eval_many_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::eval_many_in_context"
 )]
 pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Result<EvalResult>)> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = match compile_source(request.source_kind, &request.source) {
         Ok(compiled) => compiled,
         Err(err) => {
@@ -2533,6 +2587,7 @@ impl PreparedEval {
         bindings: BTreeMap<String, crate::schema::TensorValue>,
         root: &str,
     ) -> Result<EvalResult> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let roots = [root.to_string()];
         eval_compiled(&self.compiled, bindings, Some(&roots))
     }
@@ -2556,7 +2611,23 @@ impl PreparedEval {
     note = "use prepare_eval_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::prepare_eval_in_context"
 )]
 pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source(request.source_kind, &request.source)?;
+    Ok(PreparedEval {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
+/// [`prepare_eval`] over Surf declarations the caller has already parsed or
+/// assembled. The declarations are the program checked and run; they are
+/// never printed and parsed again (chelis#3129).
+#[deprecated(
+    since = "0.3.0",
+    note = "use prepare_eval_decls_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::prepare_eval_decls_in_context"
+)]
+pub fn prepare_eval_decls(decls: &[Decl]) -> Result<PreparedEval> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
     Ok(PreparedEval {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -2608,13 +2679,25 @@ fn compile_new_source_in_context(
     // the library-heavy workloads in chelis#828.
     bail_if_cancelled("parse")?;
     let raw_new_decls = parse_surf(new_source)?;
+    compile_new_decls_in_context(context, &raw_new_decls, target)
+}
+
+/// [`compile_new_source_in_context`] over declarations the caller has already
+/// parsed, so a caller holding declarations never prints and re-parses them
+/// (chelis#3129).
+fn compile_new_decls_in_context(
+    context: &crate::context::CompiledContext,
+    raw_new_decls: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    let _linked = chelis_types::install_linked_program_guard();
     // Strip module wrappers and route through the reef name resolver so
     // bare references like `add` get rewritten to their internal-name
     // form (`mylib.math.add`) — matching what
     // `compile_with_reef_graph` does for the monolithic eval path. This
     // is what makes the new code's references resolve against the
     // library state stored in the `CompiledContext`.
-    let flat_decls = flatten_module_decls(&raw_new_decls);
+    let flat_decls = flatten_module_decls(raw_new_decls);
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
@@ -2670,8 +2753,14 @@ fn compile_rewritten_decls_in_context(
         &new_checked,
         crate::target_capability::tensor_capable_prims(target),
     );
-    let mut manifest =
-        chelis_effects::realizability::compute_root_manifest(&new_checked, &realizability);
+    // The new code's effect rows include its library callees' effects, so a
+    // nullary definition that is effectful only through the library is not
+    // auto-applied as a value root.
+    let mut manifest = chelis_effects::realizability::compute_root_manifest_in_context(
+        Some(context.library_checked()),
+        &new_checked,
+        &realizability,
+    );
     route_tensor_inputs_from_dag(
         &mut manifest,
         &lowered_parts.dag,
@@ -2697,6 +2786,8 @@ fn compile_rewritten_decls_in_context(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: Some(library_runtime),
+        eval_facts: std::sync::OnceLock::new(),
+        host_program: std::sync::OnceLock::new(),
     })
 }
 
@@ -2709,6 +2800,7 @@ pub fn eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     eval_in_context_for_target(context, new_source, Target::Eval)
 }
 
@@ -2717,6 +2809,7 @@ pub fn eval_in_context_for_target(
     new_source: &str,
     target: Target,
 ) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, target)?;
     eval_compiled(&compiled, BTreeMap::new(), None)
 }
@@ -2733,6 +2826,7 @@ pub fn eval_in_context_with_bindings(
     new_source: &str,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
 ) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     eval_compiled(&compiled, bindings, None)
 }
@@ -2745,6 +2839,7 @@ pub fn check_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<CheckResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     // Mirror `check`'s shape: derive a fitness-style report from the
     // composed checked program. The total/typed counts only cover
@@ -2781,6 +2876,7 @@ pub fn eval_many_in_context(
     new_source: &str,
     roots: &[String],
 ) -> Vec<(String, Result<EvalResult>)> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = match compile_new_source_in_context(context, new_source, Target::Eval) {
         Ok(compiled) => compiled,
         Err(err) => {
@@ -2824,6 +2920,7 @@ impl PreparedEvalInContext {
         bindings: BTreeMap<String, crate::schema::TensorValue>,
         root: &str,
     ) -> Result<EvalResult> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let roots = [root.to_string()];
         eval_compiled(&self.compiled, bindings, Some(&roots))
     }
@@ -2837,7 +2934,22 @@ pub fn prepare_eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<PreparedEvalInContext> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
+/// [`prepare_eval_in_context`] over declarations the caller has already
+/// parsed or assembled. They are the program checked and run; they are never
+/// printed and parsed again (chelis#3129).
+pub fn prepare_eval_decls_in_context(
+    context: &crate::context::CompiledContext,
+    new_decls: &[Decl],
+) -> Result<PreparedEvalInContext> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let compiled = compile_new_decls_in_context(context, new_decls, Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -2850,6 +2962,7 @@ pub fn prepare_rewritten_entry_batch_in_context(
     context: &crate::context::CompiledContext,
     batch: &chelis_reef::RewrittenEntryBatch,
 ) -> Result<PreparedEvalInContext> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
@@ -2861,17 +2974,23 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
+    // [04-NUM-2] results assume round-to-nearest-even with subnormals kept.
+    // The evaluator runs in its host's thread (the CLI, or a Python or Rust
+    // embedding that may have set a rounding mode or flush-to-zero), so every
+    // evaluation pins the IEEE default and restores the host's state after
+    // (spec/design/correctly_rounded_math.md section 6, chelis#2964).
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // A parameterized tensor entry is a callable declaration in the checked
     // manifest until evaluation selects it and supplies all of its runtime
     // inputs. Specialize that selection into a new manifested program before
     // consuming any roots, so the legacy in-context `main(x)` surface remains
     // manifest-authoritative instead of bypassing the phase boundary.
-    let effective_program = manifested_program_for_eval(
+    let effective_manifest = manifest_for_eval(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
     )?;
-    let manifest = effective_program.manifest();
+    let manifest = effective_manifest.as_ref();
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
@@ -2932,11 +3051,7 @@ fn eval_compiled(
     // rules, or that shares a node that can trap across declarations, is
     // rejected here as ownership lowering for C rejects it, rather than
     // evaluated. The wire codec runs the key rules too.
-    let mut key_rule_errors = Vec::new();
-    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
-    if key_rule_errors.is_empty() {
-        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
-    }
+    let key_rule_errors = &compiled.eval_facts().key_rule_errors;
     if !key_rule_errors.is_empty() {
         return Err(stage_error(
             "eval",
@@ -2947,8 +3062,7 @@ fn eval_compiled(
             GeneralKind::LowerError,
         ));
     }
-    let mut sharing_errors = Vec::new();
-    chelis_ir::verify::verify_declaration_sharing(active_dag, &mut sharing_errors);
+    let sharing_errors = &compiled.eval_facts().sharing_errors;
     if !sharing_errors.is_empty() {
         return Err(stage_error(
             "eval",
@@ -3024,7 +3138,26 @@ fn eval_compiled(
         .iter()
         .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
         .collect::<BTreeMap<_, _>>();
-    let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
+    let host_outcome = if let Some(prepared) = compiled.host_program() {
+        crate::runtime::evaluate_prepared_host_program(
+            prepared,
+            compiled.checked(),
+            compiled
+                .library_runtime
+                .as_ref()
+                .map(|library| &library.checked),
+            compiled
+                .library_runtime
+                .as_ref()
+                .map(|library| &library.lowered_names),
+            crate::runtime::HostEvaluationInputs {
+                roots: &tensor_values_by_name,
+                bindings: Some(&bindings),
+            },
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
+        )
+    } else if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
             Some(&library.checked),
@@ -3136,7 +3269,7 @@ fn eval_compiled(
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
-        manifest: manifest_result(&effective_program),
+        manifest: root_manifest_result(compiled.program.target(), manifest),
         transcript: host_outcome.transcript,
     })
 }
@@ -3162,6 +3295,7 @@ fn unavailable_root_error(entry: &RootEntry, reason: &str) -> CompilerError {
 }
 
 pub fn grad(request: GradRequest) -> Result<GradResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_source(request.source_kind, &request.source)?;
     let output_name = crate::pipeline::IrName::new(request.output_name.as_str());
     let output = compiled
@@ -3228,6 +3362,7 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
 }
 
 pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let result = match request.mode {
         ValidateMode::Surf => chelis_validate::validate_surf(&request.source),
         ValidateMode::Deep => chelis_validate::validate_deep(&request.source),
@@ -3243,6 +3378,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
 }
 
 pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let exprs = parse_deep(&request.source)?;
     let surf_text = chelis_surf::decompile::try_decompile_program(&exprs).map_err(|error| {
         stage_error("decompile", error.to_string(), GeneralKind::ValidationError)
@@ -3253,6 +3389,7 @@ pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
 }
 
 pub fn batch(requests: Vec<BatchRequest>) -> BatchResultEnvelope {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     BatchResultEnvelope {
         results: requests
             .into_iter()
@@ -3359,15 +3496,23 @@ fn lower_diagnostic_to_compiler_error(
         error.errors[0].message = diagnostic.to_string();
         return error;
     }
+    // spec/04-type-system.md section 4.7: a mismatch the lowered graph
+    // proves from literals is a type error, reported with the checker's kind.
+    let kind = if diagnostic.is_dimension_mismatch() {
+        GeneralKind::DimensionMismatch
+    } else {
+        GeneralKind::LowerError
+    };
     stage_error_with_span(
         "lower",
         diagnostic.to_string(),
-        GeneralKind::LowerError,
+        kind,
         deep_span_to_diagnostic(diagnostic.span),
     )
 }
 
 pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match result {
         Ok(value) => crate::schema::ApiEnvelope::success(value),
         Err(err) => crate::schema::ApiEnvelope::failure(err.stage, err.errors),
@@ -3393,11 +3538,98 @@ struct CompiledSource {
     /// path (no separate library to merge); `Some` on the in-context
     /// path produced by `compile_new_source_in_context`.
     library_runtime: Option<LibraryRuntime>,
+    /// Evaluation facts that depend on this compile alone, derived on the
+    /// first evaluation and reused by every later one (chelis#3144).
+    eval_facts: std::sync::OnceLock<EvalProgramFacts>,
+    /// The host evaluator's program (the library composed with this source
+    /// when there is a library) with its shared host-lowering facts, built on
+    /// the first evaluation. `None` inside means composition failed, and each
+    /// evaluation reports that failure itself.
+    host_program: std::sync::OnceLock<Option<crate::runtime::PreparedHostEvaluation>>,
+}
+
+/// The facts every evaluation of one [`CompiledSource`] needs and none of
+/// them changes: the manifest an evaluation observes when it specializes no
+/// callable entry, the realizability inputs a specialization reads, and the
+/// lowered DAG's key-rule and sharing verdicts.
+struct EvalProgramFacts {
+    base_manifest: std::sync::Arc<RootManifest>,
+    base_def_names: BTreeSet<String>,
+    realizability: chelis_effects::realizability::RealizabilityResult,
+    key_rule_errors: Vec<String>,
+    sharing_errors: Vec<String>,
+}
+
+/// Program-wide evaluation-fact derivations since the process started: a
+/// work counter that lets a test assert the facts are derived once per
+/// compile rather than once per evaluated root (chelis#3144).
+static EVAL_PROGRAM_FACT_DERIVATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn eval_program_fact_derivations() -> u64 {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    EVAL_PROGRAM_FACT_DERIVATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl CompiledSource {
     fn checked(&self) -> &CheckedProgram {
         self.program.checked()
+    }
+
+    fn eval_facts(&self) -> &EvalProgramFacts {
+        self.eval_facts.get_or_init(|| {
+            EVAL_PROGRAM_FACT_DERIVATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut base_manifest = self.manifest().clone();
+            route_tensor_inputs_from_dag(&mut base_manifest, &self.dag, &self.named_roots);
+            let declaration_order = checked_def_order(self.checked());
+            base_manifest.entries.sort_by_key(|entry| {
+                declaration_order
+                    .get(entry.def_name.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+            let base_def_names = self
+                .manifest()
+                .entries
+                .iter()
+                .map(|entry| entry.def_name.clone())
+                .collect();
+            let realizability = chelis_effects::realizability::infer_realizability(
+                self.checked(),
+                crate::target_capability::tensor_capable_prims(self.program.target()),
+            );
+            let mut key_rule_errors = Vec::new();
+            chelis_ir::verify::verify_random_operands(&self.dag, &mut key_rule_errors);
+            if key_rule_errors.is_empty() {
+                chelis_ir::verify::verify_key_rules(&self.dag, &mut key_rule_errors);
+            }
+            let mut sharing_errors = Vec::new();
+            chelis_ir::verify::verify_declaration_sharing(&self.dag, &mut sharing_errors);
+            EvalProgramFacts {
+                base_manifest: std::sync::Arc::new(base_manifest),
+                base_def_names,
+                realizability,
+                key_rule_errors,
+                sharing_errors,
+            }
+        })
+    }
+
+    /// The host evaluator's prepared program, or `None` when the library and
+    /// this source do not compose.
+    fn host_program(&self) -> Option<&crate::runtime::PreparedHostEvaluation> {
+        self.host_program
+            .get_or_init(|| {
+                let program = match &self.library_runtime {
+                    Some(library) => CheckedProgram::compose(&library.checked, self.checked())?,
+                    None => self.checked().clone(),
+                };
+                Some(crate::runtime::PreparedHostEvaluation::new(
+                    chelis_ir::host::PreparedHostProgram::new(program),
+                ))
+            })
+            .as_ref()
     }
 
     fn manifest(&self) -> &RootManifest {
@@ -3406,10 +3638,13 @@ impl CompiledSource {
 }
 
 fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
+    root_manifest_result(program.target(), program.manifest())
+}
+
+fn root_manifest_result(target: Target, manifest: &RootManifest) -> RootManifestResult {
     RootManifestResult {
-        target: program.target(),
-        entries: program
-            .manifest()
+        target,
+        entries: manifest
             .entries
             .iter()
             .map(|entry| RootManifestEntryResult {
@@ -3418,20 +3653,21 @@ fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
                 required_inputs: entry.required_inputs.iter().cloned().collect(),
             })
             .collect(),
-        requires_main: program.manifest().requires_main(),
+        requires_main: manifest.requires_main(),
     }
 }
 
 /// Specialize callable tensor entries selected for evaluation into owed
 /// roots once all required runtime inputs have bindings. The checked manifest
 /// intentionally excludes parameterized declarations in the abstract; this
-/// produces a new `ManifestedProgram` for the concrete evaluation request
-/// rather than reaching around the manifest to the legacy named-root map.
-fn manifested_program_for_eval<'a>(
+/// produces a new manifest for the concrete evaluation request rather than
+/// reaching around the manifest to the legacy named-root map. A request that
+/// specializes nothing observes the compile's own manifest, derived once.
+fn manifest_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
-) -> Result<ManifestedProgram> {
+) -> Result<std::sync::Arc<RootManifest>> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
@@ -3441,17 +3677,13 @@ fn manifested_program_for_eval<'a>(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_else(|| BTreeSet::from(["main"]));
-    let mut manifest = compiled.manifest().clone();
-    let realizability = chelis_effects::realizability::infer_realizability(
-        compiled.checked(),
-        crate::target_capability::tensor_capable_prims(compiled.program.target()),
-    );
+    let facts = compiled.eval_facts();
+    let realizability = &facts.realizability;
+    let mut specialized: Vec<RootEntry> = Vec::new();
 
     for candidate in candidate_names {
-        if manifest
-            .entries
-            .iter()
-            .any(|entry| entry.def_name == candidate)
+        if facts.base_def_names.contains(candidate)
+            || specialized.iter().any(|entry| entry.def_name == candidate)
         {
             continue;
         }
@@ -3595,9 +3827,14 @@ fn manifested_program_for_eval<'a>(
                     });
             }
         }
-        manifest.entries.extend(selected_entries);
+        specialized.extend(selected_entries);
+    }
+    if specialized.is_empty() {
+        return Ok(facts.base_manifest.clone());
     }
 
+    let mut manifest = compiled.manifest().clone();
+    manifest.entries.extend(specialized);
     route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
     let declaration_order = checked_def_order(compiled.checked());
     manifest.entries.sort_by_key(|entry| {
@@ -3606,11 +3843,7 @@ fn manifested_program_for_eval<'a>(
             .copied()
             .unwrap_or(usize::MAX)
     });
-    Ok(ManifestedProgram::new(
-        compiled.checked().clone(),
-        manifest,
-        compiled.program.target(),
-    ))
+    Ok(std::sync::Arc::new(manifest))
 }
 
 /// Refine selected Host-call admission from the same kernel input carrier
@@ -3850,12 +4083,77 @@ fn compile_source_scoped_mode(
     })
     .map_err(pipeline_rejection_to_compiler_error)
     .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        outcome,
+        target,
+        planned_c,
+        #[cfg(feature = "compilation-trace")]
+        collect_trace,
+    )
+}
+
+/// Compile Surf declarations the caller has already parsed or assembled, for
+/// evaluation. The declarations are the program that is checked, lowered, and
+/// run; no source text is printed or parsed again (chelis#3129).
+fn compile_decls_for_eval(
+    decls: &[Decl],
+    entry: Option<&str>,
+    target: Target,
+) -> Result<CompiledSource> {
+    bail_if_cancelled("parse")?;
+    let prepared = crate::pipeline::prepare_surf_decls(decls, entry)
+        .map_err(|error| {
+            pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(
+                error,
+            ))
+        })
+        .map_err(|error| cancelled_or("check", error))?;
+    bail_if_cancelled("check")?;
+    let outcome = crate::pipeline::run_prepared(
+        prepared,
+        crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
+    )
+    .map_err(pipeline_rejection_to_compiler_error)
+    .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        outcome,
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
+/// Compile a program the caller has already checked, for evaluation. The
+/// checked compilation is lowered and run as it is, so the program the caller
+/// checked is exactly the program evaluated (chelis#3129).
+fn compile_checked_for_eval(
+    checked: crate::pipeline::CheckedCompilation,
+    target: Target,
+) -> Result<CompiledSource> {
+    let lowered =
+        crate::pipeline::lower_checked(checked, crate::pipeline::LoweringMode::AllowHostOnly)
+            .map_err(pipeline_rejection_to_compiler_error)
+            .map_err(|error| cancelled_or("check", error))?;
+    compiled_from_pipeline_outcome(
+        crate::pipeline::PipelineOutcome::Lowered(lowered),
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
+fn compiled_from_pipeline_outcome(
+    outcome: crate::pipeline::PipelineOutcome,
+    target: Target,
+    planned_c: bool,
+    #[cfg(feature = "compilation-trace")] collect_trace: bool,
+) -> Result<CompiledSource> {
     let (lowered, host_ordinary, host_execution) = match outcome {
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
         crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
             // C execution selects host lowering here, before artifact emission.
-            // Preserve the host-only builtin diagnostic before lowering callbacks.
-            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
             let realizability = chelis_effects::realizability::infer_realizability(
                 checked.program(),
                 crate::target_capability::tensor_capable_prims(target),
@@ -3910,6 +4208,8 @@ fn compile_source_scoped_mode(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
+        eval_facts: std::sync::OnceLock::new(),
+        host_program: std::sync::OnceLock::new(),
     })
 }
 
@@ -3925,6 +4225,7 @@ fn compile_source_scoped_mode(
 /// source that fails to parse returns `false`: the bare path then surfaces the
 /// real parse diagnostic, unchanged from pre-#816 behavior.
 pub fn surf_source_has_import(source: &str) -> bool {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match chelis_surf::parser::parse_str(source) {
         Ok(decls) => flatten_module_decls(&decls)
             .iter()
@@ -4391,6 +4692,7 @@ pub fn reject_symbolic_windowed_reduce(
     dag: &Dag,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let target = target.as_str();
     for node in dag.nodes() {
         let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
@@ -4438,6 +4740,7 @@ pub fn reject_unsupported_reduce_window_precision(
     dag: &Dag,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let target = target.as_str();
     for node in dag.nodes() {
         let (op_label, reducer) = match &node.op {
@@ -4467,12 +4770,6 @@ pub fn reject_unsupported_reduce_window_precision(
     }
     Ok(())
 }
-
-/// Host-only builtins that have no compiled-backend lowering. Calls
-/// to these from a `chelis build` program must fail at compile time
-/// with the owning early diagnostic. The emitter's Result boundary remains
-/// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
-const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
 /// Closed target vocabulary for shared pre-codegen build gates.
 ///
@@ -4526,12 +4823,6 @@ impl TryFrom<&str> for BuildTarget {
             )),
         }
     }
-}
-
-fn host_only_builtin_error(name: &str, target: BuildTarget) -> CompilerError {
-    let unsupported =
-        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target.as_str());
-    unsupported_stage_error(unsupported)
 }
 
 fn unsupported_gate_error(
@@ -4643,6 +4934,7 @@ pub fn reject_inexact_device_reduction_cells(
     dag: &Dag,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let device_target = match target {
         BuildTarget::C => return Ok(()),
         BuildTarget::Hip => Target::Hip,
@@ -4676,216 +4968,6 @@ pub fn reject_inexact_device_reduction_cells(
     Ok(())
 }
 
-/// Reject direct host-runtime-only calls on checked Deep before host lowering
-/// descends into their callback arguments. This preserves the owning builtin
-/// diagnostic even when an argument is itself intentionally unrepresentable
-/// in compiled code (for example `tensor_scan(..., fn (...), ...)`). The
-/// concrete-HostProgram scan below remains the second boundary for aliases
-/// and other shapes materialized by lowering.
-pub fn reject_host_only_builtins_before_host_lowering(
-    program: &CheckedProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
-        return Err(host_only_builtin_error(&name, target));
-    }
-    Ok(())
-}
-
-/// Eval/test-only builtins (`process_run`, the chelis#890 JSON family, the
-/// chelis#903 CSV family) are rejected for every compiled target with the
-/// same message the CLI build gate prints, so the public
-/// `compile()`/`compile_for_execution()` APIs (the chelis-python path)
-/// fail loudly instead of falling through to a generic codegen error
-/// (chelis#891 review finding 13). The list lives in `chelis_ir::host`
-/// and this gate is consumed by both public build paths.
-pub fn reject_eval_only_builtins(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
-        // Branded through `Unsupported` (section C2,
-        // spec/design/loud_unsupported.md). Both public build paths call
-        // this definition, keeping their diagnostics byte-compatible. The
-        // stage tag names the ACTUAL rejecting lane (round-2 red-team
-        // finding: a hardcoded "c" misstated the lane on HIP builds).
-        return Err(unsupported_stage_error(
-            chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
-                "compiled targets (the host interpreter's eval/test lanes only)",
-                chelis_types::unsupported::Stage::Codegen(target.as_str()),
-                chelis_types::deliberate_rejection!(
-                    "[05-HOST-2]",
-                    "run the program with `chelis eval` or `chelis test`, or remove the \
-                     call before building (spec/05-risc-primitives.md section 3.7)"
-                ),
-            ),
-        ));
-    }
-    Ok(())
-}
-
-pub fn reject_host_only_builtins(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    use chelis_ir::host::{
-        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
-    };
-
-    // A higher-order helper's callback can itself reach a host-only
-    // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
-    // callback carries its body inline, so we descend into it. A *named*
-    // callback refers to a top-level function by name; that function's
-    // body is scanned separately when we walk `program.functions`, so we
-    // do not need to chase the reference here.
-    fn scan_callback(callback: &ConcreteHostCallback, found: &mut Option<String>) {
-        if let HostCallbackKind::Inline { body, .. } = &callback.kind {
-            scan_expr(body, found);
-        }
-    }
-
-    fn scan_expr(expr: &ConcreteHostExpr, found: &mut Option<String>) {
-        if found.is_some() {
-            return;
-        }
-        match &expr.kind {
-            ConcreteHostExprKind::Builtin { name, args, .. } => {
-                if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
-                    *found = Some(name.clone());
-                    return;
-                }
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::Call { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::TensorCall { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::If {
-                cond,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                scan_expr(cond, found);
-                scan_expr(then_expr, found);
-                scan_expr(else_expr, found);
-            }
-            ConcreteHostExprKind::Let { bindings, body, .. }
-            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
-                for binding in bindings {
-                    scan_expr(&binding.value, found);
-                }
-                scan_expr(body, found);
-            }
-            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
-                for item in items {
-                    scan_expr(item, found);
-                }
-            }
-            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
-                for field in fields {
-                    scan_expr(field, found);
-                }
-            }
-            ConcreteHostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
-            ConcreteHostExprKind::MatchOption {
-                scrutinee,
-                some_expr,
-                none_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                scan_expr(some_expr, found);
-                scan_expr(none_expr, found);
-            }
-            ConcreteHostExprKind::MatchAdt {
-                scrutinee,
-                arms,
-                default_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                for arm in arms {
-                    scan_expr(&arm.expr, found);
-                }
-                if let Some(d) = default_expr {
-                    scan_expr(d, found);
-                }
-            }
-            ConcreteHostExprKind::Map { callback, list, .. }
-            | ConcreteHostExprKind::Filter { callback, list, .. }
-            | ConcreteHostExprKind::Partition { callback, list, .. }
-            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
-                scan_callback(callback, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::Fold {
-                callback,
-                init,
-                list,
-                ..
-            }
-            | ConcreteHostExprKind::Scan {
-                callback,
-                init,
-                list,
-                ..
-            } => {
-                scan_callback(callback, found);
-                scan_expr(init, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
-            ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
-            _ => {}
-        }
-    }
-
-    // This walk is deliberately whole-program (every global value AND
-    // every function body), NOT scoped to the build entry's reachable
-    // call graph. That asymmetry with the reachability-scoped AD guard
-    // in `runtime.rs::find_reachable_host_only_builtin_call` is
-    // intentional: `chelis_backend_c::host_emit` emits *every*
-    // `program.functions` entry unconditionally (no dead-code pruning),
-    // so a `tensor_scan` call inside an otherwise-unreferenced helper still
-    // reaches the C emitter's fallible builtin boundary. The gate walks the
-    // same emitted set to preserve the earlier, builtin-specific diagnostic;
-    // it is not the sole defense. The AD guard can scope to the transform
-    // target because AD lowers only that target's subgraph. If backend
-    // dead-function pruning lands later, this can be narrowed to the emitted
-    // set in lockstep.
-    let mut found: Option<String> = None;
-    for global in &program.globals {
-        scan_expr(&global.value, &mut found);
-        if found.is_some() {
-            break;
-        }
-    }
-    if found.is_none() {
-        for function in &program.functions {
-            scan_expr(&function.body, &mut found);
-            if found.is_some() {
-                break;
-            }
-        }
-    }
-
-    if let Some(name) = found {
-        return Err(host_only_builtin_error(&name, target));
-    }
-
-    Ok(())
-}
-
 /// chelis#616: whether a movement `(start, end)` bound pair is node-valued.
 fn pair_has_node_bound(pair: &(RtDim, RtDim)) -> bool {
     pair.0.node_input().is_some() || pair.1.node_input().is_some()
@@ -4899,6 +4981,7 @@ pub fn reject_unsupported_effect_ops(
     dag: &Dag,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for node in dag.nodes() {
         // The C lane emits a key-operand dropout from its draw key; a device
         // target has no port of the kernel yet.
@@ -4937,6 +5020,7 @@ pub fn reject_unsupported_effect_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| reject_unsupported_effect_ops(dag, target))
 }
 
@@ -4946,6 +5030,7 @@ pub fn reject_unsupported_effect_ops_in_host_execution_plan(
     plan: &chelis_ir::host::HostExecutionPlan,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     reject_unsupported_effect_ops_in_host_program(plan.program(), target)
 }
 
@@ -4955,6 +5040,7 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| {
         reject_symbolic_windowed_reduce(dag, target)?;
         reject_unsupported_reduce_window_precision(dag, target)
@@ -4978,6 +5064,7 @@ fn helper_is_device_emitted(dag: &Dag) -> bool {
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| {
         if helper_is_device_emitted(dag) {
             reject_unsupported_hip_ops(dag)
@@ -5014,6 +5101,7 @@ pub fn reject_unsupported_hip_ops_in_host_program(
 pub fn reject_unsupported_metal_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     for_each_host_helper_dag(program, |dag| {
         if helper_is_device_emitted(dag) {
             reject_unsupported_metal_ops(dag)
@@ -5028,6 +5116,7 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     reject_inexact_device_reduction_cells(dag, BuildTarget::Metal)?;
     for node in dag.nodes() {
         let direct_nonnumeric = match &node.op {
@@ -5441,6 +5530,7 @@ const HIP_UNSUPPORTED_DTYPE_HINT: &str =
     "this tensor dtype is not admitted by the HIP target; see spec/04-type-system.md §1.1.3";
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)?;
     for node in dag.nodes() {
         match &node.op {
@@ -5458,25 +5548,27 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             // it cleanly here rather than letting it reach the launch-emit
             // `todo!`, which would abort the build with an `internal error`
             // panic. The C backend is canonical; use `--target c`.
-            // [05-OP-6] demands identical eval-vs-compiled behavior, and
-            // the HIP `cast` kernel is a raw device-side C++ conversion
-            // with no trap guard at all. Emitting `cast_trunc` through it
-            // would silently skip the Domain/Overflow traps, so the HIP
-            // lane rejects loudly until the guarded kernels land.
-            RiscOp::CastTrunc { .. } => {
+            // Every named cast atom demands identical eval-vs-compiled
+            // behavior, and the HIP `cast` kernel is a raw device-side C++
+            // conversion with no trap guard at all. Emitting a named rung
+            // through it would silently skip its traps, so the HIP lane
+            // rejects loudly until the guarded kernels land.
+            RiscOp::NamedCast { mode, .. } => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not support `cast_trunc`; \
+                        "`chelis build --target hip` does not support `{}`; \
                          lowered node {} requires it. The HIP cast kernels carry no \
-                         numeric-trap guard, so the [05-OP-6] Domain/Overflow traps \
+                         numeric-trap guard, so the {} traps \
                          cannot be honored on device yet; use `--target c`.",
-                        node.id.0
+                        mode.keyword(),
+                        node.id.0,
+                        mode.atom()
                     ),
                     "hip",
                     chelis_types::unimplemented_rejection!(
                         759,
                         "the HIP cast kernels emit an unguarded device-side conversion, \
-                         so the [05-OP-6] traps have no device implementation; the C \
+                         so the named cast traps have no device implementation; the C \
                          target is canonical for the named cast ladder"
                     ),
                 ));
@@ -5789,6 +5881,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Realize
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Where
             | RiscOp::Sub
@@ -5873,43 +5966,38 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
     } else {
         GeneralKind::EvalError
     };
-    // A declared literal result guard attributes its trap to the producing
-    // cast, but it did not reject an element conversion. Recognize the exact
-    // extent context and canonical line before attaching conversion advice.
-    let extent_cast = (|| {
-        let mut lines = message.lines();
-        let context = lines.next()?.strip_prefix("extent `")?;
-        let (claim, comparison) = context.split_once("`: claimed = ")?;
-        let (required, observation) = comparison.split_once(", cast axis ")?;
-        let (axis, observed) = observation.split_once(" = ")?;
-        required.parse::<u64>().ok()?;
-        axis.parse::<usize>().ok()?;
-        observed.parse::<usize>().ok()?;
-        Some(
-            claim == required
-                && lines.next() == Some("numeric trap: domain in cast at i64")
-                && lines.next().is_none(),
-        )
-    })()
-    .unwrap_or(false);
-    let cast_domain =
-        trusted_numeric_trap && !extent_cast && message.contains("numeric trap: domain in cast at");
-    let mut error = stage_error("eval", message, kind);
-    if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
-        diagnostic.suggestions.push(
-            "fractional float-to-int conversion must state its rounding explicitly: \
-             use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
-             `floor` or `round` before `cast`; the remaining named lossy cast \
-             forms are tracked by chelis#759"
-                .to_string(),
-        );
-    }
-    error
+    // [04-NUM-9]: a numeric trap renders byte-identically in every lane, so
+    // eval attaches no lane-only advice after the trap line.
+    stage_error("eval", message, kind)
 }
 
 #[cfg(test)]
 mod eval_trap_classification_tests {
     use super::*;
+
+    /// The shared failure renderings in `chelis_abi::failure` end in one
+    /// canonical [04-NUM-9] line, so eval classifies them as numeric traps;
+    /// the List index failure is not a trap.
+    #[test]
+    fn shared_failure_renderings_classify_as_their_lanes_report_them() {
+        for message in [
+            chelis_abi::failure::operand_shape_disagreement("add", &[2], &[3]),
+            chelis_abi::failure::operand_shape_disagreement("lt", &[2, 3], &[3]),
+            chelis_abi::failure::sparse_index_out_of_bounds("scatter_elements", -1, 1, 4),
+        ] {
+            let error = eval_stage_error(message.clone(), true);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::NumericTrap,
+                "{message}"
+            );
+        }
+        let error = eval_stage_error(chelis_abi::failure::list_index_out_of_bounds(5, 2), true);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::EvalError
+        );
+    }
 
     #[test]
     fn canonical_trap_line_becomes_a_typed_eval_diagnostic() {
@@ -6181,7 +6269,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
                 .iter()
                 .map(|binder| crate::schema::WireTypeBinder {
                     name: binder.name.clone(),
-                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                    bound: binder.bound.as_ref().map(|bound| bound.surf_spelling()),
                 })
                 .collect(),
             params: params.iter().map(wire_param).collect(),
@@ -6203,7 +6291,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
                 .iter()
                 .map(|binder| crate::schema::WireTypeBinder {
                     name: binder.name.clone(),
-                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                    bound: binder.bound.as_ref().map(|bound| bound.surf_spelling()),
                 })
                 .collect(),
             params: params.iter().map(wire_param).collect(),
@@ -6312,6 +6400,11 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             name: name.clone(),
             span: span(*s),
         },
+        Expr::Accumulate(call, accumulator, s) => WireSurfExpr::Accumulate {
+            call: Box::new(wire_expr(call)?),
+            accumulator: accumulator.clone(),
+            span: span(*s),
+        },
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
             func: Box::new(wire_expr(func)?),
             args: args
@@ -6378,7 +6471,12 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             expr: Box::new(wire_expr(inner)?),
             stages: stages
                 .iter()
-                .map(wire_expr)
+                .map(|stage| {
+                    Ok(crate::schema::WireSurfPipeStage {
+                        syntax: stage.syntax.into(),
+                        expression: wire_expr(stage)?,
+                    })
+                })
                 .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
@@ -6815,6 +6913,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Relu => WireRiscOp::Relu,
+        RiscOp::Softmax { axis } => WireRiscOp::Softmax {
+            axis: i32::try_from(*axis).expect("normalized softmax axis is i32"),
+        },
         RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,
@@ -6825,6 +6926,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Cos => WireRiscOp::Cos,
         RiscOp::Tan => WireRiscOp::Tan,
         RiscOp::Atan => WireRiscOp::Atan,
+        RiscOp::Tanh => WireRiscOp::Tanh,
+        RiscOp::Erf => WireRiscOp::Erf,
+        RiscOp::Erfc => WireRiscOp::Erfc,
         RiscOp::Abs => WireRiscOp::Abs,
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
@@ -7040,7 +7144,15 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Copy => WireRiscOp::Copy,
         RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
-        RiscOp::CastTrunc { new_precision } => WireRiscOp::CastTrunc {
+        RiscOp::NamedCast {
+            mode,
+            new_precision,
+        } => WireRiscOp::NamedCast {
+            mode: match mode {
+                NamedCastMode::Trunc => WireNamedCastMode::Trunc,
+                NamedCastMode::Saturate => WireNamedCastMode::Saturate,
+                NamedCastMode::Wrap => WireNamedCastMode::Wrap,
+            },
             new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
@@ -7068,6 +7180,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                         FusedStepOp::Cos => WireFusedStepOp::Cos,
                         FusedStepOp::Tan => WireFusedStepOp::Tan,
                         FusedStepOp::Atan => WireFusedStepOp::Atan,
+                        FusedStepOp::Tanh => WireFusedStepOp::Tanh,
+                        FusedStepOp::Erf => WireFusedStepOp::Erf,
+                        FusedStepOp::Erfc => WireFusedStepOp::Erfc,
                         FusedStepOp::Abs => WireFusedStepOp::Abs,
                         FusedStepOp::Floor => WireFusedStepOp::Floor,
                         FusedStepOp::Ceil => WireFusedStepOp::Ceil,
@@ -7161,7 +7276,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 23);
+        assert_eq!(wire.schema_version, 27);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7474,7 +7589,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 23);
+        assert_eq!(json["schema_version"], 27);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -9159,8 +9274,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         );
 
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/copy-drop"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/copy-drop"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let compiled = compile_new_source_in_context(
             &context,
             "module App.Eval\nimport Mylib.Copy (consume)\n\n\
@@ -9205,8 +9324,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_selects_main_and_scopes_metadata() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-main"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-main"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Entry\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
              def second(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(a, b)\n";
@@ -9243,8 +9366,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn in_context_compiled_metadata_agrees_with_eval() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-eval"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-eval"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Eval\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
 
@@ -9487,8 +9614,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_rejects_scalar_entry() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-scalar"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-scalar"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "def main(a: f32, b: f32) -> f32 = add(a, b)\n";
         let err =
             compile_for_execution_in_context(&context, source, CompileTarget::C, Some("main"))
@@ -9512,8 +9643,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_rejects_hip_target() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-hip"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-hip"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Hip\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         // Sanity: the same source compiles in-context to C.
@@ -9541,8 +9676,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_ambiguous_without_main() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-ambig"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-ambig"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Ambig\nimport Mylib.Copy (consume)\n\n\
              def first(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
              def other(y: tensor[2, f32]) -> tensor[2, f32] = realize(y)\n";
@@ -9565,8 +9704,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_rejects_suffix_near_miss() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-suffix"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
              def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         let err =
@@ -9584,8 +9727,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_selects_double_underscore_def_by_exact_name() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix-pos"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-suffix-pos"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
              def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         let artifact = compile_for_execution_in_context(

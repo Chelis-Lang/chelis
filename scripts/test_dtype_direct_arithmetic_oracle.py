@@ -131,44 +131,113 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_evaluator_canonical_nan_removal_fails(self) -> None:
         self.mutate(
             "crates/chelis-types/src/dtype_semantics.rs",
-            "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
-            "fn preserve_subtraction_f32_nan(value: f32) -> f32 {",
+            "fn canonical_nan_f32(value: f32) -> f32 {",
+            "fn preserve_nan_f32(value: f32) -> f32 {",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
+            oracle.OracleFailure, "evaluator canonical arithmetic NaNs"
         ):
             oracle.validate_source_contracts(self.repo)
 
     def test_evaluator_canonical_nan_scope_broadening_fails(self) -> None:
         self.mutate(
             "crates/chelis-types/src/dtype_semantics.rs",
-            "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
-            "_ => canonicalize_subtraction_f32(value),",
+            "        FloatBinOp::Max | FloatBinOp::Min => value,\n"
+            "        _ => canonical_nan_f64(value),",
+            "        _ => canonical_nan_f64(value),",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
+            oracle.OracleFailure, "evaluator canonical arithmetic NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_evaluator_subtraction_bypassing_the_finalizer_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/dtype_semantics.rs",
+            "        _ => canonical_nan_f32(value),",
+            "        FloatBinOp::Sub => value,\n        _ => canonical_nan_f32(value),",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "evaluator canonical arithmetic NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_subtraction_bypassing_the_finalizer_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'if is_float && matches!(op, "+" | "-" | "*" | "/") {',
+            'if is_float && matches!(op, "+" | "*" | "/") {',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_subtraction_skipping_the_finalization_point_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'return finalize_elem(nan, format!("({lhs}) {op} ({rhs})"), ty);',
+            'return format!("({lhs}) {op} ({rhs})");',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_finalization_point_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            'NanFinalization::Canonical => format!("{}({expr})", canonical_nan_helper(is_f64)),',
+            "NanFinalization::Canonical => expr.to_string(),",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_subtraction_reclassified_bit_preserving_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            "        RiscOp::Add\n        | RiscOp::Sub\n",
+            "        RiscOp::Add\n",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_fused_subtraction_reclassified_bit_preserving_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            "FusedStepOp::MaxElem | FusedStepOp::MinElem => NanFinalization::BitPreserving,",
+            "FusedStepOp::MaxElem | FusedStepOp::MinElem | FusedStepOp::Sub => {\n"
+            "            NanFinalization::BitPreserving\n"
+            "        }",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
         ):
             oracle.validate_source_contracts(self.repo)
 
     def test_c_wide_nan_canonicalization_removal_fails(self) -> None:
         self.mutate(
-            "crates/chelis-backend-c/src/emit.rs",
-            'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
-            "Prim::F32 => None,",
+            "crates/chelis-backend-c/src/fp_env.rs",
+            "return isnan(value) ? chelis_f32_from_bits(UINT32_C(0x7fc00000)) : value;",
+            "return value;",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "C subtraction canonical NaNs"
+            oracle.OracleFailure, "C wide canonical NaN finalizer"
         ):
             oracle.validate_source_contracts(self.repo)
 
     def test_c_reduced_nan_canonicalization_removal_fails(self) -> None:
         self.mutate(
-            "crates/chelis-backend-c/src/emit.rs",
-            'Prim::F16 => "UINT16_C(0x7e00)",',
-            'Prim::F16 => "UINT16_C(0xfe00)",',
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            "            return (uint16_t)0x7E00u;",
+            "            return (uint16_t)(sign | 0x7E00u);",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "C subtraction canonical NaNs"
+            oracle.OracleFailure, "C reduced canonical NaN stores"
         ):
             oracle.validate_source_contracts(self.repo)
 
@@ -277,8 +346,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_wire_identity_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/schema.rs",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "current WireDag identities"):
             oracle.validate_source_contracts(self.repo)

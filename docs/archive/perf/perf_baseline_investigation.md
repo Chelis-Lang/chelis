@@ -256,7 +256,7 @@ within the 30s headline ballpark for cold.
 ```sh
 # Fresh tempdir so the disk cache doesn't short-circuit
 rm -rf /tmp/perf-investigate/reef_home && mkdir -p /tmp/perf-investigate/reef_home
-cd /home/jeff/Documents/scratch/coral
+cd <coral checkout>
 CHELIS_REEF_HOME=/tmp/perf-investigate/reef_home \
 CHELIS_PROFILE_COMPILE_CONTEXT=1 \
 CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1 \

@@ -47,14 +47,14 @@
 //!    shared hygiene counter over the full program before pruning drops the
 //!    def, so the entry's binders survive the split identically.
 //! 9. `eval_only_wrapper_build_accept_reject_parity` — a well-typed,
-//!    unreachable eval-only chain builds successfully in both cache modes.
+//!    unreachable chain of host-runtime callers builds in both cache modes.
 //! 10. `unreachable_dep_type_error_rejected_in_both_cache_regimes` — an
 //!     unreachable ordinary type error rejects identically with or without
 //!     a clean layered cache.
-//! 11. Selected eval-only-tainted type, effect, and linearity errors reject
+//! 11. Selected type, effect, and linearity errors in such a chain reject
 //!     with identical diagnostics in cache-disabled, cold, and warm builds.
 //! 12. An invalid file outside the selected Reef target does not block build.
-//! 13. The separate tensor_scan build gate still sees selected definitions.
+//! 13. An unreachable tensor_scan definition builds in every cache mode.
 
 use assert_cmd::Command;
 use std::fs;
@@ -138,7 +138,11 @@ fn build_c(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> (Vec<
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     cmd.assert().success();
     let c = fs::read(out.path().join("main.c")).expect("main.c emitted");
     let h = fs::read(out.path().join("main.h")).expect("main.h emitted");
@@ -396,13 +400,13 @@ fn pruning_fires_macro_hygiene_monolithic_vs_layered_c_identical() {
     );
 }
 
-// ── Semantic parity before the eval-only transitive drop (chelis#1184) ──
+// ── Semantic parity before reachability pruning (chelis#1184) ──
 //
-// `cmd_build` checks the complete selected program before removing unreachable
-// eval-only-tainted definitions. The drop still needs its transitive closure
-// so the rechecked emission program never contains a dangling caller. Tests
-// below cover both a well-typed removable chain and errors the drop must not
-// conceal, across cold, warm, and cache-disabled builds.
+// `cmd_build` checks the complete selected program before pruning
+// entry-unreachable definitions, so the rechecked emission program never
+// contains a dangling caller. Tests below cover both a well-typed removable
+// chain of host-runtime callers and errors the pruning must not conceal,
+// across cold, warm, and cache-disabled builds.
 
 /// Build `entry` and capture `(success, stderr)` WITHOUT asserting the outcome,
 /// so the monolithic and cache-warm paths can be compared for accept/reject
@@ -415,7 +419,11 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     let output = cmd.output().expect("run chelis build");
     (
         output.status.success(),
@@ -494,13 +502,10 @@ fn assert_selected_semantic_error_in_all_build_modes(
     }
 }
 
-/// The dependency has an unreachable eval-only CHAIN: `dep_runner` uses the
-/// eval-only `round_to` builtin, `dep_wrapper` calls `dep_runner`, and
-/// `dep_outer` calls `dep_wrapper`. The entry uses only `az_add`. The transitive
-/// drop must remove ALL THREE so no dangling reference reaches the monolithic
-/// check. The chain is depth-3 on purpose: a single-pass "direct users + their
-/// direct dependents" drop would leave `dep_outer` dangling, so this fixture
-/// pins the FIXPOINT, not just one hop.
+/// The dependency has an unreachable CHAIN over a host-runtime builtin:
+/// `dep_runner` uses `round_to`, `dep_wrapper` calls `dep_runner`, and
+/// `dep_outer` calls `dep_wrapper`. The entry uses only `az_add`. Pruning
+/// removes all three, so no dangling reference reaches the monolithic check.
 fn eval_only_wrapper_bodies() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n",
@@ -529,17 +534,16 @@ fn eval_only_wrapper_build_accept_reject_parity() {
         mono_err, warm_err,
         "build stderr must be byte-identical across cache regimes"
     );
-    // The package is well-typed (`chelis check` accepts it): the transitive drop
-    // removes the unreachable eval-only chain, so it builds in BOTH regimes.
+    // The package is well-typed (`chelis check` accepts it), so it builds in
+    // BOTH regimes.
     assert!(
         mono_ok,
         "well-typed package must build in both cache regimes; stderr={mono_err:?}"
     );
 }
 
-/// An unreachable dependency def with a plain type error. It is NOT eval-only,
-/// so it survives the eval-only drop and reaches the monolithic full-program
-/// check; the layered check also sees it and returns `Ok(None)`, so the
+/// An unreachable dependency def with a plain type error. It reaches the
+/// monolithic full-program check; the layered check also sees it and returns `Ok(None)`, so the
 /// monolithic fallback produces the diagnostic. Both regimes must REJECT.
 fn unreachable_type_error_bodies() -> (&'static str, &'static str) {
     (
@@ -577,7 +581,7 @@ fn unreachable_dep_type_error_rejected_in_both_cache_regimes() {
 #[test]
 fn unreachable_eval_only_type_error_rejected_in_all_build_cache_modes() {
     let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_broken(x: f64) -> f64 = add(round_to(x, cast(2, i32)), cast(1, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_broken(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n";
-    assert_selected_semantic_error_in_all_build_modes(dependency, &["precision mismatch"], true);
+    assert_selected_semantic_error_in_all_build_modes(dependency, &["add", "f64", "i32"], true);
 }
 
 #[test]
@@ -618,7 +622,7 @@ fn unselected_reef_file_does_not_enter_build_semantic_gate() {
 }
 
 #[test]
-fn unreachable_tensor_scan_keeps_its_separate_build_gate() {
+fn unreachable_tensor_scan_builds_in_every_cache_mode() {
     let (scratch, cache_home) = fresh_cache_home();
     let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_scan(x: i64) -> tensor[*, i64] = tensor_scan(\n  x,\n  fn (previous: i64, _index: i64) -> add(previous, cast(1, i64)),\n  cast(3, i64)\n)\n";
     let (_, entry_body) = plain_bodies();
@@ -633,13 +637,12 @@ fn unreachable_tensor_scan_keeps_its_separate_build_gate() {
         build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
     let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
     let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
-    assert!(!disabled_ok && !cold_ok && !warm_ok);
+    assert!(
+        disabled_ok && cold_ok && warm_ok,
+        "an unreachable tensor_scan builds in every cache mode (chelis#1297): {disabled_error}"
+    );
     assert_eq!(disabled_error, cold_error);
     assert_eq!(cold_error, warm_error);
-    assert!(
-        disabled_error.contains("tensor_scan"),
-        "the separate backend gate must identify tensor_scan: {disabled_error}"
-    );
 }
 
 // ── Differential cache-parity sweep (chelis#1176) ───────────────────
@@ -665,7 +668,11 @@ fn build_probe(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> B
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     let output = cmd.output().expect("run chelis build");
     let ok = output.status.success();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -760,9 +767,10 @@ fn chelis_std_declares_no_macros() {
     let (scratch, _cache_home) = fresh_cache_home();
     let (dep, entry_body) = plain_bodies();
     let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
-    let prepared = chelis_reef::prepare_program_for_file(&entry)
-        .expect("prepare_program_for_file")
-        .expect("entry resolves inside a reef package");
+    let prepared =
+        chelis_reef::prepare_program_for_file(&entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
+            .expect("prepare_program_for_file")
+            .expect("entry resolves inside a reef package");
     let macro_count = prepared
         .stdlib_decls
         .iter()
@@ -913,8 +921,7 @@ fn library_cache_evicts_under_cap_and_protects_stdlib() {
 #[test]
 fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
     // The other oracles use no-chelis-std fixtures. This one imports chelis-std,
-    // so the build pulls in Std.Process (eval-only, entry-unreachable) and
-    // `drop_unreachable_eval_only_defs` actually fires against REAL chelis-std --
+    // so the build prunes entry-unreachable REAL chelis-std definitions --
     // the motivating path (chelis#1176 review, F4). Reuses the committed
     // `pseudo_nautilus` fixture (an erf approximation over chelis-std scalars).
     let scratch = tempdir().expect("scratch");
@@ -947,7 +954,7 @@ fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
         "a chelis-std-importing package must build in both cache regimes: monolithic={mono_err:?} warm={warm_err:?}"
     );
     // Confirm the stdlib layer engaged (i.e. real chelis-std was linked and the
-    // eval-only drop path ran over it, not the no-chelis-std shortcut).
+    // pruning ran over it, not the no-chelis-std shortcut).
     let std_artifacts = fs::read_dir(cache_home.join(".cache").join("typecheck"))
         .into_iter()
         .flatten()

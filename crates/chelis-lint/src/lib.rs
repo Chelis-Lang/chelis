@@ -1,7 +1,7 @@
 //! Naming-convention lint for the Chelis ecosystem.
 //!
 //! Language naming and style rules live in `chelis/spec/01-nomenclature.md`.
-//! Repository workflow conventions may instead be owned by `CONTRIBUTING.md`.
+//! Repository workflow conventions live in `docs/maintainer_guide.md`.
 //! This crate translates each rule into an executable check, walks a target
 //! tree, and reports violations with `file:line:col: rule_id: message`
 //! references.
@@ -118,7 +118,7 @@ pub trait Rule: Send + Sync {
     fn id(&self) -> &str;
 
     /// Owning documentation reference for this rule, for example `"§6.2"` in
-    /// `spec/01-nomenclature.md` or `"CONTRIBUTING.md § Declarative Naming"`.
+    /// `spec/01-nomenclature.md` or `"docs/maintainer_guide.md § Declarative Naming"`.
     /// Printed alongside violations so readers can find the rule.
     fn spec_ref(&self) -> &str;
 
@@ -168,55 +168,6 @@ pub trait Rule: Send + Sync {
     /// applies.
     fn fix(&self, _ctx: &Context<'_>, _violation: &Violation) -> Option<Replacement> {
         None
-    }
-
-    /// Whether the CLI fix driver must verify the post-fix source against
-    /// the typed/linearity pipeline before writing the replacement to disk.
-    ///
-    /// Default `false` for rules whose fix is purely structural (case
-    /// rename, allowlist update, identifier normalization, etc.).
-    ///
-    /// Rules whose rewrites cross the semantic safety bar named in
-    /// `spec/01-nomenclature.md` §12 — currently `redundant-linearity-call`
-    /// — override to `true`. The CLI's `apply_lint_fixes` driver then
-    /// applies the replacement to a candidate `String`, runs the typed
-    /// pipeline (parse, desugar, expand, type-check, effect-check,
-    /// linearity-check), and only writes the replacement to disk if every
-    /// stage accepts. If the pipeline rejects the candidate, the
-    /// replacement is silently dropped.
-    ///
-    /// Architectural choice documented in
-    /// `docs/investigations/redundant_linearity_autofix_architecture.md`
-    /// (Path 1B): the gate lives in the CLI driver so `chelis-lint` stays
-    /// dep-pure.
-    fn fix_requires_typed_pipeline_check(&self) -> bool {
-        false
-    }
-
-    /// Whether the CLI lint driver should suppress this rule's warnings
-    /// when the autofix is unavailable for the violation (no fix
-    /// proposed, fix proposed but bailed out, or fix rejected by the
-    /// typed-pipeline gate).
-    ///
-    /// Default `false`: warnings fire even when no fix is offered, so
-    /// the user can see the diagnostic and rewrite manually. This is
-    /// the right behavior for purely informational advisories whose
-    /// lack-of-fix carries its own signal (no such rule is currently
-    /// registered; the closest historical example was the pre-0.7.9
-    /// `redundant-linearity-call`).
-    ///
-    /// Rules whose warning is only meaningful when paired with a safe
-    /// rewrite (currently `prefer-pipe-operator` and
-    /// `redundant-linearity-call`) opt in to `true`.
-    /// `chelis lint --fix` then converges for those rules: either the
-    /// rewrite is applied (and the warning disappears with the
-    /// rewrite), or the warning is suppressed (because the rule
-    /// declines to propose an unsafe transformation).
-    ///
-    /// Architectural rationale in
-    /// `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
-    fn check_mirrors_fix(&self) -> bool {
-        false
     }
 }
 

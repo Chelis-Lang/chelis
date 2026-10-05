@@ -170,6 +170,8 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
                 "errors": [{
                     "kind": "UseAfterConsume",
                     "message": "variable `x` was already consumed by realize at surf:56..66; later use at surf:72..73 is invalid",
+                    "span": { "offset": 72, "span": "point" },
+                    "span_id": "surf:72..73",
                     "severity": 0.9,
                     // chelis#886 [04-FIT-15]: the field set no longer varies
                     // by producing stage. The embedding API always carried
@@ -341,7 +343,7 @@ fn rt_wave1_207_empty_file_build_rejects_with_same_message() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", tmp.path().to_str().expect("path utf8")])
+        .args(["build", "--emit-c", tmp.path().to_str().expect("path utf8")])
         .output()
         .expect("run chelis build");
     let combined = format!(

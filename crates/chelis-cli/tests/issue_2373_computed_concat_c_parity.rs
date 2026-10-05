@@ -1,4 +1,8 @@
 //! #2373: linked C and Eval execute the same checked computed concat.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 
@@ -162,6 +166,7 @@ fn non_axis_mismatch_reaches_concat_in_both_lanes() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -201,6 +206,7 @@ fn zero_element_concat_output_metadata_overflow_matches_eval_and_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -251,6 +257,7 @@ fn zero_element_concat_output_metadata_within_i64_succeeds_on_both_lanes() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -304,6 +311,7 @@ fn copied_extent_keeps_result_claim_on_eval_and_linked_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -388,7 +396,7 @@ fn empty_list_fails_in_linked_c() {
     assert!(gcc_available(), "this oracle requires a linked C binary");
     let stem = "computed_concat_empty";
     let source = "parts: List[tensor[2, 2, f32]] = []\noutput = concat(parts, 1i32)\n";
-    let expected = "concat expects at least one tensor part";
+    let expected = "concat received no tensor parts\nnumeric trap: domain in concat at i64\n";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
     let out_dir = dir.path().join(format!("{stem}-out"));
@@ -400,15 +408,13 @@ fn empty_list_fails_in_linked_c() {
         .output()
         .expect("eval");
     assert!(!eval.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&eval.stderr),
-        "error: concat expects at least one tensor part\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&eval.stderr), expected);
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

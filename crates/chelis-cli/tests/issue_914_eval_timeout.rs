@@ -154,9 +154,9 @@ fn eval(args: &[&str]) -> (Option<i32>, String, String) {
     eval_impl(None, args)
 }
 
-/// `eval` with the working directory set, which is what puts a loose
-/// snippet inside a reef package: the Phase H detector resolves a
-/// non-`module` file's package root from the cwd.
+/// `eval` with the working directory set. The reef-lane rows run from a
+/// directory outside the package, so only the snippet's own location inside
+/// the package can put it in reef context (spec/02 §P2, chelis#2918).
 fn eval_in(cwd: &Path, args: &[&str]) -> (Option<i32>, String, String) {
     eval_impl(Some(cwd), args)
 }
@@ -304,14 +304,14 @@ fn timeout_message_is_absent_from_a_successful_run() {
 #[test]
 fn timeout_trips_inside_a_reef_package() {
     let (_dir, root) = reef_package();
-    let snippet_dir = tempdir().expect("snippet tempdir");
-    // Outside the package, so the cwd is the only thing that can put this
-    // snippet in reef context.
-    let path = write_program(snippet_dir.path(), "slow.ch", &reef_snippet(4_000_000));
+    let elsewhere = tempdir().expect("elsewhere tempdir");
+    // Inside the package, run from outside it, so the file's location is the
+    // only thing that can put this snippet in reef context.
+    let path = write_program(&root, "slow.ch", &reef_snippet(4_000_000));
 
     let started = Instant::now();
     let (code, stdout, stderr) = eval_in(
-        &root,
+        elsewhere.path(),
         &[
             "eval",
             "--timeout",
@@ -354,11 +354,11 @@ fn timeout_trips_inside_a_reef_package() {
 #[test]
 fn generous_timeout_does_not_disturb_a_reef_package_eval() {
     let (_dir, root) = reef_package();
-    let snippet_dir = tempdir().expect("snippet tempdir");
-    let path = write_program(snippet_dir.path(), "fast.ch", &reef_snippet(100));
+    let elsewhere = tempdir().expect("elsewhere tempdir");
+    let path = write_program(&root, "fast.ch", &reef_snippet(100));
 
     let (code, stdout, stderr) = eval_in(
-        &root,
+        elsewhere.path(),
         &[
             "eval",
             "--timeout",

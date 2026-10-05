@@ -345,7 +345,7 @@ fn compiled(directory: &Path, stem: &str, source: &str) -> Outcome {
     let built = Command::cargo_bin("chelis")
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args(["build", "--emit-c", path.to_str().unwrap(), "--target", "c", "--output"])
         .arg(&out_dir)
         .output()
         .unwrap();

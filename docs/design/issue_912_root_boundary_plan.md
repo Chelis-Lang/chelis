@@ -1,38 +1,17 @@
 # Implementation Plan — GH Issue #912: Authoring What a Top-Level Root IS
 
-## Delivery Status (2026-08-25)
-
-The integrated manifested-root boundary is implemented in this revision:
-stamped-Node traversal, target-carrying `ManifestedProgram` consumption,
-per-root input closure, static dotted tuple/ADT topology, target-aware lane
-routing, C/HIP `requires_main()`, and fail-closed [05-UNS-1] diagnostics.
-Automatic observation applies only effect-free nullary definitions with a
-concrete value result; an uninstantiated generic remains callable-only. Opaque
-or variable-size built-in containers remain bare roots, and a parameterized
-callable becomes a root only when selected with every reachable runtime input.
-The authoritative acceptance command is:
+The acceptance command for this plan is:
 
 ```sh
 cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored all
 ```
 
-Its ignore ledger is empty and all seventeen cells pass. This delivery resolves
-#1079, #1082, and #1083. The complementary #1102 delivery now materializes an
-exact shaped zero when no unresolved callable result is reverse-reachable from
-the differentiated output, while preserving #1095's rootless placeholder when
-one is. The #1148 `trace` result-type question was subsequently settled by
-spec/04 section 4.3 and [05-OP-33]. For the f32 case in #1148, matrix-trace
-inference already returns rank-zero `tensor[f32]`; the associated change adds
-explicit positive/negative coverage and corrects fixture signatures. That
-evidence does not establish full per-dtype [05-OP-33] conformance.
-
-The root's ownership face is now decided normatively by
+The root's ownership face is decided normatively by
 `spec/04-type-system.md` [04-LIN-6]: each already-manifested root is an ordered
 terminal consuming use and participates in ordinary copy insertion. That rule
 does not change this plan's authority over root identity, topology, order, lane,
 or artifact routing. Its compiler/runtime implementation is owned by #1286 and
-`spec/design/compiled_value_ownership.md`; it is not part of the seventeen-cell
-delivery recorded above.
+`spec/design/compiled_value_ownership.md`, not by this plan.
 
 ## Problem Statement
 
@@ -76,7 +55,7 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
 4. **`Target` enum in `chelis-types`. Capability mapping in `compiler-api`.**
    The mapping is a wildcard-free enum match — adding a `Target` variant without
    a capability arm fails to compile. Lives in compiler-api because that is where
-   the pipeline is driven and where library consumers (C Proof notebook, etc.)
+   the pipeline is driven and where library consumers (for example a notebook front end)
    obtain manifests.
 
 5. **`ManifestedProgram` carries `Target`.**

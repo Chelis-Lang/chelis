@@ -46,6 +46,55 @@ fn property_summary(output: &[u8]) -> Value {
 }
 
 #[test]
+fn prove_rejects_unknown_and_unimplemented_tiers_before_discovery() {
+    for tier in ["bogus-tier", "type-only", "AUTO", ""] {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["prove", "does-not-exist.ch", "--tier", tier, "--json"])
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(
+                predicate::str::contains("invalid value")
+                    .or(predicate::str::contains("a value is required")),
+            )
+            .stderr(predicate::str::contains("fuzz-only"))
+            .stderr(predicate::str::contains("smt-only"));
+    }
+}
+
+#[test]
+fn prove_accepts_every_advertised_tier() {
+    let dir = write_prop("@property identity forall(x: f32):\n  x == x\n");
+    for tier in [
+        "auto",
+        "fuzz-only",
+        "smt-only",
+        "induction-only",
+        "beacon-only",
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                tier,
+                "--samples",
+                "2",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_ne!(output.status.code(), Some(3), "tier={tier}: {output:?}");
+        assert!(
+            !property_records(&output.stdout).is_empty(),
+            "tier={tier}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn prove_passes_filtered_samples() {
     // Pin `--tier fuzz-only` so the test asserts exactly one behavior
     // across the default and `--features smt` builds: a trivial linear
@@ -769,9 +818,11 @@ fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
     );
 }
 
+/// Prove the put-call parity property over `width` binders under the bundled
+/// `std.normal_cdf.reflection` contract and return the property records and
+/// whether the run exited successfully.
 #[cfg(feature = "smt")]
-#[test]
-fn prove_k1_parity_consumes_bundled_normal_cdf_contract() {
+fn prove_parity_with_cdf_contract(width: &str) -> (Vec<serde_json::Value>, bool, String) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join("myapp");
     write_file(
@@ -790,15 +841,18 @@ chelis-std = {{ version = "0.4.0" }}
         ),
     );
     let entry = root.join("src/proofs.ch");
+    // Suffixed literals keep the property's spelled float widths to `width`.
     write_file(
         &entry,
-        r#"module App.Proofs
+        &format!(
+            r#"module App.Proofs
 import Std.Contracts (normal_cdf)
-@property put_call_parity_with_cdf_contract forall(s: f32, k: f32, disc: f32, d1: f32, d2: f32)
-  where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0:
+@property put_call_parity_with_cdf_contract forall(s: {width}, k: {width}, disc: {width}, d1: {width}, d2: {width})
+  where s >= 0.0{width}, k >= 0.0{width}, disc >= 0.0{width}, disc <= 1.0{width}:
   (((s * normal_cdf(d1)) - (k * (disc * normal_cdf(d2)))) - ((k * (disc * normal_cdf(-d2))) - (s * normal_cdf(-d1)))) == (s - (k * disc))
   with contract = "std.normal_cdf.reflection"
-"#,
+"#
+        ),
     );
 
     let output = Command::cargo_bin("chelis")
@@ -812,13 +866,25 @@ import Std.Contracts (normal_cdf)
         ])
         .output()
         .expect("run prove");
-    assert!(
-        output.status.success(),
+    let transcript = format!(
         "stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let props = property_records(&output.stdout);
+    (
+        property_records(&output.stdout),
+        output.status.success(),
+        transcript,
+    )
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_k1_parity_consumes_bundled_normal_cdf_contract() {
+    // chelis#2965: the reflection contract is fuzz-discharged per width; at
+    // f64 the shipped graph satisfies it, so an f64 consumer is validated.
+    let (props, success, transcript) = prove_parity_with_cdf_contract("f64");
+    assert!(success, "{transcript}");
     assert_eq!(props.len(), 1, "records: {props:?}");
     let prop = &props[0];
     assert_eq!(prop["name"], "put_call_parity_with_cdf_contract");
@@ -851,8 +917,32 @@ import Std.Contracts (normal_cdf)
         assumptions
             .iter()
             .any(|a| a["name"] == "std.normal_cdf.reflection"
-                && a["discharge"]["evidence"]["implementation"] == "Std.Contracts.normal_cdf"),
+                && a["discharge"]["evidence"]["implementation"] == "Std.Contracts.normal_cdf"
+                && a["discharge"]["evidence"]["dtype"] == "f64"),
         "reflection assumption must name bundled implementation: {prop}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_parity_at_f32_does_not_inherit_a_reflection_false_at_f32() {
+    // chelis#2965: at f32 the shipped normal_cdf graph's N(-x) and 1 - N(x)
+    // round apart by far more than the fuzz tolerance, so the f32 discharge of
+    // the reflection contract fails and the consumer is not validated.
+    let (props, success, transcript) = prove_parity_with_cdf_contract("f32");
+    assert!(!success, "{transcript}");
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["status"], "failed", "{prop}");
+    assert_eq!(prop["composite_verdict"], "failed", "{prop}");
+    let assumptions = prop["assumptions"].as_array().expect("assumptions array");
+    assert!(
+        assumptions
+            .iter()
+            .any(|a| a["name"] == "std.normal_cdf.reflection"
+                && a["discharge"]["evidence"]["status"] == "failed"
+                && a["discharge"]["evidence"]["dtype"] == "f32"),
+        "the f32 reflection discharge must be the failed record: {prop}"
     );
 }
 
@@ -1140,7 +1230,13 @@ fn desugared_deep_property_uses_source_samples_and_seed() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["prove", deep_path.to_str().unwrap(), "--json"])
+        .args([
+            "prove",
+            deep_path.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--json",
+        ])
         .output()
         .expect("run prove");
     assert!(
@@ -1156,6 +1252,7 @@ fn desugared_deep_property_uses_source_samples_and_seed() {
         .collect::<Vec<_>>();
     assert_eq!(records[0]["samples"], 2);
     assert_eq!(records[0]["seed"], 7);
+    assert_eq!(records[0]["proof_tier"], "fuzz");
 }
 
 #[test]
@@ -1185,6 +1282,8 @@ fn deep_property_uses_metadata_quantifiers_and_cli_samples() {
             "2",
             "--seed",
             "0",
+            "--tier",
+            "fuzz-only",
             "--json",
         ])
         .output()
@@ -1202,6 +1301,44 @@ fn deep_property_uses_metadata_quantifiers_and_cli_samples() {
         .collect::<Vec<_>>();
     assert_eq!(records[0]["name"], "deep_non_negative");
     assert_eq!(records[0]["samples"], 2);
+    assert_eq!(records[0]["proof_tier"], "fuzz");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn deep_auto_smt_verdicts_do_not_claim_fuzz_samples() {
+    for (predicate, status, exit) in [("x == x", "passed", 0), ("x > x", "failed", 1)] {
+        let dir = write_prop(&format!(
+            "@property identity forall(x: f32):\n  {predicate}\n"
+        ));
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["deep", dir.path().join("prop.ch").to_str().unwrap()])
+            .output()
+            .expect("desugar");
+        assert!(deep.status.success(), "{deep:?}");
+        let path = dir.path().join("prop.dp");
+        std::fs::write(&path, deep.stdout).expect("write deep");
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                path.to_str().unwrap(),
+                "--samples",
+                "2",
+                "--tier",
+                "auto",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(output.status.code(), Some(exit), "{output:?}");
+        let records = property_records(&output.stdout);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["status"], status);
+        assert_eq!(records[0]["proof_tier"], "smt");
+        assert_eq!(records[0]["samples"], 0);
+    }
 }
 
 // --- WI-7 mandatory non-vacuity: close the CLI-local green bypass ---
@@ -2925,6 +3062,7 @@ fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 "c",
@@ -2948,12 +3086,12 @@ fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
     }
 }
 
-// chelis#923 negative parity: the prover-owned symbolic transform must not
-// certify a conditional gradient while the compiler's scalar-AD transform
-// cannot build the same program.
+// chelis#923: the prover-owned symbolic transform still does not certify a
+// conditional gradient; the compiler builds it (chelis#3017) and the
+// executable agrees with eval.
 #[cfg(feature = "smt")]
 #[test]
-fn issue_923_conditional_grad_is_unsupported_by_prove_and_build() {
+fn issue_923_conditional_grad_is_unsupported_by_prove_and_builds() {
     let source = r#"module Audit.Main
 
 def conditional_value(x: f32) -> f32 =
@@ -2990,39 +3128,14 @@ out = conditional_derivative(2.0)
         props[0]
     );
 
-    let build = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("build").to_str().unwrap(),
-        ])
-        .output()
-        .expect("run build");
-    assert!(
-        !build.status.success(),
-        "conditional scalar grad unexpectedly built; the prover subset may \
-         only widen after compiler support lands\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&build.stderr);
-    assert!(
-        stderr.contains("can't lower these defs"),
-        "build must fail at the compiler scalar-AD boundary, got:\n{stderr}"
-    );
+    assert_scalar_grad_builds_with_eval_parity(&path, &dir.path().join("build"));
 }
 
-// The executable-parity oracle also found that the compiler scalar-AD path
-// rejects casts in differentiated bodies. Keep Tier B fail-closed until that
-// compiler boundary widens.
+// Casts in differentiated bodies: Tier B stays fail-closed, while the
+// compiler builds the gradient (chelis#3017) with eval parity.
 #[cfg(feature = "smt")]
 #[test]
-fn issue_923_cast_grad_is_unsupported_by_prove_and_build() {
+fn issue_923_cast_grad_is_unsupported_by_prove_and_builds() {
     let source = r#"def cast_value(x: f32) -> f32 = cast(x * x, f32)
 def cast_derivative(x: f32) -> f32 = grad(cast_value, wrt=x)(x)
 out = cast_derivative(2.0)
@@ -3053,6 +3166,15 @@ out = cast_derivative(2.0)
         props[0]
     );
 
+    assert_scalar_grad_builds_with_eval_parity(&path, &dir.path().join("cast-build"));
+}
+
+/// chelis#3017 widened the compiler's scalar-AD boundary: a top-level scalar
+/// `grad` lowers through the eval lane's reverse DAG, so conditionals and
+/// casts in differentiated bodies now build. The executable must print what
+/// eval prints.
+#[cfg(feature = "smt")]
+fn assert_scalar_grad_builds_with_eval_parity(path: &std::path::Path, out_dir: &std::path::Path) {
     let build = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -3062,20 +3184,31 @@ out = cast_derivative(2.0)
             "--target",
             "c",
             "--output",
-            dir.path().join("cast-build").to_str().unwrap(),
+            out_dir.to_str().unwrap(),
         ])
         .output()
         .expect("run build");
     assert!(
-        !build.status.success(),
-        "cast-bearing scalar grad unexpectedly built\nstdout={}\nstderr={}",
+        build.status.success(),
+        "scalar grad build failed\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&build.stderr).contains("can't lower these defs"),
-        "build must fail at the compiler scalar-AD boundary:\n{}",
-        String::from_utf8_lossy(&build.stderr)
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run eval");
+    assert!(eval.status.success(), "{eval:?}");
+    let executable = std::process::Command::new(out_dir.join("prop"))
+        .output()
+        .expect("run built executable");
+    assert!(executable.status.success(), "{executable:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&executable.stdout),
+        String::from_utf8_lossy(&eval.stdout),
+        "the built scalar grad must print what eval prints"
     );
 }
 
@@ -3476,7 +3609,7 @@ module_prefix = "Graph"
     write_file(
         &root.join("src/a.ch"),
         "module Graph.A\n\
-         import Graph.B (same, from_b, b_cycle)\n\
+         import Graph.B (from_b, b_cycle)\n\
          def same(x: f32) -> f32 = x\n\
          def unused(x: f32) -> f32 = x\n\
          def through_b(x: f32) -> f32 = from_b(x)\n\
@@ -3596,7 +3729,7 @@ module_prefix = "Graph"
         edges
             .iter()
             .any(|edge| edge["from"] == from_b["id"] && edge["to"] == b_same["id"]),
-        "same-name imported/local declarations must resolve by linker identity: {edges:?}"
+        "same-name declarations in two modules must resolve by linker identity: {edges:?}"
     );
     assert_eq!(rows["kind"], "dimension");
     assert!(

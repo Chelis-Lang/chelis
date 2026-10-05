@@ -1,15 +1,15 @@
-//! CLI surface coverage for the Hull `process_run` subprocess-exec builtin.
+//! CLI surface coverage for the `process_run` subprocess-exec builtin.
 //!
-//! `process_run(cmd, args) -> (exit_code, stdout, stderr)` carries the `Io`
-//! effect and is eval/test-only: it runs under `chelis eval` / `chelis test`
-//! but the C/HIP/Metal build backends reject it with a clean diagnostic
-//! rather than the silent `/* unsupported builtin */ 0` fallthrough.
+//! `process_run(cmd, args) -> (exit_code, stdout, stderr)` carries the `IO`
+//! effect and runs identically under `chelis eval` and compiled C: both lanes
+//! call the runtime's one definition (chelis#1297).
 //!
-//! Negative-test parity is intentional here:
-//!   * positive eval (exit 0 tuple, stdout capture) <-> negative eval
-//!     (spawn failure is a clean error, non-zero exit captured in the tuple)
-//!   * positive build rejection (message names the eval/test-only gap) is
-//!     the failure-side mirror of the eval path working.
+//! Negative-test parity is intentional here: every accepted capture has a
+//! failing twin (spawn failure, captures that are not UTF-8), and each
+//! failure is the same language trap on both lanes.
+
+#[path = "common/host_effect_parity.rs"]
+mod parity;
 
 use assert_cmd::Command;
 use std::fs;
@@ -158,60 +158,77 @@ fn eval_process_run_captures_nonzero_exit_code() {
     );
 }
 
-/// `chelis build` on a program that uses `process_run` must fail with the
-/// eval/test-only diagnostic. This is the anti-regression that matters most:
-/// without it the silent fallthrough would emit C returning 0 for the tuple,
-/// a wrong value rather than a diagnostic.
+/// Compiled C runs `process_run` exactly as eval does: the captured exit
+/// code, stdout and stderr, a signal's `-1`, and every call in program order,
+/// including one whose result is discarded.
 #[test]
-fn build_rejects_process_run_program_with_clear_message() {
-    let dir = tempdir().expect("tempdir");
-    let src = dir.path().join("runner.ch");
-    let out = dir.path().join("out");
-    fs::write(&src, "result = process_run(\"echo\", [\"hi\"])\n").expect("write source");
-
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            src.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // Branded per section C2 (spec/design/loud_unsupported.md): the shared
-    // eval-only gate (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`) rejects
-    // through `Unsupported`, so shells can match the structured prefix.
-    assert!(
-        stderr.contains("unsupported: builtin `process_run`"),
-        "build must reject process_run with the branded eval-only diagnostic, \
-         got stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("compiled targets (the host interpreter's eval/test lanes only)"),
-        "build rejection must explain process_run is unavailable in compiled targets, \
-         got stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("run the program with `chelis eval` or `chelis test`"),
-        "build rejection must name the eval-lane remedy, got stderr={stderr}"
-    );
-    // The rejection must fire BEFORE any C artifact is written.
-    assert!(
-        !out.join("runner.c").exists(),
-        "build must not emit a C artifact for a rejected process_run program"
-    );
+fn compiled_process_run_matches_eval_in_value_and_effect_order() {
+    let source = "def log_line(text: string) -> unit ! {IO} = {\n\
+                  _ = process_run(\"sh\", [\"-c\", string_concat(\"printf \", string_concat(text, \" >> log\"))])\n\
+                  ()\n\
+                  }\n\
+                  echo = process_run(\"echo\", [\"hi\", \"$HOME\"])\n\
+                  failing = process_run(\"sh\", [\"-c\", \"printf err >&2; exit 3\"])\n\
+                  signalled = process_run(\"sh\", [\"-c\", \"kill -9 $$\"])\n\
+                  first = log_line(\"1\")\n\
+                  second = log_line(\"2\")\n\
+                  contents = process_run(\"cat\", [\"log\"])\n";
+    let run = parity::assert_lanes_agree(source, "runner");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    for expected in [
+        "echo.0 = 0\n",
+        "echo.1 = hi $HOME\n",
+        "failing.0 = 3\n",
+        "failing.2 = err\n",
+        "signalled.0 = -1\n",
+        "contents.1 = 12\n",
+    ] {
+        assert!(
+            run.stdout.contains(expected),
+            "missing `{expected}`: {run:?}"
+        );
+    }
 }
 
-/// `chelis check` (front-end type/effect pass) ACCEPTS a `process_run`
-/// program: the rejection is build-only, not a type error. This is the
-/// pass-side mirror of `build_rejects_process_run_program_with_clear_message`.
+/// The failing twins: a missing program and a capture that is not UTF-8
+/// fail the whole call with the same trap on both lanes. stdout is checked
+/// before stderr, and no replacement character reaches a result.
+#[test]
+fn compiled_process_run_failures_match_eval() {
+    for (name, source, failure) in [
+        (
+            "missing",
+            "out = process_run(\"definitely_not_a_binary_xyz\", [])\n",
+            "process_run failed to spawn `definitely_not_a_binary_xyz`",
+        ),
+        (
+            "badout",
+            "out = process_run(\"printf\", [\"\\\\377\"])\n",
+            "IO trap in process_run: program `printf`, stdout: output is not valid UTF-8",
+        ),
+        (
+            "baderr",
+            "out = process_run(\"sh\", [\"-c\", \"printf ok; printf '\\\\377' >&2\"])\n",
+            "IO trap in process_run: program `sh`, stderr: output is not valid UTF-8",
+        ),
+        (
+            "badboth",
+            "out = process_run(\"sh\", [\"-c\", \"printf '\\\\377'; printf '\\\\377' >&2\"])\n",
+            "IO trap in process_run: program `sh`, stdout: output is not valid UTF-8",
+        ),
+    ] {
+        let run = parity::assert_lanes_agree(source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert!(
+            run.failure.starts_with(failure),
+            "{name}: expected `{failure}`, got {run:?}"
+        );
+        assert!(!run.stdout.contains('\u{fffd}'), "{name}: {run:?}");
+    }
+}
+
+/// `chelis check` (front-end type/effect pass) accepts a `process_run`
+/// program.
 #[test]
 fn check_accepts_process_run_program() {
     let dir = tempdir().expect("tempdir");

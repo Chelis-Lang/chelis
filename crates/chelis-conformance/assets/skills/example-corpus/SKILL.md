@@ -63,8 +63,11 @@ Spellings that are hard errors, not style:
   `! { Random }` are the typed `RetiredRandomness` parse error.
 - Non-primary transform arguments are named: `grad(f, wrt=x)`,
   `vmap(f, axis=n)`; axis zero is bare `vmap(f)`.
+- `sum`, `cumsum`, `trace`, and `einsum` over `i8` or `i16` return `i32`
+  (`spec/04` §5.7.1); declare the result as `i32`, pass `accumulator=i64` to
+  `sum` or `einsum`, or narrow it with an explicit `cast`.
 - Pipe stages use first-argument insertion: `x |> f(y)` means `f(x, y)`. Use
-  `x |> fn (v) -> f(y, v)` when the piped value belongs in a later position.
+  `x |> (fn (v) -> f(y, v))` when the piped value belongs in a later position.
 
 Style the lint rules enforce:
 
@@ -99,9 +102,7 @@ Style the formatter does not enforce:
   an exported API or dense signature benefits from clarity, and `copy(x)`
   only when forking ownership for downstream consumption. Existing fixtures
   and migration baselines may keep explicit `copy()` or `drop()` calls when
-  they prove compatibility or preserve baseline evidence;
-  `redundant-linearity-call` is advisory and is not papered over with
-  blocking-rule exceptions.
+  they prove compatibility or preserve baseline evidence.
 - lowered IR carries compiler-inserted `Copy` and `Drop` nodes for implicit
   linearity. If auto-copy/auto-drop produces unexpected IR, treat it as a
   structural blocker and escalate against `spec/design/implicit_linearity.md`

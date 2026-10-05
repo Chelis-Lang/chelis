@@ -2,10 +2,11 @@
 use super::*;
 use crate::discharge::{DischargeEngine, Goal, IntervalBox, IrHandle};
 use crate::{BeaconOracleMode, BeaconShim, WireDagByteStore};
-use chelis_compiler_api::{compiler, schema::LowerRequest};
-use chelis_surf::ast::{LiteralSuffix, UnaryOp};
+use chelis_compiler_api::compiler;
+use chelis_surf::ast::{LiteralSuffix, TensorPrecision, UnaryOp};
 use chelis_types::{ScalarValue, dtype_semantics::scalar_from_f64, types::Prim};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
 fn literal(expr: &Expr) -> Result<f64, String> {
     let value = match expr {
@@ -65,24 +66,43 @@ fn scalar_box(property: &Property) -> Result<IntervalBox, String> {
 
 fn scalar_input_name(expr: &Expr) -> Option<&str> {
     match tensor_operand(expr)? {
-        Expr::Var(name, _) => Some(name),
+        Cow::Borrowed(Expr::Var(name, _)) => Some(name),
         _ => None,
     }
 }
 
-fn tensor_operand(expr: &Expr) -> Option<&Expr> {
+fn names_tensor_to_scalar(expr: &Expr) -> bool {
+    matches!(expr, Expr::Var(name, _) if name == "tensor_to_scalar")
+}
+
+/// The tensor operand of a final `tensor_to_scalar` call, in either spelling
+/// the formatter and linter accept: the call `tensor_to_scalar(e)`, or a pipe
+/// whose last stage is the bare name `tensor_to_scalar`. Both spellings
+/// denote the same application, so matching only the call form would let a
+/// change of spelling disconnect a property from Beacon.
+fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
     match expr {
         Expr::Apply(function, operands, _)
-            if matches!(function.as_ref(), Expr::Var(name, _) if name == "tensor_to_scalar")
-                && operands.len() == 1 =>
+            if names_tensor_to_scalar(function) && operands.len() == 1 =>
         {
-            Some(&operands[0])
+            Some(Cow::Borrowed(&operands[0]))
+        }
+        Expr::Pipe(seed, stages, span) => {
+            let (last, earlier) = stages.split_last()?;
+            if !names_tensor_to_scalar(last) {
+                return None;
+            }
+            Some(if earlier.is_empty() {
+                Cow::Borrowed(seed.as_ref())
+            } else {
+                Cow::Owned(Expr::Pipe(seed.clone(), earlier.to_vec(), *span))
+            })
         }
         _ => None,
     }
 }
 
-fn upper_expression(property: &Property) -> Result<(&Expr, ScalarValue), String> {
+fn upper_expression(property: &Property) -> Result<(Cow<'_, Expr>, ScalarValue), String> {
     let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = &property.body else {
         return Err("Beacon property body must be a non-strict scalar upper bound".into());
     };
@@ -133,30 +153,57 @@ pub(super) fn prove(
         let mut inputs = scalar_box(property)?;
         let (expression, upper) = upper_expression(property)?;
         Goal::scalar_upper_bound(inputs.clone(), upper).map_err(|e| e.to_string())?;
-        let body = chelis_surf::format::format_expression(expression);
-        let mut source = chelis_surf::format::format_program(decls);
-        let mut entry = "beacon_goal_output".to_string();
-        while source.contains(&entry) {
-            entry.push('_');
-        }
-        let function = format!("{entry}_function");
-        let parameters = property
+        let body = chelis_surf::format::format_expression(&expression);
+        // The goal graph is lowered from the declarations the property was
+        // checked against plus generated declarations, never from a printed
+        // and re-parsed copy of them (chelis#3172). The generated names avoid
+        // every name the declarations or the expression mention; their debug
+        // rendering is a superset of those names.
+        let mentioned = format!("{decls:?}{expression:?}");
+        let fresh = |base: String| {
+            let mut name = base;
+            while mentioned.contains(&name) {
+                name.push('_');
+            }
+            name
+        };
+        // Generated declarations carry the property's first parameter span,
+        // so a diagnostic about them points into the property.
+        let span = property
             .params
-            .iter()
-            .map(|param| format!("{}: tensor[f64]", param.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        source.push_str(&format!(
-            "\ndef {function}({parameters}) -> tensor[f64] = {body}\n"
-        ));
+            .first()
+            .map_or_else(|| chelis_deep::Span::new(0, 0), |param| param.span);
+        let tensor_f64 = || TypeExpr::Tensor(Vec::new(), TensorPrecision::new("f64", span), span);
+        let entry = fresh("beacon_goal_output".to_string());
+        let function = fresh(format!("{entry}_function"));
+        let mut program = decls.to_vec();
+        program.push(Decl::FunDef {
+            name: function.clone(),
+            type_binders: Vec::new(),
+            params: property
+                .params
+                .iter()
+                .map(|param| Param {
+                    name: param.name.clone(),
+                    ty: Some(tensor_f64()),
+                    span,
+                })
+                .collect(),
+            ret_ty: Some(tensor_f64()),
+            effects: None,
+            body: expression.clone().into_owned(),
+            span,
+        });
         let mut arguments = Vec::new();
         let mut input_bindings = BTreeMap::new();
         for (index, param) in property.params.iter().enumerate() {
-            let mut name = format!("beacon_input_{index}");
-            while source.contains(&name) {
-                name.push('_');
-            }
-            source.push_str(&format!("{name} = ({name} : tensor[f64])\n"));
+            let name = fresh(format!("beacon_input_{index}"));
+            program.push(Decl::LetDef {
+                name: name.clone(),
+                ty: None,
+                value: Expr::Annotate(Box::new(Expr::Var(name.clone(), span)), tensor_f64(), span),
+                span,
+            });
             let dimension = inputs
                 .dims
                 .iter_mut()
@@ -164,16 +211,17 @@ pub(super) fn prove(
                 .ok_or("missing input binding")?;
             dimension.0.clone_from(&name);
             input_bindings.insert(name.clone(), param.name.clone());
-            arguments.push(name);
+            arguments.push(Expr::Var(name, span));
         }
-        source.push_str(&format!("{entry} = {function}({})\n", arguments.join(", ")));
+        program.push(Decl::LetDef {
+            name: entry.clone(),
+            ty: None,
+            value: Expr::Apply(Box::new(Expr::Var(function, span)), arguments, span),
+            span,
+        });
         let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
-        let lowered = compiler::lower(LowerRequest {
-            source_kind: SourceKind::Surf,
-            source,
-            entry: Some(entry.clone()),
-        })
-        .map_err(|error| format!("Beacon graph lowering failed: {error:?}"))?;
+        let lowered = compiler::lower_decls(&program, Some(&entry))
+            .map_err(|error| format!("Beacon graph lowering failed: {error:?}"))?;
         lowered
             .dag
             .validate_wire_contract()

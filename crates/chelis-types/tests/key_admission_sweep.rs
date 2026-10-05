@@ -70,14 +70,12 @@ fn tag_witnesses(tag: DeepTag) -> Vec<Shows> {
     match tag {
         // A user function's key parameter, and a constructor's key field.
         DeepTag::App => vec![
+            key("def f(k: key) -> tensor[2, key] = k |> split_keys(2i64)\n"),
             key(
                 "def g(k: key) -> tensor[2, key] = split_keys(k, 2i64)\n\ndef f(k: key) -> tensor[2, key] = g(k)\n",
             ),
             key("def f(k: key) -> Option[key] = Some(k)\n"),
         ],
-        DeepTag::Pipe => vec![key(
-            "def f(k: key) -> tensor[2, key] = k |> split_keys(2i64)\n",
-        )],
         DeepTag::Let => vec![key("def f(k: key) -> key = {\n  j = k\n  j\n}\n")],
         DeepTag::Block => vec![key("def f(k: key) -> key = do { k }\n")],
         DeepTag::Fn => vec![key("def f(k: key) -> key = (fn (j: key) -> j)(k)\n")],
@@ -260,7 +258,6 @@ fn the_admitting_tags_are_exactly_moves_joins_aggregates_and_applications() {
             "if",
             "record",
             "access",
-            "pipe",
             "block",
             "tuple",
             "tuple-get",
@@ -405,30 +402,57 @@ fn every_key_primitive_admits_exactly_its_key_operand() {
 }
 
 /// A builtin named as a value is judged at the parameters of the function
-/// type it is instantiated at, as a call is: `drop` and `split_key` as
-/// callbacks check, and a builtin whose atom names no key is refused there,
-/// with a diagnostic that names it.
+/// type it is instantiated at, as a call is: `split_key` as a callback
+/// checks, and a builtin value whose parameter admits no key is refused
+/// there, with a diagnostic that names it. Only a builtin whose whole rule
+/// travels with the value is a value at all ([04-INF-9], chelis#3149):
+/// `to_int`'s result rule and `drop`'s end of its operand's lifetime are not
+/// carried by their schemes, so naming either as a value is refused before
+/// any key judgement.
 ///
-/// Evidentiary status: the positives lock existing acceptance; the two
-/// negatives are REGRESSION TESTS (both checked at `f4eeca363`).
+/// Evidentiary status: the `split_key` positive locks existing acceptance; the
+/// `test_assert_eq` negative is a REGRESSION TEST for the key judgement, and
+/// the by-name refusals lock chelis#3149.
 #[test]
 fn a_builtin_named_as_a_value_admits_a_key_only_where_a_call_would() {
     verdict("def w(ks: List[key]) -> List[(key, key)] = map(split_key, ks)\n")
         .unwrap_or_else(|errors| panic!("{errors:?}"));
-    verdict("def w(ks: List[key]) -> List[unit] = map(drop, ks)\n")
-        .unwrap_or_else(|errors| panic!("{errors:?}"));
-    for source in [
-        "def w(ks: List[key]) -> List[i64] = map(to_int, ks)\n",
-        "def w(c: bool, k: key) -> i64 = (if c then to_int else to_int)(k)\n",
+    let errors = verdict(
+        "def w(c: bool, a: key, b: key) -> unit = \
+         (if c then test_assert_eq else test_assert_eq)(a, b, \"same\")\n",
+    )
+    .expect_err("a key reaching `test_assert_eq` as a value is refused");
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::KeyReuse)
+                && error.message.contains("`test_assert_eq`")
+                && error.message.contains("key-carrying")
+        }),
+        "expected a key refusal naming `test_assert_eq`, got {errors:?}"
+    );
+    for (source, builtin) in [
+        (
+            "def w(ks: List[key]) -> List[unit] = map(drop, ks)\n",
+            "drop",
+        ),
+        (
+            "def w(ks: List[key]) -> List[i64] = map(to_int, ks)\n",
+            "to_int",
+        ),
+        (
+            "def w(c: bool, k: key) -> i64 = (if c then to_int else to_int)(k)\n",
+            "to_int",
+        ),
     ] {
-        let errors = verdict(source).expect_err("a key reaching `to_int` as a value is refused");
+        let errors = verdict(source).expect_err("a builtin applicable only by name is refused");
         assert!(
             errors.iter().any(|error| {
-                matches!(error.kind, CheckErrorKind::KeyReuse)
-                    && error.message.contains("`to_int`")
-                    && error.message.contains("key-carrying")
+                matches!(error.kind, CheckErrorKind::TypeMismatch)
+                    && error
+                        .message
+                        .contains(&format!("builtin `{builtin}` is applicable only by name"))
             }),
-            "expected a key refusal naming `to_int`, got {errors:?}\n{source}"
+            "expected a by-name refusal naming `{builtin}`, got {errors:?}\n{source}"
         );
     }
 }

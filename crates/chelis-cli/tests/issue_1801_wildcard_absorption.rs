@@ -105,6 +105,7 @@ fn build_c(path: &Path, out_dir: &Path) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",

@@ -42,6 +42,7 @@ enum Shape {
     True,
     PositiveInteger,
     Type,
+    Dtype,
     Effects,
     Params,
     Expressions,
@@ -60,7 +61,6 @@ enum Placement {
     Tag(DeepTag),
     Path,
     BindingValue,
-    PipeStage,
 }
 
 /// The payload role shared by stamping and metadata-preserving transformations.
@@ -95,7 +95,7 @@ rules! {
     "type" => S::Type, P::Any, "a type-expression node";
     "loc" => S::Loc, P::Any, "(loc string integer integer)";
     "eff" => S::Effects, P::Tag(T::TFn), "an effects node of names or (resource {} string) entries on t-fn";
-    "dtype_bounds" => S::Bounds, P::Tag(T::Defsig), "a map from distinct binder names to float, int, or numeric on defsig";
+    "dtype_bounds" => S::Bounds, P::Tag(T::Defsig), "a map from distinct binder names to float, int, numeric, or a list of active dtypes on defsig";
     "effects" => S::Effects, P::Tag(T::Fn), "an effects node of names or (resource {} string) entries on fn";
     "source" => S::Source, P::Any, "a preserved structural (macro-name original-arg...) list";
     "wrt" => S::Wrt, P::Tag(T::Grad), "a variable or nonempty tuple of variables on grad";
@@ -114,7 +114,6 @@ rules! {
     "invariant_amenability" => S::Choices(&["linear", "polynomial", "transcendental", "opaque"]), P::Tag(T::Deftype), "a canonical amenability string on an invariant-carrying deftype";
     "surf_path" => S::String, P::Path, "a string on module/import/import-all whose ASCII-lowercased path equals its path child";
     "surf_dim_group_size" => S::PositiveInteger, P::Tag(T::Defdim), "a positive integer on the first member of an adjacent defdim group";
-    "surf_pipe_stage" => S::Choices(&["call-first"]), P::PipeStage, "\"call-first\" on an fn at a non-initial pipe stage";
     "surf_literal_style" => S::Choices(&["unsuffixed", "explicit"]), P::Tag(T::Lit), "\"unsuffixed\" or \"explicit\" on lit";
     "surf_binding_type" => S::Choices(&["inferred", "explicit"]), P::BindingValue, "\"inferred\" or \"explicit\" on a bind value";
     "lin" => S::Names(&["once", "borrow", "unrestricted"]), P::Any, "once, borrow, or unrestricted";
@@ -122,7 +121,13 @@ rules! {
     "effect" => S::Names(&["resource"]), P::Tag(T::HandleEffect), "resource on handle-effect";
     "literal_source" => S::Names(&["integer"]), P::Tag(T::Lit), "integer on lit";
     "destructure" => S::True, P::Tag(T::Bind), "true on bind";
+    "accumulator" => S::Dtype, P::Tag(T::App), "a (t-prim {} dtype) node naming an active dtype on app";
 }
+
+/// spec/02 `PrecType`: the dtype names an `accumulator` may carry.
+const ACTIVE_DTYPES: &[&str] = &[
+    "f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64", "bool", "string", "key",
+];
 
 enum KeyClass {
     Registered(&'static Rule),
@@ -141,7 +146,7 @@ pub fn role(key: &str) -> MetadataRole {
     match classify(key) {
         KeyClass::Registered(rule) => match rule.shape {
             S::Expression | S::Wrt => MetadataRole::Expression,
-            S::Type => MetadataRole::Type,
+            S::Type | S::Dtype => MetadataRole::Type,
             S::Source => MetadataRole::Preserved,
             S::Bounds => MetadataRole::BinderMap,
             S::String
@@ -169,6 +174,8 @@ enum View<'a> {
     Ast(&'a Expr),
     Value(&'a V),
     Name(&'a str, Span),
+    /// §5.9's explicit dtype set, viewed as its ordered member names.
+    BoundSet(&'a std::collections::BTreeSet<crate::BoundDtype>, Span),
     String(&'a str, Span),
     True(Span),
     Annotations(&'a Metadata, Span),
@@ -188,6 +195,7 @@ impl<'a> View<'a> {
         match self {
             Self::Value(v) => match v {
                 V::Type(v) => Self::Ast(v.expression()),
+                V::Accumulator(v) => Self::Ast(v.expression()),
                 V::PropertyTolerance(v) | V::PropertySeed(v) | V::PropertySamples(v) => {
                     Self::Ast(v.expression())
                 }
@@ -198,7 +206,6 @@ impl<'a> View<'a> {
                 }
                 V::PropertySourceKind(v) => Self::String(v.value().spelling(), v.span()),
                 V::InvariantAmenability(v) => Self::String(v.value().spelling(), v.span()),
-                V::SurfPipeStage(v) => Self::String(v.value().spelling(), v.span()),
                 V::SurfLiteralStyle(v) => Self::String(v.value().spelling(), v.span()),
                 V::SurfBindingType(v) => Self::String(v.value().spelling(), v.span()),
                 V::Lin(v) => Self::Name(v.value().spelling(), v.span()),
@@ -218,7 +225,8 @@ impl<'a> View<'a> {
             Self::Raw(v) => v.span(),
             Self::Ast(v) => v.span(),
             Self::Value(v) => v.span(),
-            Self::Name(_, span)
+            Self::BoundSet(_, span)
+            | Self::Name(_, span)
             | Self::String(_, span)
             | Self::True(span)
             | Self::Annotations(_, span) => span,
@@ -279,6 +287,12 @@ impl<'a> View<'a> {
     fn list(self) -> Option<Vec<Self>> {
         match self.scalar() {
             Self::Raw(RawExpr::List(v, _)) => Some(v.iter().map(Self::Raw).collect()),
+            Self::BoundSet(members, span) => Some(
+                members
+                    .iter()
+                    .map(|dtype| Self::Name(dtype.name(), span))
+                    .collect(),
+            ),
             Self::Ast(Expr::BareList(v, _)) => Some(v.iter().map(Self::Ast).collect()),
             Self::Value(V::Source(v)) => Some(
                 std::iter::once(Self::Name(v.name.value(), v.name.span()))
@@ -306,7 +320,15 @@ impl<'a> View<'a> {
             Self::Ast(Expr::Map(v, _)) | Self::Annotations(v, _) => Some(entries(v)),
             Self::Value(V::DtypeBounds(v)) => Some(
                 v.bounds()
-                    .map(|(k, v)| (k, Self::Name(v.value().deep_name(), v.span())))
+                    .map(|(k, v)| {
+                        let view = match v.value() {
+                            crate::DtypeBound::Family(family) => {
+                                Self::Name(family.deep_name(), v.span())
+                            }
+                            crate::DtypeBound::Set(members) => Self::BoundSet(members, v.span()),
+                        };
+                        (k, view)
+                    })
                     .collect(),
             ),
             _ => None,
@@ -543,7 +565,6 @@ fn runtime_tag(tag: DeepTag) -> bool {
         | T::Lit
         | T::Record
         | T::Access
-        | T::Pipe
         | T::Block
         | T::Tuple
         | T::TupleGet
@@ -889,6 +910,12 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
         S::True => v.is_true(),
         S::PositiveInteger => v.integer().is_some_and(|n| n > 0),
         S::Type => type_shape_error(v).is_none(),
+        S::Dtype => v.node(T::TPrim).is_some_and(|n| {
+            n.children.len() == 1
+                && n.children[0]
+                    .name()
+                    .is_some_and(|name| ACTIVE_DTYPES.contains(&name))
+        }),
         S::Effects => v.node(T::Effects).is_some_and(|n| {
             n.children.iter().all(|v| {
                 v.name().is_some()
@@ -914,10 +941,25 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
         }),
         S::Bounds => v.map().is_some_and(|m| {
             m.iter().enumerate().all(|(i, (k, v))| {
-                !m[..i].iter().any(|(prior, _)| prior == k)
-                    && v.name()
-                        .and_then(crate::DtypeFamily::from_deep_name)
-                        .is_some()
+                // spec/03 §2.2: a family atom, or §5.9's explicit set as a
+                // non-empty list of distinct active §1.1 dtype spellings.
+                let family = v
+                    .name()
+                    .and_then(crate::DtypeFamily::from_deep_name)
+                    .is_some();
+                let set = v.list().is_some_and(|members| {
+                    !members.is_empty()
+                        && members.iter().enumerate().all(|(j, member)| {
+                            member
+                                .name()
+                                .and_then(crate::BoundDtype::from_name)
+                                .is_some()
+                                && !members[..j]
+                                    .iter()
+                                    .any(|prior| prior.name() == member.name())
+                        })
+                });
+                !m[..i].iter().any(|(prior, _)| prior == k) && (family || set)
             })
         }),
         S::Source => v
@@ -942,12 +984,10 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
 #[derive(Clone, Copy, Default)]
 struct Context {
     binding_value: bool,
-    pipe_stage: bool,
 }
 fn child_context(tag: Option<DeepTag>, index: usize) -> Context {
     Context {
         binding_value: tag == Some(T::Bind) && index % 2 == 1,
-        pipe_stage: tag == Some(T::Pipe) && index > 0,
     }
 }
 fn check_entries(
@@ -994,7 +1034,6 @@ fn check_entries(
             P::BindingValue => {
                 tag.is_some_and(runtime_tag) && context.is_none_or(|c| c.binding_value)
             }
-            P::PipeStage => tag == Some(T::Fn) && context.is_none_or(|c| c.pipe_stage),
         };
         if !placement || !shape_valid(rule.shape, *v) {
             let mut e = error(key, *v, rule.expected);
@@ -1277,7 +1316,6 @@ fn typed_container_placement(
             P::Declaration => tag.is_some_and(crate::role::is_declaration_tag),
             P::Path => matches!(tag, Some(T::Module | T::Import | T::ImportAll)),
             P::BindingValue => tag.is_some_and(runtime_tag),
-            P::PipeStage => tag == Some(T::Fn),
         };
         if !allowed {
             return Err(crate::annotations::invalid(

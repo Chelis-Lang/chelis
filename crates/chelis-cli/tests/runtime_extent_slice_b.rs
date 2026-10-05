@@ -188,9 +188,9 @@ use tempfile::TempDir;
 
 use common::{authored_c_symbol, gcc_available, link_generated};
 
-/// Chelis#1482's remaining reproducer: a runtime-bound `shrink` under a
-/// symbolic signature, consumed by a composite elementwise lowering that
-/// still synthesizes anonymous-extent constants.
+/// Chelis#1482's reproducer: a runtime-bound `shrink` under a symbolic
+/// signature, consumed by a composite elementwise lowering that synthesizes
+/// anonymous-extent constants.
 const RUNTIME_BOUND_SHRINK_SIGMOID: &str = "module Repro.M1\n\
 sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
@@ -314,6 +314,7 @@ fn build_c(path: &Path, out_dir: &Path) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -340,77 +341,49 @@ fn eval(path: &Path) -> std::process::Output {
 }
 
 /// Chelis#1482 / `runtime_extents.md` C4.3: sigmoid's synthesized constants
-/// still have a missing extent source and therefore produce the registered
-/// typed receipt, not the occurrence pass's internal compiler error or an
-/// input extent silently substituted for the real one.
-///
-/// Eval and the plain-symbolic control remain negative parity: the gap is the
-/// source-less synthesized constant under a runtime-bound result, not sigmoid
-/// or symbolic elementwise execution generally.
+/// record the activation's input as their shape source, so a runtime-bound
+/// `shrink` consumed by sigmoid builds, runs, and prints what `chelis eval`
+/// prints. Both lanes refused this program with the #1482 typed receipt
+/// while the constants had no extent source.
 #[test]
-fn runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt() {
+fn runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = fixture(&dir, "repro.ch", RUNTIME_BOUND_SHRINK_SIGMOID);
+    let out_dir = dir.path().join("repro-out");
 
-    let build = build_c(&path, &dir.path().join("repro-out"));
-    let stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    let build = build_c(&path, &out_dir);
     assert!(
-        !build.status.success(),
-        "the build must refuse rather than emit undeclared C: {stderr}"
+        build.status.success(),
+        "sigmoid over a runtime-bound shrink must build: {}",
+        String::from_utf8_lossy(&build.stderr)
     );
+    let linked = common::link_generated(&out_dir, "repro.c", "repro");
+    assert!(linked.success(), "generated sigmoid program must link");
+    let compiled = std::process::Command::new(out_dir.join("repro"))
+        .output()
+        .expect("compiled sigmoid program");
     assert!(
-        !stderr.contains("internal compiler error"),
-        "the ICE must be replaced by the receipt, not accompanied by it: {stderr}"
+        compiled.status.success(),
+        "compiled sigmoid program failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
     );
-    assert_eq!(
-        build.status.code(),
-        Some(1),
-        "a typed refusal exits 1, where the panic exited 101: {stderr}"
-    );
-    assert!(
-        stderr.contains("unsupported: "),
-        "the receipt carries the section C2 brand: {stderr}"
-    );
-    assert!(
-        stderr.contains("unimplemented chelis#1482"),
-        "the receipt cites the issue that owns the gap: {stderr}"
-    );
-    assert!(
-        stderr.contains("extent source(s) for"),
-        "the receipt names the axis that has no source: {stderr}"
-    );
-    assert!(
-        stderr.contains("(codegen:c)"),
-        "the receipt names the lane that refused: {stderr}"
-    );
-
-    // The eval lane refuses with the same typed receipt as C, exit 1, no
-    // panic. Before chelis#1277 B2h the host interpreter evaluated this
-    // program (it computes shapes from values and never sees the anonymous
-    // extent); B2h applies `f` through the kernel the C lane emits for it,
-    // so the DAG evaluator's cardinality check refuses exactly where C's
-    // does. That is B2h's eval-lane capability regression on chelis#1482,
-    // recorded there beside S2a's compiled-lane one; both lanes recover
-    // together when the const gains its extent source.
     let evaluated = eval(&path);
-    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
     assert!(
-        !evaluated.status.success(),
-        "eval refuses as C does through the routed kernel: {}",
-        String::from_utf8_lossy(&evaluated.stdout)
+        evaluated.status.success(),
+        "eval sigmoid program failed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
     );
     assert_eq!(
-        evaluated.status.code(),
-        Some(1),
-        "a typed refusal, not a panic: {stderr}"
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&evaluated.stdout),
+        "compiled and evaluated sigmoid must print the same bytes"
     );
-    assert!(!stderr.contains("internal compiler error"), "{stderr}");
-    assert!(stderr.contains("unsupported: "), "{stderr}");
-    assert!(stderr.contains("unimplemented chelis#1482"), "{stderr}");
-    assert!(stderr.contains("extent source(s) for"), "{stderr}");
     assert!(
-        stderr.contains("(runtime)"),
-        "the receipt names the lane that refused: {stderr}"
+        String::from_utf8_lossy(&evaluated.stdout).contains(
+            "out = tensor(shape=[4], data=[0.7310586, 0.11920292, 0.95257413, 0.98201376])"
+        ),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stdout)
     );
 
     // The control that decides how narrow the rule had to be: an
@@ -893,6 +866,7 @@ fn no_environment_variable_disables_the_named_claim_guard() {
         .env("CHELIS_NO_STAGED_CLAIM", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -1058,6 +1032,7 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -1121,6 +1096,7 @@ to_tensor([7.0f32, 8.0f32, 9.0f32]))\n";
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             example.to_str().unwrap(),
             "--target",
@@ -2391,6 +2367,7 @@ fn a_local_unit_extent_claim_with_shrink_rejects_hip_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -2561,7 +2538,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("numel mismatch"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the chelis#616 numel abort: {out}"
     );
 }
@@ -2615,7 +2592,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("reshape expects"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the evaluator's own numel check: {out}"
     );
 }
@@ -4399,12 +4376,19 @@ fn issue_1907_literal_non_positive_stride_steps_are_rejected_statically() {
             !checked.status.success(),
             "{name}: literal step rejects: {out}"
         );
+        let report: serde_json::Value =
+            serde_json::from_slice(&checked.stdout).expect("check JSON");
         assert!(
-            out.contains(&format!(
-                "stride axis 0 step {} must be positive",
-                if name == "zero" { "0" } else { "-1" }
-            )),
-            "{name}: the checker names the stride step: {out}"
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["kind"] == "DimensionMismatch"
+                        && error["expected"] == "positive step"
+                        && error["got"] == if name == "zero" { "0" } else { "-1" }
+                        && error["span"]["offset"].as_u64()
+                            == source.find("stride(").map(|offset| offset as u64)
+                })),
+            "{name}: the checker identifies the invalid stride step: {report}"
         );
     }
 }
@@ -4600,35 +4584,20 @@ fn empty_span_source(len: usize) -> String {
     )
 }
 
-/// An empty span: the two lanes disagree about WHICH failure it is, and the
-/// numbered spec says the compiled lane is right.
+/// An empty span selects an extent-0 axis on both lanes (chelis#1795).
 ///
 /// `spec/05-risc-primitives.md` section 2.4.1 lists the runtime-bound errors
 /// as a negative bound, a shrink range overshoot, a non-positive stride step
-/// and the two reshape errors. An empty span is not among them, and
-/// `spec/04-type-system.md` section 4.7.2 makes only a NEGATIVE size an error.
-/// So `start == end` should produce an extent-0 result, and an extent-0 result
-/// under a declared `tensor[2, f32]` is a claim mismatch: C's
-/// `claimed = 2, shrink axis 0 = 0` is the conforming diagnostic. The
-/// evaluator instead rejects the span under chelis#616's operation-level
-/// admission rule, which the numbered spec does not require.
+/// and the two reshape errors. An empty span is not among them, and the
+/// runtime metadata rule says equal endpoints describe an empty axis. So
+/// `start == end` produces an extent-0 result, and an extent-0 result under a
+/// declared `tensor[2, f32]` is a claim mismatch: both lanes report
+/// `claimed = 2, shrink axis 0 = 0`.
 ///
-/// Round 1 read this the other way round and asked for C to be reordered
-/// behind the evaluator. That change was made, then the atom was checked, and
-/// it was taken out: it would have moved the conforming lane onto the
-/// non-conforming one. The divergence is an operation-level admission rule
-/// against section 2.4.1's closed list; it predates this slice, and mere
-/// discovery during review does not bring it into scope. Tracked by
-/// chelis#1795, and chelis#1481 asks for the opposite direction on a premise
-/// chelis#1795 questions.
-///
-/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
-/// Both assertions describe the behaviour on the reviewed head `cab086ef4` and
-/// on this one. The row exists so the divergence is recorded with its spec
-/// citation rather than rediscovered, and so that changing either lane has to
-/// update it.
+/// EVIDENTIARY STATUS: regression test on both lanes. Before chelis#1795 eval
+/// rejected the span itself as "empty or inverted".
 #[test]
-fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
+fn an_empty_shrink_span_is_an_extent_zero_axis_on_both_lanes() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -4637,21 +4606,18 @@ fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
     let source = empty_span_source(4);
     let (eval_ok, eval_out) = eval_result(&dir, "empty_span.ch", &source);
     let (c_ok, c_out) = c_run_result(&dir, "empty_span_c", &source);
-    assert!(
-        !eval_ok,
-        "an empty span does not produce a value: {eval_out}"
-    );
-    assert!(!c_ok, "an empty span does not produce a value: {c_out}");
-    assert!(
-        eval_out.contains("shrink axis 0 bound [4, 4] is empty or inverted"),
-        "eval rejects the span itself (chelis#616): {eval_out}"
-    );
-    assert!(
-        c_out.contains("extent `2`: claimed = 2, shrink axis 0 = 0")
-            && c_out.contains(&domain_trap_line("shrink")),
-        "C reports the claim the extent-0 result refutes, which is what \
-         section 2.4.1's closed error list implies: {c_out}"
-    );
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the refuted claim produces no value: {out}");
+        assert!(
+            out.contains("extent `2`: claimed = 2, shrink axis 0 = 0")
+                && out.contains(&domain_trap_line("shrink")),
+            "{lane}: reports the claim the extent-0 result refutes: {out}"
+        );
+        assert!(
+            !out.contains("empty or inverted"),
+            "{lane}: and never rejects the span itself: {out}"
+        );
+    }
 }
 
 /// chelis#1797's reproducer: a `shrink` whose runtime end overshoots the
@@ -4804,26 +4770,15 @@ fn an_overshooting_shrink_span_reports_the_domain_error_on_c() {
     }
 }
 
-/// Negative parity for the pair above, and the boundary of what chelis#1797
-/// repairs: a span that overshoots AND selects nothing is still refused by
-/// chelis#616's operation-level admission rule, which runs before the operand's
-/// shape is consulted.
+/// chelis#1797's reproducer with an empty span: a `shrink` whose runtime end
+/// overshoots the operand's extent. The overshoot is section 2.4.1's error,
+/// so `shrink` traps `Domain` in the compiled lane's words on eval too
+/// (chelis#1795).
 ///
-/// `[shape(x, 0) + 3, shape(x, 0) + 3)` is `[7, 7)` over an operand of four, so
-/// it is out of domain by the same three elements as the rows above and empty
-/// as well. The `RiscOp::Shrink` arm rejects `start >= end` first and never
-/// reaches `eval::shrink`, so this spelling keeps the admission rule's wording
-/// while the compiled lane keeps saying `Domain: shrink bounds outside input
-/// extent`. That divergence is chelis#1795's, whose reproducer is the same
-/// empty span without the overshoot, and repairing it would change text this
-/// change does not own.
-///
-/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
-/// `6abca2406`. The row exists so the overshoot claim above is read as bounded
-/// to spans that select something, rather than as covering every out-of-domain
-/// bound.
+/// EVIDENTIARY STATUS: regression test, eval lane; the C lane's text is
+/// unchanged.
 #[test]
-fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
+fn an_overshooting_empty_span_traps_in_shrink_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = format!(
         "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
@@ -4833,34 +4788,21 @@ fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
     );
     let (code, out) = eval_code(&dir, "overshoot_empty.ch", &source);
     assert_eq!(
-        out, "error: shrink axis 0 bound [7, 7] is empty or inverted (start >= end)\n",
-        "the admission rule reports the span, not the overshoot (chelis#1795)"
+        out,
+        overshoot_eval_rendering(),
+        "the overshoot is the error (chelis#1795)"
     );
     assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
 }
 
-/// The other non-selecting shape, for the same reason: a span that overshoots
-/// AND is INVERTED. Without this row the bound above is pinned for one of the
-/// two ways a span can select nothing, which would read as if the inverted one
-/// had been repaired.
+/// The other non-selecting shape: a span that overshoots AND is INVERTED,
+/// `[7, 1)` over an operand of four. An inverted range is outside the
+/// `0 <= start <= end <= input` domain, so it traps in `shrink` with the
+/// compiled lane's words (chelis#1795).
 ///
-/// `[shape(x, 0) + 3, 1)` is `[7, 1)` over an operand of four. Both of
-/// chelis#616's conditions hold, and its `start >= end` rejection is the one
-/// that fires, so this lane keeps the admission rule's wording where the
-/// compiled lane says `Domain: shrink bounds outside input extent`. The
-/// evaluator's own `SHRINK_DOMAIN_TRAP` branch would give the compiled lane's
-/// words for an inverted bound, and it is unreachable from source precisely
-/// because this rejection precedes it.
-///
-/// Cited to chelis#1795 like the empty row, and for the same reason: the
-/// divergence is that operation-level admission rule, which the numbered spec
-/// does not require and which chelis#1797 does not own.
-///
-/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
-/// `6abca2406`, where this spelling took the same rejection before reaching the
-/// former `assert!`.
+/// EVIDENTIARY STATUS: regression test, eval lane.
 #[test]
-fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() {
+fn an_overshooting_inverted_span_traps_in_shrink_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = format!(
         "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
@@ -4870,8 +4812,9 @@ fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() 
     );
     let (code, out) = eval_code(&dir, "overshoot_inverted.ch", &source);
     assert_eq!(
-        out, "error: shrink axis 0 bound [7, 1] is empty or inverted (start >= end)\n",
-        "the admission rule reports the span, not the overshoot (chelis#1795)"
+        out,
+        overshoot_eval_rendering(),
+        "an inverted range is outside the domain (chelis#1795)"
     );
     assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
 }
@@ -5419,9 +5362,8 @@ fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
 //
 // Both issues are one question asked twice: does a `shape(...)` read reach
 // the size slot when it is SPELLED differently. A record field and a pipe
-// stage are both spellings a person and a tool actually produce -- every
-// hydronnx model with more than one input takes its arguments as a record,
-// and `chelis lint --fix` rewrites a nested call chain into a pipe -- and
+// stage are both spellings an author actually writes -- every hydronnx
+// model with more than one input takes its arguments as a record -- and
 // `spec/04-type-system.md` section 4.7.2 admits an extent by what supplies
 // it, never by how it is written: "no stage may reject an extent because of
 // its provenance".
@@ -5506,27 +5448,13 @@ const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
      expand(b, cast(0, i32), a_dim) }\n\
      out = broadcast_rows(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
 
-/// chelis#569's `with_direct_cast`: the form that builds, and the one
-/// `prefer-pipe-operator` rewrites. The inputs are bound to names so the only
-/// replacement the fix makes is the shape read under test; a call written
-/// inline would also be piped, and a bare-name pipe stage at a call site
-/// still loses its shape source at lowering (chelis#1791, out of scope here).
-const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
-     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-     a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
-     expand(b, cast(0, i32), a_dim)\n\
-     }\n\
-     xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
-     bias = to_tensor([0.25f32])\n\
-     out = broadcast_rows(xs, bias)\n";
-
-/// A piped read of a value that is not a tensor. The stage parameter carries
-/// the upstream value's class, so a runtime scalar stays sourceless through
-/// however many stages.
-const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
+/// A piped cast of a runtime scalar parameter used as the size, with a call
+/// whose scalar agrees with the declared extent `a` of `x`.
+const PIPED_RUNTIME_SCALAR: &str = "module Repro.PipedRuntimeScalar\n\
      sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
      def f(x: tensor[a, f32], k: i32) = { a_dim = k |> cast(i64)\n\
-     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
 /// The projection with an axis the field does not have.
 const RECORD_PROJECTION_BAD_AXIS: &str = "module Repro.RecordBadAxis\n\
@@ -5756,116 +5684,18 @@ fn the_canonical_piped_shape_read_checks_evaluates_and_builds() {
     );
 }
 
-/// The row's own name: what `chelis lint --fix` produces must still work.
+/// The pipe arm with a runtime scalar in place of a shape read: the piped
+/// cast of an `i32` parameter is an admissible size (chelis#469) and both
+/// lanes print the same `[3]` tensor.
 ///
-/// This runs the real style path -- no `--allow-style-violations`, no
-/// `CHELIS_STYLE_GATE_DISABLE` -- because the defect chelis#569 reports is
-/// that following the style tool breaks a building program.
-///
-/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
-/// fixture evaluates before the fix, `chelis lint --fix` rewrites the shape
-/// read into the pipe form, and `chelis check` then rejects it.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 `chelis check`
+/// rejected it with the section 4.7.2 provenance diagnostic.
 #[test]
-fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
-    if !gcc_available() {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = fixture(&dir, "lint_fix.ch", DIRECT_SHAPE_READ_FOR_LINT_FIX);
-    let styled = |args: &[&str]| {
-        Command::cargo_bin("chelis")
-            .expect("chelis")
-            .args(args)
-            .output()
-            .expect("styled chelis invocation")
-    };
-    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&before.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "the direct spelling works before the fix: {}",
-        String::from_utf8_lossy(&before.stderr)
-    );
-
-    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&fixed.stdout).contains("fixed 1 replacement"),
-        "the fix rewrites exactly the shape read: {}{}",
-        String::from_utf8_lossy(&fixed.stdout),
-        String::from_utf8_lossy(&fixed.stderr)
-    );
-    let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
-    assert!(formatted.status.success(), "fmt must succeed");
-    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
-    assert!(
-        rewritten.contains("a_dim = x |> shape(cast(0, i32)) |> cast(i64)"),
-        "the pipe form is what the tools produce: {rewritten}"
-    );
-
-    let relinted = styled(&["lint", "--check", path.to_str().unwrap()]);
-    assert!(
-        relinted.status.success(),
-        "and the fixed program is lint-clean: {}",
-        String::from_utf8_lossy(&relinted.stderr)
-    );
-    let checked = styled(&["check", path.to_str().unwrap()]);
-    assert!(
-        checked.status.success(),
-        "the fixed program must still check: {}",
-        String::from_utf8_lossy(&checked.stdout)
-    );
-    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&evaluated.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "and evaluate to the same tensor: {}",
-        String::from_utf8_lossy(&evaluated.stderr)
-    );
-    let out_dir = dir.path().join("lint_fix-out");
-    let built = styled(&[
-        "build",
-        path.to_str().unwrap(),
-        "--target",
-        "c",
-        "-o",
-        out_dir.to_str().unwrap(),
-    ]);
-    assert!(
-        built.status.success(),
-        "and build: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    let status = link_generated(&out_dir, "lint_fix.c", "lint_fix");
-    assert!(status.success(), "link failed: {status}");
-    let run = StdCommand::new(out_dir.join("lint_fix"))
-        .output()
-        .expect("run compiled binary");
-    assert!(
-        String::from_utf8_lossy(&run.stdout).contains("data=[0.25, 0.25, 0.25]"),
-        "and run: {}",
-        String::from_utf8_lossy(&run.stdout)
-    );
-}
-
-/// Negative parity for the pipe arm: a piped read of a non-tensor stays
-/// sourceless, with the section 4.7.2 diagnostic unchanged.
-///
-/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `33cc78e84` and it
-/// must stay green: admitting a pipe stage must not admit the bare runtime
-/// scalar the pipe carries.
-#[test]
-fn a_piped_shape_read_of_a_non_tensor_is_still_sourceless() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let checked = check(&fixture(
-        &dir,
-        "piped_sourceless.ch",
-        PIPED_SOURCELESS_SCALAR,
-    ));
-    let report = String::from_utf8_lossy(&checked.stdout).to_string();
-    assert!(
-        report.contains(
-            "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in \
-             scope carries it"
-        ),
-        "the piped runtime scalar keeps the section 4.7.2 rejection: {report}"
+fn a_piped_runtime_scalar_size_executes_on_both_lanes() {
+    assert_both_lanes_render(
+        "piped_runtime_scalar",
+        PIPED_RUNTIME_SCALAR,
+        "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])",
     );
 }
 
@@ -5898,12 +5728,12 @@ const LET_BOUND_RECORD_SHAPE_READ: &str = "module Repro.LetBoundRecordRead\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 
-/// The same read piped, which is what `chelis lint --fix` makes of it.
+/// The same read piped.
 const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecordRead\n\
      type Inputs = | Inputs { q: tensor[batch, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = \
-     { a_dim = inp.q |> shape(cast(0, i32)) |> cast(i64)\n\
+     { a_dim = (inp.q) |> shape(cast(0, i32)) |> cast(i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 
@@ -6283,10 +6113,9 @@ fn arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval(
 }
 
 /// A shape read mixed with a runtime scalar PARAMETER is admissible, and the
-/// scalar's value reaches the guard. This is the row the checker change exists
-/// for: `add(shape(x, 0), k)` has one operand with a real shape source and one
-/// with none, and the arithmetic walk used to let the sourceless operand poison
-/// the whole expression.
+/// scalar's value reaches the guard: `add(shape(x, 0), k)` has one operand
+/// with a shape source and one without, and chelis#1379's arithmetic walk used
+/// to let the operand without one poison the whole expression.
 ///
 /// EVIDENTIARY STATUS: regression test. On `fc5b6aa99` both spellings were
 /// refused at CHECK with "`insert` size resolves to a runtime scalar", so
@@ -6320,9 +6149,9 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
 }
 
 /// A def-returned scalar mixed with a shape read is admissible for the same
-/// reason. A user `def` is opaque to the checker's walk, so it classifies as
-/// sourceless; the shape read beside it is what makes the expression
-/// admissible.
+/// reason. (When this row was written a user `def` classified as sourceless
+/// and the shape read beside it was what made the expression admissible;
+/// since chelis#469 every operand is admissible on its own.)
 ///
 /// EVIDENTIARY STATUS: regression test. Refused at CHECK on `fc5b6aa99`.
 #[test]
@@ -6342,20 +6171,19 @@ fn a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on
     );
 }
 
-/// The negative that bounds the checker change: arithmetic with NO admissible
-/// operand stays sourceless, with its diagnostic unchanged. Without this row a
-/// rule that simply stopped rejecting arithmetic would pass every positive
-/// above while admitting a size no lane can source.
+/// Arithmetic with NO shape-read operand is admissible too (chelis#469):
+/// section 4.7.2 lists checked integer arithmetic over a parameter among the
+/// admissible extents, so each size below evaluates to its value.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Measured identical on `fc5b6aa99` and
-/// on this head; the behaviour is deliberately unchanged.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 each spelling was
+/// refused at check with "`insert` size resolves to a runtime scalar".
 #[test]
-fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
+fn arithmetic_over_a_scalar_with_no_tensor_source_is_an_admissible_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, size) in [
-        ("bare_scalar_arith", "add(k, 1i64)"),
-        ("bare_scalar_mul", "mul(k, 2i64)"),
-        ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)"),
+    for (name, size, extent) in [
+        ("bare_scalar_arith", "add(k, 1i64)", 4),
+        ("bare_scalar_mul", "mul(k, 2i64)", 6),
+        ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)", 7),
     ] {
         let source = format!(
             "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, {size})\n\
@@ -6363,59 +6191,45 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
              out = f(seed, 3i64)\n"
         );
         let (ok, out) = eval_result(&dir, &format!("{name}.ch"), &source);
+        assert!(ok, "`{size}` is an admissible size: {out}");
         assert!(
-            !ok,
-            "`{size}` has no shape source and must be rejected: {out}"
-        );
-        assert!(
-            out.contains("`insert` size resolves to a runtime scalar, but no tensor in scope")
-                && out.contains("chelis#469"),
-            "`{size}` keeps the section 4.7.2 sourceless diagnostic verbatim: {out}"
+            out.contains(&format!("shape=[{extent}]")),
+            "`{size}` evaluates to extent {extent}: {out}"
         );
     }
 }
 
-/// A bare runtime scalar is still rejected too. `add(k, 1i64)` above and a bare
-/// `k` are the same class, and a change that admitted arithmetic by weakening
-/// the leaf rule rather than the combination rule would separate them.
+/// A bare runtime scalar is admissible as well. `add(k, 1i64)` above and a
+/// bare `k` take one route through the lowering, and a change that admitted
+/// arithmetic while refusing the bare name would separate them.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Unchanged from `fc5b6aa99`.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 the bare `k` was
+/// refused at check with "`insert` size resolves to the symbolic dimension".
 #[test]
-fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
+fn a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, k)\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   out = f(seed, 3i64)\n";
     let (ok, out) = eval_result(&dir, "bare_scalar.ch", source);
-    assert!(!ok, "a bare runtime scalar size must be rejected: {out}");
+    assert!(ok, "a bare runtime scalar size evaluates: {out}");
     assert!(
-        out.contains("`insert` size resolves to the symbolic dimension `k`")
-            && out.contains("chelis#469"),
-        "with the bare-symbol wording of the same diagnostic: {out}"
+        out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
+        "and sizes the axis by k = 3: {out}"
     );
 }
 
 /// A computed size that goes NEGATIVE traps before allocation on BOTH lanes,
-/// which is what `spec/04-type-system.md` section 4.7.2 requires of a runtime
-/// negative size. What the two lanes do NOT share is the rendering, and this
-/// row and its C twin below exist as a pair so that divergence is visible
-/// rather than implied by one lane's text.
+/// which is what `spec/04-type-system.md` section 4.7 requires of a runtime
+/// negative size: the non-negativity guard of the owning `insert`, a
+/// `Domain` trap rendered by `chelis_abi::failure::negative_target_extent`
+/// with a context line naming the axis and the value (chelis#1802). The
+/// operation's own guard precedes the result claim on its extent, because a
+/// negative number is not an extent the claim could compare.
 ///
-/// Eval reports through the `RtDim::Node` carrier it shares with `stride` and
-/// `slice` bounds, so it says "movement bound" about an `insert` size and never
-/// renders [04-NUM-9]'s form. C renders [04-NUM-9]'s form with section 4.7's
-/// context line and never renders the movement-bound message. Under a free
-/// result dim C says "Domain: expansion axis or extent outside domain" instead
-/// of the claim line, while eval's text does not change at all. Newly reachable
-/// through chelis#1379's admission, because the only node-valued sizes before
-/// it came from extent witnesses, which carry real axis extents and are never
-/// negative. Tracked by chelis#1802; repairing it would change text shared with
-/// rows this change does not own, so both lanes are locked here and that issue
-/// has to update both locks.
-///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
-/// reached a negative extent at all.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering. On
+/// `fc5b6aa99` the program was refused at lowering, so no lane reached a
+/// negative extent at all.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -6427,7 +6241,10 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let (ok, out) = eval_result(&dir, "arith_negative.ch", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains("must be a non-negative integer, got -3"),
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
         "the negative extent is reported with the value it computed: {out}"
     );
     assert!(
@@ -6436,13 +6253,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     );
 }
 
-/// The C twin of the negative-extent row, and the half that makes chelis#1802 a
-/// LANE DIVERGENCE rather than a wording problem: this lane renders
-/// [04-NUM-9]'s form with section 4.7's context, and the words "movement bound"
-/// appear nowhere in it.
+/// The C twin of the negative-extent row: the same context line and trap line
+/// as eval (chelis#1802), never the claim line, since the guard precedes the
+/// claim.
 ///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. Measured on this head; on `6dbbbf2bc` the program did not build.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering.
+/// Measured on this head; on `6dbbbf2bc` the program did not build.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     if !gcc_available() {
@@ -6457,14 +6273,15 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     let (ok, out) = c_run_result(&dir, "arith_negative_c", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains(&domain_trap_line("insert"))
-            && out.contains("extent `n`: claimed = 2, insert axis 0 = -3"),
-        "C renders [04-NUM-9]'s form with section 4.7's context: {out}"
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
+        "C renders eval's context line and [04-NUM-9]'s form: {out}"
     );
     assert!(
-        !out.contains("movement bound"),
-        "and never the movement-bound message eval uses for the same program \
-         (chelis#1802 is a lane divergence, not one wording): {out}"
+        !out.contains("movement bound") && !out.contains("claimed = 2"),
+        "and neither evaluator plumbing nor the claim line: {out}"
     );
     assert!(
         !out.contains("shape=["),
@@ -6472,14 +6289,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     );
 }
 
-/// The same negative extent under a FREE result dim, where C loses the claim
-/// line and falls back to the operation's own domain message while eval's text
-/// is unchanged. Without this row the divergence above could be read as "C
-/// always names the claim", which is not what either lane does.
+/// The same negative extent under a FREE result dim renders identically on
+/// both lanes: the guard does not depend on the claim shape (chelis#1802).
 ///
-/// EVIDENTIARY STATUS: disposition lock, both lanes. Measured on this head.
+/// EVIDENTIARY STATUS: regression test, both lanes. Measured on this head.
 #[test]
-fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
+fn a_negative_computed_size_under_a_free_result_dim_agrees_by_lane() {
     if !gcc_available() {
         return;
     }
@@ -6495,14 +6310,17 @@ fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
         !c_ok && !eval_ok,
         "neither lane produces a value: {c_out} {eval_out}"
     );
-    assert!(
-        c_out.contains("Domain: expansion axis or extent outside domain")
-            && c_out.contains(&domain_trap_line("insert")),
-        "with no claim to name, C reports the operation's own domain: {c_out}"
+    let expected = format!(
+        "insert target extent at axis 0 is negative: -3\n{}",
+        domain_trap_line("insert")
     );
     assert!(
-        eval_out.contains("must be a non-negative integer, got -3"),
-        "eval's rendering does not change with the claim shape: {eval_out}"
+        c_out.contains(&expected) && eval_out.contains(&expected),
+        "both lanes render the shared guard: {c_out} {eval_out}"
+    );
+    assert!(
+        !c_out.contains("Domain: expansion axis or extent outside domain"),
+        "and C no longer falls back to the runtime metadata message: {c_out}"
     );
 }
 
@@ -7507,12 +7325,9 @@ fn a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes() {
         );
         assert!(
             out.contains("DimensionMismatch")
-                && out.contains(
-                    "def 'probe' body doesn't match declared signature: body has type \
-                     `(tensor[4, 3, f32]) -> tensor[8, 3, f32]`, declared type is \
-                     `(tensor[4, 3, f32]) -> tensor[100, 3, f32]`"
-                ),
-            "{lane}: and the CHECKER reports it, naming both function types: {out}"
+                && out.contains("tensor[8, 3, f32]")
+                && out.contains("tensor[100, 3, f32]"),
+            "{lane}: checker rejects the inferred extent against the declaration: {out}"
         );
         assert!(
             !out.contains("the inlined body produces"),
@@ -7545,9 +7360,9 @@ fn the_checker_refuses_a_static_pad_extent_a_declaration_refutes() {
     assert!(!ok, "a statically refuted claim does not execute: {out}");
     assert!(
         out.contains("DimensionMismatch")
-            && out.contains("body has type `(tensor[4, f32]) -> tensor[6, f32]`")
-            && out.contains("declared type is `(tensor[4, f32]) -> tensor[2, f32]`"),
-        "and the checker, not a runtime guard, reports it: {out}"
+            && out.contains("tensor[6, f32]")
+            && out.contains("tensor[2, f32]"),
+        "the checker, not a runtime guard, rejects the conflicting result extents: {out}"
     );
     assert!(
         !out.contains(&domain_trap_line("pad")),
@@ -8372,15 +8187,6 @@ expand(b, cast(0, i32), a_dim)\n\
 }\n\
 out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
 
-/// The direct spelling `chelis lint --fix` rewrites INTO the pipe form.
-const DIRECT_CALL_FOR_LINT_FIX: &str = "module Repro.LintFixCallSite\n\
-sig g[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
-def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
-expand(b, cast(0, i32), a_dim)\n\
-}\n\
-out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
-
 /// pipe.bare_name_stage.expand_source.{eval,c}
 ///
 /// EVIDENTIARY STATUS: regression test on the C lane, disposition lock on
@@ -8430,25 +8236,23 @@ fn the_applied_stage_at_the_same_call_site_is_unchanged() {
     assert!(eval_ok && eval_out.contains(expected), "{eval_out}");
 }
 
-/// pipe.bare_name_stage.lint_fix.c: the row's own name. Following the style
-/// tool must not break a building program.
+/// pipe.bare_name_stage.lint_fix.c: the bare-name stage spelling of a
+/// building direct call, taken through the real style path.
 ///
-/// This runs the real style path, with no `--allow-style-violations` and no
-/// `CHELIS_STYLE_GATE_DISABLE`, because that is the defect: `lint --fix`'s
-/// `prefer-pipe-operator` rewrites the direct call into the bare-name stage
-/// spelling.
+/// This runs with no `--allow-style-violations` and no
+/// `CHELIS_STYLE_GATE_DISABLE`: the canonically formatted pipe spelling must
+/// check, evaluate, build, and print what the direct call prints.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured on `08e46ebe6`: the direct
-/// program builds and runs, `chelis lint --fix` makes two replacements, the
-/// rewritten program still checks at score 1 and still evaluates, and
-/// `chelis build --target c` then exits 1 with chelis#469's lowering error.
+/// EVIDENTIARY STATUS: regression test. Measured on `08e46ebe6`: this
+/// spelling checked at score 1 and evaluated, and `chelis build --target c`
+/// exited 1 with chelis#469's lowering error.
 #[test]
 fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
     if !gcc_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = fixture(&dir, "lint_fix_call.ch", DIRECT_CALL_FOR_LINT_FIX);
+    let path = fixture(&dir, "lint_fix_call.ch", BARE_STAGE_AT_A_CALL_SITE);
     let styled = |args: &[&str]| {
         Command::cargo_bin("chelis")
             .expect("chelis")
@@ -8457,37 +8261,30 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
             .expect("styled chelis invocation")
     };
     let expected = "data=[0.25, 0.25, 0.25]";
-    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
-    assert!(
-        String::from_utf8_lossy(&before.stdout).contains(expected),
-        "the direct spelling works before the fix: {}",
-        String::from_utf8_lossy(&before.stderr)
-    );
-
     let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
     assert!(formatted.status.success(), "fmt must succeed");
-    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    let formatted_source = fs::read_to_string(&path).expect("formatted fixture");
     assert!(
-        String::from_utf8_lossy(&fixed.stdout).contains("replacement"),
-        "the fix rewrites the call into the pipe form: {}{}",
-        String::from_utf8_lossy(&fixed.stdout),
-        String::from_utf8_lossy(&fixed.stderr)
-    );
-    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
-    assert!(
-        rewritten.contains("|> to_tensor |> g(to_tensor([0.25f32]))"),
-        "the bare-name stage is what the tool produces: {rewritten}"
+        formatted_source.contains("|> to_tensor |> g(to_tensor([0.25f32]))"),
+        "the bare-name stage survives canonical formatting: {formatted_source}"
     );
 
     let checked = styled(&["check", path.to_str().unwrap()]);
     assert!(
         checked.status.success(),
-        "the fixed program must still check: {}",
+        "the pipe spelling must check: {}",
         String::from_utf8_lossy(&checked.stdout)
+    );
+    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains(expected),
+        "and evaluate: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
     );
     let out_dir = dir.path().join("lint_fix_call-out");
     let built = styled(&[
         "build",
+        "--emit-c",
         path.to_str().unwrap(),
         "--target",
         "c",
@@ -8512,60 +8309,50 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
 }
 
 // ---------------------------------------------------------------------------
-// chelis#1791 half B, through the CLI: `chelis check` must reject a sourceless
-// `expand` size written as a pipe stage exactly as it rejects the direct
-// spelling.
+// chelis#1791 half B, through the CLI: an `expand` size written as a pipe
+// stage gets the verdict the direct spelling gets. When this section was
+// written that verdict was the provenance rejection; chelis#469 removed it
+// (spec/04-type-system.md section 4.7.2), so both spellings now execute and
+// both lanes print the same tensor.
 //
 // `crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs` holds the
-// checker-level rows and the byte comparison. This row exists because the
-// verdict a user sees is `chelis check`'s.
+// checker-level rows. This row exists because the verdict a user sees is the
+// CLI's.
 // ---------------------------------------------------------------------------
 
 /// The issue's reproducer B, whose size is a cast over a bare `i32`
-/// parameter and so has no tensor shape source.
-const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
+/// parameter, with a call so both lanes execute it.
+const RUNTIME_SIZE_PIPE_STAGE: &str = "module Repro.BPipe\n\
 sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
-}\n";
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
 /// The same program with the `expand` written directly.
-const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
+const RUNTIME_SIZE_DIRECT: &str = "module Repro.BDirect\n\
 sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
-}\n";
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
-/// expand.sourceless_size.pipe_position: the user-visible verdict.
+/// Oracle rows `expand.runtime_size.pipe_position.eval` and `.c`: the size
+/// written as a pipe stage and written directly execute identically, and both
+/// lanes print the same tensor for each.
 ///
-/// EVIDENTIARY STATUS: regression test on the pipe spelling, disposition lock
-/// on the direct one. On `08e46ebe6` the pipe spelling was rejected, but with
-/// chelis#1909's declaration-boundary obligation message rather than section
-/// 4.7.2's, so the substring assertion below failed. Before chelis#1909, on
-/// `6abca2406`, it scored a clean 1.0 with an empty error list and the
-/// sourceless size reached the lowerer instead.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 both spellings were
+/// rejected at check with the section 4.7.2 provenance diagnostic; on
+/// `08e46ebe6` the pipe spelling was rejected with chelis#1909's
+/// declaration-boundary obligation message instead, and on `6abca2406` it
+/// checked clean while the direct spelling was rejected.
 #[test]
-fn a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let needle = "but no tensor in scope carries it";
-    let piped = check(&fixture(&dir, "sourceless_pipe.ch", SOURCELESS_PIPE_STAGE));
-    let piped_out = String::from_utf8_lossy(&piped.stdout).to_string();
-    assert!(
-        piped_out.contains(needle) && piped_out.contains("chelis#469"),
-        "the pipe stage must carry the section 4.7.2 sourceless-size diagnostic: {piped_out}"
-    );
-    assert!(
-        !piped_out.contains("\"score\": 1,"),
-        "and must not score a clean 1.0: {piped_out}"
-    );
-    let direct = check(&fixture(&dir, "sourceless_direct.ch", SOURCELESS_DIRECT));
-    let direct_out = String::from_utf8_lossy(&direct.stdout).to_string();
-    assert!(
-        direct_out.contains(needle) && direct_out.contains("chelis#469"),
-        "the direct spelling keeps its diagnostic: {direct_out}"
-    );
+fn a_runtime_expand_size_in_pipe_position_executes_on_both_lanes() {
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    assert_both_lanes_render("runtime_size_pipe", RUNTIME_SIZE_PIPE_STAGE, expected);
+    assert_both_lanes_render("runtime_size_direct", RUNTIME_SIZE_DIRECT, expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -8593,6 +8380,12 @@ p64 = vmap(fn (ka: tensor[1, f64]) -> tensor_to_scalar(sum(ka, 0)))(kc)\n  \
 cast(p64, f32)\n\
 }\n\
 out = prices(to_tensor([1.0f32, 2.0f32, 3.0f32]), 5.0f32)\n";
+
+/// A reshape whose target and input disagree on the element count is a
+/// `Domain` trap in `reshape` (spec/04-type-system.md section 4.7), rendered
+/// identically by both lanes.
+const RESHAPE_COUNT_TRAP: &str =
+    "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64";
 
 /// staged.dynamic_to_tensor.vmap_column.{eval,c}
 ///
@@ -8627,14 +8420,11 @@ fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
         .replace("tensor[1, f64]", "tensor[2, f64]");
     let (eval_ok, eval_error) = eval_result(&dir, "invalid_column.ch", &invalid);
     assert!(
-        !eval_ok && eval_error.contains("reshape expects 6 elements but tensor has 3"),
+        !eval_ok && eval_error.contains(RESHAPE_COUNT_TRAP),
         "{eval_error}"
     );
     let (c_ok, c_error) = c_run_result(&dir, "invalid_column_c", &invalid);
-    assert!(
-        !c_ok && c_error.contains("Domain: chelis_tensor_check_reshape reshape numel mismatch: target 6 but tensor has 3 elements"),
-        "{c_error}"
-    );
+    assert!(!c_ok && c_error.contains(RESHAPE_COUNT_TRAP), "{c_error}");
 }
 
 // ---------------------------------------------------------------------------

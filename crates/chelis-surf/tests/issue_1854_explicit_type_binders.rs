@@ -2,7 +2,10 @@
 //! explicit `[..]` binder list. Unknown lowercase scalar and tensor-precision
 //! names must remain `t-prim` so the shared Deep type resolver can reject them.
 
-use chelis_deep::{parser::parse_str as parse_deep, printer::print_canonical_flat};
+use chelis_deep::{
+    Atom, DeepTag, Expr, ExprCarrier, parser::parse_str as parse_deep,
+    printer::print_canonical_flat,
+};
 use chelis_surf::{
     ast::Decl,
     desugar::desugar_program,
@@ -18,6 +21,33 @@ const UNKNOWN_DTYPES: [&str; 7] = [
 fn deep(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf fixture must parse");
     print_canonical_flat(&desugar_program(&declarations).expect("Surf fixture must desugar"))
+}
+
+fn defsig_has_binders(rendered: &str, name: &str, expected: &[&str]) -> bool {
+    parse_deep(rendered)
+        .expect("desugared Deep must parse")
+        .iter()
+        .any(|expr| match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => {
+                let [Expr::Atom(Atom::Name(found), _), tail @ ..] = children else {
+                    return false;
+                };
+                if found != name {
+                    return false;
+                }
+                match tail {
+                    [_] => expected.is_empty(),
+                    [Expr::BareList(binders, _), _] => {
+                        binders.len() == expected.len()
+                            && binders.iter().zip(expected).all(|(binder, expected)| {
+                                matches!(binder, Expr::Atom(Atom::Name(name), _) if name == expected)
+                            })
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        })
 }
 
 #[test]
@@ -52,7 +82,7 @@ fn unlisted_tensor_precision_names_lower_to_unknown_primitives() {
         "an unlisted precision name must not become a type binder: {rendered}"
     );
     assert!(
-        rendered.contains("(defsig {} ident (t-fn "),
+        defsig_has_binders(&rendered, "ident", &[]),
         "the monomorphic Deep form must omit a binder-list child: {rendered}"
     );
 }
@@ -87,7 +117,7 @@ fn matching_def_annotations_reuse_the_standalone_signature_binders() {
          def ident(x: tensor[n, p]) -> tensor[n, p] = x",
     );
     assert!(
-        rendered.contains("(defsig {} ident (n p) ")
+        defsig_has_binders(&rendered, "ident", &["n", "p"])
             && rendered.matches("(d-var {} n)").count() >= 2
             && rendered.matches("(t-var {} p)").count() >= 2
             && !rendered.contains("(t-prim {} p)"),
@@ -139,7 +169,7 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
     ] {
         let rendered = deep(source);
         assert!(
-            rendered.contains(&format!("(defsig {{}} maker ({binder}) "))
+            defsig_has_binders(&rendered, "maker", &[binder])
                 && rendered.contains("(t-fn {} (t-var {} _))")
                 && rendered.contains(annotation),
             "P4b requires a body-only binder to retain a structural defsig carrier: \
@@ -151,8 +181,7 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
         let redeep =
             print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
         assert!(
-            redeep.contains(&format!("(defsig {{}} maker ({binder}) "))
-                && redeep.contains(annotation),
+            defsig_has_binders(&redeep, "maker", &[binder]) && redeep.contains(annotation),
             "canonical Surf/Deep round-trip must preserve the body-only binder: \
              {source}\n{redeep}"
         );
@@ -242,7 +271,8 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
     let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
     let rendered = print_canonical_flat(&lowered);
     assert!(
-        rendered.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))")
+        defsig_has_binders(&rendered, "accepts", &["p"])
+            && rendered.contains("(t-fn {} (t-var {} p) (t-prim {} bool))")
             && rendered.matches("(x {type: (t-var {} p)})").count() == 2,
         "the defsig and property quantifier metadata must share binder `p`: {rendered}"
     );
@@ -269,10 +299,9 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
 fn bounded_property_binders_reuse_the_declaration_binder_model() {
     let rendered = deep("@property accepts[p: Float] forall(x: p):\n  true");
     assert!(
-        rendered.contains(
-            "(defsig {dtype_bounds: {p: float}} accepts (p) \
-             (t-fn {} (t-var {} p) (t-prim {} bool)))"
-        ),
+        defsig_has_binders(&rendered, "accepts", &["p"])
+            && rendered.contains("dtype_bounds: {p: float}")
+            && rendered.contains("(t-fn {} (t-var {} p) (t-prim {} bool))"),
         "a property bound must ride on its defsig: {rendered}"
     );
 }
@@ -451,7 +480,7 @@ fn duplicate_surf_binder_names_are_rejected_before_desugaring() {
 fn dimension_and_rank_variables_require_declared_binders() {
     let unlisted = deep("sig shaped: tensor[n, f32] -> tensor[..r, f32]\ndef shaped(x) = x");
     assert!(
-        unlisted.contains("(defsig {} shaped (t-fn ")
+        defsig_has_binders(&unlisted, "shaped", &[])
             && unlisted.contains("(d-var {} n)")
             && unlisted.contains("(d-rank {} r)"),
         "unlisted variables must remain uses outside an empty binder list: {unlisted}"
@@ -459,7 +488,7 @@ fn dimension_and_rank_variables_require_declared_binders() {
 
     let listed = deep("sig shaped[n, r]: tensor[n, f32] -> tensor[..r, f32]\ndef shaped(x) = x");
     assert!(
-        listed.contains("(defsig {} shaped (n r) ")
+        defsig_has_binders(&listed, "shaped", &["n", "r"])
             && listed.contains("(d-var {} n)")
             && listed.contains("(d-rank {} r)"),
         "listed dimension and rank binders must be carried explicitly: {listed}"
@@ -505,11 +534,11 @@ fn arbitrary_non_dtype_names_remain_legal_surf_binders() {
     ] {
         let rendered = deep(source);
         assert!(
-            rendered.contains("(defsig {}")
-                && rendered.contains("(float32)")
+            (defsig_has_binders(&rendered, "shaped", &["float32"])
+                || defsig_has_binders(&rendered, "constant", &["float32"]))
                 && (rendered.contains("(d-var {} float32)")
                     || rendered.contains("(d-rank {} float32)")
-                    || rendered.contains("(t-prim {} i32)")),
+                    || rendered.contains("(t-prim {} i32")),
             "an arbitrary intentional binder must remain legal: {source}\n{rendered}"
         );
     }
@@ -562,7 +591,7 @@ fn declared_but_unused_unbounded_binders_are_preserved() {
     ] {
         let rendered = deep(source);
         assert!(
-            rendered.contains("(defsig {} constant (a) "),
+            defsig_has_binders(&rendered, "constant", &["a"]),
             "a vacuous explicit quantifier must remain structural: {rendered}"
         );
         let program = parse_deep(&rendered).expect("desugared Deep must parse");
@@ -570,7 +599,7 @@ fn declared_but_unused_unbounded_binders_are_preserved() {
         let redeep =
             print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
         assert!(
-            redeep.contains("(defsig {} constant (a) "),
+            defsig_has_binders(&redeep, "constant", &["a"]),
             "round-trip must preserve the declared binder: {redeep}"
         );
     }

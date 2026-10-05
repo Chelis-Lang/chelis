@@ -489,6 +489,7 @@ out = loss(to_tensor([{literal}]))\n"
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

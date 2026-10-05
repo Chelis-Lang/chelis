@@ -38,10 +38,12 @@ pub struct HostLoweringTrace {
 
 impl HostLoweringTrace {
     pub fn globals(&self) -> &[Option<HelperLoweringTrace>] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.globals
     }
 
     pub fn functions(&self) -> impl Iterator<Item = (&str, &[Option<HelperLoweringTrace>])> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.functions
             .iter()
             .map(|(name, traces)| (name.as_str(), traces.as_slice()))
@@ -88,15 +90,18 @@ pub struct TracedCompilation<T> {
 
 impl<T> TracedCompilation<T> {
     pub fn artifact(&self) -> &CompiledExecutionArtifact {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.artifact
     }
 
     pub fn projection(&self) -> &T {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.projection
     }
 
     /// Consume the pairing when the caller needs to own the separate products.
     pub fn into_parts(self) -> (CompiledExecutionArtifact, T) {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         (self.artifact, self.projection)
     }
 }

@@ -142,7 +142,7 @@ fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
         assert!(
             !unknown_form
                 .message
-                .contains("not in the 62-tag closed vocabulary"),
+                .contains("not in the 61-tag closed vocabulary"),
             "`{}` IS in the vocabulary; the pre-Phase-3 wildcard text is \
              dishonest for it; got: {}",
             tag.as_str(),
@@ -166,9 +166,9 @@ fn no_disposition_list_is_disjoint_and_in_vocabulary() {
     }
     assert_eq!(
         DeepTag::ALL.len() - NO_EXPRESSION_DISPOSITION.len(),
-        32,
-        "62 tags split into 32 dispatched and 30 rejected (chelis#859 moved \
-         `block` to the dispatched side); a vocabulary change must revisit \
+        31,
+        "61 tags split into 31 dispatched and 30 rejected (Deep 0.20 removes \
+         `pipe`); a vocabulary change must revisit \
          this file in the same change set (B1)"
     );
 }

@@ -1,29 +1,10 @@
-//! Behavior baseline for the `infer` module split (openspec
-//! `modularize-type-inference`).
-//!
-//! The split moves ~21,000 lines of inference code out of one file and into a
-//! role-based module tree. Every step of that move is supposed to be
-//! behavior-preserving, but the existing suite exercises inference through
-//! many narrow issue-specific assertions: a reordered diagnostic or a dropped
-//! metadata stamp can slip between them. These fixtures close that gap by
-//! recording the *whole* observable output of a check — the annotated Deep
-//! tree with its metadata, the type environment, the inference statistics,
-//! and the ordered diagnostics — and comparing it byte for byte.
-//!
-//! The recorded baselines live in `tests/fixtures/infer_parity/`. A missing
-//! baseline is written on first run and the test FAILS, so a deleted or
-//! never-recorded fixture can never pass silently. A baseline is only allowed
-//! to change when the change is a deliberate, reviewed behavior change; for
-//! this refactor the correct number of baseline edits is zero.
-
-use std::fs;
-use std::path::PathBuf;
+//! Behavioral checks across inference routes. Historical byte-for-byte
+//! snapshots pinned source metadata and rejection wording, not language rules.
 
 use chelis_deep::Expr;
-use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::{CheckedProgram, InferResult, check_ir_program};
+use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
     let decls = parse_surf(source).unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
@@ -35,162 +16,58 @@ fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
     .into_exprs()
 }
 
-/// The full observable output of an accepted check: the annotated tree (which
-/// carries the type metadata inline), the type environment, and the honest
-/// visit counters.
-fn accepted_snapshot(checked: &CheckedProgram) -> String {
-    let mut out = String::new();
-
-    out.push_str("== annotated deep ==\n");
-    out.push_str(&print_canonical(checked.annotated_exprs()));
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-
-    out.push_str("\n== type env ==\n");
-    let mut env: Vec<(&String, String)> = checked
-        .type_env()
-        .iter()
-        .map(|(name, ty)| (name, chelis_deep::printer::print_expr_flat(ty)))
-        .collect();
-    env.sort();
-    for (name, ty) in env {
-        out.push_str(&format!("{name} : {ty}\n"));
-    }
-
-    out.push_str("\n== signature inference ==\n");
-    let mut functions: Vec<_> = checked.signature_inference().functions.iter().collect();
-    functions.sort_by_key(|(name, _)| *name);
-    for (binding, function) in functions {
-        out.push_str(&format!("binding = {binding}\n"));
-        out.push_str(&format!("  name = {}\n", function.name));
-        out.push_str(&format!(
-            "  authored_signature = {}\n",
-            function.authored_signature
-        ));
-        out.push_str(&format!(
-            "  authored_signature_type = {:?}\n",
-            function.authored_signature_type
-        ));
-        out.push_str(&format!(
-            "  recursive_cycle = {}\n",
-            function.recursive_cycle
-        ));
-        out.push_str(&format!(
-            "  checked_signature = {:?}\n",
-            function.checked_signature
-        ));
-        out.push_str(&format!(
-            "  display_signature = {:?}\n",
-            function.display_signature
-        ));
-        for param in &function.params {
-            out.push_str(&format!(
-                "  param[{}] name = {}; written = {}; inferred_read_only = {}; \
-                 checked_type = {:?}; display_type = {:?}\n",
-                param.index,
-                param.name,
-                param.written,
-                param.inferred_read_only,
-                param.checked_type,
-                param.display_type,
-            ));
-        }
-    }
-
-    out.push_str("\n== infer stats ==\n");
-    let stats = checked.infer_stats();
-    out.push_str(&format!(
-        "typed_nodes = {}\ntotal_nodes = {}\n",
-        stats.typed_nodes, stats.total_nodes
-    ));
-
-    out
-}
-
-/// The full observable output of a rejected check: every diagnostic in order,
-/// with the fields a consumer can actually see.
-fn rejected_snapshot(report: &InferResult) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "typed_nodes = {}\ntotal_nodes = {}\ndiagnostics = {}\n\n",
-        report.typed_nodes,
-        report.total_nodes,
-        report.errors.len()
-    ));
-    for (index, error) in report.errors.iter().enumerate() {
-        out.push_str(&format!("[{index}] kind = {:?}\n", error.kind));
-        out.push_str(&format!("    message = {}\n", error.message));
-        out.push_str(&format!("    severity = {}\n", error.severity));
-        out.push_str(&format!("    expected = {:?}\n", error.expected));
-        out.push_str(&format!("    got = {:?}\n", error.got));
-        out.push_str(&format!("    span_offset = {:?}\n", error.span_offset));
-        out.push_str(&format!("    span_id = {:?}\n", error.span_id));
-        for hint in &error.suggestions {
-            out.push_str(&format!("    hint = {hint}\n"));
-        }
-    }
-    out
-}
-
-fn baseline_path(name: &str) -> PathBuf {
-    let (section, test_name) = name
-        .split_once('_')
-        .expect("the parity fixture name has a section prefix");
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/infer_parity")
-        .join(format!("infer_module_parity__{section}__{test_name}.snap"))
-}
-
-/// Compare against the recorded baseline. A missing baseline is recorded and
-/// then reported as a failure: the point of the fixture is the comparison, so
-/// a first run must never be mistaken for a passing run.
-fn assert_matches_baseline(name: &str, actual: &str) {
-    let path = baseline_path(name);
-    if !path.exists() {
-        fs::create_dir_all(path.parent().expect("fixture dir")).expect("create fixture dir");
-        fs::write(&path, actual).expect("write baseline");
-        panic!(
-            "{name}: no recorded baseline. Wrote {}. Review it, then run the test again.",
-            path.display()
+fn assert_accepted_parity(name: &str, source: &str, expected_types: &[(&str, &str)]) {
+    let deep = surf_to_deep(source, name);
+    let checked = check_ir_program(&deep)
+        .unwrap_or_else(|report| panic!("{name} must check cleanly: {:#?}", report.errors));
+    assert_eq!(
+        checked.type_env().len(),
+        expected_types.len(),
+        "{name}: exported binding set changed"
+    );
+    for &(binding, expected_type) in expected_types {
+        let ty = checked
+            .type_env()
+            .get(binding)
+            .unwrap_or_else(|| panic!("{name}: missing exported binding {binding}"));
+        assert_eq!(
+            chelis_deep::printer::print_expr_flat(ty),
+            expected_type,
+            "{name}: wrong public type for {binding}"
         );
     }
-    let expected = fs::read_to_string(&path).expect("read baseline");
-    let shown = path.display();
-    assert!(
-        expected == actual,
-        "{name}: inference output differs from the recorded baseline at {shown}.\n\
-         The infer module split must not change checked trees, metadata, \
-         statistics, or diagnostics.\n\
-         --- recorded ---\n{expected}\n--- actual ---\n{actual}"
+}
+
+fn assert_rejected_parity(name: &str, source: &str, expected: &[(&str, &[&str])]) {
+    let deep = surf_to_deep(source, name);
+    let report = check_ir_program(&deep)
+        .err()
+        .unwrap_or_else(|| panic!("{name}: invalid program was admitted"));
+    assert_eq!(
+        report.errors.len(),
+        expected.len(),
+        "{name}: missing or cascading extra rejection: {:#?}",
+        report.errors
     );
-}
-
-/// A program that must type-check cleanly, compared on its whole output.
-fn assert_accepted_parity(name: &str, source: &str) {
-    let deep = surf_to_deep(source, name);
-    match check_ir_program(&deep) {
-        Ok(checked) => assert_matches_baseline(name, &accepted_snapshot(&checked)),
-        Err(report) => {
-            let msgs: Vec<&str> = report.errors.iter().map(|e| e.message.as_str()).collect();
-            panic!("{name}: fixture is supposed to type-check, but it failed: {msgs:#?}");
-        }
-    }
-}
-
-/// A program that must be rejected, compared on its whole ordered diagnostic
-/// list.
-fn assert_rejected_parity(name: &str, source: &str) {
-    let deep = surf_to_deep(source, name);
-    match check_ir_program(&deep) {
-        Ok(_) => panic!("{name}: fixture is supposed to be rejected, but it type-checked"),
-        Err(report) => {
-            assert!(
-                !report.errors.is_empty(),
-                "{name}: a rejection must carry at least one diagnostic"
-            );
-            assert_matches_baseline(name, &rejected_snapshot(&report));
-        }
+    let mut unmatched = report.errors.iter().collect::<Vec<_>>();
+    for &(kind, operands) in expected {
+        let position = unmatched.iter().position(|error| {
+            error.kind.diagnostic_name() == kind
+                && if let Some(identifier) = error.kind.unresolved_identifier() {
+                    operands.len() == 1 && operands[0] == identifier
+                } else {
+                    operands
+                        .iter()
+                        .all(|operand| error.message.contains(operand))
+                }
+        });
+        let at = position.unwrap_or_else(|| {
+            panic!(
+                "{name}: missing {kind} on {operands:?}: {:#?}",
+                report.errors
+            )
+        });
+        unmatched.swap_remove(at);
     }
 }
 
@@ -207,6 +84,19 @@ def run() -> i32 = apply_twice(bump, 3)
 def identity_pair(a: i32, b: f32) -> (i32, f32) = (a, b)
 def use_pair() -> i32 = identity_pair(1, 2.0).0
 "#,
+        &[
+            (
+                "apply_twice",
+                "(t-fn {} (t-fn {} (t-prim {} i32) (t-prim {} i32)) (t-prim {} i32) (t-prim {} i32))",
+            ),
+            ("bump", "(t-fn {} (t-prim {} i32) (t-prim {} i32))"),
+            (
+                "identity_pair",
+                "(t-fn {} (t-prim {} i32) (t-prim {} f32) (t-tuple {} (t-prim {} i32) (t-prim {} f32)))",
+            ),
+            ("run", "(t-fn {} (t-prim {} i32))"),
+            ("use_pair", "(t-fn {} (t-prim {} i32))"),
+        ],
     );
 }
 
@@ -221,6 +111,28 @@ def swap(x: tensor[4, 6, f32]) -> tensor[6, 4, f32] = permute(x, 1, 0)
 def collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, i64)])
 def reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)
 "#,
+        &[
+            (
+                "broadcast_bias",
+                "(t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-tensor {} (d-lit {} 64) (t-prim {} f32)))",
+            ),
+            (
+                "collapse",
+                "(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 6) (t-prim {} f32)) (t-tensor {} (d-lit {} 24) (t-prim {} f32)))",
+            ),
+            (
+                "project",
+                "(t-fn {} (t-tensor {} (d-lit {} 64) (d-lit {} 32) (t-prim {} f32)) (t-tensor {} (d-lit {} 32) (d-lit {} 8) (t-prim {} f32)) (t-tensor {} (d-lit {} 64) (d-lit {} 8) (t-prim {} f32)))",
+            ),
+            (
+                "reduce_rows",
+                "(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 6) (t-prim {} f32)) (t-tensor {} (d-lit {} 4) (t-prim {} f32)))",
+            ),
+            (
+                "swap",
+                "(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 6) (t-prim {} f32)) (t-tensor {} (d-lit {} 6) (d-lit {} 4) (t-prim {} f32)))",
+            ),
+        ],
     );
 }
 
@@ -237,6 +149,18 @@ item_total = len(values)
 first_two = take(values, cast(2, i64))
 paired = zip(values, values)
 "#,
+        &[
+            ("doubled", "(t-adt {} List (t-prim {} i32))"),
+            ("first_two", "(t-adt {} List (t-prim {} i32))"),
+            ("item_total", "(t-prim {} i64)"),
+            ("kept", "(t-adt {} List (t-prim {} i32))"),
+            (
+                "paired",
+                "(t-adt {} List (t-tuple {} (t-prim {} i32) (t-prim {} i32)))",
+            ),
+            ("total", "(t-prim {} i32)"),
+            ("values", "(t-adt {} List (t-prim {} i32))"),
+        ],
     );
 }
 
@@ -251,6 +175,17 @@ def make(a: f32, b: f32) -> Point = Point { x: a, y: b }
 def read_x(p: Point) -> f32 = p.x
 def shift(p: Point, dx: f32) -> Point = Point { x: add(p.x, dx), y: p.y }
 "#,
+        &[
+            (
+                "make",
+                "(t-fn {} (t-prim {} f32) (t-prim {} f32) (t-adt {} Point))",
+            ),
+            ("read_x", "(t-fn {} (t-adt {} Point) (t-prim {} f32))"),
+            (
+                "shift",
+                "(t-fn {} (t-adt {} Point) (t-prim {} f32) (t-adt {} Point))",
+            ),
+        ],
     );
 }
 
@@ -271,6 +206,13 @@ def first_or(xs: List[i32], fallback: i32) -> i32 = match xs with {
   | Nil => fallback
 }
 "#,
+        &[
+            ("area", "(t-fn {} (t-adt {} Shape) (t-prim {} f32))"),
+            (
+                "first_or",
+                "(t-fn {} (t-adt {} List (t-prim {} i32)) (t-prim {} i32) (t-prim {} i32))",
+            ),
+        ],
     );
 }
 
@@ -282,6 +224,16 @@ fn accepted_transforms() {
 def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
 def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)
 "#,
+        &[
+            (
+                "batch_process",
+                "(t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32)))",
+            ),
+            (
+                "process",
+                "(t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} features) (t-prim {} f32)))",
+            ),
+        ],
     );
 }
 
@@ -295,6 +247,10 @@ fn rejected_numeric_restrictions() {
 def mixed(n: i32) -> f32 = add(1.0, n)
 def int_div(a: i32, b: i32) -> i32 = div(a, b)
 "#,
+        &[
+            ("PrecisionMismatch", &["f32", "i32"]),
+            ("PrecisionMismatch", &["div"]),
+        ],
     );
 }
 
@@ -306,6 +262,10 @@ fn rejected_invalid_shapes() {
 def bad_matmul(x: tensor[64, 32, f32], w: tensor[16, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
 def bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, i64)])
 "#,
+        &[
+            ("DimensionMismatch", &["matmul", "32", "16"]),
+            ("DimensionMismatch", &["reshape", "25", "24"]),
+        ],
     );
 }
 
@@ -318,6 +278,10 @@ values: List[i32] = [1, 2, 3]
 wrong_element = map(fn (v: f32) -> mul(v, 2.0), values)
 wrong_predicate = filter(fn (v: i32) -> v, values)
 "#,
+        &[
+            ("PrecisionMismatch", &["f32", "i32"]),
+            ("PrecisionMismatch", &["filter", "bool"]),
+        ],
     );
 }
 
@@ -331,6 +295,10 @@ type Point =
 def read_missing(p: Point) -> f32 = p.z
 def build_wrong(a: i32) -> Point = Point { x: a, y: 1.0 }
 "#,
+        &[
+            ("TypeMismatch", &["Point", "z"]),
+            ("PrecisionMismatch", &["i32", "f32"]),
+        ],
     );
 }
 
@@ -352,6 +320,12 @@ def bad_result(s: Shape) -> f32 = match s with {
   | Rect(w, h) => 1
 }
 "#,
+        &[
+            ("UnknownConstructor", &["Triangle"]),
+            ("UnboundVariable", &["b"]),
+            ("UnboundVariable", &["h"]),
+            ("PrecisionMismatch", &["f32", "i32"]),
+        ],
     );
 }
 
@@ -363,5 +337,6 @@ fn rejected_transforms() {
 def label(x: tensor[features, f32]) -> string = "constant"
 def batch_label(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(label)
 "#,
+        &[("TypeMismatch", &["batch_label", "string", "f32"])],
     );
 }

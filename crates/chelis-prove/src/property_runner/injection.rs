@@ -215,6 +215,7 @@ pub(super) fn prove_with_injection(
                         crate::opaque::GenModule {
                             exprs: &exprs,
                             source: &module_source,
+                            runtime: options.runtime,
                         },
                         &producers,
                         &mut grng,

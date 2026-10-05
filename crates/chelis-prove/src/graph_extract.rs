@@ -88,7 +88,27 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
         .enumerate()
         .map(|(new, old)| (*old, new as u64))
         .collect();
+    // Every declaration-table row must stay some retained node's declaration,
+    // so keep only the rows the closure uses, in their original order.
+    let declaration_rows: std::collections::BTreeMap<_, _> = retained
+        .iter()
+        .map(|id| wire.nodes[*id as usize].declaration)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(new, old)| (old, new as u64))
+        .collect();
     let mut dag = wire.clone();
+    dag.declarations = declaration_rows
+        .keys()
+        .map(|row| {
+            usize::try_from(*row)
+                .ok()
+                .and_then(|row| wire.declarations.get(row))
+                .cloned()
+                .ok_or("node declaration outside the declaration table")
+        })
+        .collect::<Result<_, _>>()?;
     dag.nodes = retained
         .iter()
         .map(|id| {
@@ -96,6 +116,7 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
             node.id = mapping[id];
             node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
             node.activation = node.activation.map(|activation| mapping[&activation]);
+            node.declaration = declaration_rows[&node.declaration];
             node
         })
         .collect();
@@ -229,6 +250,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Relu
+            | WireRiscOp::Softmax { .. }
             | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
@@ -239,6 +261,9 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Cos
             | WireRiscOp::Tan
             | WireRiscOp::Atan
+            | WireRiscOp::Tanh
+            | WireRiscOp::Erf
+            | WireRiscOp::Erfc
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
@@ -277,7 +302,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Drop
             | WireRiscOp::Realize
             | WireRiscOp::Cast { .. }
-            | WireRiscOp::CastTrunc { .. }
+            | WireRiscOp::NamedCast { .. }
             | WireRiscOp::FusedElem { .. }
             | WireRiscOp::BlasMatmul { .. }
             | WireRiscOp::Gather { .. }
@@ -602,7 +627,14 @@ const _: () = {
     // labels carry no numeric payload.
     // Version 23 adds the paired sparse batch rank. It is index geometry,
     // not a floating numeric payload or float-envelope transformer.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 23);
+    // Version 24 adds the Tier 1 `Tanh`, a unary float primitive grouped with
+    // `Atan`; it embeds no numeric payload.
+    // Version 25 adds Softmax axis metadata, with no embedded numeric values.
+    // Version 26 makes `cast_trunc` the `trunc` rung of the tagged
+    // `NamedCast`; it embeds no numeric payload.
+    // Version 27 adds the Tier 1 `Erf` and `Erfc`, unary float primitives
+    // grouped with `Atan`; they embed no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 27);
 };
 
 #[cfg(test)]

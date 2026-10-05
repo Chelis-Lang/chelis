@@ -97,6 +97,12 @@ The guard classifies direct lower-stage calls. It treats core transition calls a
 
 The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, and `chelis-ir`. A dependency guard checks the manifest and resolved graph.
 
+The approved transitive closure includes `chelis-axis-core`, a leaf containing
+ordered-axis algorithms shared by the checker and IR. Its ordinary Rust build
+uses the proof-erasing `vstd` macros; the Verus, Kani, and Vermilion executables
+remain opt-in development tools. This leaf does not authorize additional direct
+core dependencies or dependencies on compiler adapters, shells, or backends.
+
 The dependency guard, the documentation guard, and the pipeline-artifact compile-fail fixture run in the per-PR gate `lint-and-unit` stage, so hosted CI enforces the dependency boundary, the no_std documentation contract, and the facade artifact boundary. The manual `compiler_pipeline_oracle.py` still runs the same three controls.
 
 The package artifact and schema paths pass fully linked expanded Deep to the core. `checked_program_with_effects` retains only the Reef error adapter.

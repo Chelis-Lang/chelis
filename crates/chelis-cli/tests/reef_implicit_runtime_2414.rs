@@ -121,7 +121,7 @@ fn assert_first_runs_succeed(program: &str, with_lock: bool) {
 
     let (_dir, package) = fresh_package(program, with_lock);
     chelis(&package)
-        .args(["build", "--target", "c", "src/main.ch", "-o"])
+        .args(["build", "--emit-c", "--target", "c", "src/main.ch", "-o"])
         .arg(package.join("out"))
         .assert()
         .success();

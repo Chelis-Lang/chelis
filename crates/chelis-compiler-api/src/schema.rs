@@ -70,6 +70,7 @@ pub enum ApiEnvelope<T> {
 
 impl<T> ApiEnvelope<T> {
     pub fn success(result: T) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::Success(ApiSuccess { ok: true, result })
     }
 
@@ -94,6 +95,7 @@ impl<T> ApiEnvelope<T> {
     /// );
     /// ```
     pub fn failure(stage: String, errors: Vec<Diagnostic>) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::Failure(ApiFailure {
             ok: false,
             stage,
@@ -104,6 +106,7 @@ impl<T> ApiEnvelope<T> {
     /// Build the HTTP request-decoding failure without exposing diagnostic
     /// construction to the transport crate.
     pub fn invalid_request(message: impl Into<String>) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::failure(
             "http".into(),
             vec![Diagnostic::general(
@@ -237,12 +240,14 @@ pub struct UnsupportedDiagnosticIdentity {
 
 impl Diagnostic {
     pub fn kind(&self) -> DiagnosticKind {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         DiagnosticKind::decode(&self.kind)
             .expect("producer diagnostics are constructed from DiagnosticKind")
     }
 
     /// Wording-independent identity for a production unsupported diagnostic.
     pub fn unsupported_identity(&self) -> Option<UnsupportedDiagnosticIdentity> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.unsupported.as_ref().map(|unsupported| {
             let payload = unsupported.identity();
             UnsupportedDiagnosticIdentity {
@@ -318,6 +323,7 @@ impl Diagnostic {
 impl Diagnostic {
     /// Project a check diagnostic onto the wire carrier.
     pub fn try_from_check_error(error: &chelis_types::errors::CheckError) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if let chelis_types::errors::CheckErrorKind::UnsupportedFeature { unsupported } =
             &error.kind
         {
@@ -353,6 +359,7 @@ impl Diagnostic {
     /// for them, so dropping them here would keep the very stage-dependence
     /// the atom forbids.
     pub fn from_effect_error(error: &chelis_effects::EffectError, severity: UnitInterval) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self {
             kind: effect_error_kind(&error.kind).as_str().to_owned(),
             message: error.message.clone(),
@@ -713,6 +720,7 @@ pub struct Span {
 impl Span {
     /// Admit a foreign byte range for access to this local UTF-8 source.
     pub fn slice<'a>(&self, source: &'a str) -> Result<&'a str, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let end = self
             .offset
             .checked_add(self.len)
@@ -769,6 +777,7 @@ pub enum DiagnosticSpan {
 impl DiagnosticSpan {
     /// The byte offset, which both variants carry.
     pub fn offset(self) -> u64 {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             Self::Range { offset, .. } | Self::Point { offset } => offset,
         }
@@ -780,6 +789,7 @@ impl DiagnosticSpan {
     /// collection length, and calling it one invites `is_empty`, which would
     /// be meaningless for a source coordinate.
     pub fn extent(self) -> Option<u64> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             Self::Range { len, .. } => Some(len),
             Self::Point { .. } => None,
@@ -1157,6 +1167,7 @@ pub struct OrderedInferredParameters(Vec<WireInferredParameter>);
 
 impl OrderedInferredParameters {
     pub fn as_slice(&self) -> &[WireInferredParameter] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.0
     }
 }
@@ -1705,6 +1716,65 @@ pub struct WireParam {
     pub span: Span,
 }
 
+/// Cast-rung transport for authored pipe stages, including the nested named rung.
+/// Its
+/// spelling mirrors the authored syntax packet rather than exposing Deep AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeCastMode {
+    Checked,
+    Named(WirePipeNamedCastMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeNamedCastMode {
+    Trunc,
+    Saturate,
+    Wrap,
+}
+
+impl From<chelis_deep::CastMode> for WirePipeCastMode {
+    fn from(mode: chelis_deep::CastMode) -> Self {
+        use chelis_deep::{CastMode, NamedCastMode};
+        match mode {
+            CastMode::Checked => Self::Checked,
+            CastMode::Named(mode) => Self::Named(match mode {
+                NamedCastMode::Trunc => WirePipeNamedCastMode::Trunc,
+                NamedCastMode::Saturate => WirePipeNamedCastMode::Saturate,
+                NamedCastMode::Wrap => WirePipeNamedCastMode::Wrap,
+            }),
+        }
+    }
+}
+
+/// Authored pipe-stage syntax; normalization consumes this before literal typing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeStageSyntax {
+    Callable,
+    CallFirst,
+    Cast(WirePipeCastMode),
+    Copy,
+    Realize,
+}
+
+impl From<chelis_surf::ast::PipeStageSyntax> for WirePipeStageSyntax {
+    fn from(syntax: chelis_surf::ast::PipeStageSyntax) -> Self {
+        use chelis_surf::ast::PipeStageSyntax as S;
+        match syntax {
+            S::Callable => Self::Callable,
+            S::CallFirst => Self::CallFirst,
+            S::Cast(mode) => Self::Cast(mode.into()),
+            S::Copy => Self::Copy,
+            S::Realize => Self::Realize,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireSurfPipeStage {
+    pub syntax: WirePipeStageSyntax,
+    pub expression: WireSurfExpr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireSurfExpr {
@@ -1762,7 +1832,7 @@ pub enum WireSurfExpr {
     },
     Pipe {
         expr: Box<WireSurfExpr>,
-        stages: Vec<WireSurfExpr>,
+        stages: Vec<WireSurfPipeStage>,
         span: Span,
     },
     If {
@@ -1783,6 +1853,12 @@ pub enum WireSurfExpr {
     },
     Tuple {
         items: Vec<WireSurfExpr>,
+        span: Span,
+    },
+    /// A call with an explicit accumulator dtype (spec/02 `CallArgs`).
+    Accumulate {
+        call: Box<WireSurfExpr>,
+        accumulator: String,
         span: Span,
     },
     Cast {
@@ -2148,7 +2224,18 @@ pub struct WireRecordPatternField {
 /// - `22`: a Load of a resolved top-level value uses an unspellable encoded
 ///   origin label, distinct from every ordinary graph input. A version-21
 ///   reader has no such identity and cannot interpret that label.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;
+/// - `24`: `Tanh` and the fused `Tanh` step are the [05-OP-46] Tier 1
+///   primitive (chelis#2957); an earlier graph spelled `tanh` as
+///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
+/// - `25`: `Softmax` retains [05-OP-48] through AD before stable forward
+///   decomposition; a version-24 reader does not know the operation.
+/// - `26`: the named lossy casts share one tagged `NamedCast` operation
+///   whose `mode` names the rung (chelis#759): `trunc` for `cast_trunc`,
+///   `saturate` for `cast_saturate` and `wrap` for `cast_wrap`. A version-25
+///   reader does not know that operation.
+/// - `27`: `Erf` and `Erfc` and their fused steps are [05-OP-46] Tier 1
+///   primitives; a version-26 reader does not know the operations.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2309,11 +2396,13 @@ impl WireDag {
     /// Returns `Ok(())` only for [`WIRE_DAG_SCHEMA_VERSION`]. Older and
     /// future versions both fail closed.
     pub fn validate_schema_version(&self) -> Result<(), WireDagSchemaError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         validate_explicit_wire_dag_schema_version(Some(self.schema_version))
     }
 
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
@@ -2494,9 +2583,12 @@ impl WireDag {
                     }
                 }
                 WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
+                    // [05-OP-64]: `mod` also admits the floats (chelis#626);
+                    // the bitwise operations stay integer-only ([05-OP-47]).
+                    let mod_op = matches!(node.op, WireRiscOp::Mod);
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
-                            .is_some_and(|prim| prim.is_integer())
+                            .is_some_and(|prim| prim.is_integer() || (mod_op && prim.is_float()))
                         || node.inputs.iter().any(|id| {
                             self.nodes[..index]
                                 .iter()
@@ -2517,7 +2609,7 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            "WireDag {:?} node {} requires two earlier inputs with its dtype and shape",
                             node.op, node.id
                         )));
                     }
@@ -2868,6 +2960,29 @@ impl WireDag {
                 }
             }
 
+            if let WireRiscOp::Softmax { axis } = node.op
+                && (node.inputs.len() != 1
+                    || axis < 0
+                    || usize::try_from(axis)
+                        .map_or(true, |axis| axis >= node.output_type.dims.len())
+                    || !Prim::parse_interchange_name(&node.output_type.precision)
+                        .is_some_and(|p| p.is_float())
+                    || {
+                        let input = &self.nodes[node.inputs[0] as usize].output_type;
+                        input.precision != node.output_type.precision
+                            || input.dims.len() != node.output_type.dims.len()
+                            || input
+                                .dims
+                                .iter()
+                                .zip(&node.output_type.dims)
+                                .any(|(actual, expected)| !wire_dim_info_equal(actual, expected))
+                    })
+            {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag softmax node {} requires one same-shape/dtype float input and an in-range axis",
+                    node.id
+                )));
+            }
             if matches!(&node.op, WireRiscOp::Relu | WireRiscOp::ReluAdjoint) {
                 let expected_inputs = if matches!(&node.op, WireRiscOp::Relu) {
                     1
@@ -3015,6 +3130,7 @@ impl WireDag {
     /// [`WireDagSchemaError`], and an invalid exact-version cross-node shape
     /// surfaces as [`WireDagContractError`].
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let found = envelopes::version(json).map_err(WireDagDecodeError::Parse)?;
         validate_explicit_wire_dag_schema_version(found).map_err(WireDagDecodeError::Schema)?;
         let fields: WireDagFields =
@@ -3459,6 +3575,7 @@ fn wire_axis_origin(
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
         | WireRiscOp::Recip
@@ -3469,6 +3586,9 @@ fn wire_axis_origin(
         | WireRiscOp::Cos
         | WireRiscOp::Tan
         | WireRiscOp::Atan
+        | WireRiscOp::Tanh
+        | WireRiscOp::Erf
+        | WireRiscOp::Erfc
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -3478,7 +3598,7 @@ fn wire_axis_origin(
         | WireRiscOp::Drop
         | WireRiscOp::Realize
         | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::NamedCast { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
         | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
@@ -3860,6 +3980,9 @@ pub enum WireFusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -3902,6 +4025,15 @@ pub enum WireExtremaKind {
 pub enum WireExtremaOperand {
     Left,
     Right,
+}
+
+/// The rung of a [`WireRiscOp::NamedCast`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireNamedCastMode {
+    Trunc,
+    Saturate,
+    Wrap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4016,6 +4148,9 @@ pub enum WireRiscOp {
     },
     Relu,
     ReluAdjoint,
+    Softmax {
+        axis: i32,
+    },
     Neg,
     Recip,
     Exp,
@@ -4025,6 +4160,9 @@ pub enum WireRiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -4174,7 +4312,8 @@ pub enum WireRiscOp {
     Cast {
         new_precision: String,
     },
-    CastTrunc {
+    NamedCast {
+        mode: WireNamedCastMode,
         new_precision: String,
     },
     FusedElem {

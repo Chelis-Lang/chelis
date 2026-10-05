@@ -1663,11 +1663,12 @@ directly, `host_lane_positive_rank_mismatch_traps_before_indexing`,
 `host_lane_matching_shapes_still_compute` control; and four `chelis-cli` tests
 in `issue_1484_host_lane_rank_guard`, which run the three programs recorded in
 [#1484] through `chelis build --target c` and the host linker and assert that
-each aborts with the guard text where `chelis eval` reports a shape mismatch,
-plus the `issue_1484_matching_rank_host_lane_still_runs` control. Each of the
+each exits with status 1 and the same `Domain` trap `chelis eval` reports
+(spec/04-type-system.md section 4.7), plus the `issue_1484_matching_rank_host_lane_still_runs` control. Each of the
 six rejection tests was confirmed red on the pre-fix tree, three of them by the
-compiled binary printing values instead of aborting. `grep -c 'rank mismatch'
-crates/chelis-backend-c/src/host_emit.rs` now returns non-zero, locked by
+compiled binary printing values instead of failing. `host_emit.rs` routes both
+the rank and the shape disagreement through the runtime's
+`chelis_elementwise_shape_trap`, locked by
 `sibling_sweep_host_emit_carries_the_elementwise_rank_guard`.
 
 #### What PP5 does not establish
@@ -2380,7 +2381,7 @@ is part of the design.
   `TypeUseSite::Defsig` the resolver mints a fresh variable for `_`
   (`crates/chelis-types/src/deep_type.rs`, `resolve_type_var`: `if name ==
   "_" { ... self.vg.fresh_tvar() }`), and `collect_declarations`
-  (`crates/chelis-types/src/infer/common.rs`, the `DeepTag::Defsig` arm)
+  (`crates/chelis-types/src/infer/declaration_collect.rs`, the `DeepTag::Defsig` arm)
   resolves the signature inside `subst.enter_level`, leaves the level, and
   calls `env.generalize(&ty, subst)`, which quantifies every variable minted
   above the current level, the hole included: the header becomes
@@ -2428,7 +2429,7 @@ is part of the design.
   The issue's candidate fix (eager only in argument position of an eager
   application) is not adopted, for the reason given under the decision.
 - [#1485], an over-rejection and an ingress split. `primary_inference_
-  schedule` (`crates/chelis-types/src/infer/program.rs`) builds a mirror
+  schedule` (`crates/chelis-types/src/infer/program_schedule.rs`) builds a mirror
   edge from a module function to every item at or after the floor that
   references it and a read edge from a value to every later item that reads
   it. `carried = wrap(f)` with `f` reading `carried` closes a two-cycle;
@@ -2630,8 +2631,8 @@ it is honest**, where a complete or authored-binder header is honest by
    binder-list declaration in `packages/chelis-std/` and `examples/`; the
    implementer's first Slice A step is to run the rigid check over the
    stdlib and confirm exactly that list reddens. A stdlib source change
-   regenerates the bundle and commits `reef.lock` and the tracked `dist/`
-   artifacts. No stdlib or example source declares a partial header (a
+   reaches the embedded bundle when the compiler builds; nothing generated
+   is committed. No stdlib or example source declares a partial header (a
    `def` with an annotated parameter and no result type): zero in both
    trees, so item 2 changes no shipped schedule, and no top-level value in
    either tree nests a lambda that names a top-level `def`, so item 3

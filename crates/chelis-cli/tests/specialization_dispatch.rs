@@ -42,6 +42,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -55,7 +56,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
     let c_path = out_dir.join(format!("op_{name}.c"));
     let c = fs::read_to_string(&c_path).expect("read generated c");
     let c_lines = c.lines().count();
-    let adjacent_pair_sum = c.contains("__sum_level_") && c.contains("__next_n_");
+    let adjacent_pair_sum = c.contains("__sum_level_") && c.contains("__pair_next");
     let allocs = c.matches("chelis_alloc(").count();
     // Only count actual *call sites* (indented, with open paren).
     let sgemm_calls = c.matches("    cblas_sgemm(").count();
@@ -72,9 +73,11 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         && c.contains("chelis_sparse_check_target(")
         && c.contains("chelis_sparse_plan_release(")
         && c.contains("CHELIS_DTYPE_I64");
-    let fused_kernels = c.matches("parallel for simd").count();
+    // Each parallel loop is an `omp for` inside the region that pins the
+    // floating-point environment on every worker thread.
+    let fused_kernels = c.matches("#pragma omp for simd").count();
     // Generic non-SIMD parallel-for loops (used for reductions etc.).
-    let generic_loops = c.matches("\n    #pragma omp parallel for\n").count();
+    let generic_loops = c.matches("\n        #pragma omp for\n").count();
 
     Dispatch {
         name,

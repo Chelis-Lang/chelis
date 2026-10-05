@@ -71,33 +71,17 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
     memcpy(&v, &bits, sizeof(double));
     return v;
 }
-/* Issue #387: portable integer division/remainder by-zero trap. The
- * evaluator halts with a clean diagnostic; the C backend must do the same
- * on every platform. Relying on the hardware fault is NOT portable: x86
- * raises SIGFPE on integer #DE, but ARM64 (e.g. macOS arm64) defines
- * integer division by zero to return a value and does NOT fault, so the
- * binary would silently compute a wrong answer -- the exact eval-vs-backend
- * divergence #387 exists to kill. Codegen calls this guard before every
- * INTEGER `div` / `mod`; it returns the divisor so the call composes inline
- * (`a / chelis_int_div_guard(b)`). Float division is IEEE-754 (`1.0/0.0 ==
- * inf`) and is never guarded. The message matches the evaluator's
- * `integer division or remainder by zero` exactly. */
-/* spec/04 section 4.7: output from preceding effects survives a later trap.
- * abort() need not flush C streams (notably on glibc). Preserve the original
- * failure even if a stream itself cannot be flushed. */
-static inline void chelis_flush_and_abort(void) {
+/* [04-NUM-10]: a trap becomes a process failure at the lane boundary - the
+ * binary writes its message to stderr and exits with status 1, as `chelis
+ * eval` does; it never aborts. spec/04 section 4.7: output from preceding
+ * effects survives the trap, so both streams are flushed first, and the
+ * original failure is preserved even if a stream cannot be flushed. */
+static inline void chelis_flush_and_exit_trap(void) {
     (void)fflush(stdout);
     (void)fflush(stderr);
-    abort();
+    exit(1);
 }
 
-static inline int64_t chelis_int_div_guard(int64_t divisor) {
-    if (divisor == 0) {
-        fprintf(stderr, "integer division or remainder by zero\n");
-        chelis_flush_and_abort();
-    }
-    return divisor;
-}
 /* chelis#729 Phase 3: exact signed-integer absolute value. The generated
  * caller supplies the declared width and the frozen C2 diagnostic produced
  * from chelis_types::dtype_semantics::NumericTrap. Checking the minimum
@@ -112,15 +96,15 @@ static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
         case 64: minimum = INT64_MIN; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
-            chelis_flush_and_abort();
+            chelis_flush_and_exit_trap();
             /* Keep the published header warning-clean even when a C/C++
-             * compiler does not infer abort's non-returning contract through
+             * compiler does not infer exit's non-returning contract through
              * this inline wrapper. The return is unreachable. */
             return value;
     }
     if (value == minimum) {
         fprintf(stderr, "%s\n", trap_message);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
     return value < 0 ? -value : value;
 }
@@ -137,13 +121,13 @@ static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximu
         case 64: *minimum = INT64_MIN; *maximum = INT64_MAX; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer width %d\n", bits);
-            chelis_flush_and_abort();
+            chelis_flush_and_exit_trap();
     }
 }
 
 static inline void chelis_numeric_trap(const char *message) {
     fprintf(stderr, "%s\n", message);
-    chelis_flush_and_abort();
+    chelis_flush_and_exit_trap();
 }
 
 static inline int64_t chelis_int_checked_add(int64_t lhs, int64_t rhs, int bits,
@@ -202,6 +186,25 @@ static inline int64_t chelis_int_checked_divisor(int64_t dividend, int64_t divis
     if (divisor == 0) chelis_numeric_trap(zero_message);
     if (dividend == minimum && divisor == -1) chelis_numeric_trap(overflow_message);
     return divisor;
+}
+
+/* spec/05 section 2.1 floor_div at a signed-integer width: the quotient rounded toward
+ * negative infinity. The divisor is checked before any C `/` or `%`, so a
+ * zero divisor raises the DivZero trap and MIN / -1 the Overflow trap instead
+ * of reaching C undefined behavior. Every target traps the same way; a
+ * hardware fault is not relied on (AArch64 integer division by zero does not
+ * fault). The correction cannot overflow: a nonzero remainder bounds the
+ * truncated quotient strictly inside the width. */
+static inline int64_t chelis_int_checked_floor_div(int64_t dividend, int64_t divisor,
+                                                   int bits, const char *zero_message,
+                                                   const char *overflow_message) {
+    int64_t quotient, remainder;
+    (void)chelis_int_checked_divisor(dividend, divisor, bits, zero_message,
+                                     overflow_message);
+    quotient = dividend / divisor;
+    remainder = dividend % divisor;
+    if (remainder != 0 && ((remainder < 0) != (divisor < 0))) quotient -= 1;
+    return quotient;
 }
 
 static inline int64_t chelis_checked_int_cast(int64_t value, int bits,
@@ -295,12 +298,12 @@ static inline int64_t chelis_int_from_twos(uint64_t value, int bits) {
 static inline void chelis_int_shift_validate(int64_t amount, int bits) {
     if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
         fprintf(stderr, "invalid integer shift width: %d\n", bits);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
     if (amount < 0) {
         fprintf(stderr, "shift amount must be non-negative, got %lld\n",
                 (long long)amount);
-        chelis_flush_and_abort();
+        chelis_flush_and_exit_trap();
     }
 }
 
@@ -338,6 +341,12 @@ chelis_string chelis_string_from_scalar(chelis_scalar value);
  * hex digits, then `)` (spec/08 section 2). */
 chelis_string chelis_string_from_key(chelis_key key);
 chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
+/* [05-OP-59]: the language builtins `to_int` and `to_float`, distinct from the
+ * scalar-carrier parse above. Each trims surrounding Unicode whitespace and
+ * returns an owned option whose Some child is an i64 or f64 scalar; a finite
+ * float spelling that overflows f64 yields a signed infinity. */
+chelis_option *chelis_to_int(chelis_string text);
+chelis_option *chelis_to_float(chelis_string text);
 chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);
 int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis);
@@ -534,6 +543,7 @@ chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype);
 chelis_list *chelis_tensor_elements(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value);
+void chelis_pad_sequences_to_require_width(int64_t width);
 chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value);
 chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis);
 chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes);
@@ -565,6 +575,11 @@ void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
 void chelis_print_dict(const chelis_dict *dict);
 void chelis_print_adt(const chelis_adt *adt);
+bool chelis_list_eq(const chelis_list *lhs, const chelis_list *rhs);
+bool chelis_tuple_eq(const chelis_tuple *lhs, const chelis_tuple *rhs);
+bool chelis_dict_eq(const chelis_dict *lhs, const chelis_dict *rhs);
+bool chelis_adt_eq(const chelis_adt *lhs, const chelis_adt *rhs);
+bool chelis_option_eq(const chelis_option *lhs, const chelis_option *rhs);
 void chelis_fail(chelis_string message);
 chelis_string chelis_read_file(chelis_string path);
 void chelis_write_file(chelis_string path, chelis_string contents);
@@ -572,6 +587,28 @@ chelis_list *chelis_read_lines(chelis_string path);
 chelis_list *chelis_read_bytes(chelis_string path);
 bool chelis_file_exists(chelis_string path);
 chelis_list *chelis_list_dir(chelis_string path);
+chelis_tuple *chelis_clock_wall_read(void);
+chelis_tuple *chelis_clock_monotonic_read(void);
+chelis_tuple *chelis_process_run(chelis_string program, const chelis_list *args);
+chelis_scalar chelis_round_to(chelis_scalar x, chelis_scalar places);
+void chelis_tensor_scan_check_state(const chelis_tensor *state, const chelis_tensor *shape_template);
+chelis_tensor *chelis_tensor_scan_stack(const chelis_list *states, const chelis_tensor *shape_template);
+void chelis_elementwise_shape_trap(const char *op, const chelis_tensor *lhs, const chelis_tensor *rhs);
+void chelis_matmul_product_trap(const chelis_tensor *lhs, const chelis_tensor *rhs);
+void chelis_test_assert_fail(chelis_string label);
+void chelis_test_assert_eq(chelis_value actual, chelis_value expected, chelis_string label);
+void chelis_test_assert_eq_tensor(const chelis_tensor *actual, const chelis_tensor *expected, chelis_string label);
+void chelis_test_assert_close_tensor(const chelis_tensor *actual, const chelis_tensor *expected, chelis_scalar tolerance, chelis_string label);
+chelis_list *chelis_parse_csv(chelis_string text);
+chelis_string chelis_to_csv(const chelis_list *table);
+chelis_list *chelis_csv_cols(const chelis_list *table);
+chelis_scalar chelis_csv_nrows(const chelis_list *table);
+chelis_list *chelis_csv_strs(const chelis_list *table, chelis_string column);
+chelis_list *chelis_csv_f64s(const chelis_list *table, chelis_string column);
+chelis_list *chelis_csv_ints(const chelis_list *table, chelis_string column);
+chelis_string chelis_csv_str(const chelis_list *table, chelis_scalar row, chelis_string column);
+chelis_scalar chelis_csv_f64(const chelis_list *table, chelis_scalar row, chelis_string column);
+chelis_scalar chelis_csv_int(const chelis_list *table, chelis_scalar row, chelis_string column);
 chelis_mapped_file *chelis_mmap_file(chelis_string path);
 chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
@@ -613,10 +650,10 @@ static inline float chelis_bf16_to_f32(uint16_t bits) {
 static inline uint16_t chelis_f32_to_bf16(float v) {
     uint32_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    /* NaN: preserve the most-significant mantissa bit so the result is
-     * still a NaN (not silently coerced to inf). */
+    /* NaN: [04-NUM-2]'s canonical quiet bf16 NaN, whatever the input's
+     * sign and payload (chelis#2964). */
     if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
-        return (uint16_t)((bits >> 16) | 0x0040u);
+        return (uint16_t)0x7FC0u;
     }
     /* Round-to-nearest-even on the discarded 16 mantissa bits. */
     uint32_t lsb = (bits >> 16) & 1u;
@@ -662,9 +699,10 @@ static inline uint16_t chelis_f32_to_f16(float v) {
     int32_t exp = (int32_t)((bits >> 23) & 0xFFu) - 127 + 15;
     uint32_t mant = bits & 0x007FFFFFu;
     if (((bits >> 23) & 0xFFu) == 0xFFu) {
-        /* Inf / NaN: preserve. */
+        /* NaN: [04-NUM-2]'s canonical quiet f16 NaN, whatever the
+         * input's sign and payload (chelis#2964). Inf keeps its sign. */
         if (mant != 0u) {
-            return (uint16_t)(sign | 0x7E00u);
+            return (uint16_t)0x7E00u;
         }
         return (uint16_t)(sign | 0x7C00u);
     }
@@ -677,10 +715,18 @@ static inline uint16_t chelis_f32_to_f16(float v) {
         if (exp < -10) {
             return (uint16_t)sign;
         }
-        mant = (mant | 0x00800000u) >> (1 - exp);
-        uint32_t lsb = (mant >> 13) & 1u;
-        uint32_t rounded = mant + 0x00000FFFu + lsb;
-        return (uint16_t)(sign | (rounded >> 13));
+        /* Round the full significand once at the subnormal quantum: every
+         * discarded bit, not only the ones a pre-shift keeps, decides a
+         * near-tie. A carry into bit 10 is the smallest normal. */
+        uint32_t full = mant | 0x00800000u;
+        uint32_t shift = (uint32_t)(14 - exp);
+        uint32_t kept = full >> shift;
+        uint32_t dropped = full & ((1u << shift) - 1u);
+        uint32_t half = 1u << (shift - 1u);
+        if (dropped > half || (dropped == half && (kept & 1u) != 0u)) {
+            kept += 1u;
+        }
+        return (uint16_t)(sign | kept);
     }
     /* Normal: round-to-nearest-even on the discarded 13 mantissa bits. */
     uint32_t lsb = (mant >> 13) & 1u;

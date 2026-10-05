@@ -1,5 +1,7 @@
 //! Checked ordered-axis plans shared by the checker and IR.
 
+#[cfg(kani)]
+mod kani_harnesses;
 mod verified;
 pub use verified::{checked_inverse, is_permutation, normalize_axis, reduction_survivors};
 

@@ -4,6 +4,24 @@
 version = 3
 
 [[path_rule]]
+prefix = "scripts/generate_c_support_inventory.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks generated C support against its source rosters and route decisions"
+tracking_issue = "chelis#1170"
+
+[[path_rule]]
+prefix = "scripts/test_generate_c_support_inventory.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs source-roster and published-inventory positive and negative controls"
+tracking_issue = "chelis#1170"
+
+[[path_rule]]
 prefix = "pyrightconfig.json"
 disposition = "owner"
 workflow = "ci.yml"
@@ -104,6 +122,148 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit executes this module's positive and negative parity-receipt rows"
 tracking_issue = "chelis#2102"
+
+# chelis#2957: the CORE-MATH vendoring script regenerates and checks the
+# chelis-crmath amalgamation; script-unit runs its tests, including the
+# repository's own `--check`, on every pull request.
+[[path_rule]]
+prefix = "scripts/vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
+[[path_rule]]
+prefix = "scripts/test_vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
+# chelis#2859: the Std.Datetime reference and differential harness. The
+# chelis-cli `std_datetime_oracle` target runs both against eval and native C;
+# script-unit runs the reference's own tests on every pull request.
+[[path_rule]]
+prefix = "scripts/datetime_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/datetime_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_datetime_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's positive and negative rows and the harness comparison logic"
+tracking_issue = "chelis#2859"
+
+# chelis#2942: the eval and C lane code the three Std.Datetime differentials
+# share. The chelis-cli differential targets run it on both lanes; script-unit
+# runs its own tests on every pull request.
+[[path_rule]]
+prefix = "scripts/datetime_lanes.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_datetime_lanes.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared lane module's stage, ordering and failure tests"
+tracking_issue = "chelis#2942"
+
+# chelis#2860: the Std.Datetime.Business reference and differential harness.
+# The chelis-cli `std_datetime_business_oracle` target runs both against eval
+# and native C; script-unit runs the reference's tests, NumPy differential
+# included, on every pull request.
+[[path_rule]]
+prefix = "scripts/datetime_business_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/datetime_business_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_datetime_business_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's positive and negative rows and its NumPy differential"
+tracking_issue = "chelis#2860"
+
+# chelis#2778: the Std.Decimal reference and differential harness.
+# script-unit runs the reference's tests and the harness's generator and
+# comparator tests on every pull request. The chelis-cli `std_decimal_oracle`
+# target runs the differential's canary on every pull request and the complete
+# differential nightly (see its test exclusion below).
+[[path_rule]]
+prefix = "scripts/decimal_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/decimal_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_decimal_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's accepting and rejecting rows against independent derivations"
+tracking_issue = "chelis#2778"
+
+[[path_rule]]
+prefix = "scripts/test_decimal_differential.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the harness's generator and comparator rows"
+tracking_issue = "chelis#2778"
+
+# chelis#2862: the Std.Datetime.Zone differential harness and TZif fixture
+# generator. The chelis-cli `std_datetime_zone` target runs the harness against
+# eval and native C; script-unit checks the fixtures against the generator.
+[[path_rule]]
+prefix = "scripts/datetime_zone_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/generate_tzif_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks the TZif fixtures against this generator and its manifest"
+tracking_issue = "chelis#2862"
+
+[[path_rule]]
+prefix = "scripts/test_generate_tzif_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the TZif fixture generator's positive and negative rows"
+tracking_issue = "chelis#2862"
 
 [[path_rule]]
 prefix = "tests/corpus/core_fragment_parity/"
@@ -242,6 +402,17 @@ packages = ["chelis-runtime-bundle"]
 reason = "runtime dependency changes can add runtime inputs the build record must declare"
 tracking_issue = "chelis#1354"
 
+# chelis#3120: ownership and host/kernel classification consume Surf literals
+# and shared CLI fixtures. Execute their existing positive/negative suites in
+# standing PR CI so an upstream literal or fixture edit cannot omit them.
+[[standing_target]]
+package = "chelis-ir"
+name = "ownership_lowering"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1277_kernel_decision"
+
 # chelis#1582: package-resolved scalar callables stay lexical under vmap, with
 # exact evaluator/native-C agreement and unimported-name rejection controls.
 [[standing_target]]
@@ -314,6 +485,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit runs the compiler-pin updater's consistency, argument, and mutation tests"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_bump_compiler_pins.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the compiler-pin updater's own unit tests"
 tracking_issue = "chelis#1824"
 
 # The completion runner consumes these exact runtime-extent corpus inputs.
@@ -1025,6 +1205,18 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
 tracking_issue = "chelis#1863"
 
+# Source-only migration changes this all-ignored CPU behavior-parity
+# harness. Run all five tests when directly modified; the separate performance
+# runner remains the authoritative performance oracle.
+[[manual_only_target]]
+package = "chelis-cli"
+name = "issue_1205_front_end_performance"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
+reason = "the all-ignored front-end behavior parity suite must execute when its source-emission harness changes; this does not replace its authoritative performance runner"
+tracking_issue = "chelis#2828"
+
 # These all-ignored targets either need prerequisites no Linux PR worker has or
 # exceed the default inner-loop budget. A direct modification is listed with
 # its ignored tests, rejected if an active test appears, and reported as a
@@ -1032,6 +1224,13 @@ tracking_issue = "chelis#1863"
 # docs/manual_gates.md row whose command runs exactly this target's ignored
 # tests, and one of them runs all of them with no name filter; an uncited row
 # that runs it makes this row stale.
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "coral_prerequisites"
+manual_gates = ["coral_prerequisites", "coral_prerequisites regression suite"]
+reason = "the documented Coral prerequisite acceptance bundle remains a manual gate outside the default inner-loop budget"
+tracking_issue = "chelis#2828"
+
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "shoals_oracle"
@@ -1056,6 +1255,13 @@ name = "chelis_std_self_test_corpus"
 manual_gates = ["chelis_std_self_test_corpus"]
 reason = "the ignored in-language standard-library corpus exceeds the default integration-test budget"
 tracking_issue = "chelis#1824"
+
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "std_json_ctor_cross_module"
+manual_gates = ["std_json_ctor_cross_module cross-module constructor suite"]
+reason = "the ignored cross-module constructor suite exceeds the default inner-loop budget"
+tracking_issue = "chelis#311"
 
 [[manual_gate_target]]
 package = "chelis-cli"
@@ -1126,6 +1332,45 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
 tracking_issue = "chelis#1824"
 
+# chelis#3017: the complete scalar-gradient lane sweep builds and runs 32 C
+# executables. Its standing canary is `issue_1741_scalar_gradient_cli`.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "issue_3017_scalar_gradient_sweep"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "every exact gradient body over the 24-input sweep at f32 and f64 builds one C executable per body and dtype"
+tracking_issue = "chelis#3017"
+# Every test in these two targets is `#![cfg(feature = "smt")]`, so a
+# default-feature listing has none, and the cvc5 they link is provisioned only
+# by the SMT jobs. The nightly full SMT prove runs every smt-gated chelis-prove
+# integration target with the feature.
+[[target_exclusion]]
+package = "chelis-prove"
+name = "issue_1475_sqrt_domain"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#1475"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "transcendental_finance_lowering"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#434"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "standard_contract_discharge_table"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "recomputes every standard-contract fuzz discharge at every float width; a per-pull-request canary in the chelis-prove lib recomputes one row"
+tracking_issue = "chelis#2957"
+
 # These individual heavy rows remain in otherwise selectable targets. Each
 # exact test is removed from package expansion and retains the same unfiltered
 # Linux nightly owner.
@@ -1188,6 +1433,252 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "recursive composite cotangent parity compiles and executes generated C"
 tracking_issue = "chelis#1293"
+
+# The complete Std.Decimal differential corpus and extreme-argument sweep take
+# minutes each on a loaded package-expansion shard; the sweep runs as batches of
+# at most 48 `chelis test` cases so the suite timeout bounds a batch
+# (chelis#3142). Pull-request CI runs a canary of each instead, in the same
+# targets, and the targets' other tests in full; docs/manual_gates.md has the
+# command that runs both complete tests on demand.
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_oracle"
+name = "std_decimal_agrees_with_the_reference_on_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Std.Decimal default differential corpus builds and runs about 200 programs on eval and compiled C"
+tracking_issue = "chelis#2794"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_failures"
+name = "std_decimal_extreme_arguments_raise_no_primitive_trap"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Std.Decimal extreme-argument sweep evaluates 324 calls in seven chelis test runs of at most 48 (chelis#3142)"
+tracking_issue = "chelis#2794"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_properties"
+name = "std_decimal_properties_pass_at_the_default_samples_and_their_false_variants_fail"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "chelis prove compiles the linked program for every sample, guard and shrink step (chelis#3117), so a hundred samples of six Std.Decimal properties and six refutations take tens of CPU minutes; std_decimal_property_canary_passes_and_its_false_variants_fail runs per pull request"
+tracking_issue = "chelis#2946"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_datetime_oracle"
+name = "std_datetime_agrees_with_the_reference_on_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "Std.Datetime eval and compiled C differential over the whole ci corpus; std_datetime_canary_agrees_with_the_reference_on_eval_and_c runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_oracle"
+tracking_issue = "chelis#2970"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_datetime_business_oracle"
+name = "std_datetime_business_agrees_with_the_reference_on_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "Std.Datetime.Business eval and compiled C differential over the full calendar corpus; std_datetime_business_canary_agrees_with_the_reference_on_eval_and_c runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_business_oracle"
+tracking_issue = "chelis#2970"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_datetime_zone"
+name = "std_datetime_zone_agrees_with_zoneinfo_on_eval"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "Std.Datetime.Zone eval differential against zoneinfo over every fixture zone; std_datetime_zone_canary_agrees_with_zoneinfo_on_eval_and_c runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_zone"
+tracking_issue = "chelis#2970"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_datetime_zone"
+name = "std_datetime_zone_agrees_with_zoneinfo_on_c"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "Std.Datetime.Zone compiled C differential against zoneinfo over every fixture zone; std_datetime_zone_canary_agrees_with_zoneinfo_on_eval_and_c runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_zone"
+tracking_issue = "chelis#2970"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_datetime_failures"
+name = "std_datetime_extreme_arguments_raise_no_primitive_trap"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "Std.Datetime extreme-argument sweep, one chelis test case per call; std_datetime_extreme_arguments_canary runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_failures"
+tracking_issue = "chelis#2970"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
 
 # Cargo metadata classifies paths under workspace package roots directly.
 # Shared roots remain fail-closed unless this file records a current,
@@ -1379,6 +1870,21 @@ disposition = "packages"
 packages = ["chelis-e2e"]
 
 [[path_rule]]
+prefix = "examples/construct_alternatives.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/softmax_adjoint.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/scalar_special_values.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
 prefix = "examples/tensor_structural_ops.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
@@ -1460,6 +1966,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "examples/runtime_scalar_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/dropout_staged_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
@@ -1528,6 +2039,31 @@ packages = ["chelis-e2e", "chelis-surf"]
 prefix = "examples/illustrative/mlp.ch"
 disposition = "packages"
 packages = ["chelis-surf"]
+
+# Illustrative sources read by chelis-surf's integration round-trip tests and
+# fmt_idempotent_on_repo_ch_corpus, chelis-e2e::example_corpus_validate, and
+# chelis-cli's cli.rs, which walks the illustrative directory (and copies
+# pipeline.ch by name).
+[[path_rule]]
+prefix = "examples/illustrative/linear_regression.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/pattern_matching.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/pipeline.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/record_input_broadcast.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
 [[path_rule]]
 prefix = "examples/rank_poly_borrow.ch"
@@ -1908,7 +2444,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -1917,10 +2454,15 @@ packages = [
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
 
+# The chelis-std sources are packed by the chelis-std-bundle build script, so
+# the bundle and every package that consumes it own a change here.
 [[path_rule]]
 prefix = "packages/chelis-std/"
 disposition = "packages"
-packages = ["chelis-cli", "chelis-compiler-api", "chelis-reef", "chelis-std-bundle"]
+packages = [
+  "chelis-cli", "chelis-compiler-api", "chelis-e2e", "chelis-prove",
+  "chelis-python", "chelis-reef", "chelis-std-bundle", "chelis-tide",
+]
 
 # The configuration-closure implementation and its adversarial controls execute
 # together in the pull-request script-unit discovery.
@@ -1962,6 +2504,26 @@ cadence = "pull_request and push"
 reason = "the runtime-archive lookup guard's repository scan and planted-lookup controls execute in script-unit"
 tracking_issue = "chelis#1354"
 
+# The single-compile guard scans every Rust file under crates/ and every
+# Python file under scripts/ and .github/scripts/ from its script-unit test.
+[[path_rule]]
+prefix = "scripts/check_single_compile.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the single-compile guard is imported and run against the repository by its script-unit tests"
+tracking_issue = "chelis#2928"
+
+[[path_rule]]
+prefix = "scripts/test_check_single_compile.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the single-compile guard's repository scan and planted double-compile controls execute in script-unit"
+tracking_issue = "chelis#2928"
+
 # Exact implementation paths for the initial chelis#1824 mechanism. These
 # avoid granting authority to unrelated future files under scripts/, .github/
 # or .config/.
@@ -2000,6 +2562,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
 tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ci-cache-warm.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit locks the cache writer's main-only triggers, its single writer per family and its key parity with every consumer (scripts/test_ci_cache_policy.py)"
+tracking_issue = "chelis#3034"
 
 [[path_rule]]
 prefix = ".github/workflows/conformance-nightly.yml"
@@ -2323,6 +2894,15 @@ reason = "script-unit runs through the managed project command launcher and exer
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "devenv/git-hooks.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit parses the hook catalog and the install task for every tracked hook through the Devenv version contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "devenv/toolchains.nix"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2356,6 +2936,24 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit enters the project CI profile before executing runtime and environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the script suite verifies current-interpreter library setup and PyO3 cache identity shared by hosted, Devenv and gate consumers"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs interpreter signature and authoritative library setup regressions"
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
@@ -2402,6 +3000,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit activates the project through the shared setup sequence before its environment handoff regressions"
 tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/actions/vendor/ci/"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "byte-for-byte Chelis-Lang/ci@6afc09f copy; the native Nix job runs the vendored disk reclaim, portable Devenv and build-cache actions, and openspec-store.yml runs the vendored Devenv and store actions on pull requests"
+tracking_issue = "chelis#2867"
 
 [[path_rule]]
 prefix = "scripts/ci_nix_cache_roots.py"
@@ -2458,6 +3065,15 @@ reason = "the macOS workspace shard's Metal smoke builds a Metal host with cheli
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = ".github/scripts/smoke_macos_manifested_callable.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard runs the manifested callable smoke against the generated C ABI with positive execution and negative admission probes"
+tracking_issue = "chelis#2828"
+
+[[path_rule]]
 prefix = "scripts/test_glibc231_workflows.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2465,6 +3081,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit checks the immutable Bullseye producer and release configuration; the Nix CI lane owns its separate runtime proof"
 tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_cvc5_build.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the cvc5 fetch-retry classifier and requires every release.yml smt build to go through the retry wrapper inside a bounded job"
+tracking_issue = "chelis#1004"
 
 [[path_rule]]
 prefix = "scripts/devenv_entry_regression.py"
@@ -2510,6 +3135,60 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the discovered PR script suite executes both hooks' owned-profile, foreign-profile, uv fallback, and truncation regressions"
 tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = ".githooks/pre-commit"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared pre-commit hook's check-only staged-content, sequencer, no-op, interpreter, worktree, cleanup, and truncation controls"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".githooks/pre-push"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared pre-push hook's stale, fresh, skip-notice, no-cargo, worktree, and truncation controls"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".cargo-husky/hooks/pre-commit"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires the cargo-husky pre-commit hook to be byte-identical to the tested shared template"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".cargo-husky/hooks/pre-push"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires the cargo-husky pre-push hook to be byte-identical to the tested shared template"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/regen_hooks.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the regeneration hooks' leg selection, staged-content checks, and push-range checks in temporary clones"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_regen_hooks.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the regeneration hook regressions"
+tracking_issue = "chelis#1868"
 
 [[path_rule]]
 prefix = "scripts/test_bootstrapless_scripts.py"
@@ -2628,6 +3307,24 @@ job = "installed-artifact-canary"
 cadence = "tag push and workflow_dispatch"
 reason = "the release canary installs the shipped toolchain and requires the staged runtime to match the shipped lib archive byte for byte and to come from a sealed build"
 tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/verify_static_nss.py"
+disposition = "owner"
+workflow = "release.yml"
+job = "build-linux-x86_64-static"
+cadence = "tag push and workflow_dispatch"
+reason = "the static Linux build runs its chelis and chelisup host lookups in pinned images whose hosts lines name NSS plugins and refuses a binary the lookup ends with a signal"
+tracking_issue = "chelis#2686"
+
+[[path_rule]]
+prefix = "scripts/test_verify_static_nss.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the static host-lookup check's fail-closed controls: a signal, a lookup the binary never reached, and an image with no plugin witness never pass"
+tracking_issue = "chelis#2686"
 
 [[path_rule]]
 prefix = "scripts/test_installed_artifact_canary.py"
@@ -2963,6 +3660,15 @@ reason = "CI cadence and stable dependency assertions run in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/test_ci_cache_policy.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Rust build cache policy across every workflow runs in script-unit"
+tracking_issue = "chelis#3034"
+
+[[path_rule]]
 prefix = "scripts/gate.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2970,6 +3676,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "gate stage definitions and command construction are exercised by the gate contract suite in script-unit"
 tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ownership_ledger_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit derives the ownership-ledger commands from Cargo metadata and reconciles them against every member manifest"
+tracking_issue = "chelis#2931"
+
+[[path_rule]]
+prefix = "scripts/test_ownership_ledger_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2931"
 
 [[path_rule]]
 prefix = "scripts/test_gate.py"
@@ -3101,6 +3825,42 @@ reason = "The shared runner contract suite executes in script-unit."
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/bench_phase_j.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs test_checkout_arguments, which imports this manual benchmark and checks that its Coral checkout is a required argument"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/build_wrapped_spans_sidecar.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs test_checkout_arguments, which imports this manual generator and checks that its Octant paths derive from the required checkout argument"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/test_checkout_arguments.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/test_reap_orphans.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
 prefix = "scripts/test_nextest_profile_partition.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -3126,6 +3886,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the checked-in rejection registry agreement and offline authority-admission controls execute in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/check_rejection_authority_boundary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the [05-UNS-5] construction-boundary check and its unit tests run in script-unit"
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
@@ -3306,7 +4075,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3322,7 +4092,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3338,6 +4109,24 @@ workflow = "ci.yml"
 job = "lint-rust"
 cadence = "pull_request and push"
 reason = "Clippy policy is executed directly by the standing Rust policy job"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "chelis-lint.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs chelis lint --check ., which loads this repository traversal policy before any rule"
+tracking_issue = "chelis#2867"
+
+[[path_rule]]
+prefix = "scripts/test_pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the pipeline-core dependency guard's fixture-graph unit contracts with the other scripts/test_*.py suites"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
@@ -3359,6 +4148,51 @@ reason = "the Rust-policy lint-and-unit stage scans evaluator modules for direct
 tracking_issue = "chelis#1323"
 
 [[path_rule]]
+prefix = "scripts/check_std_bundle_reproducible.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust-policy lint-and-unit stage runs the chelis-std-bundle build script twice in one fresh target directory, each time in its own output directory, and compares the packed runtimes"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
+prefix = "scripts/test_check_std_bundle_reproducible.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the reproducibility check's output-parsing and comparison controls"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
+prefix = "scripts/check_std_bundle_untracked.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust-policy lint-and-unit stage refuses tracked generated chelis-std files: the dist pairs and locks that record the bundled runtime"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
+prefix = "scripts/test_python_sdist_backend.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the Python sdist backend's chelis-std package controls"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
+prefix = "scripts/test_check_std_bundle_untracked.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the std-bundle tracking guard's positive and negative fixtures"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
 prefix = "scripts/test_eval_system_guard.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3377,30 +4211,13 @@ reason = "the integration-support gate stage executes the focused evaluator boun
 tracking_issue = "chelis#1323"
 
 [[path_rule]]
-prefix = "scripts/regenerate_chelis_std_bundle.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "lint-rust"
-cadence = "pull_request and push"
-reason = "the Rust policy job's lint-and-unit gate stage runs the chelis-std bundle regeneration check twice against the committed outputs"
-tracking_issue = "chelis#1824"
-
-[[path_rule]]
-prefix = "scripts/test_regenerate_chelis_std_bundle.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit executes the bundle regeneration unit tests; the real fixed-point class stays on the nightly script lane"
-tracking_issue = "chelis#1824"
-
-[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3430,25 +4247,7 @@ reason = "the standing compiler_pin_tripwire target checks the live compiler pin
 tracking_issue = "chelis#2027"
 
 [[path_rule]]
-prefix = "examples/nautilus_quantile_contract/reef.lock"
-disposition = "owner"
-workflow = "ci.yml"
-job = "ci-fast"
-cadence = "pull_request and push"
-reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
-tracking_issue = "chelis#2027"
-
-[[path_rule]]
 prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "ci-fast"
-cadence = "pull_request and push"
-reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
-tracking_issue = "chelis#2027"
-
-[[path_rule]]
-prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"
 disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"
@@ -3689,7 +4488,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3765,6 +4565,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_compiled_host_effect_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "compiled host-effect oracle source contracts and leg definitions execute in the script unit suite"
+tracking_issue = "chelis#1297"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_compiled_host_effect_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "compiled host-effect oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1297"
 
 [[path_rule]]
 prefix = "scripts/dtype_relu_oracle.py"
@@ -3903,6 +4721,18 @@ prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# Exact sources exercised by the native program/library parity cases and the
+# chelis-e2e executable example corpus.
+[[path_rule]]
+prefix = "examples/native_program.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/native_library.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 [[path_rule]]
 prefix = ".github/workflows/secret-scan.yml"
 disposition = "owner"
@@ -3956,3 +4786,30 @@ job = "secret-scan"
 cadence = "pull_request and push"
 reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
 tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = "examples/linspace.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/literal_ascriptions.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# Opt-in axis experiment; script-unit also discovers its paired helper tests.
+
+[[path_rule]]
+prefix = "scripts/axis_oracle_comparison.py"
+disposition = "packages"
+packages = ["chelis-axis-core"]
+
+[[path_rule]]
+prefix = "scripts/test_axis_oracle_comparison.py"
+disposition = "packages"
+packages = ["chelis-axis-core"]
+
+[[path_rule]]
+prefix = "scripts/test_axis_proof_tools.py"
+disposition = "packages"
+packages = ["chelis-axis-core"]

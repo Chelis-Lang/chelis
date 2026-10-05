@@ -2,6 +2,7 @@
 
 use chelis_deep::parser::parse_str_strict as deep_parse_strict;
 use chelis_deep::printer::print_canonical;
+use chelis_deep::{Atom, DeepTag, Expr, ExprCarrier};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 
@@ -266,9 +267,19 @@ fn wildcard_dimension_desugars_to_d_name_star() {
 fn typed_def_emits_defsig() {
     let decls = surf_parse("def f(x: f32) -> f32 = x").unwrap();
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-    let text = print_canonical(&deep);
-    assert!(text.contains("(defsig {} f"), "Missing defsig in:\n{text}");
-    assert!(text.contains("(def {}\n  f"), "Missing def in:\n{text}");
+    assert!(
+        matches!(
+            deep.as_slice(),
+            [signature, definition]
+                if matches!(signature.carrier(), ExprCarrier::DecodedNode(
+                    DeepTag::Defsig, _, [Expr::Atom(Atom::Name(name), _), ..]
+                ) if name == "f")
+                && matches!(definition.carrier(), ExprCarrier::DecodedNode(
+                    DeepTag::Def, _, [Expr::Atom(Atom::Name(name), _), ..]
+                ) if name == "f")
+        ),
+        "a typed declaration must emit its matching signature and body: {deep:#?}"
+    );
 }
 
 #[test]
@@ -366,93 +377,32 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
     );
 }
 
-// === Bare-keyword pipe stages (Item 2b / G11) ===
-//
-// The pipe-stage parser at `parser.rs::parse_pipe_stage` recognizes bare
-// unary-builtin keyword tokens (`Realize`, `Copy`) and synthesizes an
-// explicit lambda over a fresh `__chelis_pipe` parameter, so the
-// desugarer produces the canonical `(pipe ... (fn (v) -> (realize v)))`
-// Deep shape per spec `01-nomenclature.md` §3.6 first-argument insertion.
-//
-// Only the unary builtins have spec-meaningful bare pipe-stage form;
-// keywords taking additional arguments (`grad`, `vmap`, `cast`, `jit`,
-// `with`) keep their existing arg-form behavior, and the structural forms
-// (`if`, `match`, `fn`, `par`) keep their existing rejection — see
-// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
-
+// Bare keyword stages normalize directly to their ordinary Deep operations.
 #[test]
 fn bare_realize_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
-    let decls = surf_parse(src).expect("bare `|> realize` should parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let deep = desugar_program(&surf_parse(src).unwrap()).unwrap();
     let text = print_canonical(&deep);
-    // Canonical desugar: pipe with a synthesized unary lambda calling
-    // the unary builtin on the piped value.
-    assert!(
-        text.contains("(pipe {"),
-        "expected pipe node in desugared output, got:\n{text}"
-    );
-    assert!(
-        text.contains("__chelis_pipe") && text.contains("realize"),
-        "expected synthesized lambda body `(realize {{}} (var {{}} __chelis_pipe))`, got:\n{text}"
-    );
-    assert!(
-        text.contains("(params {} __chelis_pipe)"),
-        "expected fresh `__chelis_pipe` param, got:\n{text}"
-    );
-    // Deep round-trips with strict tag validation.
-    let reparsed = deep_parse_strict(&text).expect("synthesized lambda Deep validates");
-    assert_eq!(text, print_canonical(&reparsed));
+    assert!(text.contains("(realize {"));
+    assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
+    assert_eq!(text, print_canonical(&deep_parse_strict(&text).unwrap()));
 }
 
 #[test]
 fn bare_copy_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy";
-    let decls = surf_parse(src).expect("bare `|> copy` should parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-    let text = print_canonical(&deep);
-    assert!(
-        text.contains("(pipe {"),
-        "expected pipe node in desugared output, got:\n{text}"
-    );
-    // Synthesized lambda over the piped value: `(fn ... (params __chelis_pipe)
-    // (copy ... (var ... __chelis_pipe)))`. Metadata maps carry source spans
-    // so we match on the structural body rather than literal `{}` markers.
-    assert!(
-        text.contains("(params {} __chelis_pipe)"),
-        "expected fresh `__chelis_pipe` param, got:\n{text}"
-    );
-    assert!(
-        text.contains("(copy {") && text.contains("(var {") && text.contains("__chelis_pipe))"),
-        "expected `(copy {{...}} (var {{...}} __chelis_pipe))` body, got:\n{text}"
-    );
-    let reparsed = deep_parse_strict(&text).expect("synthesized lambda Deep validates");
-    assert_eq!(text, print_canonical(&reparsed));
+    let text = print_canonical(&desugar_program(&surf_parse(src).unwrap()).unwrap());
+    assert!(text.contains("(copy {"));
+    assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
+    assert_eq!(text, print_canonical(&deep_parse_strict(&text).unwrap()));
 }
 
 #[test]
 fn chained_bare_keyword_with_named_pipe_stages_parses() {
-    // Mixed pipe: bare keyword stage chained with a regular named-function
-    // stage. Exercises the pipe-loop boundary (the parser must not consume
-    // the next `|>` while parsing the bare keyword stage).
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu";
-    let decls = surf_parse(src).expect("chained bare-keyword + named pipe should parse");
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-    let text = print_canonical(&deep);
-    assert!(
-        text.contains("(pipe {"),
-        "expected pipe node in desugared output, got:\n{text}"
-    );
-    // The bare-keyword stage produces the synthesized lambda.
-    assert!(
-        text.contains("__chelis_pipe") && text.contains("realize"),
-        "expected bare-realize stage to expand to lambda body, got:\n{text}"
-    );
-    // The named-ident stage must remain a `var` reference (no lambda wrap).
-    assert!(
-        text.contains("relu)") && !text.contains("relu __chelis_pipe"),
-        "expected named-ident pipe stage `(var ... relu)` to survive (no lambda wrap), got:\n{text}"
-    );
+    let text = print_canonical(&desugar_program(&surf_parse(src).unwrap()).unwrap());
+    assert!(text.contains("(realize {") && text.contains("relu)") && text.contains("(app {"));
+    assert!(!text.contains("(pipe {") && !text.contains("__chelis_pipe"));
 }
 
 #[test]
@@ -472,10 +422,10 @@ fn keyword_with_arg_form_in_pipe_stage_still_parses() {
         text.contains("(cast {"),
         "expected (cast {{...}} ...) in:\n{text}"
     );
-    // The bare-realize stage still synthesizes the canonical lambda body.
+    // The bare-realize stage normalizes to its ordinary operand.
     assert!(
-        text.contains("__chelis_pipe"),
-        "expected synthesized __chelis_pipe param, got:\n{text}"
+        !text.contains("__chelis_pipe") && text.contains("(realize {"),
+        "expected direct realize operand without a synthetic binder, got:\n{text}"
     );
 }
 
@@ -540,7 +490,7 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
 // The pipe-stage fix in Item 2b (`parse_pipe_stage` synthesizes a lambda
 // for `x |> realize` / `x |> copy`) intentionally left three sibling
 // surfaces out of scope; see the "Sibling sweep" table in
-// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`:
+// `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`:
 //
 // H1: top-level bare unary-builtin reference, e.g. `f = realize`.
 // H2: bare unary-builtin keyword as juxtaposition argument, e.g.
@@ -549,7 +499,7 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
 //     per spec §3.6 ≡ `cast(x, f32)`.
 //
 // These three fixtures pin the failures. They flip to running in the
-// fix commit (see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+// fix commit (see `docs/archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
 
 #[test]
 fn top_level_bare_unary_builtin_reference_parses() {
@@ -601,8 +551,8 @@ fn one_arg_cast_pipe_stage_parses() {
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
-        text.contains("(pipe {"),
-        "expected pipe node in lowered output, got:\n{text}"
+        !text.contains("(pipe {"),
+        "pipe must normalize before lowering, got:\n{text}"
     );
     assert!(
         text.contains("(cast {"),
@@ -688,7 +638,7 @@ fn with_device_desugars_to_handle_effect() {
 // The fix changes the formatter's emit path for multi-stage pipes so the
 // chosen layout survives a parse/emit cycle. These tests flip to running in
 // the fix commit; see
-// `docs/investigations/fmt_pipe_idempotency_diagnosis.md`.
+// `docs/archive/investigations/fmt_pipe_idempotency_diagnosis.md`.
 
 /// `fmt(fmt(src))` must equal `fmt(src)`. Asserts a fixed point of the Surf
 /// formatter for the given Surf source.
@@ -770,7 +720,14 @@ fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
 }
 
 fn discover_repo_ch_files(root: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    const GENERATED_DIRECTORIES: &[&str] = &[".devenv", ".git", ".venv", "node_modules", "target"];
+    const GENERATED_DIRECTORIES: &[&str] = &[
+        ".devenv",
+        ".git",
+        ".venv",
+        ".worktrees",
+        "node_modules",
+        "target",
+    ];
 
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -816,7 +773,14 @@ fn repo_ch_corpus_discovery_excludes_generated_and_symlinked_trees() {
     let external = tempfile::tempdir().expect("external fixture");
     std::fs::write(root.path().join("real.ch"), "def real() -> i32 = 1\n")
         .expect("write repository source");
-    for generated in [".devenv", ".venv", "target", "node_modules", ".git"] {
+    for generated in [
+        ".devenv",
+        ".venv",
+        "target",
+        "node_modules",
+        ".git",
+        ".worktrees",
+    ] {
         let directory = root.path().join(generated);
         std::fs::create_dir_all(&directory).expect("create generated directory");
         std::fs::write(directory.join("generated.ch"), "not repository source")

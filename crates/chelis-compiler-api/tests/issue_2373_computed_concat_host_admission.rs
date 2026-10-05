@@ -1,4 +1,8 @@
 //! #2373: a computed tensor retains its checked concat geometry at admission.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 use chelis_compiler_api::compiler::{check, eval};
 use chelis_compiler_api::schema::{CheckRequest, EvalRequest, ExecutionValue, SourceKind};
@@ -300,11 +304,12 @@ fn invalid_concat_list_rank_dtype_and_non_axis_extent_stay_loud() {
     for (source, expected) in [
         (
             "parts: List[tensor[2, 2, f32]] = []\noutput = concat(parts, 1i32)\n",
-            "concat expects at least one tensor part",
+            "concat received no tensor parts\nnumeric trap: domain in concat at i64",
         ),
         (
             "output = concat([to_tensor([[1.0f32], [2.0f32]]), to_tensor([[3.0f32]])], 1i32)\n",
-            "concat expects matching non-concatenated axes; axis 0 differed",
+            "concat parts disagree at axis 0: part 0 has 2, part 1 has 1\n\
+             numeric trap: domain in concat at i64",
         ),
     ] {
         let checked = check(CheckRequest {

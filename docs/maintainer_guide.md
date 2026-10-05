@@ -1,0 +1,145 @@
+# Maintainer guide
+
+Chelis is being built in the open with coding agents and human review.
+This file defines the minimum documentation and contribution rules needed to keep the
+repo coherent.
+
+## Documentation Hierarchy
+
+For project-level questions, follow the authority order in
+[AGENTS.md](../AGENTS.md#documentation-authority). The numbered chapters
+(`spec/00-12*.md`) decide language semantics, types, syntax, diagnostics, CLI
+behavior, and other user-visible contracts. `spec/design/*.md` explains
+implementation and sequence; it does not decide language rules. See
+[Numbered Specs Decide; Design Docs Implement](../AGENTS.md#numbered-specs-decide-design-docs-implement).
+Correct the controlling document when active docs disagree instead of adding
+another explanation.
+
+## Agent Guidance
+
+Shared agent instructions live in `AGENTS.md`.
+`CLAUDE.md` should resolve to the same content so Claude-style and Codex-style workflows
+use one canonical rule set.
+
+Project-local reusable agent skills live in `agent-skills/`.
+`.claude/skills` and `.codex/skills` should resolve to that same directory.
+`.claude/commands/` and `.codex/commands/` stay byte-identical.
+
+## Doc Authoring Rules
+
+- Prefer current-state descriptions over pathfinding history.
+- Keep settled decisions in active docs and historical debate in archived docs.
+- Do not describe rejected options as if they are still live.
+- Do not over-specify unimplemented formats or protocols unless a dedicated spec owns
+  them.
+- When a new doc duplicates an existing active doc, merge or delete rather than keeping
+  parallel canon.
+- Avoid introducing em dashes in new active-doc prose. When cleaning
+  one up, prefer a sentence split, colon, parentheses, comma,
+  semicolon, or ASCII ` - ` where that is the clearest punctuation.
+
+## Code and Spec Changes
+
+- Read the relevant spec before editing code.
+- Update tests with behavior changes.
+- Update the owning doc when a public language or compiler behavior changes.
+- Do not revert unrelated work already present in the repo.
+
+## Changelog Fragments
+
+Behavior-changing PRs add a Markdown fragment to `changelog.d/`. Use a filename
+such as `parser_errors.fixed.md` or `1625.changed.breaking.md`, and write the
+entry without its outer bullet. Correct pending fragments when later changes
+invalidate their claims. Reserve `CHANGELOG.md` for release assembly.
+
+The required `Changelog` CI check rejects missing or invalid fragments and
+direct changelog edits outside release assembly. Use `no-changelog` for internal
+work with no release-note value; this suppresses only the missing-fragment
+requirement. The [fragment contract](../changelog.d/README.md) has authoring examples,
+the release commands, and the acceptance oracle.
+
+## Declarative Naming
+
+Use declarative or informational names for branches, commits, plans, tests, files, and
+other artifacts. Name the capability, behavior, invariant, or deliverable they contain;
+a reader should understand the subject without first finding a roadmap that explains
+an opaque sequence label.
+
+Do not use `phase`, `tier`, `stage`, `milestone`, `step`, `item`, or a bare
+letter/number as the primary identity. A sequencing label may appear as secondary
+tracking context when it is genuinely useful, but it never substitutes for a semantic
+name.
+
+Branch names use a conventional-commit type prefix (`feat`, `fix`, `test`, `docs`,
+`style`, `chore`, or `refactor`) followed by a descriptive kebab-case slug:
+
+```text
+feat/json-serialization
+fix/runtime-shape-validation
+docs/timeless-spec-contracts
+```
+
+Avoid names such as `feat/phase-a-item6`, `fix/tier-2`, or `docs/phase3j`: they record
+position but not purpose. When a historical artifact must retain a phase identifier
+for cross-reference compatibility, use the surrounding surface's normal case
+(`phase_a` in a snake-case filename). This is a legacy compatibility rule, not
+authorization for new phase-based names.
+
+## Repo Gate (before every push)
+
+`scripts/gate.py` is the single source of truth for the per-PR
+developer-runnable gate; CI runs the same commands. `--fast` is the pre-push
+gate: fix-in-place, run before every push. Applicable CI checks on the pushed
+candidate must pass before ready-for-review. `--validation` is optional, for
+troubleshooting or additional local validation:
+
+```sh
+python3 scripts/gate.py --fast
+python3 scripts/gate.py --validation  # optional
+```
+
+`scripts/gate.py` is stdlib-only and re-executes itself through this
+checkout's own interpreter, or through uv when there is none and `python3` is
+not already a uv- or Devenv-managed runtime, so that form is correct in every
+environment; every other script is invoked as
+`.venv/bin/python scripts/<name>.py`.
+
+Push before requesting review; the review runs against the pushed head
+while CI runs on it. The full workspace test suite is CI-owned: open a draft
+PR early and let CI run it. Pull requests run on Linux; the macOS workspace
+suite runs nightly and on manual dispatch
+([CI validation cadence](ci_validation.md)).
+See [contributor setup](contributor_setup.md) for the toolchain the gate
+needs (rustup, cargo-nextest, and the uv-managed Python 3.11 venv).
+
+## Style Gate (every build, every PR)
+
+`chelis build`, `chelis check`, `chelis validate`, and
+`chelis eval --file` enforce `chelis fmt --check` and `chelis lint --check`
+on the input file before the front-end pipeline runs. Blocking style
+failures block the build by default. Advisory lint warnings report
+valid-but-non-preferred source and do not fail `lint --check` or the
+built-in gate. Before opening a PR:
+
+1. Run `chelis fmt --inplace path/to/file.ch` (or `.dp`) on every file
+   you touched, or rely on your editor formatter.
+2. Run `chelis lint --check` to surface naming/style issues.
+3. Re-run `chelis check` and `chelis build` on the affected entry point.
+
+The escape hatch `--allow-style-violations` exists for local emergency
+builds and migrations. It bypasses only the style gate, not parse,
+type, effect, validation, evaluation, or backend errors. CI must not
+pass it. The
+`CHELIS_STYLE_GATE_DISABLE=1` environment variable bypasses the gate
+entirely; it is reserved for the integration-test corpus and is not
+appropriate for production builds.
+
+For lint triage, distinguish **allow** from **keep**. Allow means the
+form is accepted project style and should not be reported. Keep means
+existing checked-in source may remain for compatibility or baseline
+evidence, while new human-facing source should use the preferred form.
+
+The style guide that the gate enforces lives in
+`spec/01-nomenclature.md`. The lint rules that codify it live under
+`crates/chelis-lint/src/rules/`. The user-facing CLI documentation
+lives at `docs/book/src/cli.md`.

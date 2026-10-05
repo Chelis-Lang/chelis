@@ -257,6 +257,9 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 | RiscOp::Cos
                 | RiscOp::Tan
                 | RiscOp::Atan
+                | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Abs
                 | RiscOp::Floor
                 | RiscOp::Ceil
@@ -297,6 +300,21 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
+    if dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::Softmax { .. }))
+    {
+        return Err(Unsupported::new(
+            UnsupportedKind::Op("softmax".into()),
+            "undecomposed softmax reached Metal emission",
+            Stage::Codegen("metal"),
+            chelis_types::deliberate_rejection!(
+                "[05-OP-48]",
+                "prepare the retained softmax identity after AD and before ownership/codegen"
+            ),
+        ));
+    }
     reject_direct_nonnumeric(dag)?;
     reject_guarded_fail(dag)?;
     reject_f64(dag)?;
@@ -999,6 +1017,9 @@ impl<'plan> Emitter<'plan> {
             }
 
             // Unary elementwise (M2 first cut).
+            RiscOp::Softmax { .. } => {
+                Err("undecomposed softmax cannot reach Metal emission".into())
+            }
             RiscOp::Neg
             | RiscOp::Exp
             | RiscOp::Log
@@ -1007,6 +1028,9 @@ impl<'plan> Emitter<'plan> {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -1463,6 +1487,9 @@ impl<'plan> Emitter<'plan> {
                 | RiscOp::Cos
                 | RiscOp::Tan
                 | RiscOp::Atan
+                | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Sqrt
                 | RiscOp::Relu
         );

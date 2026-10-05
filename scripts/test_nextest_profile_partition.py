@@ -63,6 +63,7 @@ NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import ci_change_owned  # noqa: E402
 import dtype_oracle_manifest  # noqa: E402
 
 
@@ -130,10 +131,33 @@ CENSUS_SELECTOR = (
     "binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
     "binary_id(/^chelis-python::capacity_census_bindings$/)"
 )
-GENERALIZATION_PR_FILTER = (
-    f"not ({CENSUS_SELECTOR} | {NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
-    f"({NIGHTLY_RECURSIVE_SELECTOR}))"
+HEAVY_E2E_YML = REPO_ROOT / ".github" / "workflows" / "heavy-e2e.yml"
+MODULE_ORACLES_FILTERSET = "${{ needs.module-oracles-plan.outputs.filterset }}"
+GENERALIZATION_LANE_PREFIX = (
+    "cargo nextest run --workspace --profile ci-full --ignore-default-filter "
+    "--features chelis-types/generalize-sweep-oracle --no-fail-fast -E '"
 )
+
+
+def _module_oracles_filterset() -> str:
+    """The filterset `module-oracles-plan` derives in CI."""
+    config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+    return ci_change_owned.module_oracles_filterset(config)
+
+
+def _generalization_pr_filter() -> str:
+    """The generalization lane's `-E` filter as the workflow runs it.
+
+    Read from `heavy-e2e.yml` with the planned module-oracles filterset
+    substituted, so this listing selects exactly what the shards run.
+    """
+    text = HEAVY_E2E_YML.read_text()
+    filters = re.findall(re.escape(GENERALIZATION_LANE_PREFIX) + r"([^']*)'", text)
+    if len(filters) != 1:
+        raise AssertionError(
+            f"expected one generalization lane command, found {len(filters)}"
+        )
+    return filters[0].replace(MODULE_ORACLES_FILTERSET, _module_oracles_filterset())
 CONTENDED_DEADLINE_RETRY_SELECTOR = (
     "binary_id(/^chelis-cli::test_suite_timeout$/) & "
     "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
@@ -159,6 +183,20 @@ def _cargo_environment(
 
 class FilterTextTests(unittest.TestCase):
     """No-compile lock on the three filter blocks' text."""
+
+    def test_module_oracle_exclusion_check_rejects_absent_or_selected_tests(self):
+        module = _module_oracle_test_names()
+        excluded = {name: ("mismatch", False) for name in module}
+        _assert_module_oracles_listed_and_excluded(excluded, module)
+        absent = {"chelis-cli::other::test": ("matches", False)}
+        with self.assertRaisesRegex(AssertionError, "absent from the listing"):
+            _assert_module_oracles_listed_and_excluded(absent, module)
+        selected = dict(excluded)
+        selected[min(module)] = ("matches", False)
+        with self.assertRaisesRegex(AssertionError, "selects module-oracle tests"):
+            _assert_module_oracles_listed_and_excluded(selected, module)
+        with self.assertRaisesRegex(AssertionError, "no module-oracles"):
+            _assert_module_oracles_listed_and_excluded(absent, set())
 
     def test_nextest_toml_exists(self):
         self.assertTrue(NEXTEST_TOML.is_file(), f"missing {NEXTEST_TOML}")
@@ -377,6 +415,30 @@ def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _module_oracle_test_names() -> set[str]:
+    """The canonical names of the tests the `module-oracles` job owns."""
+    config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+    return {identity.canonical for identity in ci_change_owned.module_oracle_tests(config)}
+
+
+def _assert_module_oracles_listed_and_excluded(
+    listing: dict[str, tuple[str, bool]], module: set[str]
+) -> None:
+    """Every module-oracle test is in the listing, and none is selected.
+
+    Presence comes first: a listing keyed differently from the canonical
+    names would otherwise pass the disjointness check vacuously.
+    """
+    if not module:
+        raise AssertionError("no module-oracles test exclusion is configured")
+    missing = sorted(module - set(listing))
+    if missing:
+        raise AssertionError(f"module-oracle tests absent from the listing: {missing}")
+    selected = sorted(name for name in module if listing[name][0] == "matches")
+    if selected:
+        raise AssertionError(f"the generalization lane selects module-oracle tests: {selected}")
+
+
 def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
     """List the exact explicit-filter scope used by the PR generalization lane."""
     cmd = [
@@ -392,7 +454,7 @@ def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
         "--message-format",
         "json",
         "-E",
-        GENERALIZATION_PR_FILTER,
+        _generalization_pr_filter(),
     ]
     result = subprocess.run(
         cmd,
@@ -514,7 +576,7 @@ class ProfilePartitionTests(unittest.TestCase):
         }
 
     def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
-        from scripts import ci_test_targets, gate
+        from scripts import ci_test_targets, gate, ownership_ledger_tests
         metadata = json.loads(subprocess.run(
             ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
             cwd=REPO_ROOT, check=True, capture_output=True, text=True,
@@ -550,7 +612,13 @@ class ProfilePartitionTests(unittest.TestCase):
                             for suite in full["rust-suites"].values()
                             for info in suite["testcases"].values() if not info["ignored"]))
         # Each gated standing target also runs in the gate's integration
-        # stage with exactly its features.
+        # stage with exactly its features. The gate runs the ownership-ledger
+        # targets through `ownership_ledger_tests.py`, which derives its
+        # cargo command from Cargo metadata, so compare that derived command.
+        def resolved(command):
+            if command[1:2] == ["scripts/ownership_ledger_tests.py"]:
+                return ownership_ledger_tests.ledger_command(command[2], metadata)
+            return command
         def gated(commands):
             return {
                 (command[command.index("-p") + 1],
@@ -559,7 +627,8 @@ class ProfilePartitionTests(unittest.TestCase):
                 if "-p" in command and "--features" in command
                 for index, value in enumerate(command) if value == "--test"
             }
-        self.assertLessEqual(gated(selections), gated(gate.STAGES["integration"]))
+        integration = [resolved(command) for command in gate.STAGES["integration"]]
+        self.assertLessEqual(gated(selections), gated(integration))
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
@@ -699,6 +768,23 @@ class ProfilePartitionTests(unittest.TestCase):
         self.assertLessEqual(census, active(self.dtype_flat))
         self.assertEqual(active(_list_filterset(f"not ({CENSUS_SELECTOR})")), full - census)
 
+    def test_linux_workspace_and_module_oracles_cover_the_module_oracle_tests(self):
+        # `full-workspace` also negates the module-oracles filterset that
+        # `ci_change_owned.py module-oracles` derives from the test
+        # exclusions, and `module-oracles` runs each of those tests. The
+        # filterset must name exactly those tests, each one an active test.
+        active = lambda listing: {k for k, (status, ignored) in listing.items() if status == "matches" and not ignored}
+        full = active(self.full)
+        config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+        tests = ci_change_owned.module_oracle_tests(config)
+        filterset = ci_change_owned.module_oracles_filterset(config)
+        module = active(_list_filterset(filterset))
+        self.assertEqual(module, {identity.canonical for identity in tests})
+        self.assertLessEqual(module, full)
+        census = {k for k in full if k.startswith(("chelis-compiler-api::capacity_census_wire::", "chelis-python::capacity_census_bindings::"))}
+        workspace = active(_list_filterset(f"not ({CENSUS_SELECTOR} | {filterset})"))
+        self.assertEqual(workspace, full - census - module)
+
     def test_every_profile_serializes_exactly_the_shared_target_owners(self):
         profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])
         self.assertIn("builtin-atom-closure", profiles)
@@ -752,6 +838,14 @@ class GeneralizationPartitionTests(unittest.TestCase):
             self.generalization_pr,
             "the generalization PR selector must exclude the entire "
             "nightly-owned cache-concurrency binary",
+        )
+
+    def test_module_oracle_tests_are_excluded_from_generalization(self):
+        # The `module-oracles` job owns these tests and their budget; the
+        # generalization shards negate the same derived filterset
+        # (chelis#3100).
+        _assert_module_oracles_listed_and_excluded(
+            self.generalization_pr, _module_oracle_test_names()
         )
 
 

@@ -58,11 +58,11 @@ Recorded so the next reader does not have to re-derive it:
    C-scalar does not ([#718]); prove's interpreter collapses what the SMT
    tier keeps exact ([#688]). "Make X match Y" is undefined when no Y holds
    the semantics.
-3. **Dtype discipline is the language's stated value proposition.** The
+3. **Dtype discipline is the language's stated core commitment.** The
    spec's differentiators - no implicit precision promotion, explicit
    casts, named dimensions - are precision-centric promises. A numeric
    layer with no grounded notion of `f16` or `i8` contradicts the
-   product's own core claim.
+   language's own core claim.
 
 ## Non-goals
 
@@ -70,9 +70,9 @@ Recorded so the next reader does not have to re-derive it:
   and fallback discipline, `numeric_audit_structural_prevention.md` item 3)
   or [#709] (checker holes - item 5). Those are cheaper, independent, and
   must not wait for this.
-- **Not** a numerics-accuracy project. Transcendental ulp bounds ([#719]'s
-  vvsqrtf, SLEEF vs libm differences) get a documented per-op tolerance
-  table as part of the formatting/oracle contract (§C4), not new kernels.
+- **Not** a numerics-accuracy project. The transcendentals are correctly
+  rounded under [05-OP-46], and the compiler-owned kernels that implement
+  them are designed in `spec/design/correctly_rounded_math.md`, not here.
 - **Not** a general change to surface syntax or user-facing checker rules.
   Phase 1 authors and enforces the already-decided integer-`mean` [#724]
   and bool-arithmetic [#726] cells through [#860]'s operand-dtype
@@ -325,10 +325,11 @@ the layer list by enumerating every public channel that carries numeric values
 value ADTs, exported stdlib definitions, and published runtime-header exports
 - and the storage decision covers all of them in one change set. The final JSON
 surface has one public value identity: `io/json::Json` with tagged
-`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
+`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64, string)` variants under
 [05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-i64-range
 integer-form token's exact decimal spelling, so parse totality never buys a
-float image ([#1314] owns the implementation).
+float image ([#1314] owns the implementation), and the float variant keeps its
+token's exact text beside the rounded f64.
 [#1293] removes the duplicate prelude `Json`/`JInt`/`JNum` surface and moves CSV
 to its untyped text-table contract before Phase 4C. §C6 owns the standing guard
 that keeps this census from silently growing stale.
@@ -486,25 +487,20 @@ identical bytes):
 4. **`print`, `to_list`, diagnostics, and the wire schema agree** with the
    stored bits and each other. Acceptance is literal: for every dtype,
    dump the same tensor through all exits in both lanes and diff bytes.
-5. **The transcendental tolerance table.** Where lanes legitimately differ
-   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the per-op bound is
-   authored in `spec/05-risc-primitives.md` §8 and represented by
-   `chelis_types::agreement::OP_TOLERANCES`; the [#687] oracle consults that
-   machine form. `sqrt` is required correctly rounded ([#719]) and therefore
-   has an explicit zero-bound row. A row is eligible only when both lanes
+5. **The transcendental tolerance table.** No lane legitimately differs in
+   VALUE: the transcendentals are correctly rounded ([05-OP-46];
+   `spec/design/correctly_rounded_math.md`), so the table grants no bound and
+   has no rows. The table is authored in `spec/05-risc-primitives.md` §8 and
+   represented by `chelis_types::agreement::OP_TOLERANCES`; the [#687] oracle
+   consults that machine form. `sqrt` is required correctly rounded ([#719])
+   like the transcendentals. A row would be eligible only when both lanes
    compute at [04-NUM-8]'s declared arithmetic width; [#897]'s current eval
    float path is not eligible. A differing f16/bf16 result additionally
    requires both pre-final f32 bit patterns and evidence that each rounds to
    its observed stored value; finalized strings alone do not prove an f32 ULP
    distance. Formatting itself never has tolerance.
-   The Phase 1 `f64` `tan`/`exp` cross-lane controls use `1e-12` only as an
-   implementation-chosen test margin: macOS and glibc differed by one ulp in
-   the observed repros, while the defect those controls detect (computing an
-   `f64` program through `f32`) differs by roughly `1e-7`. `1e-12` was an
-   arbitrary separating margin, not a language decision, not an
-   [05-OBS-3] tolerance row, and not authority for another operation. Those
-   controls are looser than the authored `tan`/`exp` rows and remain
-   implementation controls; they are not the [05-OBS-3] oracle.
+   The Phase 1 `f64` `tan`/`exp` cross-lane controls compare the lanes byte
+   for byte, like every other operation.
 6. **Containers and scalar roots** (decided with [#732] Phase 1, identical
    to its §C1.5; ratified as [05-OBS-4]/[05-OBS-5]): a scalar-typed value
    renders as the BARE scalar at every exit in both lanes, including as a
@@ -595,20 +591,21 @@ integration tier, not the workspace loop.
 **Current enforcement status.** The primary census enforces canonical C
 identities, complete published-header attribution, conservative arithmetic
 classification, configuration-invariant declarations, and exact semantic
-registrations for numeric callables and stdlib constructors. Its 313 rows have
-final authority; none uses an exception disposition. The stdlib closure resolves
+registrations for numeric callables and stdlib constructors. Every one of its rows
+has final authority; none uses an exception disposition. The stdlib closure resolves
 imported and generic nominal types to a finite fixed point and rejects unresolved
-names. Its execution controls preserve the 73 exact [05-OP-35] identities.
+names. Its execution controls preserve every exact [05-OP-35] registry identity.
 
 The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
-compiled serialization obligations. The executed baseline's 100 numeric leaves
-have final authority: 82 verified transports and 18 exact numeric-operation
-registrations. WireDag v23 includes the u64 shape-dependency reference, the
+compiled serialization obligations. The executed baseline's 101 numeric leaves
+have final authority: 82 verified transports and 19 exact numeric-operation
+registrations. WireDag v25 includes the u64 shape-dependency reference, the
 opaque u64 local-ascription identity, the fixed-int64 extent carrier's
 literal-witness requirement role, and the three indexed-tensor `batch_rank`
 operations. The wire
-baseline has no frozen cohort or static-descriptor admission path. Every new or
+baseline includes the retained Softmax axis under [05-OP-48] and has no frozen
+cohort or static-descriptor admission path. Every new or
 changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
 or `NumericOperation(atom)`; a citation or maintainer override cannot supply
 missing authority.
@@ -954,13 +951,13 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The primary baseline has completed that landing rule: its 313 discovered
-   rows have final authority as 74 exact nonnumeric rows, 16 exact tagged
-   carriers/transports, and 223 exact numeric-operation registrations. It has
+   The primary baseline has completed that landing rule: every discovered row
+   has final authority as an exact nonnumeric row, an exact tagged carrier or
+   transport, or an exact numeric-operation registration. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
-   100 final rows (82 verified transports and 18 numeric operations), with no
-   legacy cohort. Fresh actual verification includes WireDag v23's u64
+   101 final rows (82 verified transports and 19 numeric operations), with no
+   legacy cohort. Fresh actual verification includes WireDag v25's u64
    shape-dependency and local-ascription-identity transports, the fixed-extent
    literal-witness role, and the three indexed-tensor `batch_rank` operations.
    Nine binding rows have final nonnumeric authority, seven rows have final
@@ -1134,8 +1131,8 @@ Deliverables, with phase homes:
      an open issue. The final control instead rejects that addition because
      the new constructor identity has no exact operation registration; the
      paired integer and float mutations prove the rule uniformly. The
-     source-faithful `JsonInt(i64)` and `JsonFloat(f64)` variants are both
-     wanted tagged numeric operations, not carrier seams.
+     source-faithful `JsonInt(i64)` and `JsonFloat(f64, string)` variants are
+     both wanted tagged numeric operations, not carrier seams.
      The def leg reads capacity off the DECLARED signature, so an
      exported `def` that declares none is public numeric surface the
      census cannot see. That case used to produce no row and no
@@ -1164,7 +1161,7 @@ Deliverables, with phase homes:
      dtype bounds and the existing precision-name backstop remain capacity;
      an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
      in `capacity_census_tripwire` exercise these boundaries and preserve the
-     existing 73 definitions and four ADT identities. This is declared-surface
+     registered definitions and ADT identities. This is declared-surface
      evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
@@ -1333,7 +1330,7 @@ Named non-goals, each with its owner, so coverage is never inferred:
   defend, and no checker can govern a conversion whose source type is
   not in the program. The fix is still type-system-shaped: TYPE THE
   BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
-  precedent (`JsonInt(i64)` beside `JsonFloat(f64)`; JSON syntax
+  precedent (`JsonInt(i64)` beside `JsonFloat(f64, string)`; JSON syntax
   distinguishes the two, so a parse that erases it discards
   information the source format carried) - after which the checker
   governs everything downstream and the [#759] discipline covers the
@@ -1666,9 +1663,9 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 4 and WireDag version 23 are
+**Current integration state.** Execution version 4 and WireDag version 27 are
 the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
-100 distinct numeric leaves: 82 verified transports and 18 numeric operations,
+101 distinct numeric leaves: 82 verified transports and 19 numeric operations,
 with zero exception rows. It includes the shape-dependency and opaque
 local-ascription-identity transports plus the fixed literal-witness extent
 role, replaces the original 84-row legacy cohort and incorporates
@@ -2415,7 +2412,7 @@ this maintenance does not widen the HIP/Metal scope.
    target decision from structured rejection to the new ABI representation
    ([#714]); it does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
-   frozen strings (the `chelis_int_div_guard` pattern, generalized), and
+   frozen strings (the `chelis_int_checked_divisor` pattern, generalized), and
    f16/bf16 scalar C storage/rounding matching §C1 via exact `uint16_t`
    payloads and the same conversion helpers the WS-1 kernels use.
 3. **The generated print helper**: the emitted C tensor/scalar printers

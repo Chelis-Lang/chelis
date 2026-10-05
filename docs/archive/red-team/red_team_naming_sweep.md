@@ -7,7 +7,7 @@
   `chelis/spec/01-nomenclature.md` and the post-sweep source state.
 - **Build SHA used:** `592a9735672758b2849c8d2a8d21cf9e412e75af` (chelis main).
   Working tree shows `M README.md` only; lint binary built clean.
-- **Lint binary:** `/home/jeff/Documents/scratch/chelis/target/debug/chelis`,
+- **Lint binary:** `<checkout>/target/debug/chelis`,
   command `chelis lint [--check] [--rule <id>] <path>`.
 - **Repos verified:** chelis monorepo (incl. chelis-std runtime, chelis-lint
   crate), nautilus, coral, shoals, octant.

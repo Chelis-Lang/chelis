@@ -93,6 +93,11 @@ pub fn classify_fuzzability(expr: &SmtExpr) -> Fuzzability {
             combine_fuzz(classify_fuzzability(cond), classify_fuzzability(then_e)),
             classify_fuzzability(else_e),
         ),
+        // Chelis ships no `erf`, so a fuzz run has no declared-width graph to
+        // evaluate it with (chelis#2965).
+        SmtExpr::Apply(name, _) if name == "erf" => Fuzzability::NotFuzzable(
+            "`erf` has no shipped Chelis graph to evaluate at a declared dtype".into(),
+        ),
         SmtExpr::Apply(_, args) => args
             .iter()
             .map(classify_fuzzability)

@@ -1,4 +1,4 @@
-# Effects and Handlers
+# Effects
 
 Chelis tracks observable host work and resource requirements in function types.
 The checker infers effects after checking types. An effect annotation can set an
@@ -24,12 +24,16 @@ the suffix lets the checker infer the effects.
 Random draws are pure functions of explicit keys. `dropout` and `uniform_like`
 take a key as their first argument and add no effect. Create a key from a seed,
 then split it when you need more than one draw. Each key can be used at most
-once along any execution path:
+once along any execution path. Tuple destructuring such as the first binding below
+is written inside a function body:
 
-```chelis-surf-fragment
-(first_key, second_key) = split_key(key_from_seed(42i64))
-first = dropout(first_key, x, 0.5f32)
-second = dropout(second_key, x, 0.5f32)
+```chelis-surf
+def two_masks[n](x: tensor[n, f32]) -> tensor[n, f32] = {
+  (first_key, second_key) = 42i64 |> key_from_seed |> split_key
+  first = dropout(first_key, x, 0.5f32)
+  second = dropout(second_key, x, 0.5f32)
+  add(first, second)
+}
 ```
 
 See [Type System Reference](type-reference.md) for the `key` type.
@@ -44,6 +48,7 @@ request. For the C target, the accepted name is exactly `"cpu"`:
 def relu_on_cpu[n](x: tensor[n, f32]) -> tensor[n, f32] = with device("cpu") { relu(x) }
 ```
 
-A C build rejects another device name with `BuildTargetMismatch` before
-writing artifacts. For other targets and device support, see [Backends](backends.md).
-The precise effect and target rules are in `spec/04-type-system.md` §7.
+A C build rejects any other device name before writing artifacts, with an
+error that names the region and the accepted device. For other targets and
+device support, see [Backends](backends.md). The precise effect and target
+rules are in §7 of the [type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md).

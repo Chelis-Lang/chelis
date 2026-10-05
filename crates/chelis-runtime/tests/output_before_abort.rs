@@ -55,11 +55,15 @@ impl Drop for Probe {
 
 const SOURCE: &str = r#"
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #ifdef NONFLUSHING_ABORT
-/* Darwin's abort can flush itself. This twin isolates the runtime's own
- * obligation; the native twin below exercises the real libc, including Linux. */
-static _Noreturn void nonflushing_abort(void) { _Exit(99); }
-#define abort nonflushing_abort
+/* A trap ends the process with exit(1) ([04-NUM-10]), and exit flushes the
+ * streams itself. This twin substitutes an exit that does not, so it isolates
+ * the runtime's own flush obligation; the native twin below exercises the real
+ * libc. */
+static _Noreturn void nonflushing_exit(int status) { _Exit(status); }
+#define exit nonflushing_exit
 #endif
 #include "chelis_runtime.h"
 int main(int argc, char **argv) {
@@ -69,7 +73,7 @@ int main(int argc, char **argv) {
     if (setvbuf(stderr, error_buffer, _IOFBF, sizeof error_buffer) != 0) return 4;
     if (strcmp(argv[2], "before") == 0) fputs("effect\n", stdout);
     if (strcmp(argv[1], "numeric") == 0) chelis_numeric_trap("numeric trap");
-    else if (strcmp(argv[1], "division") == 0) chelis_int_div_guard(0);
+    else if (strcmp(argv[1], "division") == 0) chelis_int_checked_divisor(1, 0, 8, "division trap", "overflow trap");
     else if (strcmp(argv[1], "abs") == 0) chelis_int_abs_guard(INT8_MIN, 8, "abs trap");
     else if (strcmp(argv[1], "abs_width") == 0) chelis_int_abs_guard(1, 3, "abs trap");
     else if (strcmp(argv[1], "limits") == 0) {
@@ -88,7 +92,7 @@ fn check_buffered_output(nonflushing_abort: bool) {
     let binary = probe.compile(nonflushing_abort);
     for (case, diagnostic) in [
         ("numeric", "numeric trap"),
-        ("division", "integer division or remainder by zero"),
+        ("division", "division trap"),
         ("abs", "abs trap"),
         ("abs_width", "invalid integer abs width"),
         ("limits", "invalid integer width"),

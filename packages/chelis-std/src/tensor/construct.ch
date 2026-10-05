@@ -2,16 +2,31 @@ module Std.Tensor.Construct
 export (linspace, arange, stack, squeeze, unsqueeze)
 sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) =
-  if lte(count, cast(0, i64)) then fail("linspace: count must be at least 1") else if eq(count, cast(1, i64)) then to_tensor([start]) else {
-    empty = skip([start], cast(1, i64))
-    to_tensor(linspace_values(start, stop, count, cast(0, i64), empty))
+  if not(and(eq(sub(start, start), cast(0, p)), eq(sub(stop, stop), cast(0, p)))) then fail("linspace: endpoints must be finite") else if lte(count, cast(0, i64)) then fail("linspace: count must be at least 1") else if eq(count, cast(1, i64)) then to_tensor([start]) else {
+    denominator = sub(count, cast(1, i64))
+    to_tensor(map(fn (idx) -> if eq(idx, cast(0, i64)) then start else if eq(idx, denominator) then stop else add(start, mul(sub(stop, start), linspace_weight(idx, denominator, cast(0, p), cast(0.5, p)))), range(cast(0, i64), count)))
   }
-def linspace_values[p: Float](start: p, stop: p, count: i64, idx: i64, out: List[p]) -> List[p] =
-  if gte(idx, count) then out else {
-    weight = div(cast(idx, p), cast(sub(count, cast(1, i64)), p))
-    value = if eq(idx, cast(0, i64)) then start else if eq(idx, sub(count, cast(1, i64))) then stop else add(start, mul(sub(stop, start), weight))
-    linspace_values(start, stop, count, add(idx, cast(1, i64)), append(out, value))
-  }
+-- Generate the binary fraction with exact i64 remainders. Each stored prefix
+-- is exact. Stop before adding an unrepresentable half-place, then use the
+-- remainder and final bit for one ties-to-even rounding. Comparing remainder
+-- with denominator-remainder avoids overflowing an i64 doubling. A positive
+-- i64 ratio needs at most 63 leading places plus 53 significand places; fold
+-- those 117 steps so evaluation never recurses with floating precision.
+def linspace_weight[p: Float](remainder: i64, denominator: i64, value: p, place: p) -> p = {
+  rounded = fold(fn (state: (i64, p, p, bool), unused: i64) -> if state.3 then state else if eq(state.0, cast(0, i64)) then (state.0, state.1, state.2, true) else {
+    complement = sub(denominator, state.0)
+    digit = gte(state.0, complement)
+    next_remainder = if digit then sub(state.0, complement) else add(state.0, state.0)
+    prefix = if digit then add(state.1, state.2) else state.1
+    half_place = div(state.2, cast(2, p))
+    if or(eq(half_place, cast(0, p)), neq(sub(add(prefix, half_place), prefix), half_place)) then {
+      remaining_complement = sub(denominator, next_remainder)
+      round_up = or(gt(next_remainder, remaining_complement), and(eq(next_remainder, remaining_complement), digit))
+      (next_remainder, if round_up then add(prefix, state.2) else prefix, half_place, true)
+    } else (next_remainder, prefix, half_place, false)
+  }, (remainder, value, place, false), range(cast(0, i64), cast(117, i64)))
+  if rounded.3 then rounded.1 else fail("linspace: exact weight exceeded integer precision bound")
+}
 sig arange[n, p: Int]: p -> p -> tensor[n, p]
 def arange(start, stop) = {
   empty = skip([start], cast(1, i64))

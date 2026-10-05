@@ -20,7 +20,7 @@
 //! explicitly-sized worker thread so the guard fires deterministically
 //! regardless of the harness default stack size.
 //!
-//! See docs/investigations/wi1_infer_recursion_depth.md and the
+//! See docs/archive/investigations/wi1_infer_recursion_depth.md and the
 //! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
 use chelis_deep::DeepTag;

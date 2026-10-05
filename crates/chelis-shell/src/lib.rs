@@ -9,7 +9,11 @@ pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
 // adds checked collection-operation relations. Positional bincode cannot read
 // either change as an absent field without changing the programs an export
 // admits, so both require exact version rejection.
-pub const SHELL_FORMAT_VERSION: u32 = 5;
+/// Bumped to 6 for chelis#2443: [`TypeVariableDomain`] gained an
+/// `ActiveSet` variant, so a shell published by this compiler can carry a
+/// domain a version-5 reader cannot decode.
+// #3130: Surf stages carry explicit syntax and Deep 0.20 has no Pipe.
+pub const SHELL_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -151,7 +155,10 @@ pub struct TypeVariableRestriction {
 /// The §5.9 primitive dtype bounds and §3.1 inferred operation-value
 /// restrictions from `spec/04-type-system.md`, kept distinct in published
 /// metadata. A new semantic domain requires a spec and shell format change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// Not `Copy`: §5.9's set form publishes its member spellings, so the domain
+// carries a `Vec`. A published format names its dtypes rather than encoding
+// them as bits, which a shell consumer would have to decode.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeVariableDomain {
     /// §5.9 `Float`.
@@ -166,6 +173,10 @@ pub enum TypeVariableDomain {
     IntValue,
     /// An inferred operation operand is a numeric scalar or tensor.
     NumericValue,
+    /// §5.9's explicit dtype set, as the member spellings it admits in §1.1
+    /// declaration order. Unlike a family, this does not widen when §1.1
+    /// activates a dtype, so the members are published rather than a name.
+    ActiveSet(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +209,12 @@ pub fn decode_shell(bytes: &[u8]) -> Result<ShellPackage, bincode::Error> {
     let version = u32::from_le_bytes(version_bytes);
     if version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}"
+            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            if version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     let payload = &bytes[SHELL_MAGIC.len() + 4..];
@@ -237,8 +253,13 @@ pub fn read_shell(path: &Path) -> Result<ShellPackage, Box<dyn std::error::Error
 pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
     if shell.format_version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}",
-            shell.format_version
+            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            shell.format_version,
+            if shell.format_version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     validate_nonempty_trimmed("package.name", &shell.package.name)?;
@@ -639,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v5_envelope() {
+    fn shell_encoding_has_an_explicit_v7_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -647,7 +668,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        assert_eq!(SHELL_FORMAT_VERSION, 5);
+        assert_eq!(SHELL_FORMAT_VERSION, 7);
     }
 
     #[test]
@@ -671,7 +692,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 7; regenerate the shell package"
         );
     }
 
@@ -683,7 +704,35 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 7; regenerate the shell package"
+        );
+    }
+
+    /// chelis#2443 took the envelope to 6, because `TypeVariableDomain` gained
+    /// spec/04 §5.9's explicit dtype set and a v5 reader cannot decode it.
+    /// A v5 shell must therefore be refused rather than read as if the domain
+    /// vocabulary were unchanged.
+    #[test]
+    fn shell_decode_rejects_the_pre_dtype_set_domain_version() {
+        let mut bytes = encode_shell(&fixture_shell()).expect("encode shell");
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+
+        let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 5 is unsupported; expected 7; regenerate the shell package"
+        );
+    }
+
+    #[test]
+    fn shell_decode_rejects_the_pre_pipe_normalization_version_before_payload_decode() {
+        let mut bytes = b"CHELCHB\0".to_vec();
+        bytes.extend_from_slice(&6_u32.to_le_bytes());
+        let error =
+            decode_shell(&bytes).expect_err("v6 must be refused before reading its payload");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 6 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
         );
     }
 

@@ -267,7 +267,8 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
     );
     artifacts.write(Artifact::LibraryCacheKeyInputs, library_key_inputs);
 
-    let prepared = prepare_reef_graph_cached(package_root).expect("prepare fixed package graph");
+    let prepared = prepare_reef_graph_cached(package_root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("prepare fixed package graph");
     artifacts.write(
         Artifact::PreparedGraphEncode,
         prepared.encode().expect("encode prepared graph"),
@@ -299,8 +300,12 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
     );
     artifacts.write(Artifact::PreparedGraphCacheKeyInputs, prepared_key_inputs);
 
-    let context =
-        compile_reef_context(reef_home, package_root).expect("compile fixed package context");
+    let context = compile_reef_context(
+        reef_home,
+        package_root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile fixed package context");
     let encoded = context.encode().expect("encode compiled context");
     artifacts.write(Artifact::CompiledEncode, &encoded);
 
@@ -435,7 +440,12 @@ fn cache_roots_are_exact_bytes_across_24_fresh_processes() {
     let preceding_path = scratch.path().join("compiled-context-v18.ctx");
     fs::write(&preceding_path, preceding).expect("write preceding-format fixture");
     assert!(matches!(
-        CompiledContext::load_if_fresh(&preceding_path, scratch.path(), &package_root),
+        CompiledContext::load_if_fresh(
+            &preceding_path,
+            scratch.path(),
+            &package_root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         Err(CacheError::Corrupt(_))
     ));
 }

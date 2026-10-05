@@ -63,6 +63,9 @@ pub(super) fn infer_app(
         builtins::builtin_decl(name)
     });
     let checkpoint = errors.checkpoint();
+    // spec/04 §5.7: an explicit `accumulator=` is checked against the
+    // operand dtype after the call checks at its default accumulator.
+    let accumulator = node.meta().accumulator();
     let result = infer_app_inner(
         expr,
         node,
@@ -72,8 +75,39 @@ pub(super) fn infer_app(
         adt_reg,
         errors,
         product,
-        expected_result,
+        if accumulator.is_some() {
+            None
+        } else {
+            expected_result
+        },
     );
+    let result = match accumulator {
+        Some(accumulator) if errors.iter_since(checkpoint).next().is_none() => {
+            let operation = builtin.map(|builtin| builtin.name);
+            match accumulated_result(
+                operation,
+                accumulator.expression(),
+                kids,
+                &result,
+                product,
+                subst,
+                errors,
+            ) {
+                Ok(result) => result,
+                Err(message) => {
+                    let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+                    return report(
+                        errors,
+                        match TypeDiagnosticLocation::from_expr(expr) {
+                            Some(location) => location.attach(error),
+                            None => error,
+                        },
+                    );
+                }
+            }
+        }
+        _ => result,
+    };
     if errors.iter_since(checkpoint).next().is_none()
         && let Some(builtin) = builtin
     {
@@ -112,6 +146,25 @@ pub(super) fn infer_app(
         }
     }
     result
+}
+
+/// Infer an application's callee. Every application route infers its callee
+/// here, so the Var rule can tell a builtin called by name from a builtin
+/// named as a value ([04-INF-9], [04-LIN-9]).
+pub(super) fn infer_callee(
+    callee: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    product.callee_reference = matches!(
+        callee.carrier(),
+        chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
+    );
+    infer_expr(callee, env, vg, subst, adt_reg, errors, product)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,11 +210,11 @@ fn infer_app_inner(
     });
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_permute_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        let inferred = infer_reshape_app(node, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(expr, node, env, vg, subst, adt_reg, errors, product);
         if let Some(expected) = env.exact_stdlib_expected_result()
             && matches!(expected, Type::Tensor(_, _))
         {
@@ -175,25 +228,21 @@ fn infer_app_inner(
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_shrink_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_pad_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_stride_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
-    // chelis#339: the anchored named-axis expand form `expand(x, new, size,
-    // anchor)` carries four arguments, but the builtin HM scheme is arity-3
-    // (`(&tensor, i32, i32) -> out`), so it would hit the generic arity
-    // check before the procedural arm. Dispatch it here (the
-    // `infer_permute_app` pattern). The ordinary 3-arg expand keeps the generic
-    // path, which reaches `check_expand_signature` with the scheme intact.
-    // Named-axis calls and malformed arities use the procedural path so the
-    // expand-specific arity diagnostic owns obsolete shape-taking spellings.
+    // chelis#339: the four-argument anchored form belongs to `insert`, but
+    // its registered HM scheme is arity-3. Route it around generic arity
+    // checking. Both operations' malformed arities take this procedural path
+    // for their own exact diagnostics; ordinary 3-argument calls use HM.
     if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
         && kids.len() != 4
     {
@@ -203,7 +252,7 @@ fn infer_app_inner(
         } else {
             "expand"
         };
-        return infer_expand_app(callee, node, env, vg, subst, adt_reg, errors, product);
+        return infer_expand_app(callee, expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -228,6 +277,7 @@ fn infer_app_inner(
     ) && kids.len() >= 4
     {
         return infer_reduction_app(
+            expr,
             node,
             func_name.as_deref().unwrap(),
             env,
@@ -323,11 +373,7 @@ fn infer_app_inner(
             }
         }
     } else {
-        product.callee_reference = matches!(
-            kids[0].carrier(),
-            chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
-        );
-        infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
+        infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // The constructor callee no longer passes through `infer_expr`, but it is
     // still a runtime expression owner and must contribute the same fitness
@@ -377,13 +423,18 @@ fn infer_app_inner(
             // value environment is a *runtime value* (the issue #259 class,
             // `expand(&x, ax, 4)` with `ax: i32`), not a dim name, and must
             // keep flowing through ordinary inference into the
-            // compile-time-constant rejection. The 4-arg anchored form routes
-            // through `infer_expand_app` instead and never reaches this loop.
+            // compile-time-constant rejection. The size slot is discriminated
+            // the same way: a name bound in the value environment is a runtime
+            // size whose own type must be `i64`, so `insert(x, 0, j)` with
+            // `j: i32` keeps its `i32` and reaches the size-dtype rejection
+            // below rather than being retyped as an extent (chelis#469). The
+            // 4-arg anchored form routes through `infer_expand_app` instead
+            // and never reaches this loop.
             let is_expand = matches!(func_name.as_deref(), Some("expand") | Some("insert"));
-            let is_expand_size = is_expand && index == 2;
-            let is_expand_inserted_name = is_expand
-                && index == 1
-                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
+            let names_a_dim =
+                symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
+            let is_expand_size = is_expand && index == 2 && names_a_dim;
+            let is_expand_inserted_name = is_expand && index == 1 && names_a_dim;
             let is_reduction_axis = is_named_reduction && index >= 1;
             if (is_expand_size || is_expand_inserted_name || is_reduction_axis)
                 && symbolic_dim_ref_name(arg).is_some()
@@ -411,10 +462,33 @@ fn infer_app_inner(
             return_with_collection_cleanup!(report_builtin_arity(
                 errors,
                 node,
+                CheckSite::Expr(expr),
                 "drop",
                 1,
                 arg_tys.len()
             ));
+        }
+        // The operand is owned, so a borrowed one is a type error rather
+        // than an implicit consume of its owner.
+        // An operand still unresolved here is re-checked against the final
+        // substitution when the declaration closes (chelis#3180).
+        match subst.apply(&arg_tys[0]) {
+            operand @ Type::Ref(_) => {
+                let error = borrowed_drop_operand_error(&operand);
+                let error = CheckError {
+                    message: with_node_provenance(node, error.message.clone()),
+                    ..error
+                };
+                return_with_collection_cleanup!(report_at_check_site(
+                    errors,
+                    error,
+                    CheckSite::Expr(expr),
+                ));
+            }
+            Type::Var(tv) => {
+                subst.record_deferred_drop_operand(tv, TypeDiagnosticLocation::from_expr(expr));
+            }
+            _ => {}
         }
         return_with_collection_cleanup!(Type::Unit);
     }
@@ -431,23 +505,34 @@ fn infer_app_inner(
         _ => None,
     };
     if let Some((retired, keyed)) = retired_draw {
-        return_with_collection_cleanup!(report(
+        let builtin = if func_name.as_deref() == Some("dropout") {
+            "dropout"
+        } else {
+            "uniform_like"
+        };
+        let expected = format!("{} arguments", arg_tys.len() + 1);
+        let got = format!("{} arguments", arg_tys.len());
+        return_with_collection_cleanup!(report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "`{retired}` is the retired counter-stream spelling: a random draw \
+                        "call `{builtin}`: expected {expected}, got {got}; \
+                         `{retired}` is the retired counter-stream spelling: a random draw \
                          takes an explicit key first, `{keyed}` (spec/05-risc-primitives.md \
                          section 2.7)"
                     ),
                 ),
+                expected,
+                got,
                 vec![format!(
                     "Pass a key first: make one with `key_from_seed(seed)` and derive more \
                      with `split_key`, `split_keys` or `fold_in`, as in `{keyed}`"
                 )],
             ),
+            CheckSite::Expr(expr),
         ));
     }
 
@@ -508,11 +593,21 @@ fn infer_app_inner(
     if let Some(fname) = func_name.as_deref()
         && (INT_BINOPS.contains(&fname) || INT_SHIFT_OPS.contains(&fname))
         && arg_tys.iter().any(|ty| {
+            // [05-OP-64]: `mod` also admits floats (chelis#626).
             matches!(type_for_readonly_check(ty, subst),
-                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim))
+                    if !prim.is_integer() && !(fname == "mod" && prim.is_float()))
         })
         && let Some(rejected) = integer_binop_result_type(
-            node, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+            node,
+            Some(fname),
+            &arg_tys,
+            vg,
+            subst,
+            errors,
+            None,
+            &Type::Unit,
+            product,
         )
     {
         // Preserve the existing direct operation's diagnostic. Symbolic
@@ -530,6 +625,7 @@ fn infer_app_inner(
             && left.is_integer()
         {
             return_with_collection_cleanup!(check_matmul_signature(
+                CheckSite::Expr(expr),
                 &arg_tys,
                 &Type::Unit,
                 subst,
@@ -601,7 +697,14 @@ fn infer_app_inner(
     // `postprocess_application`; every unambiguous builtin is screened here.
     if let Some(fname) = func_name.as_deref()
         && fname != "concat"
-        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors)
+        && let Err(rejected) = enforce_registered_axis_dtypes(
+            fname,
+            &arg_tys,
+            node,
+            CheckSite::Expr(expr),
+            subst,
+            errors,
+        )
     {
         return_with_collection_cleanup!(rejected);
     }
@@ -615,20 +718,22 @@ fn infer_app_inner(
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
     {
-        return_with_collection_cleanup!(report(
+        return_with_collection_cleanup!(report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "{callee} expects an i64 size (write Ni64 or cast(N, i64)), \
-                         got {}",
-                        Type::Prim(p)
+                        "{callee} argument 3 (size): expected i64, got {} (write Ni64 or cast(N, i64))",
+                        p.name()
                     ),
                 ),
+                "i64".to_string(),
+                p.name().to_string(),
                 vec![],
             ),
+            CheckSite::Expr(expr),
         ));
     }
 
@@ -699,25 +804,26 @@ fn infer_app_inner(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return_with_collection_cleanup!(report(
+                return_with_collection_cleanup!(report_at_check_site(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         with_node_provenance(
                             node,
                             format!(
-                                "list element rank mismatch: {} dims vs {} dims; \
-                             List[tensor[...]] requires rank-uniform elements \
-                             (the dim slot is a dimension variable, not a \
-                             shape-vector variable). Reshape or flatten \
-                             elements to a common rank before listing \
-                             (spec/04-type-system.md §4.5.1).",
+                                "call `Cons` arguments 1 and 2: list element rank mismatch: {} dims vs {} dims; \
+                                 List[tensor[...]] requires rank-uniform elements \
+                                 (the dim slot is a dimension variable, not a \
+                                 shape-vector variable). Reshape or flatten \
+                                 elements to a common rank before listing \
+                                 (spec/04-type-system.md §4.5.1).",
                                 head_dims.len(),
                                 tail_dims.len(),
                             ),
                         ),
                         vec![],
                     ),
+                    CheckSite::Expr(expr),
                 ));
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
@@ -809,6 +915,7 @@ fn infer_app_inner(
     };
     let mut ret_tv = match unify_checked_call_contract(
         expr,
+        source_func_name.as_deref(),
         &func_ty,
         &arg_tys,
         aggregate_call_context,
@@ -835,6 +942,7 @@ fn infer_app_inner(
             &callee_collection_contracts,
             &alternatives,
             tensor_concat,
+            split_keys_call_count(kids, env),
         );
     }
     let related_results = product
@@ -860,6 +968,7 @@ fn infer_app_inner(
     let checkpoint = errors.checkpoint();
     let contract_name = func_name.clone();
     let applied = finish_unified_app(
+        CheckSite::Expr(expr),
         node,
         kids,
         func_name,
@@ -949,4 +1058,98 @@ fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], su
         }
         subst.insert_dim(root, Dim::Wildcard);
     }
+}
+
+/// [05-OP-67]: the operand of `drop` is owned, so a borrowed one is a type
+/// error rather than an implicit consume of its owner. Shared by the eager
+/// check in the `drop` route and the deferred one at declaration close.
+pub(super) fn borrowed_drop_operand_error(operand: &Type) -> CheckError {
+    CheckError::with_types(
+        CheckErrorKind::TypeMismatch,
+        format!(
+            "drop argument 1: expected an owned value, got borrowed `{operand}`; `drop` ends its \
+             operand's lifetime and cannot take a borrow ([05-OP-67])"
+        ),
+        "an owned value".to_string(),
+        operand.to_string(),
+        vec!["Drop the owner itself: write `drop(x)`, not `drop(&x)`".to_string()],
+    )
+}
+
+/// chelis#3180: re-check each `drop` operand that was unresolved when its call
+/// was inferred against the declaration's final substitution.
+pub(super) fn validate_deferred_drop_operands(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    for (tv, location) in subst.take_deferred_drop_operands() {
+        let operand = subst.apply(&Type::Var(tv));
+        if matches!(operand, Type::Ref(_)) {
+            let error = borrowed_drop_operand_error(&operand);
+            errors.push(match location {
+                Some(location) => location.attach(error),
+                None => error,
+            });
+        }
+    }
+}
+
+/// The result of a `matmul`, `sum` or `einsum` call with an explicit
+/// `accumulator=`: the call's default-accumulator `result` at
+/// `sum_result(p, accumulator)` (`p` for `matmul`), once spec/04 §5.7.1's
+/// permitted-pairs table admits the operand dtype `p` with that accumulator.
+fn accumulated_result(
+    operation: Option<&str>,
+    accumulator: &deep::Expr,
+    kids: &[deep::Expr],
+    result: &Type,
+    product: &InferenceProduct,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<Type, String> {
+    let operation = match operation {
+        Some(operation @ ("matmul" | "sum" | "einsum")) => operation,
+        Some(operation) => {
+            return Err(format!(
+                "`{operation}` takes no `accumulator=` argument: only `matmul`, `sum` and \
+                 `einsum` select an accumulator (spec/04 §5.7); remove the argument"
+            ));
+        }
+        None => {
+            return Err(
+                "`accumulator=` applies only to a call of the built-in `matmul`, `sum` \
+                 or `einsum` (spec/04 §5.7); remove the argument"
+                    .to_string(),
+            );
+        }
+    };
+    let accumulator = stamped_parts(accumulator)
+        .filter(|(tag, _, _)| *tag == DeepTag::TPrim)
+        .and_then(|(_, _, parts)| parts.first().and_then(symbol_name))
+        .and_then(Prim::parse_name)
+        .ok_or_else(|| {
+            format!("`{operation}`'s `accumulator=` must name a dtype (spec/04 §5.7)")
+        })?;
+    let operand = kids
+        .get(if operation == "einsum" { 2 } else { 1 })
+        .and_then(|operand| product.current_owner_type(operand, subst, errors));
+    // A borrowed operand is decided on its referent.
+    let operand = match operand.map(|operand| subst.apply(&operand)) {
+        Some(Type::Ref(referent)) => Some(subst.apply(&referent)),
+        operand => operand,
+    };
+    let operand = match operand {
+        Some(Type::Tensor(_, TensorPrec::Concrete(prim))) => prim,
+        _ => {
+            return Err(format!(
+                "`{operation}` with `accumulator={}` is decided over the operand's dtype at \
+                 the call (spec/04 §5.7.1's permitted-pairs table), and this operand's dtype is \
+                 a type variable, which the checker does not decide an explicit accumulator \
+                 over; omit `accumulator=`, or pass an operand of concrete dtype",
+                accumulator.name()
+            ));
+        }
+    };
+    let result_precision = explicit_accumulator_result(operation, operand, accumulator)?;
+    Ok(match subst.apply(result) {
+        Type::Tensor(dims, _) => Type::Tensor(dims, TensorPrec::Concrete(result_precision)),
+        other => other,
+    })
 }

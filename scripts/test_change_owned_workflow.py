@@ -268,9 +268,17 @@ def assert_change_owned_topology(
         expansion["needs"], ["integration-plan"]
     )
     test.assertEqual(expansion["timeout-minutes"], 90)
-    test.assertEqual(expansion["env"]["CC"], "clang")
-    test.assertEqual(expansion["env"]["CXX"], "clang++")
     test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
+    # Cargo builds here with the compilers the linux-workspace cache writer
+    # used; a different CC or CXX reruns every cc-rs build script on a hit.
+    expansion_executor = next(
+        step
+        for step in expansion["steps"]
+        if "scripts/ci_change_owned.py run-shard" in step.get("run", "")
+    )
+    for scope in (expansion["env"], expansion_executor.get("env", {})):
+        test.assertNotIn("CC", scope)
+        test.assertNotIn("CXX", scope)
     test.assertFalse(expansion.get("continue-on-error", False))
     test.assertFalse(expansion["strategy"]["fail-fast"])
     test.assertEqual(expansion["strategy"]["matrix"]["shard"], SHARDS)

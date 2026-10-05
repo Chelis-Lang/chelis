@@ -1,6 +1,6 @@
 //! Host-lane CSV I/O acceptance (chelis#903).
 //!
-//! The QFBench-shaped end-to-end contract, one step past `json_io.rs`: a
+//! The benchmark-shaped end-to-end contract, one step past `json_io.rs`: a
 //! `.ch` program reads TWO CSV input files (one LF, one CRLF, one quoted
 //! field with an embedded comma) plus a JSON params file, computes with
 //! tensor builtins, rounds with `round_to`, and writes BOTH a nested
@@ -46,6 +46,7 @@ fn solve_source(dir: &Path) -> String {
         r#"module Demo.Main
 import Std.Io.Csv (read_csv, to_csv)
 import Std.Io.Json (Json, JsonFloat, JsonObject, JsonString, json_float, json_get, json_string, load_json, to_json)
+def float_json(x: f64) -> Json = JsonFloat(x, to_string(x))
 def required_cell(row: Dict[string, string], column: string) -> string = match dict_get(row, column) with {{
   | Some(text) => text
   | None => fail(string_concat("required CSV column missing: `", string_concat(column, "`")))
@@ -76,11 +77,11 @@ net = mul(gross, required_json_float(params, "haircut"))
 out = JsonObject(dict_of([
   ("base_currency", JsonString(required_json_string(params, "base_currency"))),
   ("portfolio", JsonObject(dict_of([
-    ("gross_value", JsonFloat(round_to(gross, 2))),
-    ("net_value", JsonFloat(round_to(net, 2))),
-    ("risk_weighted", JsonFloat(round_to(risk, 4)))
+    ("gross_value", float_json(round_to(gross, 2))),
+    ("net_value", float_json(round_to(net, 2))),
+    ("risk_weighted", float_json(round_to(risk, 4)))
   ]))),
-  ("meta", JsonObject(dict_of([("positions", JsonFloat(cast(len(positions), f64)))])))
+  ("meta", JsonObject(dict_of([("positions", float_json(cast(len(positions), f64)))])))
 ]))
 done_json = write_file("{results}", to_json(out))
 val0 = round_to(mul(float_cell(index(positions, 0i64), "quantity"), float_cell(index(positions, 0i64), "mid_price")), 2)
@@ -220,7 +221,8 @@ px = map(fn (row: Dict[string, string]) -> match dict_get(row, "px") with {{
   }}
   | None => fail("float_column: column `px` not found; available column: `mid_price`")
 }}, positions)
-done = write_file("{}", to_json(JsonFloat(index(px, 0i64))))
+first_px = index(px, 0i64)
+done = write_file("{}", to_json(JsonFloat(first_px, to_string(first_px))))
 "#,
         app_pkg.join("positions.csv").to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -290,7 +292,7 @@ first_widened = index(float_column(trades, "trade_id"), 0i64)
 out = JsonObject(dict_of([
   ("first_id", JsonInt(integer_cell(index(trades, 0i64), "trade_id"))),
   ("totals", JsonObject(dict_of([("qty", JsonInt(total_qty))]))),
-  ("lossy", JsonObject(dict_of([("first_id_f64", JsonFloat(first_widened))])))
+  ("lossy", JsonObject(dict_of([("first_id_f64", JsonFloat(first_widened, to_string(first_widened)))])))
 ]))
 done_json = write_file("{results}", to_json(out))
 row0 = dict_of([("trade_id", to_string(index(ids, 0i64)))])

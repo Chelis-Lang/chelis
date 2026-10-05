@@ -402,7 +402,9 @@ fn real_shape_sensitive_builtin_keeps_its_validation() {
             errors.iter().any(|error| {
                 error["kind"] == "DimensionMismatch"
                     && error["message"].as_str().is_some_and(|message| {
-                        message.contains("conv requires a positive stride, got 0 (spatial axis 0)")
+                        message.contains("conv")
+                            && message.contains("positive stride")
+                            && message.contains("axis 0")
                     })
             })
         }),
@@ -426,7 +428,16 @@ fn real_shape_sensitive_builtin_keeps_its_stride_dtype() {
         report["errors"].as_array().is_some_and(|errors| {
             errors.iter().any(|error| {
                 error["kind"] == "PrecisionMismatch"
-                    && error["message"] == "precision mismatch: expected i64, got f64"
+                    && error["expected"] == "i64"
+                    && error["got"] == "f64"
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("conv")
+                            && message.contains("argument 3")
+                            && message.contains("expected")
+                            && message.contains("got")
+                    })
+                    && error["span"]["offset"]
+                        == INVALID_BUILTIN_CONV2D_STRIDE_DTYPE.rfind("conv(").unwrap()
             })
         }),
         "check report: {report}"
@@ -471,7 +482,7 @@ fn ordinary_def_cannot_collide_with_standard_prelude_macro() {
         if command == "eval" {
             invocation.args(["eval", "--file", source.to_str().unwrap()]);
         } else {
-            invocation.args(["build", source.to_str().unwrap()]);
+            invocation.args(["build", "--emit-c", source.to_str().unwrap()]);
         }
         let output = invocation.output().expect("run lane");
         assert!(!output.status.success(), "{command} must reject");

@@ -398,9 +398,10 @@ pub fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Link the chelis-generated C against the platform host toolchain, resolving
-/// compile/link flags (OpenMP, and BLAS when the source needs it) from
-/// `chelis_backend_c::toolchain`.
+/// Link the C a source-only build (`chelis build --emit-c`) wrote against the
+/// platform host toolchain, resolving compile/link flags (OpenMP, and BLAS when
+/// the source needs it) from `chelis_backend_c::toolchain`. A default build has
+/// already published the executable; run that instead of linking again.
 pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
@@ -451,7 +452,7 @@ pub fn gcc_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Build `source` to C, link it, run it, and return its stdout. Panics with a
+/// Build `source` natively, run its CLI-produced executable, and return stdout. Panics with a
 /// diagnostic if any stage fails.
 pub fn build_and_run(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
@@ -472,10 +473,6 @@ pub fn build_and_run(source: &str, name: &str) -> String {
         ])
         .assert()
         .success();
-
-    let source_file = format!("{name}.c");
-    let status = link_generated(&out_dir, &source_file, name);
-    assert!(status.success(), "link failed: {status}");
 
     let run_output = StdCommand::new(out_dir.join(name))
         .output()
@@ -510,10 +507,6 @@ pub fn build_and_run_app(reef_home: &Path, app_pkg: &Path, name: &str) -> String
         ])
         .assert()
         .success();
-
-    let source_file = format!("{name}.c");
-    let status = link_generated(&out_dir, &source_file, name);
-    assert!(status.success(), "link failed: {status}");
 
     let run_output = StdCommand::new(out_dir.join(name))
         .output()

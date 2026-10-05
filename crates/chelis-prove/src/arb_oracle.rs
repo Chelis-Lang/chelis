@@ -1555,6 +1555,10 @@ mod arb_live_tests {
         assert!(rigorous_special_fn_enclosure(SpecialFn::Sqrt, 0.0, DEFAULT_PREC).is_well_formed());
     }
 
+    // Tests only: Rust std functions on the clippy disallowed list compute
+    // reference or input values here; the list holds production code to
+    // chelis-crmath (chelis#2957).
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn general_box_certifier_bounds_a_known_exp_fit() {
         // p(x) = 1 + x + x^2/2 (2nd-order Taylor of exp at 0), descending coeffs.
@@ -1634,6 +1638,10 @@ mod arb_live_tests {
 
     // ─── chelis#434 m2: mean-value certifier {erf,exp,log,sqrt} ───────────────
 
+    // Tests only: Rust std functions on the clippy disallowed list compute
+    // reference or input values here; the list holds production code to
+    // chelis-crmath (chelis#2957).
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn meanvalue_is_tight_and_sound_vs_naive_for_exp() {
         // p(x)=1+x+x²/2 over [-0.25,0.25]. The mean-value bound must be SOUND

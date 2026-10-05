@@ -8,6 +8,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 thread_local! {
@@ -23,28 +24,18 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-    /// Counts whole-program definition folds on this thread (chelis#2207).
-    /// `prepare_subexpr_lowering_context` folds every definition it admits,
-    /// so this rises once per context prepared, never once per definition.
-    static PROGRAM_DEF_FOLD_PASSES: Cell<u64> = const { Cell::new(0) };
+    /// Counts whole-program context preparations on this thread (chelis#2207).
+    static PROGRAM_CONTEXT_PREPARATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Whole-program definition folds on this thread since the last reset.
-///
-/// Preparing a [`SubexprLoweringContext`] folds the pipes in every definition
-/// it admits (chelis#1923), which is linear in the program. A caller that
-/// lowers many subexpressions against one fixed program should therefore
-/// prepare one context and reuse it; this counter is how a test states that
-/// obligation as a bound rather than as a wall clock, in the shape of
-/// chelis#1835's `host::host_summary_probe_builds`. A counted receipt cannot
-/// flake under machine load.
-pub fn program_def_fold_passes() -> u64 {
-    PROGRAM_DEF_FOLD_PASSES.with(Cell::get)
+/// Context preparations on this thread. Prepare once and share immutable
+/// definitions when lowering many subexpressions of the same program.
+pub fn program_context_preparations() -> u64 {
+    PROGRAM_CONTEXT_PREPARATIONS.with(Cell::get)
 }
 
-/// Reset [`program_def_fold_passes`] for this thread.
-pub fn reset_program_def_fold_passes() {
-    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(0));
+pub fn reset_program_context_preparations() {
+    PROGRAM_CONTEXT_PREPARATIONS.with(|passes| passes.set(0));
 }
 
 pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
@@ -82,6 +73,8 @@ pub struct LowerDiagnostic {
     pub span_id: Option<String>,
     pub fatal: bool,
     unsupported: Option<Box<Unsupported>>,
+    host_control: bool,
+    dimension_mismatch: bool,
 }
 
 impl LowerDiagnostic {
@@ -92,7 +85,24 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: None,
+            host_control: false,
+            dimension_mismatch: false,
         }
+    }
+
+    /// A dimension mismatch the lowered graph proves from literals before
+    /// any execution (spec/04-type-system.md section 4.7): a type error the
+    /// checker could not see, reported with the checker's kind.
+    fn dimension_mismatch(message: impl Into<String>, span_id: Option<String>) -> Self {
+        Self {
+            dimension_mismatch: true,
+            ..Self::new(message, None, span_id).fatal()
+        }
+    }
+
+    /// Whether this diagnostic is a `DimensionMismatch` proven from literals.
+    pub fn is_dimension_mismatch(&self) -> bool {
+        self.dimension_mismatch
     }
 
     pub(crate) fn from_unsupported(
@@ -113,6 +123,8 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: Some(Box::new(unsupported)),
+            host_control: false,
+            dimension_mismatch: false,
         }
     }
 
@@ -130,10 +142,27 @@ impl LowerDiagnostic {
         self.fatal = true;
         self
     }
+
+    /// Mark a body a tensor kernel cannot carry but host control flow can:
+    /// the declaration's body belongs on the host lane of both evaluators,
+    /// so the shared kernel decision routes it there instead of failing.
+    fn host_control(mut self) -> Self {
+        self.host_control = true;
+        self
+    }
+
+    /// Whether this diagnostic routes its declaration to host control flow
+    /// rather than rejecting it.
+    pub fn requires_host_control(&self) -> bool {
+        self.host_control
+    }
 }
 
 impl fmt::Display for LowerDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.dimension_mismatch {
+            write!(f, "DimensionMismatch: ")?;
+        }
         write!(f, "{}", self.message)?;
         if let Some(span_id) = &self.span_id {
             write!(f, " at source span `{span_id}`")?;
@@ -375,10 +404,45 @@ fn unsupported_lowering_message(tag: &str) -> String {
     )
 }
 
+/// The name a bare `expand`/`insert` size reads as a dimension, when the
+/// checker read it as one: the result axis the size sets carries the size's
+/// own name (chelis#469). The checker stamps that name only for a dimension of
+/// the definition the size is written in, and spec/04-type-system.md section
+/// 4.7.2 makes a name that is both a value and such a dimension a type error,
+/// so this stamp is the one record of the decision. Lowering's size arm and
+/// host inlining's top-level qualification ([`app_stamped_dimension_size`])
+/// both read it here; neither re-decides it by name lookup.
+fn stamped_dimension_size(size_arg: &Expr, result_dims: &[DimInfo], axis: usize) -> Option<String> {
+    let name = bare_var_name(strip_cast_wrappers(size_arg))?;
+    matches!(result_dims.get(axis), Some(DimInfo::Named(stamped, _)) if *stamped == name)
+        .then_some(name)
+}
+
+/// [`stamped_dimension_size`] for a checked positional `expand`/`insert`
+/// application, read from its stamped result type before it is lowered.
+/// `None` for any other expression, and for the named-axis `insert` form,
+/// whose axis is resolved only against the lowered operand.
+pub(crate) fn app_stamped_dimension_size(expr: &Expr) -> Option<String> {
+    let (DeepTag::App, meta, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let (callee, args) = kids.split_first()?;
+    if !matches!(bare_var_name(callee)?.as_str(), "expand" | "insert") {
+        return None;
+    }
+    let axis = usize::try_from(extract_int_for_dim(args.get(1)?)?).ok()?;
+    let result = LowerCtx::formal_param_type_for_call(
+        meta.ty()?.expression(),
+        &UnordMap::new(),
+        &UnordMap::new(),
+    );
+    stamped_dimension_size(args.get(2)?, &result.dims, axis)
+}
+
 /// If `expr` is exactly `(var {} name)`, return the symbol name. Used by
 /// `lower_pipe` to detect bare-var pipe stages that should be lowered as
 /// unary applications (Item 2c — see
-/// `docs/investigations/c_backend_grad_piped_body_diagnosis.md`).
+/// `docs/archive/investigations/c_backend_grad_piped_body_diagnosis.md`).
 fn bare_var_name(expr: &Expr) -> Option<String> {
     let kids = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
@@ -410,7 +474,7 @@ fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
     // `host::try_lower_compiled_program` keys off this so the user
     // receives the AD rejection text instead of an undefined-symbol
     // host call. Issue #197.
-    if !diagnostic.fatal && unrepresentable_panic_suppressed() {
+    if !diagnostic.fatal && !diagnostic.host_control && unrepresentable_panic_suppressed() {
         std::panic::panic_any(UnrepresentableDag);
     }
     std::panic::panic_any(diagnostic);
@@ -436,6 +500,70 @@ fn raise_fatal_lowering_error(
     span_id: Option<String>,
 ) -> ! {
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+}
+
+/// The extent `dag` fixes for `axis` of `id`, or `None` when only run time
+/// has it ([`LowerCtx::graph_fixed_axis_extent`] documents the two origins).
+fn graph_fixed_axis_extent(dag: &Dag, id: NodeId, axis: usize) -> Option<usize> {
+    use crate::axis_sources::ExtentOrigin;
+    match crate::axis_sources::resolve_axis_extent(dag, id, axis)? {
+        ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+        ExtentOrigin::OpComputed { op, axis } => {
+            crate::axis_sources::static_op_computed_axis_extent(dag, op, axis)
+        }
+        ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
+    }
+}
+
+/// spec/04-type-system.md section 4.7: "A violation proven from literals is a
+/// type error. Literals that become visible only when a call is inlined prove
+/// it just the same when the lowered graph fixes the claimed axis to a
+/// different extent: the program is rejected before any execution, on every
+/// lane". A same-shape operation whose operands' extents the graph fixes to
+/// different values at one axis, typically literal Lists that reach
+/// `to_tensor` through an inlined call, is that violation. It is reported as
+/// the checker reports the direct spelling, naming the operation, the
+/// operand and both extents.
+fn reject_literal_operand_disagreement(dag: &Dag) {
+    let fixed = |id: NodeId, axis: usize| graph_fixed_axis_extent(dag, id, axis);
+    for node in dag.nodes() {
+        // A malformed relation is the IR verifier's to report; only a
+        // well-formed one can prove a disagreement.
+        let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        else {
+            continue;
+        };
+        for axis in 0..node.output_type.dims.len() {
+            let mut expected: Option<usize> = None;
+            // Operands in input order, so the reported argument is the
+            // first one disagreeing with an earlier fixed operand.
+            let members = node
+                .inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, input)| agreement.members().contains(input));
+            for (index, &member) in members {
+                let Some(extent) = fixed(member, axis) else {
+                    continue;
+                };
+                match expected {
+                    None => expected = Some(extent),
+                    Some(required) if required != extent => {
+                        let argument = index + 1;
+                        raise_lowering_diagnostic(LowerDiagnostic::dimension_mismatch(
+                            format!(
+                                "`{}` argument {argument}, axis {axis}: expected {required}, \
+                                 got {extent} (extents fixed by literals after inlining)",
+                                crate::grad::risc_op_name(&node.op)
+                            ),
+                            node.span_id.clone(),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
 }
 
 fn raise_fatal_unsupported(
@@ -1299,7 +1427,7 @@ fn lower_program_with_context_inner(
         }
     }
     let library_scope = LexicalScope {
-        bindings: ctx.bindings.clone(),
+        bindings: ctx.bindings.without_facts(),
         ..LexicalScope::default()
     };
     let library_values = ctx
@@ -1335,10 +1463,20 @@ fn lower_program_with_context_inner(
         );
     }
 
+    // The new program's own classification, derived at most once: deriving
+    // it again for each unnamed item made lowering a file cost the square of
+    // its size (chelis#3144).
+    let mut new_program_lowering = None;
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
-                && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env))
+                && top_level_expr_is_lowered_with_names(
+                    expr,
+                    new_type_env,
+                    new_program_lowering.get_or_insert_with(|| {
+                        top_level_lowering_map(new_program.exprs(), new_type_env)
+                    }),
+                ))
         {
             ctx.lower_top_level(expr);
         }
@@ -1470,6 +1608,23 @@ impl LocalAscriptionBindingRegion {
     }
 }
 
+/// One named axis a local tensor ascription claims: binding `binding`'s
+/// extent at `axis` is a site for dimension binder `binder`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalAscriptionNamedSite {
+    pub binding: String,
+    pub axis: usize,
+    pub binder: String,
+    /// Whether `binder` is output-inferred ([`DimBinderRoles::return_only`]),
+    /// so this site may bind it; otherwise the site is only ever a claim.
+    pub output_inferred: bool,
+    /// Whether `binder` is named by a `List` parameter's elements
+    /// ([`DimBinderRoles::list_element`]), so the site is a claim against the
+    /// extent the activation recorded from them, or a refusal when it
+    /// recorded none.
+    pub list_element: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TensorCallsiteSpecialization {
     /// Checker-owned identities used while lowering the concrete body. These
@@ -1478,6 +1633,9 @@ pub(crate) struct TensorCallsiteSpecialization {
     precision_substitutions: UnordMap<String, Prim>,
     rank_substitutions: UnordMap<String, Vec<DimInfo>>,
     dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
+    /// Checked dimension binders of the activations in force (see
+    /// `LowerCtx::checked_dim_substitutions`).
+    checked_dim_substitutions: UnordMap<String, DimInfo>,
     /// Checked plus authored aliases used only to rebuild the current
     /// declaration's parameter/result contracts.
     claim_precision_substitutions: UnordMap<String, Prim>,
@@ -1491,9 +1649,48 @@ pub struct SubexprLoweringContext {
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     tensor_specialization: TensorCallsiteSpecialization,
+    /// See [`LowerCtx::activation_record`].
+    activation_record: ActivationRecord,
+}
+
+/// Which dimension binders the host lane executing a graph's ascription
+/// regions records when an activation starts, and so claims a site naming
+/// one against ([`LowerCtx::activation_record`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ActivationRecord {
+    /// None: a site naming a binder no region input witnesses is refused.
+    #[default]
+    Nothing,
+    /// The binders a `List` parameter's element tensors name
+    /// ([`DimBinderRoles::list_element`]). The C host lane records them in
+    /// its entry contract's named states.
+    ListElements,
+    /// Every parameter-carried binder ([`DimBinderRoles::parameter_carried`]).
+    /// `chelis eval` records them all in its activation.
+    Parameters,
 }
 
 impl SubexprLoweringContext {
+    /// This context for a host lane that claims a site naming a
+    /// parameter-carried binder against its own activation record.
+    pub fn claiming_parameter_binders_at_activation(&self) -> Self {
+        Self {
+            activation_record: ActivationRecord::Parameters,
+            ..self.clone()
+        }
+    }
+
+    /// This context for a host lane that records the binders a `List`
+    /// parameter's elements name when an activation starts, and claims a
+    /// site naming one against that record. A lane that already records
+    /// every parameter-carried binder keeps doing so.
+    pub fn claiming_list_element_binders_at_activation(&self) -> Self {
+        Self {
+            activation_record: self.activation_record.max(ActivationRecord::ListElements),
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn with_tensor_callsite_specialization(
         &self,
         specialization: TensorCallsiteSpecialization,
@@ -1508,10 +1705,25 @@ impl SubexprLoweringContext {
         tensor_specialization
             .dim_axis_positions
             .merge(specialization.dim_axis_positions);
+        for (name, dim) in specialization.checked_dim_substitutions.into_sorted() {
+            tensor_specialization
+                .checked_dim_substitutions
+                .entry(name)
+                .or_insert(dim);
+        }
         Self {
             tensor_specialization,
             ..self.clone()
         }
+    }
+
+    /// This context with the activation's checked dimension binders
+    /// instantiated. Bindings already in force keep their value.
+    pub(crate) fn with_checked_dimensions(&self, dimensions: UnordMap<String, DimInfo>) -> Self {
+        self.with_tensor_callsite_specialization(TensorCallsiteSpecialization {
+            checked_dim_substitutions: dimensions,
+            ..TensorCallsiteSpecialization::default()
+        })
     }
 
     pub fn new(
@@ -1759,6 +1971,61 @@ impl SubexprLoweringContext {
         Ok(Some(claims))
     }
 
+    /// The named axes the region's ascriptions claim, in binding order: each
+    /// is a site that names a dimension binder (spec/04-type-system.md
+    /// section 4.4.1). A host lane executes a region on its own, so it is the
+    /// host lane that relates the site to the binder's other sites in the
+    /// activation: the first one binds the binder and every later one is a
+    /// claim against it.
+    pub fn local_ascription_named_sites(
+        &self,
+        region: &LocalAscriptionBindingRegion,
+    ) -> Vec<LocalAscriptionNamedSite> {
+        self.local_tensor_ascriptions
+            .iter()
+            .filter(|ascription| region.ascription_ids.contains(&ascription.id().get()))
+            .flat_map(|ascription| {
+                ascription
+                    .outstanding_claims()
+                    .iter()
+                    .filter(|claim| {
+                        matches!(
+                            claim.required_extent(),
+                            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+                        )
+                    })
+                    .map(|claim| LocalAscriptionNamedSite {
+                        binding: ascription.binding_name().to_string(),
+                        axis: claim.axis(),
+                        binder: LowerCtx::local_ascription_claim_label(
+                            ascription,
+                            claim.axis(),
+                            claim,
+                        ),
+                        output_inferred: false,
+                        list_element: false,
+                    })
+                    .map(|site| {
+                        let roles =
+                            DimBinderRoles::of_ascription(&self.program_signatures, ascription);
+                        let binder = extent_binder_label(&site.binder);
+                        LocalAscriptionNamedSite {
+                            output_inferred: roles.return_only.contains(&binder),
+                            list_element: roles.list_element.contains(&binder),
+                            ..site
+                        }
+                    })
+            })
+            .collect()
+    }
+
+    /// The dimension-binder roles of declaration `name`
+    /// ([`DimBinderRoles::of_declaration`]), from the same signature table
+    /// the named sites read.
+    pub fn dim_binder_roles(&self, name: &str) -> DimBinderRoles {
+        DimBinderRoles::of_declaration(&self.program_signatures, name)
+    }
+
     /// Restrict one synthetic region to the exact checker identities selected
     /// while planning it. Source offsets are local to an independently
     /// checked artifact and can collide after library composition.
@@ -1785,39 +2052,9 @@ pub(crate) fn prepare_subexpr_lowering_context(
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
 ) -> SubexprLoweringContext {
+    PROGRAM_CONTEXT_PREPARATIONS.with(|passes| passes.set(passes.get() + 1));
     assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
-    // chelis#1923, the other half of this ingress: the def bodies the
-    // subexpression inlines are unchecked Deep too, and a pipe in one of them
-    // reaches lowering exactly as a pipe in the subexpression itself would.
-    // Folded here, beside the decode-once assertions, so this boundary
-    // normalizes everything it admits rather than half of it.
-    //
-    // The fold is linear in the program, and a context is a pure function of
-    // the three tables above, so a caller lowering many subexpressions
-    // against one fixed program prepares the context once instead of paying
-    // this per subexpression (chelis#2207, and the free `*_with_context`
-    // entries below). `PROGRAM_DEF_FOLD_PASSES` is how a test holds that
-    // caller to it.
-    //
-    // A table with no pipe in it keeps its `Arc`:
-    // the host runtime prepares a context per `grad` or `vmap` application,
-    // and copying every definition, the standard library's included, on each
-    // one made applications scale with the program (chelis#2434).
-    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(passes.get() + 1));
-    let folded: Vec<(String, Expr)> = program_defs
-        .iter()
-        .filter_map(|(name, body)| {
-            chelis_deep::pipe::fold_pipes_if_changed(body).map(|body| (name.clone(), body))
-        })
-        .collect();
-    let program_defs = if folded.is_empty() {
-        program_defs
-    } else {
-        let mut defs = (*program_defs).clone();
-        defs.extend(folded);
-        Arc::new(defs)
-    };
     let mut program_types: BTreeMap<String, TensorType> = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -1835,6 +2072,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
         tensor_specialization: TensorCallsiteSpecialization::default(),
+        activation_record: ActivationRecord::Nothing,
     }
 }
 
@@ -1997,16 +2235,6 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     options: SubexprLoweringOptions,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    // chelis#1923: this is the one lowering ingress that receives UNCHECKED
-    // Deep, measured and in use. Every whole-program entry takes a
-    // `CheckedProgram`, whose input the checker folded, but a subexpression
-    // can arrive from a caller that parsed or synthesized it, so the fold
-    // runs here at the boundary rather than leaving a pipe to reach the
-    // fail-closed raise. This is the SAME `fold_pipe`, not a second
-    // derivation of spec/02 §0.1: a boundary that folds its own way is
-    // exactly what this change removed.
-    let folded = chelis_deep::pipe::fold_pipes(expr);
-    let expr = &folded;
     // As above, a failed attempt owns and discards its complete collector.
     catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, _, _) =
@@ -2055,12 +2283,17 @@ pub(crate) fn try_lower_staged_host_region(
         // The staged region is this graph's only declaration.
         ctx.decl = Some(ctx.dag.declare(""));
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+        ctx.activation_record = context.activation_record;
         ctx.prec_substitutions = context
             .tensor_specialization
             .precision_substitutions
             .clone();
         ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
         ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+        ctx.checked_dim_substitutions = context
+            .tensor_specialization
+            .checked_dim_substitutions
+            .clone();
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
@@ -2100,7 +2333,7 @@ pub(crate) fn try_lower_staged_host_region(
         }
         // A staged host region's inputs are the partition's, not an author's.
         ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
-        ctx.binding_witnesses.clear();
+        ctx.bindings.clear_witnesses();
         ctx.prepare_local_ascription_tokens(expr, None);
         // Do not infer equality between repeated spellings in the machine-built
         // parameter list above. The returned result type is nevertheless the
@@ -2184,12 +2417,17 @@ fn lower_subexpr_program_inner_impl(
     // The lowered expression is this graph's only declaration.
     ctx.decl = Some(ctx.dag.declare(""));
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+    ctx.activation_record = context.activation_record;
     ctx.prec_substitutions = context
         .tensor_specialization
         .precision_substitutions
         .clone();
     ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
     ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+    ctx.checked_dim_substitutions = context
+        .tensor_specialization
+        .checked_dim_substitutions
+        .clone();
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -2222,7 +2460,7 @@ fn lower_subexpr_program_inner_impl(
     );
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
-    ctx.binding_witnesses.clear();
+    ctx.bindings.clear_witnesses();
     ctx.prepare_local_ascription_tokens(expr, None);
     ctx.declaration_root_claim = authored_signature;
     let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
@@ -2317,6 +2555,7 @@ fn lower_subexpr_program_inner_impl(
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    reject_literal_operand_disagreement(&dce_dag);
     let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     #[cfg(not(feature = "lowering-trace"))]
     let _ = (&dce_remap, &copy_remap);
@@ -2998,6 +3237,34 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
 /// argument type exprs in declared order (the trailing return type is
 /// dropped), so the caller can recover each parameter's renamed precision
 /// variable. Returns `None` when the node has no `t-fn` type metadata.
+/// The checker-recorded type of a `fn` node, whose `d-var` identities are
+/// that definition's own generalized dimension binders.
+fn checked_fn_type_expr(fn_expr: &Expr) -> Option<&Expr> {
+    match fn_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => {
+            metadata.ty().map(|ty| ty.expression())
+        }
+        _ => None,
+    }
+}
+
+fn collect_dimension_binders(expr: &Expr, binders: &mut UnordSet<String>) {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::DVar, _, children) => {
+            if let Some(Expr::Atom(Atom::Name(name), _)) = children.first() {
+                binders.insert(name.clone());
+            }
+        }
+        ExprCarrier::DecodedNode(_, _, children) => {
+            for child in children {
+                collect_dimension_binders(child, binders);
+            }
+        }
+        ExprCarrier::MetadataExpression(meta) => collect_dimension_binders(&meta.expr, binders),
+        _ => {}
+    }
+}
+
 fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
     let meta = match fn_expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata,
@@ -3534,6 +3801,7 @@ pub(crate) fn tensor_callsite_specialization(
         precision_substitutions,
         rank_substitutions,
         dim_axis_positions,
+        checked_dim_substitutions: UnordMap::new(),
         claim_precision_substitutions,
         claim_rank_substitutions,
     })
@@ -3843,11 +4111,12 @@ pub fn top_level_lowering_map(
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
     let dtype_bound_names = collect_top_level_dtype_bound_names(exprs);
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(exprs),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(exprs),
+        type_env,
+    );
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -3891,11 +4160,12 @@ pub fn top_level_lowering_map_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty_expr_to_deep(ty_expr));
     }
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(new_exprs),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(new_exprs),
+        new_type_env,
+    );
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -3971,11 +4241,12 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let top_level_defs = collect_top_level_defs(program.exprs());
     let top_level_sigs = collect_top_level_sigs(program.exprs());
     let dtype_bound_names = collect_top_level_dtype_bound_names(program.exprs());
-    let types = LowerabilityTypes {
-        signatures: &top_level_sigs,
-        dtype_bound_names: &dtype_bound_names,
-        function_typed_defs: collect_function_typed_defs(program.exprs()),
-    };
+    let types = LowerabilityTypes::new(
+        &top_level_sigs,
+        &dtype_bound_names,
+        collect_function_typed_defs(program.exprs()),
+        program.type_env(),
+    );
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
@@ -4354,6 +4625,8 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_read"
                         | "mmap_len"
                         | "process_run"
+                        | "clock_wall_read"
+                        | "clock_monotonic_read"
                         | "round_to"
                         | "parse_csv"
                         | "to_csv"
@@ -4417,8 +4690,12 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "relu"
                         | "sigmoid"
                         | "tanh"
+                        | "erf"
+                        | "erfc"
                         | "silu"
                         | "gelu"
+                        | "gelu_tanh"
+                        | "standard_normal_cdf"
                         | "cmplt"
                         | "gt"
                         | "gte"
@@ -4513,6 +4790,123 @@ fn collect_top_level_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
         collect_top_level_defs_from_expr(expr, &mut defs);
     }
     defs
+}
+
+/// The roles a declaration's checked function type gives its dimension
+/// binders (spec/04-type-system.md section 4.4.1).
+///
+/// This is the one derivation the lowering, the evaluator's activation
+/// records, and the C host lane's first-site handling all read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DimBinderRoles {
+    /// Named by the declared result and by no parameter type at any depth of
+    /// a List, tuple, reference, or other constructor: output-inferred, so
+    /// only these may be bound by a first site in the body.
+    pub return_only: BTreeSet<String>,
+    /// Named by a tensor parameter's own axes (through a reference): bound
+    /// when the activation starts, so a site naming one is a claim.
+    pub tensor_parameter: BTreeSet<String>,
+    /// Named by any parameter type at any depth, `tensor_parameter`
+    /// included: a site naming one is a claim against that parameter.
+    pub parameter_carried: BTreeSet<String>,
+    /// Named by the axes of a `List` parameter's element tensors, through
+    /// nested Lists and references: recorded from the elements when the
+    /// activation starts, and absent when the List holds no tensor.
+    pub list_element: BTreeSet<String>,
+}
+
+impl DimBinderRoles {
+    pub fn of_signature(signature: &Expr) -> Self {
+        fn collect(expr: &Expr, out: &mut BTreeSet<String>) {
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                return;
+            };
+            if matches!(tag, DeepTag::DName | DeepTag::DVar) {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    out.insert(name.to_string());
+                }
+                return;
+            }
+            for kid in kids {
+                collect(kid, out);
+            }
+        }
+        fn tensor_axes(expr: &Expr, out: &mut BTreeSet<String>) {
+            match stamped_parts(expr) {
+                Some((DeepTag::TRef, _, kids)) => {
+                    if let Some(inner) = kids.first() {
+                        tensor_axes(inner, out);
+                    }
+                }
+                Some((DeepTag::TTensor, _, _)) => collect(expr, out),
+                _ => {}
+            }
+        }
+        let Some((DeepTag::TFn, _, kids)) = stamped_parts(signature) else {
+            return Self::default();
+        };
+        let Some((result, params)) = kids.split_last() else {
+            return Self::default();
+        };
+        fn list_element_axes(expr: &Expr, in_list: bool, out: &mut BTreeSet<String>) {
+            match stamped_parts(expr) {
+                Some((DeepTag::TRef, _, kids)) => {
+                    if let Some(inner) = kids.first() {
+                        list_element_axes(inner, in_list, out);
+                    }
+                }
+                Some((DeepTag::TAdt, _, kids))
+                    if kids.first().and_then(symbol_name) == Some("List") =>
+                {
+                    if let Some(element) = kids.get(1) {
+                        list_element_axes(element, true, out);
+                    }
+                }
+                Some((DeepTag::TTensor, _, _)) if in_list => collect(expr, out),
+                _ => {}
+            }
+        }
+        let mut carried = BTreeSet::new();
+        let mut tensor_parameter = BTreeSet::new();
+        let mut list_element = BTreeSet::new();
+        for param in params {
+            collect(param, &mut carried);
+            tensor_axes(param, &mut tensor_parameter);
+            list_element_axes(param, false, &mut list_element);
+        }
+        let mut return_only = BTreeSet::new();
+        collect(result, &mut return_only);
+        return_only.retain(|name| !carried.contains(name));
+        Self {
+            return_only,
+            tensor_parameter,
+            parameter_carried: carried,
+            list_element,
+        }
+    }
+
+    /// The roles of the declaration that owns `ascription`, by its checked
+    /// signature in `signatures`; empty when it has none.
+    pub fn of_ascription(
+        signatures: &BTreeMap<String, Expr>,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+    ) -> Self {
+        match ascription.declaration_name() {
+            Some(name) => Self::of_declaration(signatures, name),
+            // A top-level value's ascription has no signature, so it names
+            // no dimension binder at all.
+            None => Self::default(),
+        }
+    }
+
+    /// The roles of declaration `name` by its checked signature in
+    /// `signatures`; empty when it has none.
+    pub fn of_declaration(signatures: &BTreeMap<String, Expr>, name: &str) -> Self {
+        match signatures.get(name) {
+            Some(signature) => Self::of_signature(signature),
+            None => Self::default(),
+        }
+    }
 }
 
 pub(crate) fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
@@ -4642,6 +5036,76 @@ struct LowerabilityTypes<'a> {
     signatures: &'a BTreeMap<String, Expr>,
     dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
     function_typed_defs: UnordSet<String>,
+    /// The checked type environment the classification reads, with both maps'
+    /// terminal-name indexes, built once per classification. A short name's
+    /// declared type was found by scanning every key of both maps, once per
+    /// definition, so classifying a program cost the square of its size
+    /// (chelis#3144).
+    type_env: &'a BTreeMap<String, Expr>,
+    signature_terminals: TerminalIndex<'a>,
+    type_env_terminals: TerminalIndex<'a>,
+}
+
+impl<'a> LowerabilityTypes<'a> {
+    fn new(
+        signatures: &'a BTreeMap<String, Expr>,
+        dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+        function_typed_defs: UnordSet<String>,
+        type_env: &'a BTreeMap<String, Expr>,
+    ) -> Self {
+        Self {
+            signatures,
+            dtype_bound_names,
+            function_typed_defs,
+            type_env,
+            signature_terminals: TerminalIndex::new(signatures),
+            type_env_terminals: TerminalIndex::new(type_env),
+        }
+    }
+
+    /// [`lookup_declared_type_expr`] over this classification's maps, through
+    /// their indexes.
+    fn declared_type(&self, name: &str) -> Option<&'a Expr> {
+        self.signatures
+            .get(name)
+            .or_else(|| self.signature_terminals.unique(self.signatures, name))
+            .or_else(|| self.type_env.get(name))
+            .or_else(|| self.type_env_terminals.unique(self.type_env, name))
+    }
+}
+
+/// The keys of one map grouped by every terminal name [`terminal_name_matches`]
+/// accepts for them, so a unique terminal match is a lookup rather than a scan.
+struct TerminalIndex<'a> {
+    keys_by_terminal: BTreeMap<&'a str, BTreeSet<&'a str>>,
+}
+
+impl<'a> TerminalIndex<'a> {
+    fn new(map: &'a BTreeMap<String, Expr>) -> Self {
+        let mut keys_by_terminal = BTreeMap::<&'a str, BTreeSet<&'a str>>::new();
+        for key in map.keys() {
+            let key = key.as_str();
+            let terminals = [
+                Some(key),
+                key.rsplit_once("__").map(|(_, tail)| tail),
+                key.rsplit_once('.').map(|(_, tail)| tail),
+            ];
+            for terminal in terminals.into_iter().flatten() {
+                keys_by_terminal.entry(terminal).or_default().insert(key);
+            }
+        }
+        Self { keys_by_terminal }
+    }
+
+    /// [`unique_terminal_match`] of `name` in `map`, the map this index was
+    /// built from.
+    fn unique(&self, map: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+        let keys = self.keys_by_terminal.get(name)?;
+        if keys.len() != 1 {
+            return None;
+        }
+        keys.iter().next().and_then(|key| map.get(*key))
+    }
 }
 
 fn def_is_lowered(
@@ -4656,7 +5120,8 @@ fn def_is_lowered(
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !lookup_declared_type_expr(types.signatures, type_env, name)
+        return !types
+            .declared_type(name)
             .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
     }
 
@@ -4665,11 +5130,7 @@ fn def_is_lowered(
         // not only a function literal. Its initializer needs the same callable
         // identity as a lexical binding; a projected closure is host-served.
         if (types.function_typed_defs.contains(name)
-            || LowerCtx::type_expr_is_fn(lookup_declared_type_expr(
-                types.signatures,
-                type_env,
-                name,
-            )))
+            || LowerCtx::type_expr_is_fn(types.declared_type(name)))
             && !LowerabilityBindings::default().static_callable(body, top_level_defs)
         {
             return false;
@@ -4690,7 +5151,8 @@ fn def_is_lowered(
                 visiting,
                 &LowerabilityBindings::default(),
             )
-            && !lookup_declared_type_expr(types.signatures, type_env, name)
+            && !types
+                .declared_type(name)
                 .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
@@ -4821,7 +5283,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.names.contains(&name)
             && let Some(body) = top_level_defs.get(&name)
             && body.tag() == Some(DeepTag::Fn)
-            && (lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
+            && (types.declared_type(&name).is_some_and(|ty| {
                 type_expr_has_precision_var(ty)
                     || type_expr_has_rank_var(ty)
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
@@ -5857,6 +6319,12 @@ pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
 /// `cast`-axis fix must not lose the `-1` axis form that `softmax(x, -1)`
 /// (and the SDPA grad path) depend on.
 pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
+    // An integer cast can contain the negative-literal App carrier, notably
+    // cast(-1i64, i32). Recurse through the axis reader so that carrier keeps
+    // the same static interpretation as an outer negation.
+    if let ExprCarrier::DecodedNode(DeepTag::Cast, _, kids) = expr.carrier() {
+        return extract_int_axis(kids.first()?);
+    }
     if let Some(n) = extract_int_for_dim(expr) {
         return Some(n);
     }
@@ -5874,7 +6342,7 @@ pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
         && let Some(inner) = kids.get(1)
         && let Some(n) = extract_int_axis(inner)
     {
-        return Some(-n);
+        return n.checked_neg();
     }
     None
 }
@@ -5933,10 +6401,6 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
     }
-    // chelis#569: the pipe spelling of the same read.
-    if tag == DeepTag::Pipe {
-        return pipe_shape_read(kids);
-    }
     if app_var_name_and_args(expr).map(|(name, _)| name) != Some("shape") {
         return None;
     }
@@ -5946,73 +6410,6 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let axis = kids.get(2).and_then(extract_int_for_dim)?;
     let axis = usize::try_from(axis).ok()?;
     Some((operand, axis))
-}
-
-/// Recognize the pipe spelling of a `shape(operand, axis)` read (chelis#569).
-///
-/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, i32)), i64)` into
-/// `x |> shape(cast(0, i32)) |> cast(i64)`; both denote the same extent,
-/// so one recognizer answers for both and the lint cannot turn a building
-/// program into one the lowerer refuses.
-///
-/// `(pipe {} v s1 .. sn)` denotes `sn(..s1(v))`, and each `s` is the
-/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a call
-/// stage. The read is recognized when the FIRST stage reads `shape` off its
-/// own parameter and every later stage only re-types the result, which is
-/// what the trailing `|> cast(ty)` stages do. Any other stage returns `None`:
-/// the operand a later stage would name is a computed value, not the tensor
-/// whose axis supplies the extent.
-fn pipe_shape_read(kids: &[Expr]) -> Option<(&Expr, usize)> {
-    let operand = kids.first()?;
-    let mut axis: Option<usize> = None;
-    for stage in &kids[1..] {
-        let (param, body) = pipe_stage_lambda(stage)?;
-        match axis {
-            None => {
-                let (read_operand, read_axis) = shape_app_operand_axis(body)?;
-                if bare_var_name(strip_cast_wrappers(read_operand))? != param {
-                    return None;
-                }
-                axis = Some(read_axis);
-            }
-            Some(_) => {
-                if bare_var_name(strip_cast_wrappers(body))? != param {
-                    return None;
-                }
-            }
-        }
-    }
-    Some((operand, axis?))
-}
-
-/// The parameter name and body of a synthesized unary pipe-stage lambda,
-/// the `(fn {} (params {} p) body)` shape `parse_pipe_stage` produces.
-fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
-    let kids = match stage.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    let param_kids = match kids.first()?.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    if param_kids.len() != 1 {
-        return None;
-    }
-    let Some(Expr::Atom(Atom::Name(name), _)) = param_kids.first() else {
-        return None;
-    };
-    Some((name.clone(), kids.get(1)?))
 }
 
 /// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
@@ -6269,7 +6666,7 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                 // runtime diagnostic.
                 let inner = kids.first()?;
                 let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                // The [05-OP-6] rung folds through its OWN kernel, so
+                // Each named rung folds through its OWN kernel, so
                 // a statically-recognized `cast_trunc(1.9, i32)`
                 // contributes 1 rather than declining as the checked
                 // ladder would. An unrecognized selector declines.
@@ -6282,12 +6679,12 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                             chelis_types::cast_scalar("cast", value, target).ok()?
                         }
                     },
-                    chelis_deep::CastMode::Trunc => match extract_numeric_leaf(inner)? {
+                    chelis_deep::CastMode::Named(mode) => match extract_numeric_leaf(inner)? {
                         StagedScalar::Raw(raw) => {
-                            chelis_types::cast_trunc_raw("cast_trunc", raw, target).ok()?
+                            chelis_types::named_cast_raw(mode, raw, target).ok()?
                         }
                         StagedScalar::Typed(value) => {
-                            chelis_types::cast_trunc_scalar("cast_trunc", value, target).ok()?
+                            chelis_types::named_cast_scalar(mode, value, target).ok()?
                         }
                     },
                 };
@@ -6460,15 +6857,248 @@ enum CallableScope {
     Lexical(std::sync::Arc<LexicalScope>),
 }
 
+/// What lowering recorded about one bound name's value, besides the value.
+#[derive(Clone, Default)]
+struct ValueFacts {
+    /// Issue #368: the pinned host list or list literal the name is bound
+    /// to, lowered again where `concat` or a host list read uses it.
+    list: Option<Expr>,
+    /// chelis#369: the underlying `shape(operand, axis)` application the
+    /// name is bound to, directly or through an alias or `cast`, so a size
+    /// naming it reads the operand's extent (the `tensor_full_like` idiom).
+    shape: Option<Expr>,
+    /// chelis#469/#528: the compile-time integer the name is bound to, so a
+    /// size naming it const-folds.
+    static_size: Option<i64>,
+    /// The node bound and its declaring shape witnesses. The node comparison
+    /// in [`LowerCtx::binding_witnesses_for_expr`] keeps a rebound value from
+    /// reusing them.
+    witnesses: Option<(NodeId, Vec<NodeId>)>,
+}
+
+/// The value bindings of one lexical scope, each with the facts lowering
+/// recorded about its value.
+///
+/// A name's facts are replaced whenever the name is bound: [`Self::insert`]
+/// drops them and [`Self::insert_with_facts`] replaces them with the new
+/// binding's, so no binder (a `let`, a pattern, a function or function-literal
+/// parameter) can leave an enclosing binding's fact visible under the name it
+/// shadows. Lowering used to keep each fact in its own name-keyed table beside
+/// the values, which every binder had to clear by hand, and a function-literal
+/// parameter did not clear the shape table (chelis#469).
+#[derive(Clone, Default)]
+struct ValueScope {
+    values: UnordMap<String, LoweredValue>,
+    facts: UnordMap<String, ValueFacts>,
+}
+
+impl ValueScope {
+    fn get<Q>(&self, name: &Q) -> Option<&LoweredValue>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.values.get(name)
+    }
+
+    fn contains_key<Q>(&self, name: &Q) -> bool
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.values.contains_key(name)
+    }
+
+    fn to_sorted(&self) -> Vec<(&String, &LoweredValue)> {
+        self.values.to_sorted()
+    }
+
+    /// Bind `name` to `value` with no facts.
+    fn insert(&mut self, name: String, value: LoweredValue) -> Option<LoweredValue> {
+        self.facts.remove(&name);
+        self.values.insert(name, value)
+    }
+
+    /// Bind `name` to `value` with `facts`, replacing every fact of the
+    /// binding it shadows.
+    fn insert_with_facts(&mut self, name: String, value: LoweredValue, facts: ValueFacts) {
+        self.facts.insert(name.clone(), facts);
+        self.values.insert(name, value);
+    }
+
+    /// A binder of `name` that binds no lowered value (a callable): its
+    /// facts replace the shadowed binding's.
+    fn replace_facts(&mut self, name: &str, facts: ValueFacts) {
+        self.facts.insert(name.to_string(), facts);
+    }
+
+    fn facts<Q>(&self, name: &Q) -> Option<&ValueFacts>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts.get(name)
+    }
+
+    fn list<Q>(&self, name: &Q) -> Option<&Expr>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.list.as_ref()
+    }
+
+    fn shape<Q>(&self, name: &Q) -> Option<&Expr>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.shape.as_ref()
+    }
+
+    fn static_size<Q>(&self, name: &Q) -> Option<i64>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.static_size
+    }
+
+    fn witnesses<Q>(&self, name: &Q) -> Option<&(NodeId, Vec<NodeId>)>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.witnesses.as_ref()
+    }
+
+    /// Record the declaring shape witnesses of the value `name` is already
+    /// bound to.
+    fn set_witnesses(&mut self, name: &str, witnesses: (NodeId, Vec<NodeId>)) {
+        self.facts.entry(name.to_string()).or_default().witnesses = Some(witnesses);
+    }
+
+    /// Every binding's witnesses, as one activation saves them.
+    fn witness_snapshot(&self) -> UnordMap<String, (NodeId, Vec<NodeId>)> {
+        self.facts
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(name, facts)| Some((name.clone(), facts.witnesses.clone()?)))
+            .collect()
+    }
+
+    /// Replace every binding's witnesses with `snapshot`.
+    fn restore_witnesses(&mut self, snapshot: UnordMap<String, (NodeId, Vec<NodeId>)>) {
+        self.clear_witnesses();
+        for (name, witnesses) in snapshot.into_sorted() {
+            self.set_witnesses(&name, witnesses);
+        }
+    }
+
+    fn clear_witnesses(&mut self) {
+        let names = self
+            .facts
+            .to_sorted()
+            .into_iter()
+            .filter(|(_, facts)| facts.witnesses.is_some())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in names {
+            if let Some(facts) = self.facts.get_mut(&name) {
+                facts.witnesses = None;
+            }
+        }
+    }
+
+    /// Give `alias` everything `name` is bound to, its facts included.
+    /// Whether `name` had a value or a fact.
+    fn alias(&mut self, name: &str, alias: &str) -> bool {
+        let (value, facts) = self.entry_of(name);
+        self.put_alias(alias, value, facts)
+    }
+
+    /// [`Self::alias`], binding `alias` in `target`.
+    fn alias_into(&self, name: &str, alias: &str, target: &mut Self) -> bool {
+        let (value, facts) = self.entry_of(name);
+        target.put_alias(alias, value, facts)
+    }
+
+    fn entry_of(&self, name: &str) -> (Option<LoweredValue>, Option<ValueFacts>) {
+        (
+            self.values.get(name).cloned(),
+            self.facts.get(name).cloned(),
+        )
+    }
+
+    fn put_alias(
+        &mut self,
+        alias: &str,
+        value: Option<LoweredValue>,
+        facts: Option<ValueFacts>,
+    ) -> bool {
+        let bound = value.is_some() || facts.is_some();
+        if let Some(value) = value {
+            self.values.insert(alias.to_string(), value);
+        }
+        if let Some(facts) = facts {
+            self.facts.insert(alias.to_string(), facts);
+        }
+        bound
+    }
+
+    /// These bindings' facts, each passed through `keep`, with no values:
+    /// the start of this scope rebased into another graph, whose values are
+    /// added back with [`Self::rebase_value`].
+    fn facts_only(&self, keep: impl Fn(&ValueFacts) -> ValueFacts) -> Self {
+        Self {
+            values: UnordMap::new(),
+            facts: self
+                .facts
+                .to_sorted()
+                .into_iter()
+                .map(|(name, facts)| (name.clone(), keep(facts)))
+                .collect(),
+        }
+    }
+
+    /// Set the value of a binding rebased into another graph, keeping the
+    /// facts [`Self::facts_only`] carried over for it.
+    fn rebase_value(&mut self, name: String, value: LoweredValue) {
+        self.values.insert(name, value);
+    }
+
+    /// The values alone, without any fact.
+    fn without_facts(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            facts: UnordMap::new(),
+        }
+    }
+
+    /// The scope with every binding's witnesses dropped.
+    fn without_witnesses(mut self) -> Self {
+        self.clear_witnesses();
+        self
+    }
+}
+
+impl<Q> std::ops::Index<&Q> for ValueScope
+where
+    String: std::borrow::Borrow<Q>,
+    Q: Ord + ?Sized,
+{
+    type Output = LoweredValue;
+
+    fn index(&self, name: &Q) -> &LoweredValue {
+        &self.values[name]
+    }
+}
+
 /// Every name-keyed table of one lexical scope. [`LowerCtx`] keeps these as
 /// separate fields; `capture_scope` and `replace_scope` move them together.
 #[derive(Clone, Default)]
 struct LexicalScope {
-    bindings: UnordMap<String, LoweredValue>,
-    list_bindings: UnordMap<String, Expr>,
-    shape_bindings: UnordMap<String, Expr>,
-    static_size_bindings: UnordMap<String, i64>,
-    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    bindings: ValueScope,
     local_callables: UnordMap<String, CallableExpr>,
     fn_typed_params: UnordSet<String>,
 }
@@ -7165,6 +7795,11 @@ enum FailMessage {
     Unusable(FailMessageDefect),
 }
 
+/// One local tensor ascription's claim tokens, by claimed axis. `None` is a
+/// claim on a binder that no witness declared when the activation started; it
+/// is resolved where the ascription's initializer lowers.
+type LocalAscriptionClaimTokens = Vec<(usize, Option<NodeId>)>;
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -7199,37 +7834,29 @@ struct LowerCtx<'program> {
     interface_loads: UnordSet<String>,
     /// Counter for the aliases [`LowerCtx::pin_free_names`] mints.
     next_pin: usize,
-    bindings: UnordMap<String, LoweredValue>,
-    list_bindings: UnordMap<String, Expr>,
-    /// chelis#369: `let`-bound names whose value is a `shape(operand,
-    /// axis)` application, keyed by the bound name and holding the raw
-    /// `shape(...)` Deep `Expr`. The canonical `tensor_full_like` idiom
-    /// writes `len = shape(x, 0)` then `expand(s, 0, cast(len, i32))`,
-    /// so the `expand` size argument is a `var len` reference, not a
-    /// direct `shape(...)` app. Without this map the size-recovery path
-    /// [`Self::shape_app_operand_axis_resolved`] cannot see through the
-    /// `let` indirection and the extent silently defaults to `Lit(1)`,
-    /// producing the `Lit(n) vs Lit(1)` backward-DAG verification failure.
-    /// Saved/restored across binding scopes exactly like `list_bindings`.
-    shape_bindings: UnordMap<String, Expr>,
-    /// chelis#469/#528: `let`-bound names whose value const-folds to a
-    /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
-    /// over such values — the §4.7.2 `SizeClass::Static` provenance the
-    /// checker follows transitively through `let` bindings). Lets a later
-    /// `expand(s, axis, cast(len, i32))` (or `len` used directly) recover
-    /// the concrete extent instead of the pre-fix size-1 default — the exact
-    /// eval-`[7]`-vs-C-`[1]` silent miscompile #469 exists to prevent when a
-    /// `let`-bound static size reaches the backend. Re-binding a name to a
-    /// non-static value drops its stale entry (shadowing symmetry, mirroring
-    /// `shape_bindings`). Saved/restored across binding scopes.
-    static_size_bindings: UnordMap<String, i64>,
-    /// Lexical binding plus its declaring shape witnesses. Alias bindings
-    /// forward this metadata; rebinding replaces it and scope exit restores it.
-    /// The node comparison prevents a shadowed value reusing an outer witness.
-    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    /// The lexical value bindings and the facts recorded about each value
+    /// (a list literal, a `shape(...)` source, a static integer, declaring
+    /// shape witnesses); see [`ValueScope`].
+    bindings: ValueScope,
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
+    ///
+    /// A parameter axis declares a binder when the activation starts. An
+    /// output-inferred binder (spec/04-type-system.md section 4.4.1) is
+    /// declared later, by the first site in evaluation order that produces
+    /// its extent, and every later site naming it, the declared result
+    /// included, is a claim against that witness. The list therefore belongs
+    /// to the activation, not to a block: a `let` does not restore it. A
+    /// first site inside a runtime `if` arm would bind on that arm's path
+    /// alone, which a `Where` cannot express, so lowering routes such a body
+    /// to host control flow (see [`Self::selected_arm_depth`]).
     signature_witnesses: Vec<(String, NodeId)>,
+    /// The first-site witnesses of binders in their declaration's
+    /// [`DimBinderRoles::return_only`] set, so the declared result is a later
+    /// site of exactly those. A witness id is unique in the graph, so the set
+    /// needs no activation scoping: [`Self::signature_witnesses`] already
+    /// selects the witness the current activation sees.
+    return_only_first_sites: UnordSet<NodeId>,
     /// Every parameter witness minted by the CURRENT activation's
     /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
     ///
@@ -7259,8 +7886,19 @@ struct LowerCtx<'program> {
     /// Checker-owned authored local tensor ascriptions. This is intentionally
     /// separate from ordinary inferred expression `type` metadata.
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    /// Which binders the host lane executing this graph's ascription regions
+    /// records when an activation starts, and so claims a site naming one
+    /// against. `chelis eval` records every parameter-carried binder, List
+    /// elements included. The C host lane records the binders a `List`
+    /// parameter's elements name in its entry contract's named states, and
+    /// reads any other binder only through a region input whose type names
+    /// it, so there a site with no witness keeps the refusal.
+    activation_record: ActivationRecord,
     /// Activation-local lowering tokens allocated before its body executes.
-    local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
+    /// `None` marks a claim on a binder no witness declares yet; it is
+    /// resolved where the ascription's initializer lowers, as a claim if an
+    /// earlier site bound the binder and as that binder's first site if not.
+    local_ascription_tokens: Vec<(u64, LocalAscriptionClaimTokens)>,
     /// Scalar Bool selecting the runtime control-flow path currently being
     /// lowered. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
@@ -7302,6 +7940,11 @@ struct LowerCtx<'program> {
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
     /// has no [05-OP-68] guard and must not fall back to a placeholder.
     if_branch_depth: usize,
+    /// Depth of runtime `if` arms that lower into a `Where`, which computes
+    /// both arms on every path. A first site inside one would bind its
+    /// binder on a path that may not run (spec/04-type-system.md section
+    /// 4.4.1), so such a body runs in host control flow instead.
+    selected_arm_depth: usize,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -7330,7 +7973,7 @@ struct LowerCtx<'program> {
     /// unresolvable name (`None`). Populated by `lower_fn` when a `t-fn`
     /// param is registered; saved/restored across nested `fn` scopes
     /// alongside `bindings` and `local_callables`. See
-    /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+    /// `docs/archive/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: UnordSet<String>,
     /// Dataflow-local completeness evidence for unresolved callable
     /// applications. Grad subcontexts record a fresh result marker for each
@@ -7373,6 +8016,18 @@ struct LowerCtx<'program> {
     /// adding a node is a lowering defect.
     decl: Option<DeclId>,
     dim_substitutions: UnordMap<String, DimInfo>,
+    /// The checked dimension binders of the activations being inlined,
+    /// mapped to this call's actual axes (runtime_extents.md C2.2). The
+    /// checker generalizes each definition over its own `d-var`
+    /// identities and records them on every body node, so a body node's
+    /// type names the callee's binder until this map instantiates it.
+    /// Scoped like `dim_substitutions`: one activation's bindings never
+    /// reach a sibling call.
+    checked_dim_substitutions: UnordMap<String, DimInfo>,
+    /// The serial of the next activation that instantiates a binder without
+    /// evidence. Shared with every sub-context whose nodes are spliced into
+    /// this graph, so no two activations of one graph draw the same identity.
+    activation_serial: Arc<AtomicU64>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
     /// of the polymorphic def's signature. Populated at call sites of
@@ -7463,16 +8118,14 @@ impl<'program> LowerCtx<'program> {
             top_level: LexicalScope::default(),
             interface_loads: UnordSet::new(),
             next_pin: 0,
-            bindings: UnordMap::new(),
-            list_bindings: UnordMap::new(),
-            shape_bindings: UnordMap::new(),
-            static_size_bindings: UnordMap::new(),
-            binding_witnesses: UnordMap::new(),
+            bindings: ValueScope::default(),
             signature_witnesses: Vec::new(),
+            return_only_first_sites: UnordSet::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_tensor_ascriptions: Arc::new(Vec::new()),
+            activation_record: ActivationRecord::Nothing,
             local_ascription_tokens: Vec::new(),
             branch_path_condition: None,
             reshape_targets: BTreeMap::new(),
@@ -7484,6 +8137,7 @@ impl<'program> LowerCtx<'program> {
             program_signatures: program_signatures.into(),
             random_path_condition: None,
             if_branch_depth: 0,
+            selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
@@ -7497,6 +8151,8 @@ impl<'program> LowerCtx<'program> {
             inlined_values: UnordMap::new(),
             decl: None,
             dim_substitutions: UnordMap::new(),
+            checked_dim_substitutions: UnordMap::new(),
+            activation_serial: Arc::new(AtomicU64::new(0)),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
             dim_axis_positions: UnordMap::new(),
@@ -7579,36 +8235,10 @@ impl<'program> LowerCtx<'program> {
             let alias = format!("__chelis_pinned_{}_{name}", self.next_pin);
             let top = &mut self.top_level;
             let mut bound = false;
-            bound |= pin(
-                &mut self.bindings,
-                top_level.then_some(&mut top.bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.list_bindings,
-                top_level.then_some(&mut top.list_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.shape_bindings,
-                top_level.then_some(&mut top.shape_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.static_size_bindings,
-                top_level.then_some(&mut top.static_size_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.binding_witnesses,
-                top_level.then_some(&mut top.binding_witnesses),
-                &name,
-                &alias,
-            );
+            if top_level {
+                self.bindings.alias_into(&name, &alias, &mut top.bindings);
+            }
+            bound |= self.bindings.alias(&name, &alias);
             bound |= pin(
                 &mut self.local_callables,
                 top_level.then_some(&mut top.local_callables),
@@ -7653,10 +8283,6 @@ impl<'program> LowerCtx<'program> {
     fn capture_scope(&self) -> LexicalScope {
         LexicalScope {
             bindings: self.bindings.clone(),
-            list_bindings: self.list_bindings.clone(),
-            shape_bindings: self.shape_bindings.clone(),
-            static_size_bindings: self.static_size_bindings.clone(),
-            binding_witnesses: self.binding_witnesses.clone(),
             local_callables: self.local_callables.clone(),
             fn_typed_params: self.fn_typed_params.clone(),
         }
@@ -7667,22 +8293,11 @@ impl<'program> LowerCtx<'program> {
     fn replace_scope(&mut self, scope: LexicalScope) -> LexicalScope {
         let LexicalScope {
             bindings,
-            list_bindings,
-            shape_bindings,
-            static_size_bindings,
-            binding_witnesses,
             local_callables,
             fn_typed_params,
         } = scope;
         LexicalScope {
             bindings: std::mem::replace(&mut self.bindings, bindings),
-            list_bindings: std::mem::replace(&mut self.list_bindings, list_bindings),
-            shape_bindings: std::mem::replace(&mut self.shape_bindings, shape_bindings),
-            static_size_bindings: std::mem::replace(
-                &mut self.static_size_bindings,
-                static_size_bindings,
-            ),
-            binding_witnesses: std::mem::replace(&mut self.binding_witnesses, binding_witnesses),
             local_callables: std::mem::replace(&mut self.local_callables, local_callables),
             fn_typed_params: std::mem::replace(&mut self.fn_typed_params, fn_typed_params),
         }
@@ -7752,6 +8367,7 @@ impl<'program> LowerCtx<'program> {
         input: NodeId,
         axis: usize,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         let input_ty = self
             .dag
@@ -7765,10 +8381,23 @@ impl<'program> LowerCtx<'program> {
         };
         match name {
             "sum" => {
-                let op = RiscOp::sum_default(axis, input_ty.precision)
-                    .expect("checked variadic sum dtype");
+                // Each stage accumulates in the explicit accumulator or the
+                // default for its input `q`, and finalizes at
+                // `sum_result(q, a)`: i32 for an i8 or i16 stage, the input
+                // dtype for bf16 and f16 (spec/04 §5.7.1).
+                let op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, input_ty.precision, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, input_ty.precision),
+                }
+                .expect("checked variadic sum accumulator");
                 let RiscOp::Sum { accumulator, .. } = op else {
-                    unreachable!("sum_default returns Sum");
+                    unreachable!("the sum constructors return Sum");
+                };
+                let output_ty = TensorType {
+                    precision: input_ty.precision.sum_result_precision(accumulator),
+                    ..output_ty
                 };
                 let sum = self.dag.add_node(
                     self.owner(),
@@ -8025,11 +8654,19 @@ impl<'program> LowerCtx<'program> {
     fn type_from_meta(&self, meta: &Metadata) -> TensorType {
         meta.ty()
             .map(|ty| {
-                Self::type_from_type_expr_with_subst(
+                let mut tensor = Self::type_from_type_expr_with_subst(
                     ty.expression(),
                     &self.prec_substitutions,
                     &self.rank_substitutions,
-                )
+                );
+                for dim in &mut tensor.dims {
+                    if let DimInfo::Named(name, None) = dim
+                        && let Some(actual) = self.checked_dim_substitutions.get(name)
+                    {
+                        *dim = actual.clone();
+                    }
+                }
+                tensor
             })
             .unwrap_or_else(Self::default_type)
     }
@@ -8102,6 +8739,7 @@ impl<'program> LowerCtx<'program> {
         shadowed: &[String],
     ) -> UnordMap<String, NodeId> {
         subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        subctx.activation_record = self.activation_record;
         // A free `Load` the transformed body keeps is spliced into this graph
         // unchanged, so it must not take one of this graph's input names.
         subctx
@@ -8111,7 +8749,7 @@ impl<'program> LowerCtx<'program> {
         let mut rebase = ScopeRebase::default();
         // A top-level callee reached inside the body resolves in the
         // parent's top level, as it would outside the transform.
-        subctx.top_level = self.rebase_scope(subctx, &self.top_level, &mut rebase);
+        subctx.top_level = self.rebase_scope(subctx, &self.top_level, &mut rebase, false);
         let scope = match &function.scope {
             CallableScope::Declaration => subctx.top_level.clone(),
             CallableScope::Lexical(captured) => {
@@ -8126,11 +8764,11 @@ impl<'program> LowerCtx<'program> {
         };
         for (name, value) in scope
             .bindings
-            .into_sorted()
+            .to_sorted()
             .into_iter()
-            .filter(|(name, _)| !shadowed.contains(name))
+            .filter(|(name, _)| !shadowed.contains(*name))
         {
-            subctx.bindings.insert(name, value);
+            subctx.bindings.insert(name.clone(), value.clone());
         }
         for (name, callable) in scope
             .local_callables
@@ -8184,15 +8822,24 @@ impl<'program> LowerCtx<'program> {
         subctx: &mut LowerCtx,
         scope: &LexicalScope,
         rebase: &mut ScopeRebase,
+        keep_expression_facts: bool,
     ) -> LexicalScope {
+        // A static integer stays true in the sub-context. Host list and shape
+        // facts are expressions over names, lowered again where they are
+        // read, so they are kept only where those names stay meaningful.
         let mut rebased = LexicalScope {
-            static_size_bindings: scope.static_size_bindings.clone(),
+            bindings: scope.bindings.facts_only(|facts| ValueFacts {
+                list: keep_expression_facts.then(|| facts.list.clone()).flatten(),
+                shape: keep_expression_facts.then(|| facts.shape.clone()).flatten(),
+                static_size: facts.static_size,
+                witnesses: None,
+            }),
             fn_typed_params: scope.fn_typed_params.clone(),
             ..LexicalScope::default()
         };
         for (name, value) in scope.bindings.to_sorted() {
             if let Some(load) = self.rebase_binding(subctx, value, rebase) {
-                rebased.bindings.insert(name.clone(), load);
+                rebased.bindings.rebase_value(name.clone(), load);
             }
         }
         for (name, callable) in scope.local_callables.to_sorted() {
@@ -8309,7 +8956,7 @@ impl<'program> LowerCtx<'program> {
         if let Some(rebased) = rebase.scopes.get(&key) {
             return CallableScope::Lexical(rebased.clone());
         }
-        let rebased = std::sync::Arc::new(self.rebase_scope(subctx, captured, rebase));
+        let rebased = std::sync::Arc::new(self.rebase_scope(subctx, captured, rebase, false));
         rebase.scopes.insert(key, rebased.clone());
         CallableScope::Lexical(rebased)
     }
@@ -8774,9 +9421,10 @@ impl<'program> LowerCtx<'program> {
     /// every earlier declaration bound, with no enclosing function's
     /// witnesses.
     fn declaration_scope(&self) -> LexicalScope {
+        let scope = self.capture_scope();
         LexicalScope {
-            binding_witnesses: UnordMap::new(),
-            ..self.capture_scope()
+            bindings: scope.bindings.without_witnesses(),
+            ..scope
         }
     }
 
@@ -8792,9 +9440,7 @@ impl<'program> LowerCtx<'program> {
         initializer: &TrappingInitializer,
         rebase: &mut ScopeRebase,
     ) -> TrappingInitializer {
-        let mut scope = self.rebase_scope(subctx, &initializer.scope, rebase);
-        scope.list_bindings = initializer.scope.list_bindings.clone();
-        scope.shape_bindings = initializer.scope.shape_bindings.clone();
+        let scope = self.rebase_scope(subctx, &initializer.scope, rebase, true);
         TrappingInitializer {
             expr: initializer.expr.clone(),
             scope,
@@ -8930,6 +9576,7 @@ impl<'program> LowerCtx<'program> {
         );
         scratch.decl = Some(scratch.dag.declare(name));
         scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        scratch.activation_record = self.activation_record;
         scratch.program_value_verdicts = self.program_value_verdicts.clone();
         // `catch_lowering` clears the panic-output suppression on exit; an
         // enclosing lowering that set it keeps it.
@@ -9504,6 +10151,22 @@ impl<'program> LowerCtx<'program> {
                 Some((axis, label, required, matches!(dim, DimInfo::Lit(_))))
             })
             .collect::<Vec<_>>();
+        // A named result dimension of a return-only binder
+        // (spec/04-type-system.md section 4.4.1) is a later site of the
+        // body's first site for it. Which binder that is, the first site
+        // recorded from the declaration's [`DimBinderRoles`] when it bound
+        // it, so the claim is resolved once the body has lowered.
+        let first_site_claims = claim
+            .into_iter()
+            .filter(|_| !function && self.signature_is_authored)
+            .flat_map(|ty| ty.dims.iter().enumerate())
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Named(name, _) if !name.is_empty() && name != "*" => {
+                    Some((axis, extent_binder_label(name)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
         let start = self.invocation_witnesses.len();
         for (axis, label, required, literal) in requirements {
@@ -9631,6 +10294,39 @@ impl<'program> LowerCtx<'program> {
                     );
                 }
             }
+        }
+        for (axis, label) in first_site_claims {
+            let (Some(first_site), Some(mut id)) = (
+                self.signature_witness(&label)
+                    .filter(|witness| self.return_only_first_sites.contains(witness)),
+                result.as_single_node(),
+            ) else {
+                continue;
+            };
+            let required = self.capture_result_claim(first_site, label, axis);
+            // The token is captured after the body produced its value, so the
+            // claim belongs to a carrier of that value, which the guard
+            // derivation follows back to the producer.
+            if !matches!(self.dag.get(id).map(|node| &node.op), Some(RiscOp::Copy))
+                || id.0 <= required.0
+            {
+                let ty = self
+                    .dag
+                    .get(id)
+                    .expect("returned value")
+                    .output_type
+                    .clone();
+                id = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Copy,
+                    vec![id],
+                    ty,
+                    self.current_span_id.clone(),
+                );
+                result = LoweredValue::Node(id);
+            }
+            self.dag.add_shape_dep(id, required);
+            self.invocation_witnesses.push(id);
         }
         self.retain_invocation_witnesses(result, start)
     }
@@ -9781,7 +10477,7 @@ impl<'program> LowerCtx<'program> {
             }
             if !matches!(
                 owner.op,
-                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
             ) {
                 return false;
             }
@@ -10041,7 +10737,7 @@ impl<'program> LowerCtx<'program> {
             DeepTag::Var => self.lower_var(meta, kids, span),
             DeepTag::App => self.lower_app(meta, kids, span),
             DeepTag::Fn => self.lower_fn(meta, kids, claim),
-            DeepTag::Pipe => self.lower_pipe(),
+
             DeepTag::Cast => self.lower_cast(meta, kids),
             DeepTag::If => self.lower_if(meta, kids, span),
             DeepTag::Tuple => self.lower_tuple(kids),
@@ -10225,15 +10921,17 @@ impl<'program> LowerCtx<'program> {
         if !name.is_empty() {
             // A `def` is a top-level declaration: each entry it makes is also
             // part of the scope every top-level function body resolves in.
-            if self.is_host_list_expr(&kids[1]) {
-                let recorded = self.pin_free_names(&kids[1], true);
-                self.list_bindings.insert(name.clone(), recorded.clone());
-                self.top_level.list_bindings.insert(name.clone(), recorded);
-            }
-            self.bindings.insert(name.clone(), body_id.clone());
+            let facts = ValueFacts {
+                list: self
+                    .is_host_list_expr(&kids[1])
+                    .then(|| self.pin_free_names(&kids[1], true)),
+                ..ValueFacts::default()
+            };
+            self.bindings
+                .insert_with_facts(name.clone(), body_id.clone(), facts.clone());
             self.top_level
                 .bindings
-                .insert(name.clone(), body_id.clone());
+                .insert_with_facts(name.clone(), body_id.clone(), facts);
             if let Some(mut callable) = self.resolve_declaration_callable(&kids[1]) {
                 if let CallableExpr::Plain(function) = &mut callable
                     && let Some(signature) = self.program_signatures.get(&name)
@@ -10258,14 +10956,9 @@ impl<'program> LowerCtx<'program> {
             );
         }
         let saved = self.bindings.clone();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
-        let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         // kids[0] = (bind {} name1 expr1 name2 expr2 ...)
@@ -10289,13 +10982,16 @@ impl<'program> LowerCtx<'program> {
                     // falls back to the rank-0 host placeholder. Gated on the
                     // non-host check so it does not change `is_host_list_expr`
                     // routing for `to_list`/`map`/`filter` bindings.
+                    // The facts are read against the scope before this
+                    // binding, and the binding below replaces every fact
+                    // of the one it shadows.
+                    let mut facts = ValueFacts::default();
                     if self.is_host_list_expr(&bind_kids[i + 1])
                         || collect_cons_chain(&bind_kids[i + 1]).is_some()
                     {
                         // chelis#2603: it is lowered again where `name` is
                         // used, so its names are pinned to their meaning here.
-                        let recorded = self.pin_free_names(&bind_kids[i + 1], false);
-                        self.list_bindings.insert(name.clone(), recorded);
+                        facts.list = Some(self.pin_free_names(&bind_kids[i + 1], false));
                     }
                     // chelis#369/#469: remember a `len = shape(operand, axis)`
                     // binding — OR a `let`-to-`let` alias / use-site `cast` of
@@ -10307,36 +11003,25 @@ impl<'program> LowerCtx<'program> {
                     // and records the UNDERLYING `shape(...)` app, so recovery
                     // binds the `shape_dep` liveness edge to the actual source
                     // tensor and axis (mirroring how `fold_static_size`
-                    // recurses `static_size_bindings` for the static path). A
-                    // re-binding of `name` to anything else must drop any stale
-                    // shape entry so shadowing never recovers a wrong extent.
+                    // follows static bindings for the static path).
                     if let Some(shape_app) = self.resolve_shape_binding_source(&bind_kids[i + 1]) {
                         // chelis#2603: a directly bound `shape(...)` is lowered
                         // again at its use, so its operand is pinned here; an
                         // alias's recorded app was pinned where it was bound.
-                        let recorded = if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
-                            self.pin_free_names(&shape_app, false)
-                        } else {
-                            shape_app
-                        };
-                        self.shape_bindings.insert(name.clone(), recorded);
-                    } else {
-                        self.shape_bindings.remove(name);
+                        facts.shape =
+                            Some(if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
+                                self.pin_free_names(&shape_app, false)
+                            } else {
+                                shape_app
+                            });
                     }
                     // chelis#469/#528: remember a `len = <static int>` binding
                     // (a literal, `cast(N, _)`, or integer arithmetic over
                     // such, following prior static bindings) so a later
                     // `expand(s, axis, cast(len, i32))` const-folds the
-                    // extent instead of the size-1 default. Re-binding to a
-                    // non-static value drops any stale entry (shadowing
-                    // symmetry, mirroring `shape_bindings`).
-                    if let Some(value) = self.fold_static_size(&bind_kids[i + 1]) {
-                        self.static_size_bindings.insert(name.clone(), value);
-                    } else {
-                        self.static_size_bindings.remove(name);
-                    }
+                    // extent instead of the size-1 default.
+                    facts.static_size = self.fold_static_size(&bind_kids[i + 1]);
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
-                        self.binding_witnesses.remove(name);
                         // Preserve the function value at its binding position
                         // as well as its native inlining identity. Host scalar
                         // expressions can then capture aliases through the
@@ -10348,8 +11033,11 @@ impl<'program> LowerCtx<'program> {
                                 None
                             }
                         });
-                        if let Some(value) = value {
-                            self.bindings.insert(name.clone(), value);
+                        match value {
+                            Some(value) => {
+                                self.bindings.insert_with_facts(name.clone(), value, facts)
+                            }
+                            None => self.bindings.replace_facts(name, facts),
                         }
                         self.local_callables.insert(name.clone(), callable);
                     } else {
@@ -10370,9 +11058,9 @@ impl<'program> LowerCtx<'program> {
                                                 &bind_kids[i + 1],
                                             )
                                         })
-                                        .map(|_| claims.clone())
+                                        .map(|ascription| (ascription.clone(), claims.clone()))
                                 });
-                        if let Some(claims) = local_claims {
+                        if let Some((ascription, pending)) = local_claims {
                             let Some(mut owner) = val_id.as_single_node() else {
                                 raise_fatal_lowering_error(
                                     format!(
@@ -10382,6 +11070,13 @@ impl<'program> LowerCtx<'program> {
                                     bind_kids[i + 1].span_id().map(str::to_owned),
                                 )
                             };
+                            let claims = self.resolve_local_ascription_claims(
+                                &ascription,
+                                pending,
+                                owner,
+                                name,
+                                bind_kids[i + 1].span_id(),
+                            );
                             for (axis, _) in &claims {
                                 self.restore_local_ascription_owner_axis(owner, *axis);
                             }
@@ -10420,15 +11115,9 @@ impl<'program> LowerCtx<'program> {
                                 self.invocation_witnesses.push(owner);
                             }
                         }
-                        if let Some((input, witnesses)) = witnesses
-                            && val_id.as_single_node() == Some(input)
-                        {
-                            self.binding_witnesses
-                                .insert(name.clone(), (input, witnesses));
-                        } else {
-                            self.binding_witnesses.remove(name);
-                        }
-                        self.bindings.insert(name.clone(), val_id);
+                        facts.witnesses =
+                            witnesses.filter(|(input, _)| val_id.as_single_node() == Some(*input));
+                        self.bindings.insert_with_facts(name.clone(), val_id, facts);
                     }
                 }
                 i += 2;
@@ -10438,14 +11127,9 @@ impl<'program> LowerCtx<'program> {
         let result = self.lower_expr(&kids[1]);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
-        self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
-        self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -10479,10 +11163,9 @@ impl<'program> LowerCtx<'program> {
                 .outstanding_claims()
                 .iter()
                 .map(|claim| {
-                    (
-                        claim.axis(),
-                        self.local_ascription_claim_token(&ascription, claim),
-                    )
+                    let token = (!self.local_claim_awaits_first_site(&ascription, claim))
+                        .then(|| self.local_ascription_claim_token(&ascription, claim));
+                    (claim.axis(), token)
                 })
                 .collect();
             self.local_ascription_tokens
@@ -10540,6 +11223,169 @@ impl<'program> LowerCtx<'program> {
             }
         }
         contains(body, ascription)
+    }
+
+    /// Resolve an ascription's pending claims where its initializer `owner`
+    /// has lowered, and return the claims to attach to it.
+    ///
+    /// A pending claim names a binder no witness declared when the activation
+    /// started. If an earlier site has bound it since, the claim is an
+    /// ordinary claim against that site. Otherwise this ascription is the
+    /// binder's first producing site: the initializer's extent at the axis
+    /// becomes the binder's witness and owes no comparison here. Axes resolve
+    /// in order, so a binder repeated within one ascription is bound by its
+    /// first axis and claimed by the rest.
+    fn resolve_local_ascription_claims(
+        &mut self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        pending: LocalAscriptionClaimTokens,
+        owner: NodeId,
+        binding: &str,
+        span: Option<&str>,
+    ) -> Vec<(usize, NodeId)> {
+        let id = ascription.id().get();
+        let mut claims = Vec::with_capacity(pending.len());
+        for (axis, token) in pending {
+            let realized_axis = self.realized_local_ascription_axis(ascription, axis);
+            if let Some(token) = token {
+                claims.push((realized_axis, token));
+                continue;
+            }
+            let claim = ascription
+                .outstanding_claims()
+                .iter()
+                .find(|claim| claim.axis() == axis)
+                .expect("a pending token names one of the ascription's claims");
+            if self.local_claim_awaits_first_site(ascription, claim) {
+                let label = Self::local_ascription_claim_label(ascription, axis, claim);
+                if self.selected_arm_depth > 0 {
+                    raise_lowering_diagnostic(
+                        LowerDiagnostic::new(
+                            format!(
+                                "the output-inferred dimension `{}` is first produced under a \
+                                 runtime conditional; a tensor kernel computes both arms, so it \
+                                 cannot bind `{}` on the arm's path alone (spec/04-type-system.md \
+                                 section 4.4.1)",
+                                extent_binder_label(&label),
+                                extent_binder_label(&label),
+                            ),
+                            None,
+                            span.map(str::to_owned),
+                        )
+                        .host_control(),
+                    );
+                }
+                let witness = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LocalExpand,
+                        parameter: binding.to_string(),
+                        axis: RtAxis::Lit(
+                            i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
+                        ),
+                        requirements: Vec::new(),
+                        claims: Vec::new(),
+                    },
+                    vec![owner],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    span.map(str::to_owned),
+                );
+                if DimBinderRoles::of_ascription(&self.program_signatures, ascription)
+                    .return_only
+                    .contains(&extent_binder_label(&label))
+                {
+                    self.return_only_first_sites.insert(witness);
+                }
+                self.signature_witnesses.push((label, witness));
+                continue;
+            }
+            let token = self.local_ascription_claim_token(ascription, claim);
+            if let Some((_, recorded)) = self
+                .local_ascription_tokens
+                .iter_mut()
+                .find(|(recorded, _)| *recorded == id)
+                .and_then(|(_, tokens)| tokens.iter_mut().find(|(at, _)| *at == axis))
+            {
+                *recorded = Some(token);
+            }
+            claims.push((realized_axis, token));
+        }
+        claims
+    }
+
+    /// Translate the checker's axis in an authored `tensor[..r, h, ...]`
+    /// into the activation's axis after each preceding rank spread expands.
+    /// The checked record keeps the authored slot so its identity and label
+    /// remain stable across calls with different ranks.
+    fn realized_local_ascription_axis(
+        &self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        axis: usize,
+    ) -> usize {
+        let slots = tensor_formal_dim_slots(ascription.authored_type())
+            .expect("checked local tensor ascription has tensor type");
+        assert!(
+            axis < slots.len(),
+            "checked local claim names an authored axis"
+        );
+        slots[..axis]
+            .iter()
+            .map(|slot| match slot {
+                DimSlot::Spread(name) => self
+                    .rank_substitutions
+                    .get(name)
+                    .map(Vec::len)
+                    .unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "local tensor ascription `{}` cannot resolve rank spread `{name}` in this activation",
+                                ascription.binding_name()
+                            ),
+                            Some(ascription.ascription_span()),
+                            None,
+                        )
+                    }),
+                DimSlot::Named(_) | DimSlot::DimVar(_) | DimSlot::Other => 1,
+            })
+            .sum()
+    }
+
+    /// Whether `claim` names a binder that no witness declares yet: an
+    /// output-inferred binder (spec/04-type-system.md section 4.4.1) whose
+    /// first producing site has not been lowered. Such a claim is resolved
+    /// where its initializer lowers.
+    fn local_claim_awaits_first_site(
+        &self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        claim: &chelis_types::LocalAscriptionAxisClaim,
+    ) -> bool {
+        if !matches!(
+            claim.required_extent(),
+            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+        ) {
+            return false;
+        }
+        let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        if self.signature_witness(&label).is_some() {
+            return false;
+        }
+        // Only an output-inferred binder may be bound here. A tensor
+        // parameter's binder without a witness is one a host region does not
+        // capture; the host lane claims it against the activation, as a lane
+        // that records every parameter-carried binder claims those. Any other
+        // binder keeps the refusal at its claim token.
+        let roles = DimBinderRoles::of_ascription(&self.program_signatures, ascription);
+        let binder = extent_binder_label(&label);
+        roles.return_only.contains(&binder)
+            || roles.tensor_parameter.contains(&binder)
+            || match self.activation_record {
+                ActivationRecord::Parameters => roles.parameter_carried.contains(&binder),
+                ActivationRecord::ListElements => roles.list_element.contains(&binder),
+                ActivationRecord::Nothing => false,
+            }
     }
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
@@ -10684,11 +11530,14 @@ impl<'program> LowerCtx<'program> {
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> NodeId {
         let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        let realized_axis = self.realized_local_ascription_axis(ascription, claim.axis());
         let site = crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
             ascription_id: ascription.id().get(),
             binding: ascription.binding_name().to_string(),
             claim: label.clone(),
-            axis: RtAxis::Lit(i32::try_from(claim.axis()).expect("checked tensor rank fits int32")),
+            axis: RtAxis::Lit(
+                i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
+            ),
         };
         let scalar = TensorType {
             dims: Vec::new(),
@@ -10713,7 +11562,7 @@ impl<'program> LowerCtx<'program> {
                         site,
                         parameter: String::new(),
                         axis: RtAxis::Lit(
-                            i32::try_from(claim.axis()).expect("checked tensor rank fits int32"),
+                            i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
                         ),
                         requirements: vec![value],
                         claims: Vec::new(),
@@ -10782,12 +11631,12 @@ impl<'program> LowerCtx<'program> {
                     None,
                 )
             };
-            for (_, token) in claims {
+            for token in claims.iter().filter_map(|(_, token)| *token) {
                 let owner_count = self
                     .dag
                     .nodes()
                     .iter()
-                    .filter(|owner| owner.shape_deps.contains(token))
+                    .filter(|owner| owner.shape_deps.contains(&token))
                     .count();
                 if owner_count != 1 {
                     raise_fatal_lowering_error(
@@ -11158,11 +12007,21 @@ impl<'program> LowerCtx<'program> {
             if func_name == "split_key" && kids.len() == 2 {
                 return self.lower_split_key(&kids[1]);
             }
+            // spec/04 §5.7: the checker admitted this explicit accumulator
+            // against §5.7.1's permitted pairs.
+            let accumulator = meta
+                .accumulator()
+                .and_then(|accumulator| stamped_parts(accumulator.expression()))
+                .and_then(|(_, _, parts)| match parts.first() {
+                    Some(Expr::Atom(Atom::Name(name), _)) => Prim::parse_name(name),
+                    _ => None,
+                });
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &kids[1..],
                 &ty,
                 app_span,
+                accumulator,
             ));
         }
 
@@ -11212,7 +12071,7 @@ impl<'program> LowerCtx<'program> {
         // `outer(doubler, seed)` where `outer(f, x) = f(f(x))` — the
         // inner `f(x)` runs as an argument to the outer `f`, not as
         // part of the outer body, and must not trip the guard. See
-        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`.
+        // `docs/archive/investigations/inlining_names_recursion_guard_diagnosis.md`.
         let inlining_name = callable_ref_name(func).filter(|name| {
             self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
         });
@@ -11235,7 +12094,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.lower_split_key(&args[0])
             } else {
-                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span, None))
             }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -11367,7 +12226,7 @@ impl<'program> LowerCtx<'program> {
                 // this with the resolved callable via `local_callables`, while
                 // unresolved helper forwarding preserves the parameter until
                 // its eventual application. See
-                // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+                // `docs/archive/investigations/pipe_fn_param_stage_diagnosis.md`.
                 // A declaration's body names only top-level callables
                 // (chelis#2588): the current scope's locals and function
                 // parameters are the applying site's, not the declaration's.
@@ -11671,6 +12530,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         // This ordinary-grad subcontext lowers called declarations as private
         // pure helpers. Their literal result tokens must survive into zero or
@@ -11860,9 +12720,10 @@ impl<'program> LowerCtx<'program> {
                     // Preserve a statically known integer through the fresh
                     // Load so an imported list_index/take_list/skip_list
                     // wrapper can select the correct primal positions.
-                    if let Some(value) = self.static_i64_from_node(*actual) {
-                        subctx.static_size_bindings.insert(name.clone(), value);
-                    }
+                    let facts = ValueFacts {
+                        static_size: self.static_i64_from_node(*actual),
+                        ..ValueFacts::default()
+                    };
                     subctx.interface_loads.insert(name.clone());
                     let load = subctx.dag.add_node(
                         subctx.owner(),
@@ -11884,9 +12745,11 @@ impl<'program> LowerCtx<'program> {
                     }
                     remap_formal_types.push(param_ty.clone());
                     remap_actual_types.push(node_type(self, *actual));
-                    subctx
-                        .bindings
-                        .insert(name.clone(), LoweredValue::Node(load));
+                    subctx.bindings.insert_with_facts(
+                        name.clone(),
+                        LoweredValue::Node(load),
+                        facts,
+                    );
                 }
                 None => raise_fatal_lowering_error(
                     format!("gradient parameter {index} has no actual argument mapping"),
@@ -12364,7 +13227,6 @@ impl<'program> LowerCtx<'program> {
         };
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
@@ -12372,12 +13234,10 @@ impl<'program> LowerCtx<'program> {
         let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
         self.local_ascription_tokens.clear();
         let call_span = self.current_span_id.clone();
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
+        let saved_checked_dim_substitutions = self.checked_dim_substitutions.clone();
         let saved_prec_substitutions = self.prec_substitutions.clone();
         let saved_rank_substitutions = self.rank_substitutions.clone();
         let saved_dim_axis_positions = self.dim_axis_positions.clone();
@@ -12420,6 +13280,7 @@ impl<'program> LowerCtx<'program> {
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut authored_formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
+        let mut actual_positions = Vec::new();
         // Prepare every actual in caller scope, in written order. Installing
         // a formal early can change the value or static fact of a later actual.
         let actuals = args
@@ -12436,14 +13297,18 @@ impl<'program> LowerCtx<'program> {
         let declaring_scope = self.declaring_scope(fn_expr);
         self.replace_scope(declaring_scope);
         for (
-            (((name, (static_size, callable, value)), param_ty), formal_expr),
-            authored_formal_expr,
+            position,
+            (
+                (((name, (static_size, callable, value)), param_ty), formal_expr),
+                authored_formal_expr,
+            ),
         ) in param_names
             .iter()
             .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
             .zip(authored_param_type_exprs.iter())
+            .enumerate()
         {
             // Preserve a caller-known integer through the inlined parameter
             // name. This is required by the [05-OP-35] wrappers: their public
@@ -12464,12 +13329,14 @@ impl<'program> LowerCtx<'program> {
             // erase the only evidence that `model` in `apply(model, x)` is an
             // unresolved outer callable.
             self.fn_typed_params.remove(name);
-            if let Some(value) = static_size {
-                self.static_size_bindings.insert(name.clone(), value);
-            } else {
-                self.static_size_bindings.remove(name);
-            }
+            // The parameter replaces every fact of a same-named binding in
+            // the scope the body resolves in.
+            let facts = ValueFacts {
+                static_size,
+                ..ValueFacts::default()
+            };
             if let Some(callable) = callable {
+                self.bindings.replace_facts(name, facts);
                 match callable {
                     // Preserve structural incompleteness when an unresolved
                     // outer function parameter is forwarded through a helper.
@@ -12495,12 +13362,19 @@ impl<'program> LowerCtx<'program> {
                     formal_type_exprs.push(formal_expr.clone());
                     authored_formal_type_exprs.push(authored_formal_expr.clone());
                     actual_types.push(actual_ty);
+                    actual_positions.push(position);
                 }
-                self.bindings.insert(name.clone(), arg_id);
+                self.bindings.insert_with_facts(name.clone(), arg_id, facts);
             }
         }
         self.dim_substitutions
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
+        self.instantiate_checked_dimensions(
+            fn_expr,
+            &actual_positions,
+            &actual_types,
+            expected_return_ty,
+        );
         // Issue #388: record the positional index of each named axis in the
         // formal parameter shapes so a named reduction/expand-anchor lookup
         // can recover the axis even after monomorphization erases the named
@@ -12566,7 +13440,7 @@ impl<'program> LowerCtx<'program> {
         // pruning cannot bound (the pre-#620 refuse-on-reentry rule
         // instead fell through to `lower_app`'s silently wrong
         // return-last-arg fallback; history in
-        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`).
+        // `docs/archive/investigations/inlining_names_recursion_guard_diagnosis.md`).
         // Decrements are skipped on raise: every lowering error unwinds
         // through the per-entry `catch_lowering` and the ctx is abandoned.
         self.inlining_active += 1;
@@ -12698,15 +13572,15 @@ impl<'program> LowerCtx<'program> {
                 == self.dag.get(*id).expect("result").output_type.dims.len()
         {
             for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
-                if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
-                {
+                let produced = &self.dag.get(*id).expect("result").output_type;
+                if Self::is_distinct_checked_named_result_axis(produced, axis, checked_dim) {
                     *id = self.refine_checked_result_axis_name(*id, axis, checked_dim);
                 }
             }
         }
         self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.binding_witnesses = saved_witnesses;
+        self.bindings.restore_witnesses(saved.witness_snapshot());
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
@@ -12722,16 +13596,100 @@ impl<'program> LowerCtx<'program> {
             }
         }
         self.bindings = saved;
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
+        self.checked_dim_substitutions = saved_checked_dim_substitutions;
         self.prec_substitutions = saved_prec_substitutions;
         self.rank_substitutions = saved_rank_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
         result
+    }
+
+    /// Instantiate the callee's checked dimension binders for this
+    /// activation (runtime_extents.md C2.2). The evidence is each tensor
+    /// actual at its checked formal's axis, then this call's checked result
+    /// for a binder no tensor actual supplies, such as one that occurs only
+    /// inside a record formal. A binder keeps its first binding, equal sizes
+    /// never merge two binders, and an unknown axis is no evidence. The
+    /// enclosing activation's bindings stay in force for the caller
+    /// expressions and callables substituted into this body.
+    fn instantiate_checked_dimensions(
+        &mut self,
+        fn_expr: &Expr,
+        actual_positions: &[usize],
+        actual_types: &[TensorType],
+        expected_return_ty: &TensorType,
+    ) {
+        let Some(checked_type) = checked_fn_type_expr(fn_expr) else {
+            return;
+        };
+        let mut binders = UnordSet::new();
+        collect_dimension_binders(checked_type, &mut binders);
+        if binders.is_empty() {
+            return;
+        }
+        let Some(checked_formals) = fn_type_arg_exprs(fn_expr) else {
+            return;
+        };
+        let mut evidence = Vec::new();
+        for (position, actual) in actual_positions.iter().zip(actual_types) {
+            if let Some(formal) = checked_formals.get(*position) {
+                evidence.push((
+                    Self::formal_param_type_for_call(
+                        formal,
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    ),
+                    actual.clone(),
+                ));
+            }
+        }
+        if let Some(result) = extract_fn_return_type(fn_expr)
+            && expected_return_ty != &Self::default_type()
+        {
+            evidence.push((
+                Self::formal_param_type_for_call(
+                    result,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                ),
+                expected_return_ty.clone(),
+            ));
+        }
+        for (checked, actual) in evidence {
+            if checked.dims.len() != actual.dims.len() {
+                continue;
+            }
+            for (checked, actual) in checked.dims.iter().zip(&actual.dims) {
+                let DimInfo::Named(name, None) = checked else {
+                    continue;
+                };
+                let unknown =
+                    matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
+                if binders.contains(name) && !unknown && actual != checked {
+                    self.checked_dim_substitutions
+                        .entry(name.clone())
+                        .or_insert_with(|| actual.clone());
+                }
+            }
+        }
+        // A binder with no evidence, such as one whose actual axis has only a
+        // run-time extent, still names this activation's axis and no other:
+        // it gets a fresh identity, never the callee-private name, which a
+        // sibling activation of the same body would share.
+        let unbound = binders
+            .into_sorted()
+            .into_iter()
+            .filter(|binder| !self.checked_dim_substitutions.contains_key(binder))
+            .collect::<Vec<_>>();
+        if !unbound.is_empty() {
+            let serial = self.activation_serial.fetch_add(1, Ordering::Relaxed);
+            for binder in unbound {
+                let fresh = DimInfo::Named(format!("_act_dim_{serial}_{binder}"), None);
+                self.checked_dim_substitutions.insert(binder, fresh);
+            }
+        }
     }
 
     /// Execute a resolved signature activation over bindings already placed
@@ -12742,7 +13700,7 @@ impl<'program> LowerCtx<'program> {
         params: &[String],
         body: &Expr,
     ) -> LoweredValue {
-        let saved_witnesses = self.binding_witnesses.clone();
+        let saved_witnesses = self.bindings.witness_snapshot();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
         let saved_activation = self.activation_witnesses.clone();
@@ -12861,7 +13819,7 @@ impl<'program> LowerCtx<'program> {
         }
         self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, start);
-        self.binding_witnesses = saved_witnesses;
+        self.bindings.restore_witnesses(saved_witnesses);
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
         self.activation_witnesses = saved_activation;
@@ -12891,15 +13849,13 @@ impl<'program> LowerCtx<'program> {
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
-            if let Some(value) = arg_id
-                .as_single_node()
-                .and_then(|node| self.static_i64_from_node(node))
-            {
-                self.static_size_bindings.insert(name.clone(), value);
-            } else {
-                self.static_size_bindings.remove(name);
-            }
-            self.bindings.insert(name.clone(), arg_id);
+            let facts = ValueFacts {
+                static_size: arg_id
+                    .as_single_node()
+                    .and_then(|node| self.static_i64_from_node(node)),
+                ..ValueFacts::default()
+            };
+            self.bindings.insert_with_facts(name.clone(), arg_id, facts);
         }
         let result = self.lower_resolved_body(fn_expr, &param_names, body);
         if let Some(ret_ty_expr) = fn_expr.result_type() {
@@ -13195,6 +14151,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {
@@ -13520,6 +14477,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {
@@ -13984,6 +14942,7 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         ty: &TensorType,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         match func_name {
             // [05-OP-58] owns these exact identities. They cannot be encoded
@@ -14376,24 +15335,22 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            // Bucket 3: `tanh`, `silu`, `gelu` route through new tier2
-            // decompositions so the RISC DAG path stays self-contained.
-            // Mirrors the relu/sigmoid pattern above.
+            // `tanh`, `erf`, and `erfc` are [05-OP-46] Tier 1 primitives; `silu`,
+            // `gelu`, `gelu_tanh`, and `standard_normal_cdf` route through their §3.3
+            // tier2 lowerings, mirroring the relu/sigmoid pattern above.
             "tanh" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "tanh input");
-                // Elementwise: output dims always come from the lowered
-                // operand (the annotation's dims can be stale symbolics
-                // inside a rank-poly inline body; see chelis#346 red-team
-                // F1/F3). Same contract as the Tier-1 binary arms.
-                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
-                let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_tanh(
-                    self.owner(),
-                    &mut self.dag,
-                    x,
-                    &out_ty,
-                    parent_span.as_deref(),
-                );
+                let node = self.lower_transcendental(RiscOp::Tanh, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erf input");
+                let node = self.lower_transcendental(RiscOp::Erf, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erfc" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erfc input");
+                let node = self.lower_transcendental(RiscOp::Erfc, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {
@@ -14422,6 +15379,40 @@ impl<'program> LowerCtx<'program> {
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_gelu(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "gelu_tanh" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "gelu_tanh input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_gelu_tanh(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "standard_normal_cdf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "standard_normal_cdf input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_standard_normal_cdf(
                     self.owner(),
                     &mut self.dag,
                     x,
@@ -14524,15 +15515,27 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_matmul(
-                    self.owner(),
-                    &mut self.dag,
-                    a,
-                    b,
-                    &a_ty,
-                    &b_ty,
-                    parent_span.as_deref(),
-                )
+                match accumulator {
+                    Some(accumulator) => tier2::lower_matmul_with_accumulator(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        accumulator,
+                        parent_span.as_deref(),
+                    ),
+                    None => tier2::lower_matmul(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        parent_span.as_deref(),
+                    ),
+                }
             }
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
@@ -14968,7 +15971,11 @@ impl<'program> LowerCtx<'program> {
                 let mut result = input;
                 for position in axes {
                     result = self.lower_variadic_value_reduction_stage(
-                        func_name, result, position, app_span,
+                        func_name,
+                        result,
+                        position,
+                        app_span,
+                        accumulator,
                     );
                 }
                 result
@@ -14991,7 +15998,13 @@ impl<'program> LowerCtx<'program> {
                 // carries a wildcard placeholder. See
                 // `Self::reduction_out_dims`.
                 let out_dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
+                let sum_op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, operand_prec, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, operand_prec),
+                }
+                .unwrap_or_else(|msg| {
                     // The type checker already rejects unsupported
                     // operand precisions before lowering; fall back to
                     // the operand precision so the resulting IR can
@@ -15027,9 +16040,7 @@ impl<'program> LowerCtx<'program> {
                 // precision so downstream consumers see the documented
                 // result type.
                 if accumulator != operand_prec {
-                    let result_prec = operand_prec
-                        .default_reduce_sum_result_precision()
-                        .unwrap_or(operand_prec);
+                    let result_prec = operand_prec.sum_result_precision(accumulator);
                     if result_prec != accumulator {
                         let cast_ty = TensorType {
                             dims: out_dims,
@@ -15472,7 +16483,8 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.checked_unit_axis(x, axis, &args[0])
                 };
-                // Recover the broadcast extent. Three sources, in order:
+                // Recover the broadcast extent. The arms below are
+                // refinements tried in order, and the last one is total:
                 //
                 //   1. A statically-extractable size (a bare int, `(lit
                 //      ...)`, a `cast`-wrapped int, or a symbolic dim
@@ -15491,7 +16503,9 @@ impl<'program> LowerCtx<'program> {
                 //      `Lit(1)` that produced the `Lit(n) vs Lit(1)`
                 //      verification failure under `grad`.
                 //
-                //   3. Otherwise default to size 1.
+                //   3. Otherwise the size is ordinary integer dataflow: a
+                //      rank-0 `RtDim::Node` input (chelis#469). No size is
+                //      refused for its provenance and none defaults to 1.
                 //
                 // chelis#384/#397: when the extent comes from a
                 // `shape(src, axis)` argument, capture `src`'s lowered node so
@@ -15525,9 +16539,7 @@ impl<'program> LowerCtx<'program> {
                     //     through `cast` / `let` by `shape_app_operand_axis_
                     //     resolved`). Tried BEFORE the bare-symbol arm so the
                     //     `let`-bound form resolves to the tensor extent rather
-                    //     than a sourceless `Sym("len")` that the guard below
-                    //     rejects (the check-`accept` / build-`reject`
-                    //     asymmetry #469 tracks). The source node is recorded
+                    //     than a `Sym("len")`. The source node is recorded
                     //     as a `shape_dep` below so its `Load` survives DCE and
                     //     declares the extent symbol (chelis#384/#397).
                     else if let Some((src, source_axis, _)) =
@@ -15548,23 +16560,46 @@ impl<'program> LowerCtx<'program> {
                             })),
                         }
                     }
-                    // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
-                    //     in-scope tensor dimension, or a monomorphized dim
-                    //     substitution). The post-node sourceless guard below
-                    //     validates the symbol has a real tensor source and
-                    //     fails closed otherwise.
+                    // (3) A bare `var` size is read as a dimension only when
+                    //     the checker read it as one: the result axis it sizes
+                    //     carries the size's own name. The checker stamps that
+                    //     name only for a dimension of the definition the size
+                    //     is written in, a binder of that definition or a dim a
+                    //     tensor type in its scope carries, and section 4.7.2
+                    //     makes a name that is both a value and such a
+                    //     dimension a type error. So within one definition a
+                    //     name is one or the other, and the stamp, made in that
+                    //     definition's own scope, decides which. Every other
+                    //     name, a parameter, a local, a capture, a top-level
+                    //     binding or a `cast` over one, is a runtime value and
+                    //     lowers through arm (4)'s dataflow. The dimension
+                    //     tables below are not scoped to the activation (a
+                    //     caller's binder stays visible while a callee is
+                    //     inlined, chelis#2954), so they are consulted only for
+                    //     a stamped dimension, never to decide whether a name is
+                    //     one (chelis#469). For a stamped dimension the
+                    //     substitution and tensor-source identities are
+                    //     refinements. A name that is neither a stamped
+                    //     dimension with a source nor a value has no extent to
+                    //     read, and stays a fatal error.
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
-                        if let Some(value) =
-                            self.dim_substitutions.get(&name).and_then(|dim| match dim {
-                                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
-                                    Some(*value)
-                                }
-                                DimInfo::Named(_, None) => None,
-                            })
+                        let stamped_dimension =
+                            stamped_dimension_size(size_arg, &ty.dims, axis).is_some();
+                        if !stamped_dimension && self.names_a_value(&name) {
+                            self.lower_one_bound(size_arg, &mut inputs, "expand size")
+                        } else if stamped_dimension
+                            && let Some(value) =
+                                self.dim_substitutions.get(&name).and_then(|dim| match dim {
+                                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                                        Some(*value)
+                                    }
+                                    DimInfo::Named(_, None) => None,
+                                })
                         {
                             RtDim::Lit(value)
-                        } else if let Some((src, source_axis, _)) =
-                            self.tensor_source_for_symbol(&name)
+                        } else if stamped_dimension
+                            && let Some((src, source_axis, _)) =
+                                self.tensor_source_for_symbol(&name)
                         {
                             let tensor = inputs.len();
                             inputs.push(src);
@@ -15611,9 +16646,7 @@ impl<'program> LowerCtx<'program> {
                     //     decides literal-versus-node for every runtime extent.
                     //     A literal or named claim over the axis is checked by
                     //     the section 4.7 runtime extent guards rather than by
-                    //     refusing the program; the silent `Concrete(1)`
-                    //     default that chelis#469 replaced is not reachable
-                    //     from here.
+                    //     refusing the program, and no size defaults to 1.
                     else {
                         self.lower_one_bound(size_arg, &mut inputs, "expand size")
                     }
@@ -16654,7 +17687,7 @@ impl<'program> LowerCtx<'program> {
             if raw < 0 {
                 let argument = if name == "index" { "index" } else { "count" };
                 raise_fatal_lowering_error(
-                    format!("{name} requires non-negative {argument}, got {raw}"),
+                    chelis_abi::failure::list_argument_negative(name, argument, raw),
                     Some(count_arg.span()),
                     count_arg.span_id().map(ToOwned::to_owned),
                 );
@@ -16663,7 +17696,7 @@ impl<'program> LowerCtx<'program> {
             return match name {
                 "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
                     raise_fatal_lowering_error(
-                        format!("index {raw} out of bounds for list of len {}", items.len()),
+                        chelis_abi::failure::list_index_out_of_bounds(raw, items.len()),
                         Some(count_arg.span()),
                         count_arg.span_id().map(ToOwned::to_owned),
                     )
@@ -16844,14 +17877,14 @@ impl<'program> LowerCtx<'program> {
 
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
         bare_var_name(expr)
-            .and_then(|name| self.list_bindings.get(&name).cloned())
+            .and_then(|name| self.bindings.list(&name).cloned())
             .unwrap_or_else(|| expr.clone())
     }
 
     fn is_host_list_expr(&self, expr: &Expr) -> bool {
         if bare_var_name(expr)
             .as_deref()
-            .is_some_and(|name| self.list_bindings.contains_key(name))
+            .is_some_and(|name| self.bindings.list(name).is_some())
         {
             return true;
         }
@@ -17796,9 +18829,7 @@ impl<'program> LowerCtx<'program> {
     /// arithmetic walker the checker uses. Axis folding remains on the
     /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
-        chelis_types::fold_static_int_expr(expr, |name| {
-            self.static_size_bindings.get(name).copied()
-        })
+        chelis_types::fold_static_int_expr(expr, |name| self.bindings.static_size(name))
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -17815,7 +18846,7 @@ impl<'program> LowerCtx<'program> {
     ///
     /// Works at the DAG-node level, not the Deep-expression level, because by
     /// the time `lower_if` runs, inlined-function parameters are already
-    /// bound to lowered nodes (`static_size_bindings` is only populated by
+    /// bound to lowered nodes (a binding's static-integer fact is only recorded by
     /// `lower_let`, never at param-binding time), and the comparison/boolean
     /// surface retains direct `Compare` and `Logical` identities.
     /// Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather than folding
@@ -17907,7 +18938,9 @@ impl<'program> LowerCtx<'program> {
                     Some(IntBinOp::FloorDiv),
                     Some(FloatBinOp::FloorDiv),
                 )?,
-                RiscOp::Mod => numeric_binop(input0?, input1?, Some(IntBinOp::Rem), None)?,
+                RiscOp::Mod => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Rem), Some(FloatBinOp::Rem))?
+                }
                 RiscOp::TruncDiv => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }
@@ -18056,7 +19089,7 @@ impl<'program> LowerCtx<'program> {
             return Some(n);
         }
         // A shape(...) read (direct app, or a bare/cast-wrapped var recorded
-        // in `shape_bindings`) of a statically-sized operand axis folds to
+        // in a binding's shape fact) of a statically-sized operand axis folds to
         // that extent; a symbolic extent fails the fold.
         if let Some((operand, axis)) = self.shape_app_operand_axis_resolved(expr) {
             let operand_id = self.lower_expr(&operand).as_single_node()?;
@@ -18070,10 +19103,7 @@ impl<'program> LowerCtx<'program> {
         match tag {
             // A bare `var` bound to a static value by a prior `let`. (A
             // shape-bound var was already handled above.)
-            DeepTag::Var => self
-                .static_size_bindings
-                .get(&bare_var_name(expr)?)
-                .copied(),
+            DeepTag::Var => self.bindings.static_size(&bare_var_name(expr)?),
             DeepTag::Cast => self.fold_shape_derived_static_size(kids.first()?, sources),
             DeepTag::App => {
                 let op = bare_var_name(kids.first()?)?;
@@ -18174,7 +19204,7 @@ impl<'program> LowerCtx<'program> {
 
     /// Leaf recognizer for [`Self::is_shape_derived_arith_dim`]: a static
     /// int (literal / `(lit ...)` / cast-wrapped), a `shape(operand, axis)`
-    /// read (direct or a `shape_bindings` alias), a bound runtime rank-zero
+    /// read (direct or a shape-fact alias), a bound runtime rank-zero
     /// integer node (parameter, helper result, or local computed alias),
     /// a `let`-bound static var, or a nested app of the same language.
     fn is_shape_derived_arith_leaf(&self, expr: &Expr) -> bool {
@@ -18188,8 +19218,9 @@ impl<'program> LowerCtx<'program> {
             return false;
         };
         match tag {
-            DeepTag::Var => bare_var_name(expr)
-                .is_some_and(|name| self.static_size_bindings.contains_key(&name)),
+            DeepTag::Var => {
+                bare_var_name(expr).is_some_and(|name| self.bindings.static_size(&name).is_some())
+            }
             DeepTag::Cast => kids
                 .first()
                 .is_some_and(|inner| self.is_shape_derived_arith_leaf(inner)),
@@ -18244,6 +19275,20 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
+    /// True when `name` reads a value here: a parameter, local or captured
+    /// binding of the current scope, a folded static size, or a top-level
+    /// declaration. It decides nothing about dimensions; an `expand`/`insert`
+    /// size the checker did not read as a dimension lowers as dataflow when
+    /// this holds, and has nothing to read when it does not (chelis#469).
+    fn names_a_value(&self, name: &str) -> bool {
+        self.bindings.contains_key(name)
+            || self.bindings.static_size(name).is_some()
+            || self.program_defs.contains_key(name)
+            || self.program_types.contains_key(name)
+            || self.program_signatures.contains_key(name)
+            || LoadStoreName::top_level_source_for_label(name).is_ok_and(|source| source.is_some())
+    }
+
     /// Recover an `expand` extent from a `shape(operand, axis)` size
     /// argument, returning BOTH the dim and the lowered node whose runtime
     /// shape supplies the extent. chelis#384/#397: the caller records the
@@ -18264,7 +19309,7 @@ impl<'program> LowerCtx<'program> {
         span: Option<String>,
         authored_signature: bool,
     ) {
-        self.binding_witnesses.clear();
+        self.bindings.clear_witnesses();
         self.signature_witnesses.clear();
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
@@ -18390,8 +19435,7 @@ impl<'program> LowerCtx<'program> {
                 self.activation_witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
-            self.binding_witnesses
-                .insert(name.clone(), (input, witnesses));
+            self.bindings.set_witnesses(name, (input, witnesses));
         }
     }
 
@@ -18401,7 +19445,7 @@ impl<'program> LowerCtx<'program> {
             expr = children.first()?;
         }
         let name = bare_var_name(expr)?;
-        let binding @ (input, _) = self.binding_witnesses.get(&name)?;
+        let binding @ (input, _) = self.bindings.witnesses(&name)?;
         (self.bindings.get(&name)?.as_single_node()? == *input).then_some(binding)
     }
 
@@ -19006,22 +20050,20 @@ impl<'program> LowerCtx<'program> {
     /// because a DECLARING witness observes a parameter axis rather than an
     /// operation's result.
     fn graph_fixed_axis_extent(&self, id: NodeId, axis: usize) -> Option<usize> {
-        use crate::axis_sources::ExtentOrigin;
-        match crate::axis_sources::resolve_axis_extent(&self.dag, id, axis)? {
-            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
-            ExtentOrigin::OpComputed { op, axis } => {
-                crate::axis_sources::static_op_computed_axis_extent(&self.dag, op, axis)
-            }
-            ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
-        }
+        graph_fixed_axis_extent(&self.dag, id, axis)
     }
 
-    /// A checked call type refines an authored result only when this exact
+    /// A checked call type refines a produced result only when this exact
     /// axis gained a concrete, non-wildcard name. A known extent attached to
     /// the same name is not a new name. Literals stay solely in the authored
     /// result path, where their runtime obligations originate.
+    ///
+    /// The comparison is with the label the produced axis carries, never with
+    /// the callee's authored result: the checked name belongs to the caller's
+    /// activation and the authored one to the callee's, so equal spellings
+    /// (both `n`) name different binders (runtime_extents.md C2.2).
     fn is_distinct_checked_named_result_axis(
-        declared: &TensorType,
+        produced: &TensorType,
         axis: usize,
         checked: &DimInfo,
     ) -> bool {
@@ -19031,8 +20073,8 @@ impl<'program> LowerCtx<'program> {
         !checked_binder.is_empty()
             && checked_binder != "*"
             && !matches!(
-                declared.dims.get(axis),
-                Some(DimInfo::Named(authored_binder, _)) if authored_binder == checked_binder
+                produced.dims.get(axis),
+                Some(DimInfo::Named(produced_label, _)) if produced_label == checked_binder
             )
     }
 
@@ -19053,8 +20095,13 @@ impl<'program> LowerCtx<'program> {
         };
         // A checked caller view renames the diagnostic of an existing exact
         // obligation, never its declaring witness or physical result extent.
+        // A same-shape producer owns its result claim (runtime_extents.md,
+        // #1948), so the walk stops there rather than passing to an operand.
         let (mut origin, mut origin_axis) = (id, axis);
-        while let Some(crate::axis_sources::AxisSource::InputAxis {
+        while !matches!(
+            crate::axis_sources::same_shape_result_agreement(&self.dag, origin),
+            Ok(Some(_))
+        ) && let Some(crate::axis_sources::AxisSource::InputAxis {
             input,
             axis: RtAxis::Lit(source_axis),
         }) = crate::axis_sources::output_axis_sources(&self.dag, origin).get(origin_axis)
@@ -19469,7 +20516,7 @@ impl<'program> LowerCtx<'program> {
     /// returns `None` — at which point the caller silently defaults the
     /// extent to `Lit(1)`, the `Lit(n) vs Lit(1)` backward-DAG failure this
     /// issue tracks. Here, when the stripped expression is a `var <name>`
-    /// recorded in [`Self::shape_bindings`] as a `shape(operand, axis)`
+    /// recorded as a binding's shape fact ([`ValueFacts::shape`]), a `shape(operand, axis)`
     /// binding, recover the operand/axis from that bound app instead.
     ///
     /// Returns the *operand* `Expr` by value (cloned from the binding when
@@ -19485,7 +20532,7 @@ impl<'program> LowerCtx<'program> {
         // app for `let`-to-`let` aliases too (chelis#469 RT-3), a single
         // lookup here resolves a whole alias chain to its real source.
         let name = bare_var_name(strip_cast_wrappers(expr))?;
-        let bound = self.shape_bindings.get(&name)?;
+        let bound = self.bindings.shape(&name)?;
         let (operand, axis) = shape_app_operand_axis(bound)?;
         Some((operand.clone(), axis))
     }
@@ -19496,7 +20543,7 @@ impl<'program> LowerCtx<'program> {
     /// `shape(...)` app `Expr` when:
     ///   - the value IS a `shape(...)` app (possibly `cast`-wrapped), or
     ///   - the value is a bare / `cast`-wrapped `var` already recorded in
-    ///     [`Self::shape_bindings`] (an alias of an earlier shape name).
+    ///     a binding's shape fact (an alias of an earlier shape name).
     ///
     /// Returning the UNDERLYING app (not the alias name) is the safety
     /// property: the recovered extent and its `shape_dep` liveness edge bind
@@ -19504,14 +20551,14 @@ impl<'program> LowerCtx<'program> {
     /// the wrong `Load`. Because each recorded alias already points at the
     /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, i32)`)
     /// resolves in one lookup per link at bind time. Mirrors how
-    /// [`Self::fold_static_size`] recurses [`Self::static_size_bindings`] for
+    /// [`Self::fold_static_size`] recurses static-integer facts for
     /// the static path (`j = k; ...` folds through the alias).
     fn resolve_shape_binding_source(&self, value: &Expr) -> Option<Expr> {
         if shape_app_operand_axis(value).is_some() {
             return Some(value.clone());
         }
         let alias = bare_var_name(strip_cast_wrappers(value))?;
-        self.shape_bindings.get(&alias).cloned()
+        self.bindings.shape(&alias).cloned()
     }
 
     fn lower_handle_effect(&mut self, meta: &Metadata, kids: &[Expr]) -> LoweredValue {
@@ -20161,15 +21208,11 @@ impl<'program> LowerCtx<'program> {
         }
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
         let call_span = self.current_span_id.clone();
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -20274,15 +21317,11 @@ impl<'program> LowerCtx<'program> {
             self.preserve_declared_result(&result, ty, None);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
         self.bindings = saved; // Restore scope
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -20351,23 +21390,6 @@ impl<'program> LowerCtx<'program> {
             ty,
             self.current_span_id.clone(),
         ))
-    }
-
-    /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
-    /// A `pipe` must never reach lowering: `chelis_deep::pipe::fold_pipe`
-    /// replaced it with the application `spec/02-surf-syntax.md` §0.1 says it
-    /// denotes, at the checker's input, so every pass after the checker sees
-    /// that application and none of them re-derives the sentence for itself.
-    /// A pipe arriving here means the fold did not run, and lowering one
-    /// anyway is what chelis#1923 and chelis#1791 were: two derivations of one
-    /// sentence that disagreed. So this fails closed rather than keeping a
-    /// second path alive to hide the day the first stops folding.
-    fn lower_pipe(&mut self) -> LoweredValue {
-        raise_malformed_deep(
-            "a pipe reached lowering unfolded",
-            None,
-            self.current_span_id.clone(),
-        )
     }
 
     /// `(cast {} expr (t-prim {} name))` -- precision cast.
@@ -20456,11 +21478,19 @@ impl<'program> LowerCtx<'program> {
         // lowering error, never a silent fall back to the checked rung.
         let op = match chelis_deep::cast_mode_of(kids) {
             Ok(chelis_deep::CastMode::Checked) => RiscOp::Cast { new_precision },
-            Ok(chelis_deep::CastMode::Trunc) => RiscOp::CastTrunc { new_precision },
+            Ok(chelis_deep::CastMode::Named(mode)) => RiscOp::NamedCast {
+                mode,
+                new_precision,
+            },
             Err(selector) => raise_fatal_lowering_error(
                 format!(
                     "`{selector}` is not a recognized cast mode selector; the \
-                     only named rung is `trunc` ([05-OP-6])"
+                     named rungs are {}",
+                    chelis_deep::NamedCastMode::ALL
+                        .iter()
+                        .map(|named| format!("`{}` ({})", named.deep_selector(), named.atom()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 Some(kids[2].span()),
                 kids[2].span_id().map(ToOwned::to_owned),
@@ -21149,7 +22179,9 @@ impl<'program> LowerCtx<'program> {
         // that arm's key under.
         let then_active = self.draw_activation();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let then_value = self.lower_expr(then_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
         let then_node = self.expect_runtime_if_branch(then_value, "then", span);
         if let Some(parent_path) = saved_random_path {
@@ -21196,7 +22228,9 @@ impl<'program> LowerCtx<'program> {
         });
         let else_active = self.draw_activation();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let else_value = self.lower_expr(else_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
         self.random_path_condition = saved_random_path;
@@ -21612,17 +22646,12 @@ impl<'program> LowerCtx<'program> {
                         );
                     }
                     let saved = self.bindings.clone();
-                    let saved_list_bindings = self.list_bindings.clone();
-                    let saved_shape_bindings = self.shape_bindings.clone();
-                    let saved_static_size_bindings = self.static_size_bindings.clone();
                     let saved_callables = self.local_callables.clone();
                     let saved_fn_typed_params = self.fn_typed_params.clone();
                     for (name, value) in binds {
                         // Pattern binds shadow every same-named outer
-                        // binding class, mirroring `lower_plain_callable_app`.
-                        self.list_bindings.remove(&name);
-                        self.shape_bindings.remove(&name);
-                        self.static_size_bindings.remove(&name);
+                        // binding class, mirroring `lower_plain_callable_app`;
+                        // binding the value replaces the name's facts.
                         self.local_callables.remove(&name);
                         self.fn_typed_params.remove(&name);
                         self.bindings.insert(name, value);
@@ -21634,9 +22663,6 @@ impl<'program> LowerCtx<'program> {
                     }
                     let value = self.lower_expr(body);
                     self.bindings = saved;
-                    self.list_bindings = saved_list_bindings;
-                    self.shape_bindings = saved_shape_bindings;
-                    self.static_size_bindings = saved_static_size_bindings;
                     self.local_callables = saved_callables;
                     self.fn_typed_params = saved_fn_typed_params;
                     return value;
@@ -22464,7 +23490,7 @@ mod fused_zero_tests {
         for (style, call) in [
             ("direct", "f(x)"),
             ("helper", "apply(f, x)"),
-            ("pipe", "x |> f"),
+            ("pipe", "(x |> f)"),
         ] {
             for dead in [false, true] {
                 let body = if dead {
@@ -22936,7 +23962,7 @@ mod tests {
     /// table that has no pipe to fold. The host runtime prepares one per
     /// `grad` or `vmap` application, so a copy there scales every application
     /// with the whole program, the standard library's definitions included.
-    /// A table with a pipe is still folded.
+    /// Surf pipe bodies reach this context as normalized applications.
     #[test]
     fn a_pipe_free_definition_table_keeps_its_arc() {
         let parse = |source: &str| {
@@ -22964,10 +23990,10 @@ mod tests {
 
         let piped = Arc::new(BTreeMap::from([(
             "f".to_string(),
-            parse("(fn {} (params {} x) (pipe {} (var {} x) (var {} g)))"),
+            parse("(fn {}\n  (params {} x)\n  (app {} (var {} g) (var {} x)))"),
         )]));
         let folded = context_defs(&piped);
-        assert!(!Arc::ptr_eq(&folded, &piped));
+        assert!(Arc::ptr_eq(&folded, &piped));
         let body = chelis_deep::printer::print_expr_flat(&folded["f"]);
         assert!(!body.contains("pipe"), "the pipe must fold: {body}");
     }
@@ -23240,6 +24266,7 @@ mod tests {
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
             tensor_specialization: TensorCallsiteSpecialization::default(),
+            activation_record: ActivationRecord::Nothing,
         };
         let (dag, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,
@@ -23502,11 +24529,9 @@ mod tests {
         let top_level_defs = BTreeMap::from([("bad".into(), Expr::Atom(Atom::Int(0), span))]);
         let signatures = BTreeMap::new();
         let dtype_bound_names = BTreeMap::new();
-        let types = LowerabilityTypes {
-            signatures: &signatures,
-            dtype_bound_names: &dtype_bound_names,
-            function_typed_defs: UnordSet::new(),
-        };
+        let type_env = BTreeMap::new();
+        let types =
+            LowerabilityTypes::new(&signatures, &dtype_bound_names, UnordSet::new(), &type_env);
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(
             &match_expr,
@@ -23606,6 +24631,7 @@ mod tests {
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
             tensor_specialization: TensorCallsiteSpecialization::default(),
+            activation_record: ActivationRecord::Nothing,
         };
 
         let regions =
@@ -24702,9 +25728,8 @@ mod tests {
     /// chelis#369 negative parity + chelis#469/#528 positive parity: the
     /// SHAPE-recovery path must follow ONLY a genuine `let len = shape(...)`
     /// binding — a `len` bound to a static `cast(7, i32)` must NOT
-    /// mis-recover `x`'s shape extent 3. It is not sourceless, though: a
-    /// `let`-bound static value folds to its own extent (`SizeClass::Static`
-    /// followed through the `let`), so the size resolves to `Concrete(7)`, not
+    /// mis-recover `x`'s shape extent 3. A `let`-bound static value folds to
+    /// its own extent through the `let`, so the size resolves to `Concrete(7)`, not
     /// the pre-#469 size-1 default (which silently miscompiled eval-`[7]` to
     /// C-`[1]`) and not `x`'s 3.
     #[test]
@@ -24738,8 +25763,8 @@ mod tests {
     /// to a static value must drop the stale shape entry, so a later expand
     /// size referencing the re-bound name does not recover the old shape
     /// extent 3 — it folds to the NEW static value (5) instead (chelis#469/
-    /// #528 `SizeClass::Static` shadowing symmetry). Guards the shadowing
-    /// path in `lower_let` for both `shape_bindings` and `static_size_bindings`.
+    /// #528 static-value shadowing symmetry). Guards the shadowing
+    /// path in `lower_let` for both the shape and the static-integer fact.
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
         // len = shape(x, 0)          -- shape binding
@@ -24771,6 +25796,67 @@ mod tests {
             "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
              recover the stale shape extent 3; got {size:?}",
         );
+    }
+
+    /// chelis#469: a size naming a runtime scalar with no tensor source and no
+    /// static value lowers as ordinary integer dataflow, an `RtDim::Node` whose
+    /// input is the scalar itself. Section 4.7.2 forbids refusing an extent
+    /// for its provenance; this arm used to raise "no in-scope tensor axis
+    /// supplies that extent". Both the bare name and a `cast` over it, which
+    /// the arm strips, take the dataflow route.
+    #[test]
+    fn issue_469_a_runtime_scalar_size_lowers_as_a_node() {
+        for size in ["(var {} k)", "(cast {} (var {} k) (t-prim {} i64))"] {
+            let body = format!(
+                r#"
+                (app {{type: (t-tensor {{}} (d-name {{}} *) (t-prim {{}} f32))}}
+                     (var {{}} insert)
+                     (app {{type: (t-prim {{}} f32)}}
+                          (var {{}} scalar_to_tensor)
+                          (cast {{type: (t-prim {{}} f32)}} (lit {{}} 3.0) (t-prim {{}} f32)))
+                     (cast {{}} (lit {{}} 0) (t-prim {{}} i32))
+                     {size})
+            "#
+            );
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            )
+            .declared_for_test();
+            let k = ctx.dag.add_node(
+                ctx.owner(),
+                RiscOp::Load { name: "k".into() },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: chelis_types::types::Prim::Int64,
+                },
+                None,
+            );
+            ctx.bindings.insert("k".into(), LoweredValue::Node(k));
+            let expr = chelis_deep::parser::parse_str(&body).expect("parse body");
+            let _ = ctx.lower_expr(&expr[0]);
+            let expand = ctx
+                .dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Expand { .. }))
+                .expect("an Expand node must be present");
+            let RiscOp::Expand { size: rt, .. } = &expand.op else {
+                unreachable!("matched above")
+            };
+            let RtDim::Node(slot) = rt else {
+                panic!("{size}: a runtime scalar size is a node-valued extent; got {rt:?}")
+            };
+            let carried = expand.inputs[*slot];
+            let carried_op = &ctx.dag.get(carried).expect("size input node").op;
+            assert!(
+                carried == k || matches!(carried_op, RiscOp::Cast { .. }),
+                "{size}: the extent input is the scalar `k` (or its cast); got {carried_op:?}"
+            );
+        }
     }
 
     #[test]
@@ -26482,8 +27568,14 @@ mod tests {
             LinearityInfo::default(),
         ).declared_for_test();
         let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
-        ctx.bindings.insert("n".into(), caller.clone());
-        ctx.static_size_bindings.insert("n".into(), 3);
+        ctx.bindings.insert_with_facts(
+            "n".into(),
+            caller.clone(),
+            ValueFacts {
+                static_size: Some(3),
+                ..ValueFacts::default()
+            },
+        );
         let root = ctx
             .lower_expr(&parse(
                 "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
@@ -26492,8 +27584,8 @@ mod tests {
         let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
             .expect("static count remains caller-owned");
         assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
-        assert_eq!(ctx.static_size_bindings["n"], 3);
-        assert!(!ctx.static_size_bindings.contains_key("count"));
+        assert_eq!(ctx.bindings.static_size("n"), Some(3));
+        assert_eq!(ctx.bindings.static_size("count"), None);
         assert_eq!(ctx.bindings["n"].as_single_node(), caller.as_single_node());
     }
 
@@ -26767,8 +27859,8 @@ mod tests {
             &checked.dims[1]
         ));
 
-        // An already-authored name and wildcard/empty names never become a
-        // checked-result refinement.
+        // A name the produced axis already carries and wildcard/empty names
+        // never become a checked-result refinement.
         assert!(!LowerCtx::is_distinct_checked_named_result_axis(
             &authored,
             0,
@@ -27699,33 +28791,41 @@ mod regression_tests {
     fn pipe_lambda_stage_preserves_tensor_shape_for_following_matmul() {
         let dag = parse_and_lower(
             r#"
-                (def {} x
-                  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
-                (def {} w1
-                  (var {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))} w1))
-                (def {} bias
-                  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))} bias))
-                (def {} w2
-                  (var {type: (t-tensor {} (d-lit {} 128) (d-lit {} 10) (t-prim {} f32))} w2))
-                (def {} h1
-                  (pipe {}
-                    (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
-                      (var {} matmul)
-                      (var {} x)
-                      (var {} w1))
-                    (fn {type: (t-fn {} (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32)) (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32)))}
-                      (params {} p)
-                      (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
-                        (var {} add)
-                        (var {} p)
-                        (var {} bias)))
-                    (var {} relu)))
-                (def {} out
-                  (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 10) (t-prim {} f32))}
-                    (var {} matmul)
-                    (var {} h1)
-                    (var {} w2)))
-            "#,
+(def {}
+  x
+  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
+
+(def {}
+  w1
+  (var {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))} w1))
+
+(def {}
+  bias
+  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))} bias))
+
+(def {}
+  w2
+  (var {type: (t-tensor {} (d-lit {} 128) (d-lit {} 10) (t-prim {} f32))} w2))
+
+(def {}
+  h1
+  (app {}
+    (var {} relu)
+    (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
+      (var {} add)
+      (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
+        (var {} matmul)
+        (var {} x)
+        (var {} w1))
+      (var {} bias))))
+
+(def {}
+  out
+  (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 10) (t-prim {} f32))}
+    (var {} matmul)
+    (var {} h1)
+    (var {} w2)))
+"#,
         );
         let root = dag
             .roots()
@@ -28621,7 +29721,7 @@ mod regression_tests {
     #[test]
     fn an_unsupported_transform_in_pipe_position_names_the_transform() {
         let exprs = chelis_deep::parser::parse_str(
-            "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
+            "(app {} (grad {} (var {} f)) (lit {type: (t-prim {} f32)} 1.0))",
         )
         .expect("parse failed");
         let err =

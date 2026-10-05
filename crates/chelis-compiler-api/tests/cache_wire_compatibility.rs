@@ -62,6 +62,7 @@ fn previous_compiled_context_is_rejected_before_live_source_lookup() {
         &fixtures().join("context-v17.ctx"),
         absent.path(),
         &absent.path().join("no-package"),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect_err("old positional payload must never be admitted");
     assert!(
@@ -93,7 +94,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "stdlib-v15-key-input.bin",
             "stdlib-v15.tc",
             b"chelis_std_typecheck_v".as_slice(),
-            41_u32,
+            42_u32,
             stdlib_cache_key_input_bytes(&std_decls, [0x5a; 32]),
             std_key,
         ),
@@ -101,7 +102,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "library-v11-key-input.bin",
             "library-v11.tc",
             b"chelis_library_typecheck_v".as_slice(),
-            25_u32,
+            26_u32,
             library_cache_key_input_bytes(&dep_decls, std_key),
             lib_key,
         ),
@@ -372,7 +373,12 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
     historical_producer::package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
-    let context = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let context = chelis_compiler_api::compile_reef_context(
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let expected = expected_numeric_payloads(true);
     assert_eq!(
         historical_producer::context_numeric_payloads(&context),
@@ -383,9 +389,14 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
     let bytes = context.encode().unwrap();
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_payload_bytes(&bytes, &expected);
-    let disk = CompiledContext::load_if_fresh(&path, &reef_home, &package)
-        .unwrap()
-        .unwrap();
+    let disk = CompiledContext::load_if_fresh(
+        &path,
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap()
+    .unwrap();
     let worker = CompiledContext::decode(&bytes).unwrap();
     assert_current_literal_result(&serde_json::to_value(&context).unwrap()["library_dag"]);
     for restored in [&disk, &worker] {
@@ -470,7 +481,12 @@ fn every_cached_library_decoder_rejects_forged_selector_callable_metadata() {
     historical_producer::package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
-    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let compiled = chelis_compiler_api::compile_reef_context(
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     assert_selector_forgery_rejects(&compiled);
 }
 
@@ -524,7 +540,12 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
     historical_producer::package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
-    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let compiled = chelis_compiler_api::compile_reef_context(
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let (compiled_bytes, compiled_digest) = compiled.encode_for_handoff().unwrap();
     let compiled_path = directory.path().join("numeric.ctx");
     for storage in [false, true] {
@@ -555,8 +576,13 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
         fs::write(&compiled_path, &changed).unwrap();
         let error = CompiledContext::decode(&changed).unwrap_err();
         assert!(error.contains("lowered library payload"), "{error}");
-        let error =
-            CompiledContext::load_if_fresh(&compiled_path, &reef_home, &package).unwrap_err();
+        let error = CompiledContext::load_if_fresh(
+            &compiled_path,
+            &reef_home,
+            &package,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap_err();
         assert!(
             matches!(error,CacheError::Decode(ref message) if message.contains("lowered library payload")),
             "{error}"
@@ -627,7 +653,12 @@ fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recom
     historical_producer::package_fixture(&package);
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
-    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let compiled = chelis_compiler_api::compile_reef_context(
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let compiled_bytes = compiled.encode().unwrap();
     let compiled_path = directory.path().join("numeric.ctx");
     let std_magic = b"CHELIS_CACHE_ENV_V1\n";
@@ -670,8 +701,13 @@ fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recom
         fs::write(&compiled_path, &changed).unwrap();
         let error = CompiledContext::decode(&changed).unwrap_err();
         assert!(error.contains("lowered library payload"), "{error}");
-        let error =
-            CompiledContext::load_if_fresh(&compiled_path, &reef_home, &package).unwrap_err();
+        let error = CompiledContext::load_if_fresh(
+            &compiled_path,
+            &reef_home,
+            &package,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap_err();
         assert!(
             matches!(error, CacheError::Decode(ref message) if message.contains("lowered library payload")),
             "{error}"

@@ -46,6 +46,10 @@ pub enum AdRejectionReason {
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
     PiecewiseConstant,
+    /// The op's value jumps wherever its truncated quotient changes, so it
+    /// has no derivative there; [05-OP-64] rejects differentiating `mod` at
+    /// every dtype (chelis#626).
+    TruncatedQuotientJump,
     /// Bool logical operations are control predicates, not numeric
     /// arithmetic, and have no reverse-mode adjoint.
     LogicalOperation,
@@ -132,6 +136,12 @@ impl fmt::Display for AdError {
                     f,
                     "grad: {op} is non-differentiable (piecewise constant); \
                      remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::TruncatedQuotientJump => write!(
+                    f,
+                    "grad: {op} is non-differentiable (it jumps wherever its truncated \
+                     quotient changes, [05-OP-64]); remove it from the gradient path or wrap \
+                     it in a stop-gradient"
                 ),
                 AdRejectionReason::LogicalOperation => write!(
                     f,
@@ -530,7 +540,7 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
         RiscOp::Mod => {
             return Some(AdError::NotSupported {
                 op: "mod",
-                reason: AdRejectionReason::PiecewiseConstant,
+                reason: AdRejectionReason::TruncatedQuotientJump,
             });
         }
         RiscOp::TruncDiv => {
@@ -560,15 +570,15 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
-        // [05-OP-6]: `cast_trunc` is piecewise constant, so its
-        // adjoint is zero almost everywhere and undefined at every
-        // integer boundary. Rejecting is the point of the atom's
+        // [05-OP-6]: every named cast rung is piecewise constant, so
+        // its adjoint is zero almost everywhere and undefined at every
+        // integer boundary. Rejecting is the point of each atom's
         // `no_grad` rule: a silent zero here would mask a modeling
         // bug rather than report it. The checked `cast` keeps its
         // float-to-float adjoint.
-        RiscOp::CastTrunc { .. } => {
+        RiscOp::NamedCast { mode, .. } => {
             return Some(AdError::NotSupported {
-                op: "cast_trunc",
+                op: mode.keyword(),
                 reason: AdRejectionReason::PiecewiseConstant,
             });
         }
@@ -692,6 +702,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
         RiscOp::Relu => "relu",
+        RiscOp::Softmax { .. } => "softmax",
         RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Recip => "recip",
@@ -702,6 +713,9 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Cos => "cos",
         RiscOp::Tan => "tan",
         RiscOp::Atan => "atan",
+        RiscOp::Tanh => "tanh",
+        RiscOp::Erf => "erf",
+        RiscOp::Erfc => "erfc",
         RiscOp::Abs => "abs",
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
@@ -743,7 +757,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Drop => "drop",
         RiscOp::Realize => "realize",
         RiscOp::Cast { .. } => "cast",
-        RiscOp::CastTrunc { .. } => "cast_trunc",
+        RiscOp::NamedCast { mode, .. } => mode.keyword(),
         RiscOp::FusedElem { .. } => "fused_elem",
         RiscOp::BlasMatmul { .. } => "blas_matmul",
         RiscOp::Gather { .. } => "gather",
@@ -1639,6 +1653,39 @@ fn compute_adjoints(
             );
             Some(vec![(a, zero_a), (b, zero_b), (cotangent, dg)])
         }
+        RiscOp::Softmax { axis } => {
+            let x = node.inputs[0];
+            let ty = node.output_type.clone();
+            let mut reduced = ty.clone();
+            reduced.dims.remove(*axis);
+            let gy = dag.add_node(node.owner, RiscOp::Mul, vec![g, node.id], ty.clone(), None);
+            let sum =
+                crate::tier2::lower_sum_to_storage(node.owner, dag, gy, *axis, &reduced, None);
+            let broadcast = dag.add_node(
+                node.owner,
+                RiscOp::Expand {
+                    axis: *axis,
+                    size: RtDim::InputAxis {
+                        tensor: 1,
+                        axis: crate::dag::RtAxis::Lit(
+                            i32::try_from(*axis).expect("checked tensor axis"),
+                        ),
+                    },
+                },
+                vec![sum, x],
+                ty.clone(),
+                None,
+            );
+            let difference = dag.add_node(
+                node.owner,
+                RiscOp::Sub,
+                vec![g, broadcast],
+                ty.clone(),
+                None,
+            );
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![node.id, difference], ty, None);
+            Some(vec![(x, dx)])
+        }
         RiscOp::Relu => {
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
@@ -1698,18 +1745,12 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Sin => {
-            // d/dx sin(x) = cos(x) = sin(x + pi/2)
+            // [05-OP-46]: d/dx sin(x) = cos(x), the correctly rounded `cos`
+            // primitive. A shifted `sin(x + pi/2)` rounds the shift at the
+            // operand dtype and loses the low bits of `x` (chelis#2989).
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let half_pi = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_PI_2),
-                vec![],
-                ty.clone(),
-                None,
-            );
-            let shifted = dag.add_node(node.owner, RiscOp::Add, vec![x, half_pi], ty.clone(), None);
-            let cos_x = dag.add_node(node.owner, RiscOp::Sin, vec![shifted], ty.clone(), None);
+            let cos_x = dag.add_node(node.owner, RiscOp::Cos, vec![x], ty.clone(), None);
             let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, cos_x], ty, None);
             Some(vec![(x, dx)])
         }
@@ -1772,6 +1813,54 @@ fn compute_adjoints(
             let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
             let denom = dag.add_node(node.owner, RiscOp::Add, vec![one, x_sq], ty.clone(), None);
             let dx = tier2::lower_div(node.owner, dag, g, denom, &ty, None);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Tanh => {
+            // [05-OP-46]: tanh gives g * (1 - y * y) using the forward y = tanh(x).
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let one = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 1.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let y_sq = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![node.id, node.id],
+                ty.clone(),
+                None,
+            );
+            let one_minus =
+                dag.add_node(node.owner, RiscOp::Sub, vec![one, y_sq], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, one_minus], ty, None);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Erf | RiscOp::Erfc => {
+            // [05-OP-46]: erf gives g*(k*exp(neg(x*x))) and erfc gives
+            // neg(g*(k*exp(neg(x*x)))), with k = 2/sqrt(pi) rounded once to
+            // the operand dtype.
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let k = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_2_SQRT_PI),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
+            let neg_x_sq = dag.add_node(node.owner, RiscOp::Neg, vec![x_sq], ty.clone(), None);
+            let density = dag.add_node(node.owner, RiscOp::Exp, vec![neg_x_sq], ty.clone(), None);
+            let slope = dag.add_node(node.owner, RiscOp::Mul, vec![k, density], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope], ty.clone(), None);
+            let dx = if matches!(node.op, RiscOp::Erfc) {
+                dag.add_node(node.owner, RiscOp::Neg, vec![dx], ty, None)
+            } else {
+                dx
+            };
             Some(vec![(x, dx)])
         }
         RiscOp::Abs => {
@@ -1915,9 +2004,8 @@ fn compute_adjoints(
             Some(vec![(data, replay)])
         }
         // [05-OP-8]: zero to the template and the reparameterisation adjoint
-        // to each bound, read from the forward key. A bound stored at f32
-        // under a narrower or wider template (chelis#1295) takes the checked
-        // cast of the template-dtype adjoint.
+        // to each bound, read from the forward key. Each bound has the
+        // template's dtype ([05-OP-8]), as the verifier requires.
         RiscOp::UniformLike => {
             let template = node.inputs[0];
             let template_ty = forward.get(template).unwrap().output_type.clone();
@@ -1948,19 +2036,6 @@ fn compute_adjoints(
                     },
                     None,
                 );
-                let adjoint = if bound_ty.precision == node.output_type.precision {
-                    adjoint
-                } else {
-                    dag.add_node(
-                        node.owner,
-                        RiscOp::Cast {
-                            new_precision: bound_ty.precision,
-                        },
-                        vec![adjoint],
-                        bound_ty,
-                        None,
-                    )
-                };
                 contributions.push((node.inputs[slot], adjoint));
             }
             Some(contributions)
@@ -2772,7 +2847,7 @@ fn compute_adjoints(
                 // integer or bool target is piecewise constant and
                 // "never contributes a silent zero". There is no
                 // adjoint, so this arm refuses to invent one -- the
-                // same treatment `CastTrunc` gets below.
+                // same treatment `NamedCast` gets below.
                 //
                 // `structural_rejection` is shared by the live-node scan
                 // and backward walk, so either path reports the atom's
@@ -2803,7 +2878,7 @@ fn compute_adjoints(
         // atom forbids; this arm keeps the unchecked entry point from
         // inventing one. `structural_rejection` reports the atom's exact
         // reason from either checked traversal before this fallback.
-        RiscOp::CastTrunc { .. } => None,
+        RiscOp::NamedCast { .. } => None,
         RiscOp::FusedElem { .. } => {
             // Fused nodes should be un-fused before AD; gradient through fusion
             // is not yet supported.
@@ -3382,6 +3457,10 @@ fn restore_target(
 }
 
 #[cfg(test)]
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::eval::{TensorValue, eval_scalar};
@@ -4132,7 +4211,7 @@ mod tests {
     // [06] §7.5: a comparison queues exact zero cotangents for its
     // operands, so rejection analysis must visit their producers too.
     fn comparison_with_discrete_cast(
-        truncating: bool,
+        named: Option<crate::dag::NamedCastMode>,
         through_integer_extrema: bool,
     ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
@@ -4144,23 +4223,32 @@ mod tests {
             scalar_f32(),
             None,
         );
+        // `cast_wrap` reads only a signed integer.
+        let m_type = if named == Some(crate::dag::NamedCastMode::Wrap) {
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            }
+        } else {
+            scalar_f32()
+        };
         let m = dag.add_node(
             owner,
             RiscOp::Load { name: "m".into() },
             vec![],
-            scalar_f32(),
+            m_type,
             None,
         );
         let discrete = dag.add_node(
             owner,
-            if truncating {
-                RiscOp::CastTrunc {
+            match named {
+                Some(mode) => RiscOp::NamedCast {
+                    mode,
                     new_precision: Prim::Int32,
-                }
-            } else {
-                RiscOp::Cast {
+                },
+                None => RiscOp::Cast {
                     new_precision: Prim::Int32,
-                }
+                },
             },
             vec![m],
             TensorType {
@@ -4232,8 +4320,10 @@ mod tests {
 
     #[test]
     fn grad_comparison_operand_reports_its_structural_rejection() {
-        for (truncating, op) in [(false, "cast"), (true, "cast_trunc")] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, false);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let op = named.map_or("cast", |mode| mode.keyword());
+            let (dag, x, out) = comparison_with_discrete_cast(named, false);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => panic!("{op} beneath comparison must reject grad"),
                 Err(error) => error,
@@ -4250,8 +4340,9 @@ mod tests {
 
     #[test]
     fn grad_zero_only_integer_control_still_reports_float_to_integer_cast() {
-        for truncating in [false, true] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating, true);
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        for named in std::iter::once(None).chain(rungs) {
+            let (dag, x, out) = comparison_with_discrete_cast(named, true);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => {
                     panic!("float-to-integer cast beneath zero-only integer control must reject")
@@ -4261,7 +4352,7 @@ mod tests {
             assert_eq!(
                 error,
                 AdError::NotSupported {
-                    op: if truncating { "cast_trunc" } else { "cast" },
+                    op: named.map_or("cast", |mode| mode.keyword()),
                     reason: AdRejectionReason::PiecewiseConstant,
                 }
             );
@@ -6800,6 +6891,25 @@ mod tests {
             (a - expected).abs() < 1e-4,
             "grad of atan at 1.5 should be ≈ {expected} (1/3.25), got {a}"
         );
+    }
+
+    /// [05-OP-46]: erf(x) at x=0.5 has gradient (2/sqrt(pi))*exp(-0.25)
+    /// ≈ 0.8788, and erfc(x) its negation; both agree with finite differences.
+    #[test]
+    fn grad_erf_and_erfc_at_0_5() {
+        let expected = 0.878_782_578_935_444_8;
+        for (op, sign) in [(RiscOp::Erf, 1.0), (RiscOp::Erfc, -1.0)] {
+            let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+                dag.add_node(owner, op.clone(), vec![a], ty.clone(), None)
+            });
+            let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
+            assert_grad_close(a, n);
+            assert!(
+                (a - sign * expected).abs() < 1e-4,
+                "grad of {op:?} at 0.5 should be ≈ {}, got {a}",
+                sign * expected
+            );
+        }
     }
 
     /// tan(x) at x=0.3: grad = 1/cos²(0.3) ≈ 1.047.

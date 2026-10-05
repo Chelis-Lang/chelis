@@ -24,6 +24,7 @@ fn write_and_build_c_target(source: &str, name: &str) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

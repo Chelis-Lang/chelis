@@ -3,145 +3,12 @@
 //! The checks remain in their original order. Each rejection still returns
 //! before the next operation family runs.
 
+use super::app_post_diagonal::{diagonal_result_error, reject_unreachable_diagonal_extent};
 use super::*;
-
-/// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
-/// Float, aggregate, tensor and random-key types are not dictionary keys.
-fn is_dict_key_type(ty: &Type) -> bool {
-    match ty {
-        Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
-        _ => false,
-    }
-}
-
-/// The declared extent at one axis of an application's result, read from the
-/// two ingresses a declaration can reach a builtin call through.
-///
-/// The `def`/`sig` route hands the declared return type down as
-/// `expected_result`. A block-scoped ascription (`y: tensor[9, f32] = ...`)
-/// does not: `infer_let` infers the right-hand side with no expectation and
-/// unifies afterwards, so the ascription arrives as `"type"` metadata on this
-/// very application node (`crates/chelis-surf/src/desugar.rs`'s
-/// `inject_type_metadata`). Resolving it here costs one speculative
-/// `resolve_deep_type`, whose diagnostics are rolled back because `infer_let`
-/// owns reporting for that same annotation and would otherwise report twice.
-/// Going through the resolver rather than reading the metadata shape directly
-/// is what makes a declared type alias (`type Row = tensor[9, f32]`) carry the
-/// same verdict as its expansion.
-#[allow(clippy::too_many_arguments)]
-fn declared_result_literal(
-    result_axis: usize,
-    result_rank: usize,
-    expected_result: Option<&Type>,
-    node: &DeepNode,
-    env: &Env,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-) -> Option<i64> {
-    // The rank-equality precondition matters as much as the literal does. A
-    // declaration whose RANK disagrees is already a signature mismatch, and the
-    // checker reports it with the two full tensor types. Reading an axis out of
-    // it anyway turns `tensor[n, 4, 5] -> tensor[7]` into "the result extent is
-    // at most 4", which names a repair that would not fix the program, and the
-    // `Type::Error` this path returns then suppresses the accurate diagnostic
-    // (round 1 P2). Rank belongs to unification; the bound stands down.
-    let literal_at = |ty: &Type| -> Option<i64> {
-        let Type::Tensor(dims, _) = ty else {
-            return None;
-        };
-        if dims.len() != result_rank {
-            return None;
-        }
-        subst.observe_dim(dims.get(result_axis)?).literal_extent()
-    };
-
-    if let Some(found) = expected_result
-        .map(|expected| subst.apply(expected))
-        .as_ref()
-        .and_then(&literal_at)
-    {
-        return Some(found);
-    }
-
-    let declared = node.meta().ty().map(|value| value.expression())?;
-    let checkpoint = errors.checkpoint();
-    let resolved = resolve_deep_type(
-        declared,
-        vg,
-        adt_reg,
-        TypeUseSite::Annotation,
-        annotation_binder_mode(env),
-        errors,
-    );
-    errors.retain_since(checkpoint, |_| false);
-    literal_at(&resolved.ok()?)
-}
-
-/// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
-/// selected extent, so a literal selected axis bounds the result from above for
-/// every runtime value of the other axis. A declared extent strictly greater
-/// than that bound is unreachable and is a `DimensionMismatch`; at or below it
-/// is satisfiable and the runtime guard owns the verdict.
-///
-/// Returns the error type when it rejects, so the caller propagates it instead
-/// of the inferred result. `Type::Error` unifies with anything, which is what
-/// keeps the enclosing signature or ascription from reporting a second time.
-#[allow(clippy::too_many_arguments)]
-fn reject_unreachable_diagonal_extent(
-    operand: &Type,
-    inferred: &Type,
-    axis1: usize,
-    axis2: usize,
-    node: &DeepNode,
-    env: &Env,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-    expected_result: Option<&Type>,
-) -> Option<Type> {
-    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2, subst)?;
-    let Type::Tensor(inferred_dims, _) = inferred else {
-        return None;
-    };
-    let declared = declared_result_literal(
-        result_axis,
-        inferred_dims.len(),
-        expected_result,
-        node,
-        env,
-        vg,
-        adt_reg,
-        subst,
-        errors,
-    )?;
-    if declared <= bound {
-        return None;
-    }
-    Some(report(
-        errors,
-        CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            with_node_provenance(
-                node,
-                format!(
-                    "diagonal declares the smaller selected extent ([05-OP-33]): \
-                     axis {source_axis} is literal {bound}, so the result extent is \
-                     at most {bound}, but the declared result extent is {declared}"
-                ),
-            ),
-            vec![format!(
-                "Declare an extent at or below {bound}, or select an axis pair \
-                 whose literal extent is at least {declared}"
-            )],
-        ),
-    ))
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
+    source_site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<String>,
@@ -172,79 +39,20 @@ pub(super) fn finish_unified_app(
         // evidence remain below. Every other registered aggregate uses only
         // the immutable decision API before ordinary dispatch can mutate types.
         if rule != builtins::AggregateRule::Concat {
-            let name = func_name
-                .as_deref()
-                .expect("registered aggregate has a name");
-            if arg_tys
-                .iter()
-                .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
-            {
-                return subst.apply(&ret_tv);
-            }
-            let operands = match rule {
-                builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
-                    if arg_tys.len() != 3 {
-                        return report_builtin_arity(errors, node, name, 3, arg_tys.len());
-                    }
-                    let element = vg.fresh_type();
-                    if let Err(error) = unify(
-                        &arg_tys[2],
-                        &Type::Adt("List".to_string(), vec![element.clone()]),
-                        subst,
-                    ) {
-                        return report(errors, error.into());
-                    }
-                    // Invoke the callback with the initial accumulator. Its
-                    // result is an independent slot: equality with the next
-                    // accumulator belongs to the aggregate rule below.
-                    let callback_result = match unify_checked_call_contract(
-                        &kids[1],
-                        &arg_tys[0],
-                        &[arg_tys[1].clone(), element],
-                        None,
-                        vg,
-                        subst,
-                        errors,
-                        product,
-                    ) {
-                        Ok(result) => result,
-                        Err(rejected) => return rejected,
-                    };
-                    if rule == builtins::AggregateRule::Scan {
-                        vec![
-                            Type::Adt("List".to_string(), vec![arg_tys[1].clone()]),
-                            Type::Adt("List".to_string(), vec![callback_result]),
-                        ]
-                    } else {
-                        vec![arg_tys[1].clone(), callback_result]
-                    }
-                }
-                builtins::AggregateRule::Append
-                | builtins::AggregateRule::DictInsert
-                | builtins::AggregateRule::DictMerge
-                | builtins::AggregateRule::Concat => arg_tys.clone(),
-            };
-            match rule.decide(&operands, &ret_tv, subst) {
-                Ok(Some(equation)) => {
-                    subst.record_result_constraint(equation);
-                    return subst.apply(&ret_tv);
-                }
-                Ok(None) => {
-                    let name = func_name
-                        .as_deref()
-                        .expect("registered aggregate has a name");
-                    return UnresolvedOperandSite::new(node, kids, name, env).defer(
-                        &arg_tys,
-                        &ret_tv,
-                        product,
-                        ret_tv.clone(),
-                    );
-                }
-                Err(mut error) => {
-                    error.message = with_node_provenance(node, error.message);
-                    return report(errors, *error);
-                }
-            }
+            return finish_registered_aggregate(
+                rule,
+                source_site,
+                node,
+                kids,
+                &func_name,
+                &arg_tys,
+                &ret_tv,
+                env,
+                vg,
+                subst,
+                errors,
+                product,
+            );
         }
     }
     let mut result_ty = subst.apply(&ret_tv);
@@ -266,7 +74,7 @@ pub(super) fn finish_unified_app(
         && let Some(expected) = expected_result
     {
         if let Err(error) = unify(&result_ty, expected, subst) {
-            return report(errors, error.into());
+            return report_at_check_site(errors, error.into(), source_site);
         }
         result_ty = subst.apply(&result_ty);
     }
@@ -283,7 +91,7 @@ pub(super) fn finish_unified_app(
     // the operand settles.
     let dtype_site = func_name
         .as_deref()
-        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env));
+        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env).with_site(source_site));
 
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
         node,
@@ -292,6 +100,7 @@ pub(super) fn finish_unified_app(
         &arg_tys,
         env,
         subst,
+        adt_reg,
         errors,
         &mut checked_route_observed,
         dtype_site.as_ref(),
@@ -305,7 +114,6 @@ pub(super) fn finish_unified_app(
         node,
         func_name.as_deref(),
         &arg_tys,
-        env,
         subst,
         errors,
         &mut checked_route_observed,
@@ -400,14 +208,17 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Matmul,
+                        DeferredShapeRule::Matmul {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
+                result_ty =
+                    check_matmul_signature(source_site, &arg_tys, &result_ty, subst, errors);
             }
             "sum" | "count" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
@@ -416,6 +227,7 @@ pub(super) fn finish_unified_app(
                     product.defer_shape_check(
                         DeferredShapeRule::Reduction {
                             name: fname.clone(),
+                            location: source_site.owned_location(),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
@@ -424,10 +236,12 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_reduction_signature(
+                    source_site,
                     fname,
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
+                    vg,
                     subst,
                     errors,
                 );
@@ -443,23 +257,13 @@ pub(super) fn finish_unified_app(
                 let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
                     symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
                 });
-                // chelis#397/#469: classify the size by PROVENANCE
-                // (static / shape-sourced / sourceless), following
-                // `let`/`cast`/arithmetic to a tensor shape source.
-                // A truly sourceless runtime scalar is rejected at
-                // check so it never reaches the build/eval-only
-                // rejection (a check-clean program must build).
-                let size_class = kids
-                    .get(3)
-                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
-                    .unwrap_or(SizeClass::Unknown);
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
                             builtin: callee,
                             axis_is_dim_name,
-                            size_class,
                             env: Box::new(env.clone()),
+                            location: source_site.owned_location(),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
@@ -468,12 +272,12 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_expand_signature(
+                    source_site,
                     callee,
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
                     axis_is_dim_name,
-                    size_class,
                     env,
                     subst,
                     errors,
@@ -483,32 +287,57 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::LayerNorm,
+                        DeferredShapeRule::LayerNorm {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
+                result_ty = check_layer_norm_signature(
+                    source_site,
+                    &arg_tys,
+                    &result_ty,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "conv" => {
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Conv,
+                        DeferredShapeRule::Conv {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty =
-                    check_conv_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
+                result_ty = check_conv_signature(
+                    source_site,
+                    &kids[1..],
+                    &arg_tys,
+                    &result_ty,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "split_keys" => {
                 checked_route_observed = true;
-                result_ty = check_split_keys_signature(&kids[1..], &result_ty, env, subst, errors);
+                result_ty = check_split_keys_signature(
+                    source_site,
+                    &kids[1..],
+                    &result_ty,
+                    env,
+                    subst,
+                    errors,
+                );
             }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;
@@ -606,10 +435,14 @@ pub(super) fn finish_unified_app(
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
         checked_route_observed = true;
-        let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
-            Type::Tensor(dims, _) => Some(dims),
-            _ => None,
-        });
+        // chelis#3000: a borrowed operand `&x` carries `&tensor[D, p]`, and
+        // [05-OP-36] reads its shape exactly as it reads an owned one.
+        let tensor_dims = arg_tys
+            .iter()
+            .find_map(|t| match type_for_readonly_check(t, subst) {
+                Type::Tensor(dims, _) => Some(dims),
+                _ => None,
+            });
         if let Some(dims) = tensor_dims {
             // chelis#1265: route the result through unification rather than
             // constructing it out of band. A consumer that supplies a shape
@@ -621,10 +454,16 @@ pub(super) fn finish_unified_app(
             }
             return subst.apply(&ret_tv);
         }
-        // No tensor arg → scalar comparison, returns scalar bool.
+        // No tensor arg → scalar comparison, returns scalar bool. [05-OP-36]'s
+        // recursive equality returns one scalar bool as well.
         if let Some(first_arg) = arg_tys.first() {
             let resolved_arg = type_for_readonly_check(first_arg, subst);
-            if matches!(resolved_arg, Type::Prim(_)) {
+            let recursive_equality = matches!(fname.as_str(), "eq" | "neq")
+                && matches!(
+                    resolved_arg,
+                    Type::Unit | Type::Tuple(_) | Type::Adt(..) | Type::KindedAdt(..)
+                );
+            if matches!(resolved_arg, Type::Prim(_)) || recursive_equality {
                 let result = Type::Prim(Prim::Bool);
                 if let Err(error) = unify(&ret_tv, &result, subst) {
                     return report(errors, error.into());
@@ -635,7 +474,8 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
-        let site = UnresolvedOperandSite::new(node, kids, fname.as_str(), env);
+        let site =
+            UnresolvedOperandSite::new(node, kids, fname.as_str(), env).with_site(source_site);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -854,16 +694,22 @@ pub(super) fn finish_unified_app(
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, precision) => {
                             if !dims.is_empty() {
-                                return report(
+                                return report_at_check_site(
                                     errors,
-                                    CheckError::new(
+                                    CheckError::with_types(
                                         CheckErrorKind::TypeMismatch,
                                         with_node_provenance(
                                             node,
-                                            "tensor_to_scalar expects a rank-0 tensor".to_string(),
+                                            format!(
+                                                "tensor_to_scalar argument 1: expected rank-0 tensor, got rank-{} tensor",
+                                                dims.len()
+                                            ),
                                         ),
+                                        "rank-0 tensor".to_string(),
+                                        format!("rank-{} tensor", dims.len()),
                                         vec![],
                                     ),
+                                    site.source_site,
                                 );
                             }
                             // Conversion changes the surface, not the dtype's
@@ -878,18 +724,21 @@ pub(super) fn finish_unified_app(
                             return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                         }
                         other => {
-                            return report(
+                            return report_at_check_site(
                                 errors,
-                                CheckError::new(
+                                CheckError::with_types(
                                     CheckErrorKind::TypeMismatch,
                                     with_node_provenance(
                                         node,
                                         format!(
-                                            "tensor_to_scalar expects tensor input, got {other}"
+                                            "tensor_to_scalar argument 1: expected tensor, got {other}"
                                         ),
                                     ),
+                                    "tensor".to_string(),
+                                    other.to_string(),
                                     vec![],
                                 ),
+                                site.source_site,
                             );
                         }
                     }
@@ -928,7 +777,14 @@ pub(super) fn finish_unified_app(
             }
             "einsum" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
                     return report(
@@ -957,20 +813,95 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
-                return result_ty;
+                // [05-OP-33]: both operands have one dtype `p`. Identify their
+                // precisions before deciding the result, so two distinct
+                // binders, or two different concrete dtypes, are rejected
+                // rather than leaving the result undecided.
+                let left = type_for_readonly_check(&arg_tys[1], subst);
+                let right = type_for_readonly_check(&arg_tys[2], subst);
+                match (&left, &right) {
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
+                    (Type::Tensor(_, left_precision), Type::Tensor(_, right_precision)) => {
+                        if let Err(error) =
+                            unify_tensor_prec(left_precision, right_precision, subst)
+                        {
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::PrecisionMismatch,
+                                    with_node_provenance(
+                                        node,
+                                        format!(
+                                            "einsum operands must share one dtype \
+                                             (spec/05-risc-primitives.md [05-OP-33]): {}",
+                                            error.message
+                                        ),
+                                    ),
+                                    vec![],
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                return match infer_einsum_result_type(
+                    &equation,
+                    &type_for_readonly_check(&arg_tys[1], subst),
+                    &type_for_readonly_check(&arg_tys[2], subst),
+                    SumResultSlot::Fresh(vg),
+                    source_site.owned_location(),
+                    subst,
+                ) {
+                    Ok(result) => result,
+                    Err(message) => report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(node, message),
+                            vec![],
+                        ),
+                    ),
+                };
             }
             "gather" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) = reject_non_int32_axis("gather", &arg_tys[2], node, subst, errors)
                 {
                     return err;
                 }
+                let Some(raw_axis) = kids
+                    .get(3)
+                    .filter(|axis| gather_axis_has_integer_casts(axis))
+                    .and_then(extract_int_for_dim)
+                else {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_node_provenance(
+                                node,
+                                "gather axis must be an i32 integer constant (a literal or an integer-cast-wrapped literal); variables and helper calls cannot determine the result shape [05-AXIS-2]".to_string(),
+                            ),
+                            vec![],
+                        ),
+                    );
+                };
                 let route = ShapeRoute::Gather {
                     op: "gather".to_string(),
                     indices: Box::new(type_for_readonly_check(&arg_tys[1], subst)),
-                    raw_axis: kids.get(3).and_then(extract_int_for_dim),
+                    raw_axis: Some(raw_axis),
                     updates: None,
                     mode: None,
                 };
@@ -985,7 +916,14 @@ pub(super) fn finish_unified_app(
             }
             "where" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1044,7 +982,14 @@ pub(super) fn finish_unified_app(
             }
             "cumsum" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1061,7 +1006,24 @@ pub(super) fn finish_unified_app(
                 };
                 match cumsum_operand {
                     Type::Tensor(dims, precision) => {
-                        return Type::Tensor(dims, precision);
+                        return match default_sum_result_precision("cumsum", &precision, subst) {
+                            Ok(result) => publish_sum_result(
+                                "cumsum",
+                                dims,
+                                result,
+                                SumResultSlot::Fresh(vg),
+                                source_site.owned_location(),
+                                subst,
+                            ),
+                            Err(message) => report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_node_provenance(node, message),
+                                    vec![],
+                                ),
+                            ),
+                        };
                     }
                     Type::Error(_) => return result_ty,
                     Type::Var(_) => {
@@ -1084,7 +1046,14 @@ pub(super) fn finish_unified_app(
             }
             "diagonal" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let axis1 = match resolve_axis_pair_member(
@@ -1128,6 +1097,7 @@ pub(super) fn finish_unified_app(
                             axis1,
                             axis2,
                             node,
+                            source_site,
                             env,
                             vg,
                             adt_reg,
@@ -1140,20 +1110,24 @@ pub(super) fn finish_unified_app(
                         return ty;
                     }
                     Err(message) => {
-                        return report(
+                        return report_at_check_site(
                             errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(node, message),
-                                vec![],
-                            ),
+                            diagonal_result_error(node, &diagonal_operand, axis1, axis2, message),
+                            source_site,
                         );
                     }
                 }
             }
             "trace" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 for idx in [1usize, 2] {
                     if let Err(err) =
@@ -1177,7 +1151,14 @@ pub(super) fn finish_unified_app(
             }
             "clamp" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1237,7 +1218,14 @@ pub(super) fn finish_unified_app(
             }
             "sort" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1280,7 +1268,14 @@ pub(super) fn finish_unified_app(
             }
             "scatter" => {
                 if arg_tys.len() != 5 {
-                    return report_builtin_arity(errors, node, fname, 5, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        5,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) = reject_non_int32_axis("scatter", &arg_tys[3], node, subst, errors)
                 {
@@ -1308,7 +1303,14 @@ pub(super) fn finish_unified_app(
             }
             "scatter_replace" => {
                 if arg_tys.len() != 4 {
-                    return report_builtin_arity(errors, node, fname, 4, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        4,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) =
                     reject_non_int32_axis("scatter_replace", &arg_tys[3], node, subst, errors)
@@ -1384,7 +1386,14 @@ pub(super) fn finish_unified_app(
             }
             "index" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
@@ -1450,7 +1459,14 @@ pub(super) fn finish_unified_app(
             }
             "concat" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -1551,7 +1567,14 @@ pub(super) fn finish_unified_app(
             }
             "split" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let axis_ty = subst.apply(&arg_tys[1]);
@@ -1649,7 +1672,14 @@ pub(super) fn finish_unified_app(
             }
             "take" | "skip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
@@ -1700,7 +1730,14 @@ pub(super) fn finish_unified_app(
             }
             "chunk" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
@@ -1753,7 +1790,14 @@ pub(super) fn finish_unified_app(
             }
             "range" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
@@ -1777,59 +1821,9 @@ pub(super) fn finish_unified_app(
                 }
                 return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
-            "map" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let elem_ty = vg.fresh_type();
-                let out_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[1]),
-                    &Type::Adt("List".to_string(), vec![elem_ty]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                return Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]);
-            }
-            "filter" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let elem_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
-                    subst,
-                ) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "filter",
-                            "expects a callback that returns bool",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[1]),
-                    &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                return Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
-            }
             "tensor_scan" => {
-                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
+                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64)
+                //     -> tensor[n, ..state_shape(T), element(T)]`.
                 //
                 // Issue #257: host-runtime scan that produces a tensor
                 // directly, sidestepping the right-recursive list build
@@ -1839,7 +1833,14 @@ pub(super) fn finish_unified_app(
                 // that at execution time. At type-check time we accept
                 // any Type::Prim and let unification do the rest.
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 let i64 = Type::Prim(Prim::Int64);
@@ -1886,12 +1887,20 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
-                // Element type must be a concrete scalar Prim once
-                // unified. If it's still a Var the call site is
-                // under-constrained; if it's a Tensor/Adt/Fn the call
-                // is invalid. We only allow primitive scalars so the
-                // host-runtime arm can determine precision.
+                // [05-OP-38]: the state `T` is a scalar or a tensor;
+                // `state_shape(T)` is empty for a scalar and the full
+                // tensor shape otherwise, and `element(T)` is the scalar
+                // dtype or the tensor precision. The result stacks the `n`
+                // states along a new leading axis. If `T` is still a Var
+                // the call site is under-constrained; an Adt/Fn state is
+                // invalid.
                 let resolved_elem = subst.apply(&elem_ty);
+                if let Type::Tensor(state_shape, precision) = &resolved_elem {
+                    let mut dims = Vec::with_capacity(state_shape.len() + 1);
+                    dims.push(Dim::Wildcard);
+                    dims.extend(state_shape.iter().cloned());
+                    return Type::Tensor(dims, precision.clone());
+                }
                 let precision = match &resolved_elem {
                     Type::Prim(p) => TensorPrec::Concrete(*p),
                     Type::Var(tv) => {
@@ -1911,7 +1920,7 @@ pub(super) fn finish_unified_app(
                                 with_node_provenance(
                                     node,
                                     format!(
-                                        "tensor_scan element type must be a scalar primitive, got {other}"
+                                        "tensor_scan state must be a scalar or a tensor, got {other}"
                                     ),
                                 ),
                                 vec![],
@@ -1920,887 +1929,6 @@ pub(super) fn finish_unified_app(
                     }
                 };
                 return Type::Tensor(vec![Dim::Wildcard], precision);
-            }
-            "partition" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let elem_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
-                    subst,
-                ) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "partition",
-                            "expects a callback that returns bool",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[1]),
-                    &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
-                return Type::Tuple(vec![out_list.clone(), out_list]);
-            }
-            "flat_map" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let elem_ty = vg.fresh_type();
-                let out_elem_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(
-                        vec![elem_ty.clone()],
-                        Box::new(Type::Adt("List".to_string(), vec![out_elem_ty.clone()])),
-                    ),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[1]),
-                    &Type::Adt("List".to_string(), vec![elem_ty]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                return Type::Adt("List".to_string(), vec![subst.apply(&out_elem_ty)]);
-            }
-            "flatten" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(outer_name, outer_args)
-                            if outer_name == "List" && outer_args.len() == 1 =>
-                        {
-                            match &outer_args[0] {
-                                Type::Adt(inner_name, inner_args)
-                                    if inner_name == "List" && inner_args.len() == 1 =>
-                                {
-                                    return Type::Adt(
-                                        "List".to_string(),
-                                        vec![inner_args[0].clone()],
-                                    );
-                                }
-                                Type::Error(_) => return result_ty,
-                                Type::Var(_) => {
-                                    return site.defer(
-                                        &arg_tys,
-                                        &result_ty,
-                                        product,
-                                        result_ty.clone(),
-                                    );
-                                }
-                                other => {
-                                    return report(
-                                        errors,
-                                        CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_node_provenance(
-                                                node,
-                                                format!(
-                                                    "flatten expects List[List[T]] input, got List[{other}]"
-                                                ),
-                                            ),
-                                            vec![],
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("flatten expects List[List[T]] input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "zip" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let lhs = subst.apply(&arg_tys[0]);
-                let rhs = subst.apply(&arg_tys[1]);
-                match (lhs, rhs) {
-                    (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
-                        if lhs_name == "List"
-                            && rhs_name == "List"
-                            && lhs_args.len() == 1
-                            && rhs_args.len() == 1 =>
-                    {
-                        return Type::Adt(
-                            "List".to_string(),
-                            vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
-                        );
-                    }
-                    // chelis#1512: an upstream failure keeps the early
-                    // return, so the cascade still suppresses. Order matters:
-                    // an (Error, Var) pair must suppress, not suspend.
-                    (Type::Error(_), _) | (_, Type::Error(_)) => {
-                        return result_ty;
-                    }
-                    (Type::Var(_), _) | (_, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (lhs, rhs) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!("zip expects List inputs, got {lhs} and {rhs}"),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "enumerate" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                            return Type::Adt(
-                                "List".to_string(),
-                                vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
-                            );
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("enumerate expects List input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "dict_of" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                            // chelis#2523: `dict_of`'s input is a list of
-                            // `(key, value)` pairs, so an element whose type is
-                            // still a variable is constrained to a pair rather
-                            // than admitted. That ties the result's key and
-                            // value types to the list's element, so a declared
-                            // result determines them (`dict_of([])`), and the
-                            // key rule below decides once the key is known.
-                            if let Type::Var(_) = subst.apply(&args[0]) {
-                                let pair = Type::Tuple(vec![vg.fresh_type(), vg.fresh_type()]);
-                                if let Err(te) = unify(&args[0], &pair, subst) {
-                                    return report(errors, te.into());
-                                }
-                            }
-                            match subst.apply(&args[0]) {
-                                Type::Tuple(items) if items.len() == 2 => {
-                                    let dict = Type::Adt(
-                                        "Dict".to_string(),
-                                        vec![items[0].clone(), items[1].clone()],
-                                    );
-                                    match &items[0] {
-                                        key if is_dict_key_type(key) => {}
-                                        Type::Error(_) => return result_ty,
-                                        Type::Var(_) => {
-                                            return site.defer(&arg_tys, &result_ty, product, dict);
-                                        }
-                                        other => {
-                                            return report(
-                                                errors,
-                                                CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    with_node_provenance(
-                                                        node,
-                                                        format!(
-                                                            "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56]), got {other}"
-                                                        ),
-                                                    ),
-                                                    vec![],
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    return dict;
-                                }
-                                Type::Error(_) => return result_ty,
-                                other => {
-                                    return report(
-                                        errors,
-                                        CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_node_provenance(
-                                                node,
-                                                format!(
-                                                    "dict_of expects List[(K, V)] input, got List[{other}]"
-                                                ),
-                                            ),
-                                            vec![],
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("dict_of expects List input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "dict_get" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
-                    (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
-                        if let Err(te) = unify(&args[0], &key_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt("Option".to_string(), vec![subst.apply(&args[1])]);
-                    }
-                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
-                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
-                    // route once the operand binds, and decides it at its
-                    // instantiations if it never does.
-                    (Type::Var(_), _) | (_, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (dict_ty, key_ty) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "dict_contains" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
-                    (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
-                        if let Err(te) = unify(&args[0], &key_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Prim(Prim::Bool);
-                    }
-                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
-                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
-                    // route once the operand binds, and decides it at its
-                    // instantiations if it never does.
-                    (Type::Var(_), _) | (_, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (dict_ty, key_ty) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "dict_remove" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
-                    (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
-                        if let Err(te) = unify(&args[0], &key_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt(
-                            "Dict".to_string(),
-                            vec![subst.apply(&args[0]), subst.apply(&args[1])],
-                        );
-                    }
-                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
-                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
-                    // route once the operand binds, and decides it at its
-                    // instantiations if it never does.
-                    (Type::Var(_), _) | (_, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (dict_ty, key_ty) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "dict_keys" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                            return Type::Adt("List".to_string(), vec![args[0].clone()]);
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("dict_keys expects Dict input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "dict_values" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                            return Type::Adt("List".to_string(), vec![args[1].clone()]);
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("dict_values expects Dict input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "dict_entries" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                            return Type::Adt(
-                                "List".to_string(),
-                                vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
-                            );
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("dict_entries expects Dict input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "to_tensor" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    // Bucket 4b: support arbitrarily-nested numeric/bool
-                    // lists. Each enclosing `List` adds one outer
-                    // dimension, and the innermost element type must
-                    // be a numeric or bool primitive.
-                    //
-                    // Issue Chelis-Lang/chelis#218 (R2 HIGH-A from
-                    // PR #211): when the argument is a statically-
-                    // resolvable Cons-chain literal, emit concrete
-                    // `Dim::Lit(n)` per axis instead of wildcards.
-                    // The wildcard fallback only fires when the
-                    // argument is variable-fed (e.g.
-                    // `to_tensor(items)`), where the shape is
-                    // genuinely unknown at type-check time. Emitting
-                    // concrete dims at this single source point
-                    // means every downstream consumer (reductions,
-                    // elementwise activations, anything that reads
-                    // the to_tensor app's `type:` metadata) sees a
-                    // sound shape instead of `Dim::Wildcard`.
-                    let resolved = subst.apply(first_arg);
-                    if matches!(resolved, Type::Error(_)) {
-                        return result_ty;
-                    }
-                    if matches!(resolved, Type::Var(_)) {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    match peel_to_tensor_argument(&resolved) {
-                        ToTensorPeel::Ok { rank, precision } => {
-                            if rank == 0 {
-                                // Defensive: a bare scalar should never
-                                // hit this branch (the typer requires
-                                // a `List` head), but guard anyway.
-                                return report(
-                                    errors,
-                                    CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_node_provenance(
-                                            node,
-                                            format!("to_tensor expects List input, got {resolved}"),
-                                        ),
-                                        vec![],
-                                    ),
-                                );
-                            }
-                            // R2 HIGH-A: try the static-shape walker
-                            // on the actual argument expression
-                            // first. `kids[0]` is the `(var
-                            // to_tensor)` callee; `kids[1]` is the
-                            // argument expression. If the walker
-                            // can't resolve a uniform shape
-                            // (variable-fed argument, ragged
-                            // literal, or unrecognized leaf), fall
-                            // back to the legacy wildcard rank.
-                            let dims = kids
-                                .get(1)
-                                .and_then(|arg| static_to_tensor_shape(arg, rank))
-                                .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
-                            return Type::Tensor(dims, TensorPrec::Concrete(precision));
-                        }
-                        // [05-OP-57]: the leaf of `to_tensor`'s List is one
-                        // scalar tensor-element dtype. A leaf variable restricted
-                        // to the `Float`, `Int` or `Numeric` family can only be
-                        // such a scalar, so the nesting depth already fixes the
-                        // rank and the variable is the result precision, exactly
-                        // as `to_list` maps `tensor[n, p]` to `List[p]`. Returning
-                        // the scheme's opaque result here left every consumer of
-                        // a generic `to_tensor` (a `reshape`, say) suspended past
-                        // its declaration boundary.
-                        ToTensorPeel::Pending { rank, element }
-                            if rank > 0
-                                && matches!(
-                                    subst.tvar_restriction(element),
-                                    Some(
-                                        TypeVarRestriction::ActiveFloat
-                                            | TypeVarRestriction::ActiveInt
-                                            | TypeVarRestriction::ActiveNumeric
-                                    )
-                                ) =>
-                        {
-                            let dims = kids
-                                .get(1)
-                                .and_then(|arg| static_to_tensor_shape(arg, rank))
-                                .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
-                            return Type::Tensor(dims, TensorPrec::Var(element));
-                        }
-                        // chelis#2523: `to_tensor` maps `List` nested `r`
-                        // deep around a numeric or bool dtype `p` to a rank-`r`
-                        // tensor of `p`, so an element type that is still a
-                        // variable is determined by a result whose rank and
-                        // precision are known, as a declared field does for
-                        // `IntCol(to_tensor([]))`. Otherwise the call waits for
-                        // either one to bind, and the declaration boundary
-                        // decides it if neither does.
-                        ToTensorPeel::Pending { rank, element } => {
-                            if let Type::Tensor(result_dims, precision) = &result_ty
-                                && result_dims.len() >= rank
-                            {
-                                let scalar = match precision {
-                                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
-                                    TensorPrec::Var(var) => Type::Var(*var),
-                                };
-                                let inner = (rank..result_dims.len()).fold(scalar, |inner, _| {
-                                    Type::Adt("List".to_string(), vec![inner])
-                                });
-                                if let Err(te) = unify(&Type::Var(element), &inner, subst) {
-                                    return report(errors, te.into());
-                                }
-                                // A concrete precision settles the call; a
-                                // precision variable is decided when it binds,
-                                // or at its instantiations.
-                                if let TensorPrec::Concrete(prim) = precision
-                                    && (prim.is_numeric() || *prim == Prim::Bool)
-                                {
-                                    return result_ty;
-                                }
-                            }
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        ToTensorPeel::Poisoned => return result_ty,
-                        ToTensorPeel::BadInner(inner) => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!(
-                                            "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                        ToTensorPeel::NotList => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("to_tensor expects List input, got {resolved}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "to_list" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(dims, precision) => {
-                            if dims.len() != 1 {
-                                return report(
-                                    errors,
-                                    CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_node_provenance(
-                                            node,
-                                            format!(
-                                                "to_list expects a rank-1 tensor, got rank {} tensor",
-                                                dims.len()
-                                            ),
-                                        ),
-                                        vec![],
-                                    ),
-                                );
-                            }
-                            let precision = match precision {
-                                TensorPrec::Concrete(p) => p,
-                                // [05-OP-57] fixes the result constructor and
-                                // leaf relation independently of whether the
-                                // authored precision has been instantiated:
-                                // tensor[n, p] becomes List[p]. Returning the
-                                // builtin scheme's opaque result variable here
-                                // erased the known List constructor and made a
-                                // following index look unresolved at [04-INF-9]'s
-                                // declaration boundary (chelis#2126).
-                                TensorPrec::Var(variable) => {
-                                    return Type::Adt(
-                                        "List".to_string(),
-                                        vec![Type::Var(variable)],
-                                    );
-                                }
-                            };
-                            if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
-                                return report(
-                                    errors,
-                                    CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_node_provenance(
-                                            node,
-                                            format!(
-                                                "to_list expects numeric or bool tensor input, got {precision:?}"
-                                            ),
-                                        ),
-                                        vec![],
-                                    ),
-                                );
-                            }
-                            return Type::Adt("List".to_string(), vec![Type::Prim(precision)]);
-                        }
-                        Type::Error(_) => return result_ty,
-                        Type::Var(_) => {
-                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("to_list expects Tensor input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "pad_sequences" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let seqs_ty = subst.apply(&arg_tys[0]);
-                let pad_ty = subst.apply(&arg_tys[1]);
-                match seqs_ty {
-                    Type::Adt(outer_name, outer_args)
-                        if outer_name == "List" && outer_args.len() == 1 =>
-                    {
-                        match &outer_args[0] {
-                            Type::Adt(inner_name, inner_args)
-                                if inner_name == "List" && inner_args.len() == 1 =>
-                            {
-                                if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                    return report(errors, te.into());
-                                }
-                                match subst.apply(&inner_args[0]) {
-                                    Type::Prim(precision) if precision.is_numeric() => {
-                                        return Type::Tensor(
-                                            vec![Dim::Wildcard, Dim::Wildcard],
-                                            TensorPrec::Concrete(precision),
-                                        );
-                                    }
-                                    Type::Error(_) => return result_ty,
-                                    Type::Var(_) => {
-                                        return site.defer(
-                                            &arg_tys,
-                                            &result_ty,
-                                            product,
-                                            result_ty.clone(),
-                                        );
-                                    }
-                                    other => {
-                                        return report(
-                                            errors,
-                                            CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_node_provenance(
-                                                    node,
-                                                    format!(
-                                                        "pad_sequences expects numeric nested lists, got {other}"
-                                                    ),
-                                                ),
-                                                vec![],
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            other => {
-                                return report(
-                                    errors,
-                                    CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_node_provenance(
-                                            node,
-                                            format!(
-                                                "pad_sequences expects List[List[T]], got List[{other}]"
-                                            ),
-                                        ),
-                                        vec![],
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    Type::Error(_) => return result_ty,
-                    Type::Var(_) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    other => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "pad_sequences expects List[List[T]] input, got {other}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "pad_sequences_to" => {
-                if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
-                }
-                let seqs_ty = subst.apply(&arg_tys[0]);
-                let width_ty = subst.apply(&arg_tys[1]);
-                let pad_ty = subst.apply(&arg_tys[2]);
-                if let Err(te) = unify(&width_ty, &Type::Prim(Prim::Int64), subst) {
-                    return report(errors, te.into());
-                }
-                // The padded (axis-1) dimension equals the `width`
-                // argument. When `width` is a literal — including
-                // `cast(N, i64)`, the form every caller uses —
-                // propagate `Dim::Lit(N)` so the padded width is a
-                // concrete dim that participates in shape checking.
-                // A non-literal or non-positive width stays
-                // `Dim::Wildcard` (the runtime validates the value).
-                // `extract_int_for_dim` (not `extract_int_literal`)
-                // is the cast-aware extractor used for dim contexts.
-                let width_dim = node
-                    .children_slice()
-                    .get(2)
-                    .and_then(extract_int_for_dim)
-                    .filter(|width| *width > 0)
-                    .map_or(Dim::Wildcard, Dim::Lit);
-                match seqs_ty {
-                    Type::Adt(outer_name, outer_args)
-                        if outer_name == "List" && outer_args.len() == 1 =>
-                    {
-                        match &outer_args[0] {
-                            Type::Adt(inner_name, inner_args)
-                                if inner_name == "List" && inner_args.len() == 1 =>
-                            {
-                                if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                    return report(errors, te.into());
-                                }
-                                match subst.apply(&inner_args[0]) {
-                                    Type::Prim(precision) if precision.is_numeric() => {
-                                        return Type::Tensor(
-                                            vec![Dim::Wildcard, width_dim],
-                                            TensorPrec::Concrete(precision),
-                                        );
-                                    }
-                                    Type::Error(_) => return result_ty,
-                                    Type::Var(_) => {
-                                        return site.defer(
-                                            &arg_tys,
-                                            &result_ty,
-                                            product,
-                                            result_ty.clone(),
-                                        );
-                                    }
-                                    other => {
-                                        return report(
-                                            errors,
-                                            CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_node_provenance(
-                                                    node,
-                                                    format!(
-                                                        "pad_sequences_to expects numeric nested lists, got {other}"
-                                                    ),
-                                                ),
-                                                vec![],
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            other => {
-                                return report(
-                                    errors,
-                                    CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_node_provenance(
-                                            node,
-                                            format!(
-                                                "pad_sequences_to expects List[List[T]], got List[{other}]"
-                                            ),
-                                        ),
-                                        vec![],
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    Type::Error(_) => return result_ty,
-                    Type::Var(_) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    other => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "pad_sequences_to expects List[List[T]] input, got {other}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
             }
             "read_file" => return Type::Prim(Prim::String),
             "write_file" => return Type::Unit,
@@ -2819,9 +1947,8 @@ pub(super) fn finish_unified_app(
                 return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "mmap_len" => return Type::Prim(Prim::Int64),
-            // Hull Phase 0a: `process_run(cmd, args)` returns
-            // `(exit_code, stdout, stderr)`. Eval/test-only; the build
-            // backends reject it (see `reject_eval_only_builtins_host`).
+            // spec/05 §2.6: `process_run(cmd, args)` returns
+            // `(exit_code, stdout, stderr)`.
             "process_run" => {
                 return Type::Tuple(vec![
                     Type::Prim(Prim::Int64),
@@ -2838,7 +1965,36 @@ pub(super) fn finish_unified_app(
             | "csv_cols" | "csv_f64" | "csv_int" | "csv_str" => {
                 return check_csv_builtin_signature(fname, node, &arg_tys, subst, errors);
             }
-            _ => {}
+            _ => {
+                if let Some(result) = finish_collection_app(
+                    fname,
+                    source_site,
+                    node,
+                    &arg_tys,
+                    &result_ty,
+                    &site,
+                    vg,
+                    subst,
+                    errors,
+                    product,
+                ) {
+                    return result;
+                }
+                if let Some(result) = finish_conversion_app(
+                    fname,
+                    source_site,
+                    node,
+                    kids,
+                    &arg_tys,
+                    &result_ty,
+                    &site,
+                    subst,
+                    errors,
+                    product,
+                ) {
+                    return result;
+                }
+            }
         }
     }
 

@@ -197,33 +197,30 @@ def assert_extended(test, pr, nightly):
                 else:
                     test.assertNotIn("if", step)
     full = jobs["full-workspace"]
-    capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
-    test.assertFalse(capacity(full))
-    test.assertFalse(capacity(jobs["generalize-sweep-oracle-shard"]))
-    test.assertEqual(len(capacity(jobs["dtype-phase3-oracle"])), 1)
+    # Main runs these jobs on the self-hosted pool, which keeps its Kache
+    # compiler cache and never saves a GitHub cache; hosted branch runs
+    # restore only the Rust families ci-cache-warm.yml writes. An explicit
+    # target-directory cache here would have no writer.
+    for job_id, job in jobs.items():
+        for step in job.get("steps", []):
+            test.assertFalse(
+                str(step.get("uses", "")).startswith("actions/cache"),
+                (job_id, step.get("name")),
+            )
     # chelis#1819: one unsharded run of this selection has never finished
     # inside any budget, so it never reported a verdict at all. The selection
     # is unchanged and still unfiltered; it executes as four disjoint hash
     # partitions of itself.
-    workspace_suite = "cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4"
+    workspace_suite = "cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | ${{ needs.module-oracles-plan.outputs.filterset }})' --partition hash:${{ matrix.shard }}/4"
     commands = [s.get("run") for s in full["steps"]]
     test.assertIn("cargo build --workspace --lib --bins", commands)
     test.assertIn(workspace_suite, commands)
     assert_complete_hash_partition(test, full, workspace_suite)
+    module = jobs["module-oracles"]
+    module_suite = "cargo nextest run --workspace --profile module-oracles --ignore-default-filter --no-fail-fast --no-tests=warn -E '${{ needs.module-oracles-plan.outputs.filterset }}' --partition hash:${{ matrix.shard }}/2"
+    test.assertIn(module_suite, [s.get("run") for s in module["steps"]])
+    assert_complete_hash_partition(test, module, module_suite)
     test.assertIn("python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
-    script_cache_steps = [
-        step
-        for step in jobs["script-nightly"]["steps"]
-        if step.get("name") in {
-            "Restore script compiler builds",
-            "Save script compiler builds",
-        }
-    ]
-    test.assertEqual(len(script_cache_steps), 2)
-    for step in script_cache_steps:
-        cached_paths = step["with"]["path"].splitlines()
-        test.assertIn("target/agents/native-execution-integration", cached_paths)
-        test.assertIn("target/agents/native-owner-integration", cached_paths)
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
@@ -292,6 +289,8 @@ def assert_extended(test, pr, nightly):
         | {
             "dispatch-scope",
             "full-workspace",
+            "module-oracles-plan",
+            "module-oracles",
             "script-nightly",
             "integration-support",
             "backend-sanitizers-full",
@@ -322,6 +321,8 @@ def assert_dispatch_scopes(test, nightly):
     jobs = nightly["jobs"]
     full_jobs = {
         "full-workspace",
+        "module-oracles-plan",
+        "module-oracles",
         "script-nightly",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
@@ -387,8 +388,8 @@ def assert_dispatch_scopes(test, nightly):
     def legs(names):
         return sum(len(matrix_legs(jobs[name])) for name in names)
 
-    test.assertEqual(legs(full_jobs - {"report"}), 19)
-    test.assertEqual(legs(full_jobs), 20)
+    test.assertEqual(legs(full_jobs - {"report"}), 22)
+    test.assertEqual(legs(full_jobs), 23)
     for name in (
         "runtime-representation-phase0-oracle",
         "dtype-phase3-oracle",
@@ -792,6 +793,63 @@ class WarmLaneTests(unittest.TestCase):
                 job["runs-on"] = WARM_LABEL
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
                 assert_one_warm_lane(self, nightly)
+
+
+# chelis#3070: the warm broker admits a job only by a reviewed member route,
+# and these jobs have none, so on main the hosts refuse them with no steps
+# and no log. They run GitHub-hosted on every ref; the module-oracles shard
+# limit stays inside the hosted six-hour job limit.
+HOSTED_ONLY_JOBS = ("module-oracles-plan", "module-oracles")
+HOSTED_RUNNER = "ubuntu-latest"
+HOSTED_JOB_MINUTES = 360
+
+
+def assert_hosted_on_every_ref(test, nightly, name):
+    job = nightly["jobs"][name]
+    for leg in matrix_legs(job):
+        for ref in (MAIN_REF, "refs/heads/candidate"):
+            test.assertEqual(
+                resolve_ref_switch(test, job["runs-on"], ref, leg),
+                HOSTED_RUNNER,
+                f"{name} {leg} must run GitHub-hosted on {ref} (chelis#3070)",
+            )
+    test.assertLessEqual(
+        int(job["timeout-minutes"]),
+        HOSTED_JOB_MINUTES,
+        f"{name} must fit the GitHub-hosted job limit",
+    )
+
+
+class HostedModuleOraclesTests(unittest.TestCase):
+    """chelis#3070: module oracles never wait on a warm route they lack."""
+
+    def setUp(self):
+        self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
+
+    def test_module_oracle_jobs_run_github_hosted_on_every_ref(self):
+        for name in HOSTED_ONLY_JOBS:
+            with self.subTest(job=name):
+                assert_hosted_on_every_ref(self, self.nightly, name)
+
+    def test_a_warm_route_or_an_over_long_shard_is_rejected(self):
+        # The negative twin: #3005's nightly-wide expression, which picked
+        # the warm pool on main, and a shard budget past the hosted limit.
+        warm = (
+            "${{ github.ref == 'refs/heads/main' && "
+            f"'{WARM_LABEL}' || 'ubuntu-latest' }}}}"
+        )
+        for name in HOSTED_ONLY_JOBS:
+            for mutation in ("warm", "timeout"):
+                nightly = copy.deepcopy(self.nightly)
+                job = nightly["jobs"][name]
+                if mutation == "warm":
+                    job["runs-on"] = warm
+                else:
+                    job["timeout-minutes"] = HOSTED_JOB_MINUTES + 1
+                with self.subTest(job=name, mutation=mutation), self.assertRaises(
+                    AssertionError
+                ):
+                    assert_hosted_on_every_ref(self, nightly, name)
 
 
 class UnattendedBackstopTests(unittest.TestCase):

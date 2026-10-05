@@ -1,4 +1,4 @@
-# Opaque types with declared invariants
+# Opaque Types With Declared Invariants
 
 `@opaque` keeps a type's construction and representation inside its defining
 module. Other modules can use exported values and functions, but cannot build
@@ -70,7 +70,7 @@ the SMT result shown below. The shipped release binary has SMT support. A
 plain local `cargo build` omits it; its default prover can validate producer
 obligations by sampling and emits a warning that they were not SMT-verified.
 If the obligation engine is unavailable, a successful property run does not
-verify producer obligations. See [Proving](proving.md) for proof options,
+verify producer obligations. See [Checking Properties](proving.md) for proof options,
 exit codes, and the complete output format.
 
 For the SMT-enabled binary, the example has one property and three producer
@@ -97,8 +97,7 @@ upper guard, the producer obligation fails. For example, `x = 2.0` meets the
 lower guard but returns a value above the declared bound:
 
 ```chelis-surf-fragment
-def probability(x: f32) -> Option[Probability] =
-  if x >= 0.0 then Some(Probability { value: x }) else None
+def probability(x: f32) -> Option[Probability] = if (x >= 0.0) then Some(Probability { value: x }) else None
 ```
 
 With SMT enabled, the prover reports a counterexample and exits with a failure.
@@ -116,11 +115,10 @@ the public type and the functions:
 ```chelis-surf-fragment
 module Stats.Pricing
 import Stats.Opaque (Probability, probability, scale, prob_value)
-
 def adjusted(x: f32, factor: Probability) -> f32 =
   match probability(x) with {
     | Some(p) => prob_value(scale(p, factor))
-    | None    => 0.0
+    | None => 0.0
   }
 ```
 
@@ -134,7 +132,6 @@ consumer is rejected:
 ```chelis-surf-fragment
 module Stats.Forge
 import Stats.Opaque (Probability)
-
 def forge(x: f32) -> Probability = Probability { value: x }
 ```
 

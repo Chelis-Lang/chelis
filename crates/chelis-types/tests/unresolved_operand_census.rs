@@ -27,7 +27,10 @@ const MATRIX: &str = "tests/unresolved_operand_matrix.rs";
 /// The deferred shape ledger and its route dispatch. A `deferred_by_caller`
 /// row asserts that the enclosing rule is replayed from here, so the name has
 /// to appear in one of these two files.
-const LEDGER_SOURCES: &[&str] = &["src/infer/checked.rs", "src/infer/operand_deferral.rs"];
+const LEDGER_SOURCES: &[&str] = &[
+    "src/infer/checked/deferred_shape.rs",
+    "src/infer/operand_deferral.rs",
+];
 
 /// One enumerated site.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

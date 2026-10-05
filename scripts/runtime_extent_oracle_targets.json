@@ -360,7 +360,7 @@
         "a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
         "a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
         "a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
-        "a_bare_runtime_scalar_expand_size_is_still_sourceless",
+        "a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval",
         "a_binder_that_shadows_the_record_base_suppresses_the_hoist",
         "a_caller_transported_result_label_survives_the_op_computed_stamp",
         "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c",
@@ -382,7 +382,6 @@
         "a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent",
         "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
         "a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds",
-        "a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
         "a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
@@ -398,7 +397,7 @@
         "a_named_bystander_axis_keeps_its_size_extent_on_c",
         "a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
         "a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
-        "a_negative_computed_size_under_a_free_result_dim_diverges_by_lane",
+        "a_negative_computed_size_under_a_free_result_dim_agrees_by_lane",
         "a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker",
         "a_nested_helper_claim_sizes_a_root_on_c",
         "a_nested_helper_claim_sizes_a_root_on_eval",
@@ -413,7 +412,7 @@
         "a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         "a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
         "a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
-        "a_piped_shape_read_of_a_non_tensor_is_still_sourceless",
+        "a_piped_runtime_scalar_size_executes_on_both_lanes",
         "a_polymorphic_argument_claim_sizes_a_root_on_c",
         "a_polymorphic_argument_claim_sizes_a_root_on_eval",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
@@ -432,13 +431,13 @@
         "a_result_only_binder_claim_sizes_a_root_on_eval",
         "a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
         "a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        "a_runtime_expand_size_in_pipe_position_executes_on_both_lanes",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         "a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
         "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         "a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval",
-        "a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli",
         "a_split_kernel_tuple_root_executes_when_its_repeated_binder_agrees",
         "a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
         "a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
@@ -461,7 +460,7 @@
         "an_effect_before_an_op_computed_guard_runs_when_the_guard_traps_on_c",
         "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
         "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
-        "an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule",
+        "an_empty_shrink_span_is_an_extent_zero_axis_on_both_lanes",
         "an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786",
         "an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs",
         "an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
@@ -470,12 +469,12 @@
         "an_op_computed_class_with_an_unbound_binder_agrees_across_lanes",
         "an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
-        "an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval",
-        "an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval",
+        "an_overshooting_empty_span_traps_in_shrink_on_eval",
+        "an_overshooting_inverted_span_traps_in_shrink_on_eval",
         "an_overshooting_shrink_span_reports_the_domain_error_on_c",
         "an_overshooting_shrink_span_reports_the_domain_error_on_eval",
         "an_unread_declaring_parameter_still_guards_its_named_result_claim",
-        "arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless",
+        "arithmetic_over_a_scalar_with_no_tensor_source_is_an_admissible_size_on_eval",
         "arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval",
         "c_independent_trap_after_a_mismatch_loses",
         "c_independent_trap_before_a_mismatch_wins",
@@ -518,7 +517,7 @@
         "load_load_named_class_guards_every_non_canonical_member_on_eval",
         "malformed_parameter_ranks_keep_the_existing_helper_diagnostic",
         "no_environment_variable_disables_the_named_claim_guard",
-        "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        "runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval",
         "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
         "scalar_gradient_roots_keep_target_order_and_public_leaf_types",
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
@@ -959,12 +958,13 @@
         "mode": "exact"
       },
       "expected": [
+        "issue1791_a_non_i64_size_rejects_identically_in_both_positions",
+        "issue1791_a_runtime_size_checks_clean_in_pipe_position_too",
         "issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean",
-        "issue1791_a_sourceless_size_rejects_in_pipe_position_too",
-        "issue1791_the_direct_spelling_keeps_its_exact_rendering",
+
         "issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic"
       ],
-      "note": "chelis#1791 half B and chelis#1923, at the checker. The verdict is the checker's, so these receipts are unit-level and no lane splits them; the CLI twin in cli_slice_b records what a user sees. Named with --exact rather than running the whole file because issue_530_expand_inline_size_gate.rs also holds chelis#530's eleven inline-size cells, which this phase does not own."
+      "note": "chelis#1791 half B and chelis#1923, at the checker. The verdict is the checker's, so these receipts are unit-level and no lane splits them; the CLI twin in cli_slice_b records what a user sees. Named with --exact rather than running the whole file because issue_530_expand_inline_size_gate.rs also holds chelis#530's inline-size cells, which this phase does not own."
     },
     {
       "phase": "b",
@@ -979,9 +979,9 @@
         "computed_closures_keep_captures_and_eager_arguments",
         "lambda_pipe_stages_evaluate_the_input_before_the_body",
         "lambda_pipe_stages_preserve_lexical_bindings",
-        "resugaring_the_deep_still_prints_the_pipe",
+        "resugaring_the_deep_prints_calls",
         "the_annotated_deep_prints_the_application_the_pipe_denotes",
-        "the_unannotated_deep_still_carries_the_pipe"
+        "the_unannotated_deep_already_contains_applications"
       ],
       "note": "Pipe application semantics include lexical binding and eager input evaluation. Direct-call twins and trapping/agreeing inputs cover those obligations alongside the three printed surfaces."
     },
@@ -1058,7 +1058,7 @@
         "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
         "window_reduction_contracts_reject_invalid_public_calls"
       ],
-      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, and all four window reductions to enforce their checked contracts through direct and aliased CLI calls."
+      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, all four window reductions to enforce their checked contracts through direct CLI calls, and every alias of one to be refused by name."
     },
     {
       "phase": "b",
@@ -1070,11 +1070,11 @@
         "mode": "all"
       },
       "expected": [
-        "checked_library_round_trips_preserve_generic_and_primitive_function_values",
-        "checked_library_round_trips_preserve_window_reduction_contracts",
+        "checked_libraries_refuse_builtins_applicable_only_by_name",
+        "checked_library_round_trips_preserve_generic_function_values",
         "insufficient_authored_contracts_cannot_be_published_as_checked_libraries"
       ],
-      "note": "Checked stdlib and dependency contexts preserve authored, primitive-operation and window-reduction family restrictions through serialization, and refuse to publish insufficient authored contracts."
+      "note": "Checked stdlib and dependency contexts preserve authored family restrictions through serialization, refuse to publish a builtin that is applicable only by name as a value, and refuse to publish insufficient authored contracts."
     },
     {
       "phase": "b",
@@ -1157,9 +1157,11 @@
         "value": "host::signature_entry::tests::"
       },
       "expected": [
+        "host::signature_entry::tests::checked_tensor_instantiation_fills_an_authored_type_variable",
         "host::signature_entry::tests::independent_signatures_and_wildcards_create_no_equality",
         "host::signature_entry::tests::internal_rank_axis_identity_has_a_printable_guard_label",
-        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order"
+        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order",
+        "host::signature_entry::tests::recursive_list_contract_keeps_signature_binder_and_empty_slot"
       ],
       "phase": "b"
     },

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
-use crate::version::is_safe_path_component;
+use crate::version::{is_safe_path_component, validate_install_version};
 
 /// Run the shim. `argv` is the full process argv (including `argv[0]`).
 /// On success this never returns (it replaces the process image); any
@@ -71,10 +71,20 @@ pub fn run_shim(argv: &[OsString]) -> i32 {
 }
 
 /// Loud error for "a version resolved, but it is not installed."
+///
+/// The remedy names `chelisup install <ver>` only when `chelisup install`
+/// accepts `<ver>`; a selector such as `+latest` gets the accepted form
+/// instead of a command that would fail in turn.
 fn not_installed_message(store: &Store, resolution: &Resolution) -> String {
+    let remedy = match validate_install_version(&resolution.version) {
+        Ok(()) => format!("install it: chelisup install {}", resolution.version),
+        Err(_) => "a toolchain version is an exact X.Y.Z (for example 0.12.0); \
+                   install one with: chelisup install X.Y.Z"
+            .to_string(),
+    };
     format!(
         "chelis: toolchain {ver} (resolved from {src}) is not installed.\n  \
-         installed: {installed}\n  install it: chelisup install {ver}",
+         installed: {installed}\n  {remedy}",
         ver = resolution.version,
         src = resolution.source,
         installed = installed_listing(store),
@@ -85,7 +95,7 @@ fn not_installed_message(store: &Store, resolution: &Resolution) -> String {
 fn no_toolchain_message(store: &Store, cwd: &Path) -> String {
     format!(
         "chelis: no chelis toolchain resolved.\n  \
-         not inside a reef package (no reef.toml with a compiler pin above {cwd}), \
+         no applicable reef.toml compiler selection above {cwd}, \
          no chelis-toolchain file, CHELIS_TOOLCHAIN is unset, and no default is recorded.\n  \
          installed: {installed}\n  \
          pick a default: chelisup default <ver>  (after chelisup install <ver>)",
@@ -149,6 +159,21 @@ mod tests {
         assert!(msg.contains("chelisup install 0.99.0"), "{msg}");
         assert!(msg.contains("0.99.0 (resolved from"), "{msg}");
         assert!(msg.contains("installed: (none)"), "{msg}");
+    }
+
+    #[test]
+    fn not_installed_message_does_not_suggest_an_unparseable_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::at(tmp.path());
+        let res = Resolution {
+            version: "latest".to_string(),
+            source: ToolchainSource::PlusArg,
+            forwarded_args: vec![],
+        };
+        let msg = not_installed_message(&store, &res);
+        assert!(!msg.contains("chelisup install latest"), "{msg}");
+        assert!(msg.contains("chelisup install X.Y.Z"), "{msg}");
+        assert!(msg.contains("latest (resolved from"), "{msg}");
     }
 
     #[test]

@@ -18,7 +18,9 @@
 //! The internal `add_synth` helper applies the rule once per node so we
 //! don't duplicate it across the ~109 `add_node` callsites.
 
+use chelis_types::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use chelis_types::types::Prim;
+use chelis_types::{FloatBinOp, FloatUnOp};
 
 use crate::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis, RtDim,
@@ -74,13 +76,138 @@ pub fn lower_relu(
     add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
 }
 
-/// `sigmoid(x)` = `1 / (1 + exp(-x))`
+/// Builds a section 3.3 activation graph as Tier 1 DAG nodes with `ty`'s
+/// dimensions. The graph itself is defined once, in
+/// [`chelis_types::activation`], which the evaluator's activation kernels
+/// also run, so the two lanes cannot drift.
+struct DagActivationGraph<'a> {
+    owner: Owner,
+    dag: &'a mut Dag,
+    ty: &'a TensorType,
+    parent_span: Option<&'a str>,
+    /// The activation's input. Every constant is shaped like it.
+    input: NodeId,
+}
+
+impl DagActivationGraph<'_> {
+    fn at(&self, precision: Prim) -> TensorType {
+        TensorType {
+            dims: self.ty.dims.clone(),
+            precision,
+        }
+    }
+
+    fn node(&mut self, op: RiscOp, inputs: Vec<NodeId>, precision: Prim) -> NodeId {
+        let ty = self.at(precision);
+        add_synth(self.owner, self.dag, op, inputs, ty, self.parent_span)
+    }
+
+    fn precision(&self, id: NodeId) -> Prim {
+        self.dag
+            .get(id)
+            .expect("an activation step reads a node the graph built")
+            .output_type
+            .precision
+    }
+}
+
+impl ActivationGraph for DagActivationGraph<'_> {
+    type Value = NodeId;
+    type Predicate = NodeId;
+    type Error = std::convert::Infallible;
+
+    fn operand_prim(&self) -> Prim {
+        self.ty.precision
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<NodeId, Self::Error> {
+        let constant = self.node(RiscOp::synth_const(prim, value), vec![], prim);
+        // An input-less constant has no extent of its own. Recording the
+        // input as its shape source sizes an axis known only at run time
+        // from the input (chelis#1482).
+        self.dag.add_shape_dep(constant, self.input);
+        Ok(constant)
+    }
+
+    fn unary(&mut self, op: FloatUnOp, x: NodeId) -> Result<NodeId, Self::Error> {
+        let op = match op {
+            FloatUnOp::Neg => RiscOp::Neg,
+            FloatUnOp::Exp => RiscOp::Exp,
+            FloatUnOp::Recip => RiscOp::Recip,
+            FloatUnOp::Abs => RiscOp::Abs,
+            FloatUnOp::Erfc => RiscOp::Erfc,
+            other => unreachable!("section 3.3 activations use no `{}` step", other.name()),
+        };
+        let precision = self.precision(x);
+        Ok(self.node(op, vec![x], precision))
+    }
+
+    fn binary(&mut self, op: FloatBinOp, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
+        let op = match op {
+            FloatBinOp::Add => RiscOp::Add,
+            FloatBinOp::Sub => RiscOp::Sub,
+            FloatBinOp::Mul => RiscOp::Mul,
+            other => unreachable!("section 3.3 activations use no `{other:?}` step"),
+        };
+        let precision = self.precision(lhs);
+        Ok(self.node(op, vec![lhs, rhs], precision))
+    }
+
+    fn less_than(&mut self, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![lhs, rhs],
+            Prim::Bool,
+        ))
+    }
+
+    fn select(
+        &mut self,
+        condition: NodeId,
+        then: NodeId,
+        otherwise: NodeId,
+    ) -> Result<NodeId, Self::Error> {
+        let precision = self.precision(then);
+        Ok(self.node(RiscOp::Where, vec![condition, then, otherwise], precision))
+    }
+
+    fn convert(&mut self, x: NodeId, prim: Prim) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Cast {
+                new_precision: prim,
+            },
+            vec![x],
+            prim,
+        ))
+    }
+}
+
+fn lower_derived_activation(
+    activation: DerivedActivation,
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    let mut graph = DagActivationGraph {
+        owner,
+        dag,
+        ty,
+        parent_span,
+        input: x,
+    };
+    match lower_activation(&mut graph, activation, x) {
+        Ok(node) => node,
+        Err(never) => match never {},
+    }
+}
+
+/// `sigmoid(x)` = `recip(add(const(1.0), exp(neg(x))))` (section 3.3).
 ///
-/// Lowered as `recip(add(const(1), exp(neg(x))))`. The reciprocal
-/// step is a single `RiscOp::Recip` so the lowering produces the
-/// IEEE-correct value (`1 / 0 = +inf`) rather than the
-/// NaN-from-log that an `exp(neg(log(_)))` decomposition would
-/// produce on non-positive inputs.
+/// The reciprocal step is a single `RiscOp::Recip` so the lowering produces
+/// the IEEE-correct value (`1 / 0 = +inf`) rather than the NaN-from-log that
+/// an `exp(neg(log(_)))` decomposition would produce on non-positive inputs.
 pub fn lower_sigmoid(
     owner: Owner,
     dag: &mut Dag,
@@ -88,106 +215,11 @@ pub fn lower_sigmoid(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let neg_x = add_synth(owner, dag, RiscOp::Neg, vec![x], ty.clone(), parent_span);
-    let exp_neg = add_synth(
-        owner,
-        dag,
-        RiscOp::Exp,
-        vec![neg_x],
-        ty.clone(),
-        parent_span,
-    );
-    let one = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 1.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    let sum = add_synth(
-        owner,
-        dag,
-        RiscOp::Add,
-        vec![one, exp_neg],
-        ty.clone(),
-        parent_span,
-    );
-    add_synth(
-        owner,
-        dag,
-        RiscOp::Recip,
-        vec![sum],
-        ty.clone(),
-        parent_span,
-    )
+    lower_derived_activation(DerivedActivation::Sigmoid, owner, dag, x, ty, parent_span)
 }
 
-/// `tanh(x)` = `2 * sigmoid(2*x) - 1`
-///
-/// Decomposed via existing RISC primitives (Exp/Add/Mul/Neg/Log) so we
-/// avoid escalating the RISC vocabulary. The C backend numerics match
-/// the host-runtime helper `chelis_host_tanh_f32` to f32 ulp tolerance
-/// (both routes ultimately go through `expf`).
-pub fn lower_tanh(
-    owner: Owner,
-    dag: &mut Dag,
-    x: NodeId,
-    ty: &TensorType,
-    parent_span: Option<&str>,
-) -> NodeId {
-    let two = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 2.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    let two_x = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![two, x],
-        ty.clone(),
-        parent_span,
-    );
-    let sig_2x = lower_sigmoid(owner, dag, two_x, ty, parent_span);
-    let two_again = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 2.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    let two_sig = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![two_again, sig_2x],
-        ty.clone(),
-        parent_span,
-    );
-    let neg_one = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, -1.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    add_synth(
-        owner,
-        dag,
-        RiscOp::Add,
-        vec![two_sig, neg_one],
-        ty.clone(),
-        parent_span,
-    )
-}
-
-/// `silu(x)` = `x * sigmoid(x)` (a.k.a. swish).
+/// `silu(x)` = `mul(m(x), sigmoid(x))` (section 3.3; a.k.a. swish), with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_silu(
     owner: Owner,
     dag: &mut Dag,
@@ -195,24 +227,12 @@ pub fn lower_silu(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let sig_x = lower_sigmoid(owner, dag, x, ty, parent_span);
-    add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![x, sig_x],
-        ty.clone(),
-        parent_span,
-    )
+    lower_derived_activation(DerivedActivation::Silu, owner, dag, x, ty, parent_span)
 }
 
-/// `gelu(x)` via the tanh approximation:
-///
-///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-///
-/// Matches `School.Nn.Gelu.gelu_scalar` and the host-runtime helper
-/// `activation_gelu_f32`. If/when an `Erf` RISC op lands, the
-/// erf-exact form can replace this — both lanes must move together.
+/// `gelu(x)` = `mul(m(x), Phi(x))` (section 3.3): the exact Gaussian error
+/// linear unit over section 3.3's standard normal CDF graph `Phi`, with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_gelu(
     owner: Owner,
     dag: &mut Dag,
@@ -220,102 +240,40 @@ pub fn lower_gelu(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    // c = sqrt(2/pi)
-    let c = add_synth(
+    lower_derived_activation(DerivedActivation::Gelu, owner, dag, x, ty, parent_span)
+}
+
+/// `gelu_tanh(x)` = `mul(m(x), sigmoid(mul(const(2.0), u)))` with
+/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
+/// `c = sqrt(2/pi)` (section 3.3): the tanh approximation spelled through
+/// `0.5*(1+tanh(u)) = sigmoid(2u)`, which neither cancels for negative `x`
+/// nor overflows at the largest finite inputs.
+pub fn lower_gelu_tanh(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(DerivedActivation::GeluTanh, owner, dag, x, ty, parent_span)
+}
+
+/// `standard_normal_cdf(x)` = `Phi(x)` (section 3.3): the standard normal CDF over
+/// the correctly rounded `erfc`, with the two-product correction of its
+/// scaled argument.
+pub fn lower_standard_normal_cdf(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(
+        DerivedActivation::StandardNormalCdf,
         owner,
         dag,
-        RiscOp::synth_const(ty.precision, 0.7978845608028654),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    let k = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 0.044715),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    // x^3 = x * x * x
-    let x_sq = add_synth(owner, dag, RiscOp::Mul, vec![x, x], ty.clone(), parent_span);
-    let x_cu = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![x_sq, x],
-        ty.clone(),
-        parent_span,
-    );
-    // k * x^3
-    let k_x_cu = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![k, x_cu],
-        ty.clone(),
-        parent_span,
-    );
-    // x + k * x^3
-    let sum_inner = add_synth(
-        owner,
-        dag,
-        RiscOp::Add,
-        vec![x, k_x_cu],
-        ty.clone(),
-        parent_span,
-    );
-    // c * (x + k * x^3)
-    let inner = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![c, sum_inner],
-        ty.clone(),
-        parent_span,
-    );
-    let tanh_inner = lower_tanh(owner, dag, inner, ty, parent_span);
-    // 1 + tanh(inner)
-    let one = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 1.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    let one_plus_tanh = add_synth(
-        owner,
-        dag,
-        RiscOp::Add,
-        vec![one, tanh_inner],
-        ty.clone(),
-        parent_span,
-    );
-    // x * (1 + tanh(inner))
-    let x_mul = add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![x, one_plus_tanh],
-        ty.clone(),
-        parent_span,
-    );
-    // 0.5 * x * (1 + tanh(inner))
-    let half = add_synth(
-        owner,
-        dag,
-        RiscOp::synth_const(ty.precision, 0.5),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    add_synth(
-        owner,
-        dag,
-        RiscOp::Mul,
-        vec![half, x_mul],
-        ty.clone(),
+        x,
+        ty,
         parent_span,
     )
 }
@@ -715,6 +673,25 @@ pub fn lower_matmul(
     b_ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
+    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
+        .expect("lower_matmul requires an admitted floating operand precision");
+    lower_matmul_with_accumulator(owner, dag, a, b, a_ty, b_ty, accumulator, parent_span)
+}
+
+/// spec/05 §4.1's matmul lowering with a resolved accumulator: products at
+/// the operand dtype, the contraction sum in `accumulator`, and the result
+/// finalized at the operand dtype.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_matmul_with_accumulator(
+    owner: Owner,
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    a_ty: &TensorType,
+    b_ty: &TensorType,
+    accumulator: Prim,
+    parent_span: Option<&str>,
+) -> NodeId {
     assert!(
         a_ty.dims.len() >= 2 && b_ty.dims.len() >= 2,
         "lower_matmul expects rank >= 2 tensors"
@@ -823,8 +800,6 @@ pub fn lower_matmul(
         parent_span,
     );
 
-    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
-        .expect("lower_matmul requires an admitted floating operand precision");
     let sum_ty = TensorType {
         dims: result_ty.dims.clone(),
         precision: accumulator,
@@ -857,6 +832,39 @@ pub fn lower_matmul(
             parent_span,
         )
     }
+}
+
+/// Whether `node` is the product [`lower_matmul`] synthesizes: a `Mul` of the
+/// left operand expanded along the trailing column axis and the right operand
+/// expanded along the row axis, all three lowered from one `matmul` call and
+/// so carrying its one span (both expands carry it, and the product carries
+/// it unless a later pass rebuilt it without one). A disagreement between this product's operands
+/// is a disagreement between matmul's operands, so a lane reports it as a
+/// `Domain` trap in `matmul` (spec/04-type-system.md section 4.7) through
+/// `chelis_abi::failure::matmul_product_disagreement`. An authored
+/// `mul(expand(..), expand(..))` has one span per expand call and stays a
+/// `mul`.
+///
+/// `get` reads a node by id from whichever view of the graph the caller
+/// holds.
+pub fn is_matmul_product<'a>(
+    node: &crate::dag::DagNode,
+    get: impl Fn(NodeId) -> Option<&'a crate::dag::DagNode>,
+) -> bool {
+    let rank = node.output_type.dims.len();
+    if !matches!(node.op, RiscOp::Mul) || node.inputs.len() != 2 || rank < 3 {
+        return false;
+    }
+    let (Some(lhs), Some(rhs)) = (get(node.inputs[0]), get(node.inputs[1])) else {
+        return false;
+    };
+    matches!(lhs.op, RiscOp::Expand { axis, .. } if axis == rank - 1)
+        && matches!(rhs.op, RiscOp::Expand { axis, .. } if axis == rank - 3)
+        && lhs.span_id.is_some()
+        && lhs.span_id == rhs.span_id
+        // A later pass may rebuild the product without its span; it never
+        // gives it another call's.
+        && (node.span_id.is_none() || node.span_id == lhs.span_id)
 }
 
 fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
@@ -1005,7 +1013,7 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
 
 /// Keep the reduction result at its accumulator dtype, then explicitly
 /// finalize into the enclosing float composition's storage dtype (§5.7.1).
-fn lower_sum_to_storage(
+pub(crate) fn lower_sum_to_storage(
     owner: Owner,
     dag: &mut Dag,
     x: NodeId,
@@ -1046,6 +1054,25 @@ fn lower_sum_to_storage(
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    axis: usize,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    add_synth(
+        owner,
+        dag,
+        RiscOp::Softmax { axis },
+        vec![x],
+        ty.clone(),
+        parent_span,
+    )
+}
+
+/// Expand the stable forward graph after differentiation selected [05-OP-48].
+pub fn decompose_softmax(
     owner: Owner,
     dag: &mut Dag,
     x: NodeId,
@@ -1985,6 +2012,76 @@ mod tests {
         assert_eq!(result_node.output_type.dims[1], DimInfo::Lit(4));
     }
 
+    /// The product `lower_matmul` synthesizes is recognized as matmul's, so a
+    /// lane names `matmul` in its trap; an authored `mul` of two expands with
+    /// the same axes is not, because each authored call has its own span.
+    #[test]
+    fn only_the_lowered_matmul_product_is_recognized_as_matmul() {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let (a_ty, b_ty) = (matrix_2x3(), matrix_3x4());
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "A".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "B".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, Some("surf:0..12"));
+        let product = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Mul))
+            .expect("the lowered product");
+        assert!(is_matmul_product(product, |id| dag.get(id)));
+
+        // The same shape authored call by call: three spans, so a `mul`.
+        let mut authored = Dag::new();
+        let owner = Owner::from(authored.declare("test"));
+        let expanded = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let a = authored.add_node(owner, RiscOp::Load { name: "A".into() }, vec![], a_ty, None);
+        let b = authored.add_node(owner, RiscOp::Load { name: "B".into() }, vec![], b_ty, None);
+        let lhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 2,
+                size: RtDim::Lit(4),
+            },
+            vec![a],
+            expanded.clone(),
+            Some("surf:0..5".into()),
+        );
+        let rhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(2),
+            },
+            vec![b],
+            expanded.clone(),
+            Some("surf:6..11".into()),
+        );
+        let product = authored.add_node(
+            owner,
+            RiscOp::Mul,
+            vec![lhs, rhs],
+            expanded,
+            Some("surf:12..20".into()),
+        );
+        let product = authored.get(product).expect("authored product");
+        assert!(!is_matmul_product(product, |id| authored.get(id)));
+    }
+
     #[test]
     fn batched_matmul_rank4_produces_batched_sum_axis() {
         let mut dag = Dag::new();
@@ -2036,7 +2133,7 @@ mod tests {
     }
 
     #[test]
-    fn softmax_produces_maxreduce_sub_exp_sum_div() {
+    fn softmax_decomposition_produces_maxreduce_sub_exp_sum_div() {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
         let ty = vec_5();
@@ -2047,7 +2144,7 @@ mod tests {
             ty.clone(),
             None,
         );
-        let result = lower_softmax(owner, &mut dag, x, 0, &ty, None);
+        let result = decompose_softmax(owner, &mut dag, x, 0, &ty, None);
 
         // Check the chain of ops produced.
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -2340,7 +2437,7 @@ mod tests {
             ty.clone(),
             None,
         );
-        let out = lower_softmax(owner, &mut dag, x, 0, &ty, None);
+        let out = decompose_softmax(owner, &mut dag, x, 0, &ty, None);
         let expand_sizes: Vec<_> = dag
             .nodes()
             .iter()

@@ -15,9 +15,9 @@
 //!
 //! The oracle test lives next to the existing `reef_install_from_monorepo.rs`
 //! `--from-monorepo` regression test so the contract-invariant
-//! "source-equivalence" sub-case can re-use the same monorepo-built
-//! `chelis-std-0.4.0.{chb,tar.zst}` artifacts that the existing test
-//! treats as the byte-exact reference.
+//! "source-equivalence" sub-case can serve the chelis-std archive and
+//! shell this binary embeds through both paths and compare the results
+//! byte for byte.
 //!
 //! This file also contains the manual-gate test
 //! `phaseA_real_github_manual_gate`, which is `#[ignore]`d and only
@@ -54,6 +54,9 @@
 #![allow(non_snake_case)]
 
 use assert_cmd::Command;
+use chelis_std_bundle::{
+    BUNDLED_CHELIS_STD_VERSION as STD_VERSION, CHELIS_STD_ARCHIVE, CHELIS_STD_SHELL,
+};
 use predicates::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -70,22 +73,55 @@ fn monorepo_root() -> PathBuf {
         .expect("monorepo root must exist")
 }
 
-/// Real prebuilt artifacts shipped in `packages/chelis-std/dist/`. The
-/// oracle uses these as the bytes the wiremock fixture serves, so the
-/// validation step downstream of fetch sees a real chelis-std shell
-/// agreeing with its real archive — exactly what the live GitHub
-/// release would carry.
-fn chelis_std_dist() -> (PathBuf, PathBuf) {
-    let dist = monorepo_root().join("packages/chelis-std/dist");
-    let archive = dist.join("chelis-std-0.4.0.tar.zst");
-    let shell = dist.join("chelis-std-0.4.0.chb");
-    assert!(
-        archive.exists() && shell.exists(),
-        "prebuilt chelis-std artifacts missing under {}: \
-         run `chelis reef build` in packages/chelis-std/ first",
-        dist.display()
-    );
-    (archive, shell)
+/// The chelis-std archive and shell this binary embeds, the pair a
+/// `chelis-std` GitHub release carries. The oracle serves these bytes, so the
+/// validation step downstream of fetch sees a real chelis-std shell agreeing
+/// with its real archive.
+fn chelis_std_artifacts() -> (Vec<u8>, Vec<u8>) {
+    (CHELIS_STD_ARCHIVE.to_vec(), CHELIS_STD_SHELL.to_vec())
+}
+
+/// `chelis-lang/chelis-std@v<bundled version>`, the release the oracle serves.
+fn std_spec() -> String {
+    format!("chelis-lang/chelis-std@v{STD_VERSION}")
+}
+
+/// The release tag of the served chelis-std release.
+fn std_tag() -> String {
+    format!("v{STD_VERSION}")
+}
+
+/// The served release asset name with extension `ext`.
+fn std_asset(ext: &str) -> String {
+    format!("chelis-std-{STD_VERSION}.{ext}")
+}
+
+/// Where an installed chelis-std asset lands under a registry root.
+fn std_installed(ext: &str) -> String {
+    format!("packages/chelis-std/{STD_VERSION}/chelis-std-{STD_VERSION}.{ext}")
+}
+
+/// A monorepo layout under `dir` whose `packages/chelis-std` carries the real
+/// manifest and the embedded pair in `dist/`, as `--from-monorepo` reads it.
+fn staged_monorepo(dir: &Path) -> PathBuf {
+    let package = dir.join("packages/chelis-std");
+    fs::create_dir_all(package.join("dist")).expect("mkdir staged dist");
+    fs::copy(
+        monorepo_root().join("packages/chelis-std/reef.toml"),
+        package.join("reef.toml"),
+    )
+    .expect("copy chelis-std manifest");
+    fs::write(
+        package.join("dist").join(std_asset("tar.zst")),
+        CHELIS_STD_ARCHIVE,
+    )
+    .expect("write staged archive");
+    fs::write(
+        package.join("dist").join(std_asset("chb")),
+        CHELIS_STD_SHELL,
+    )
+    .expect("write staged shell");
+    dir.to_path_buf()
 }
 
 fn sha256_bytes(b: &[u8]) -> String {
@@ -141,21 +177,21 @@ fn metadata_json(tag: &str, assets: &[(u64, &str)]) -> String {
 const ARCHIVE_ASSET_ID: u64 = 1001;
 const SHELL_ASSET_ID: u64 = 1002;
 
-/// Build the four mocks needed for a chelis-lang/chelis-std@v0.4.0
+/// Build the four mocks needed for a `chelis-lang/chelis-std@v<version>`
 /// canonical-API install: metadata GET + archive bytes GET + shell
 /// bytes GET, all requiring an `Authorization: token unit-test-token`
 /// header. No 401 fallthrough — callers that want unauthenticated
 /// behavior should use [`fixture_canonical_release`] (which adds
 /// catch-all 401 mounts).
 fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock> {
-    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.4.0");
+    let meta_path = metadata_path("chelis-lang", "chelis-std", &std_tag());
     let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
     let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
-        "v0.4.0",
+        &std_tag(),
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.4.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.4.0.chb"),
+            (ARCHIVE_ASSET_ID, std_asset("tar.zst").as_str()),
+            (SHELL_ASSET_ID, std_asset("chb").as_str()),
         ],
     );
     vec![
@@ -179,25 +215,23 @@ fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock
 }
 
 /// Stand up a [`WiremockHarness`] that serves the chelis-std artifacts
-/// as `chelis-lang/chelis-std@v0.4.0` release assets via the GitHub
+/// as `chelis-lang/chelis-std@v<version>` release assets via the GitHub
 /// API two-step path. The metadata endpoint requires an
 /// `Authorization: token ...` header (returns 401 otherwise); the
 /// byte endpoints likewise. Returns the harness and the (archive,
 /// shell) bytes.
 fn fixture_canonical_release() -> (WiremockHarness, Vec<u8>, Vec<u8>) {
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).expect("read archive");
-    let shell_bytes = fs::read(&shell_p).expect("read shell");
+    let (archive_bytes, shell_bytes) = chelis_std_artifacts();
 
     let harness = WiremockHarness::new();
-    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.4.0");
+    let meta_path = metadata_path("chelis-lang", "chelis-std", &std_tag());
     let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
     let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
-        "v0.4.0",
+        &std_tag(),
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.4.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.4.0.chb"),
+            (ARCHIVE_ASSET_ID, std_asset("tar.zst").as_str()),
+            (SHELL_ASSET_ID, std_asset("chb").as_str()),
         ],
     );
 
@@ -417,16 +451,16 @@ fn oracle_happy_path_via_lib_and_cli() {
 
     // Lib-level install.
     let installed = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &registry,
     )
     .expect("install_from_github happy path");
     assert_eq!(installed.package.name, "chelis-std");
-    assert_eq!(installed.package.version, "0.4.0");
-    let placed_archive = registry.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.tar.zst");
-    let placed_shell = registry.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.chb");
+    assert_eq!(installed.package.version, STD_VERSION);
+    let placed_archive = registry.join(std_installed("tar.zst"));
+    let placed_shell = registry.join(std_installed("chb"));
     assert!(placed_archive.exists() && placed_shell.exists());
     assert_eq!(fs::read(&placed_archive).unwrap(), archive_bytes);
     assert_eq!(fs::read(&placed_shell).unwrap(), shell_bytes);
@@ -447,17 +481,14 @@ fn oracle_happy_path_via_lib_and_cli() {
         .env("GITHUB_TOKEN", "unit-test-token")
         // Drop PATH so the binary cannot fall back to `gh auth token`.
         .env("PATH", "")
-        .args([
-            "reef",
-            "install",
-            "--from-github",
-            "chelis-lang/chelis-std@v0.4.0",
-        ])
+        .args(["reef", "install", "--from-github", &std_spec()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed chelis-std 0.4.0"));
+        .stdout(predicate::str::contains(format!(
+            "Installed chelis-std {STD_VERSION}"
+        )));
     assert_eq!(
-        fs::read(cli_registry.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.tar.zst")).unwrap(),
+        fs::read(cli_registry.join(std_installed("tar.zst"))).unwrap(),
         archive_bytes
     );
 }
@@ -473,7 +504,7 @@ fn oracle_byte_equality_with_from_monorepo() {
 
     // GitHub install.
     lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &github_reg,
@@ -491,22 +522,22 @@ fn oracle_byte_equality_with_from_monorepo() {
             "reef",
             "install",
             "--from-monorepo",
-            monorepo_root().to_str().unwrap(),
-            "chelis-std=0.4.0",
+            staged_monorepo(&dir.path().join("monorepo"))
+                .to_str()
+                .unwrap(),
+            &format!("chelis-std={STD_VERSION}"),
         ])
         .assert()
         .success();
 
-    let g_a =
-        fs::read(github_reg.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.tar.zst")).unwrap();
-    let m_a =
-        fs::read(mono_reg.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.tar.zst")).unwrap();
+    let g_a = fs::read(github_reg.join(std_installed("tar.zst"))).unwrap();
+    let m_a = fs::read(mono_reg.join(std_installed("tar.zst"))).unwrap();
     assert_eq!(
         g_a, m_a,
         "archive bytes diverge between --from-github and --from-monorepo"
     );
-    let g_s = fs::read(github_reg.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.chb")).unwrap();
-    let m_s = fs::read(mono_reg.join("packages/chelis-std/0.4.0/chelis-std-0.4.0.chb")).unwrap();
+    let g_s = fs::read(github_reg.join(std_installed("chb"))).unwrap();
+    let m_s = fs::read(mono_reg.join(std_installed("chb"))).unwrap();
     assert_eq!(
         g_s, m_s,
         "shell bytes diverge between --from-github and --from-monorepo"
@@ -553,7 +584,7 @@ fn oracle_byte_equality_with_from_monorepo() {
     let m_first = &m_idx["packages"]["chelis-std"][0];
     assert_eq!(
         g_first["remote_origin"],
-        serde_json::Value::String("github://chelis-lang/chelis-std@v0.4.0".to_string()),
+        serde_json::Value::String(format!("github://{}", std_spec())),
         "GitHub install must stamp remote_origin in registry index entry"
     );
     assert!(
@@ -570,13 +601,8 @@ fn oracle_auth_missing_no_gh() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
 
-    let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
-        &harness.uri(),
-        None,
-        &registry,
-    )
-    .expect_err("must fail without auth");
+    let err = lib_install_from_github(&std_spec(), &harness.uri(), None, &registry)
+        .expect_err("must fail without auth");
     let msg = err.to_string();
     assert!(
         matches!(err, chelis_reef::GitHubFetchError::AuthMissing { .. }),
@@ -609,7 +635,7 @@ fn oracle_auth_rejected_401_distinct_from_missing() {
     let registry = dir.path().join("reef-home");
 
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("not-the-right-token"),
         &registry,
@@ -661,13 +687,13 @@ fn oracle_auth_rejected_403_also_typed() {
             .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
-                "v0.4.0",
+                &std_tag(),
             )))
             .respond_with(ResponseTemplate::new(403).set_body_string("forbidden")),
     ]);
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("scope-limited-token"),
         &dir.path().join("reef-home"),
@@ -700,7 +726,7 @@ fn assert_metadata_404_is_ambiguous(err: &chelis_reef::GitHubFetchError) {
     );
     let msg = err.to_string();
     assert!(
-        msg.contains("releases/tags/v0.4.0"),
+        msg.contains(&format!("releases/tags/{}", std_tag())),
         "metadata-404 message must name the metadata URL: {msg}"
     );
     assert!(
@@ -802,9 +828,7 @@ fn oracle_hash_mismatch_on_second_fetch() {
     // it just wrote, but the embedded shell.archive_sha256 will not
     // match — that is the agreement check fired by
     // install_validated_artifact_pair.
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = chelis_std_artifacts();
 
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
@@ -817,7 +841,7 @@ fn oracle_hash_mismatch_on_second_fetch() {
             shell_bytes.clone(),
         ));
         lib_install_from_github(
-            "chelis-lang/chelis-std@v0.4.0",
+            &std_spec(),
             &harness.uri(),
             Some("unit-test-token"),
             &registry,
@@ -838,7 +862,7 @@ fn oracle_hash_mismatch_on_second_fetch() {
     harness.mount_all(canonical_api_mocks(tampered, shell_bytes));
 
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &registry,
@@ -865,13 +889,13 @@ fn oracle_5xx_server_error_distinct_category() {
             .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
-                "v0.4.0",
+                &std_tag(),
             )))
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down")),
     ]);
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
@@ -893,7 +917,7 @@ fn oracle_429_rate_limited_includes_retry_after() {
             .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
-                "v0.4.0",
+                &std_tag(),
             )))
             .respond_with(
                 ResponseTemplate::new(429)
@@ -903,7 +927,7 @@ fn oracle_429_rate_limited_includes_retry_after() {
     ]);
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
@@ -926,7 +950,7 @@ fn oracle_dns_error_distinct_category() {
     // get a real DNS error category.
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         "http://this-host-does-not-exist.invalid",
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
@@ -951,8 +975,7 @@ fn phaseA_item6_partial_install_does_not_corrupt_index() {
     // corrupted shell) must leave `index.json` untouched. We exercise
     // that path by serving a shell that's not a valid Chelis shell
     // payload — read_shell fails before the index is touched.
-    let (archive_p, _) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
+    let (archive_bytes, _) = chelis_std_artifacts();
 
     // Reuse the canonical-API mock shape but substitute invalid bytes
     // for the shell payload.
@@ -965,7 +988,7 @@ fn phaseA_item6_partial_install_does_not_corrupt_index() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &registry,
@@ -1002,18 +1025,18 @@ fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
     // view` round-trip.
     let harness = WiremockHarness::new();
     let metadata_body = metadata_json(
-        "v0.4.0",
+        &std_tag(),
         // Note: only the `.tgz` form is attached — the canonical
         // `.tar.zst` is missing. Asset id 9999 is arbitrary; the
         // helper never reaches the byte-fetch step.
-        &[(9999, "chelis-std-0.4.0.tgz")],
+        &[(9999, std_asset("tgz").as_str())],
     );
     harness.mount_all(vec![
         Mock::given(method("GET"))
             .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
-                "v0.4.0",
+                &std_tag(),
             )))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1023,7 +1046,7 @@ fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
     ]);
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
-        "chelis-lang/chelis-std@v0.4.0",
+        &std_spec(),
         &harness.uri(),
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
@@ -1039,7 +1062,7 @@ fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
         "404 must name canonical asset: {msg}"
     );
     assert!(
-        msg.contains("chelis-std-0.4.0.tgz"),
+        msg.contains(&std_asset("tgz")),
         "404 must list assets actually present: {msg}"
     );
 }
@@ -1054,23 +1077,25 @@ fn phaseA_item6_tag_without_leading_v_is_accepted_and_normalized() {
     // serve metadata under whichever form the caller passed; the
     // version is the tag with one `v` stripped, so the on-disk
     // package directory and the asset names use `0.4.0` either way.
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = chelis_std_artifacts();
 
     // Form: tag = "0.4.0" (no leading v). Metadata path:
     // /repos/.../releases/tags/0.4.0
     let harness = WiremockHarness::new();
     let metadata_body = metadata_json(
-        "0.4.0",
+        STD_VERSION,
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.4.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.4.0.chb"),
+            (ARCHIVE_ASSET_ID, std_asset("tar.zst").as_str()),
+            (SHELL_ASSET_ID, std_asset("chb").as_str()),
         ],
     );
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path("chelis-lang", "chelis-std", "0.4.0")))
+            .and(wm_path(metadata_path(
+                "chelis-lang",
+                "chelis-std",
+                STD_VERSION,
+            )))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(metadata_body)
@@ -1095,18 +1120,14 @@ fn phaseA_item6_tag_without_leading_v_is_accepted_and_normalized() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let installed = lib_install_from_github(
-        "chelis-lang/chelis-std@0.4.0",
+        &format!("chelis-lang/chelis-std@{STD_VERSION}"),
         &harness.uri(),
         Some("unit-test-token"),
         &registry,
     )
     .expect("no-v form must succeed");
-    assert_eq!(installed.package.version, "0.4.0");
-    assert!(
-        registry
-            .join("packages/chelis-std/0.4.0/chelis-std-0.4.0.tar.zst")
-            .exists()
-    );
+    assert_eq!(installed.package.version, STD_VERSION);
+    assert!(registry.join(std_installed("tar.zst")).exists());
 }
 
 #[test]
@@ -1180,8 +1201,7 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
             std::env::set_var("GITHUB_TOKEN", "unit-test-token");
         }
         let before = count_tempfile_entries(&private_tmp);
-        chelis_reef::install_from_github("chelis-lang/chelis-std@v0.4.0", &registry)
-            .expect("install ok");
+        chelis_reef::install_from_github(&std_spec(), &registry).expect("install ok");
         let after = count_tempfile_entries(&private_tmp);
         unsafe {
             match prior_tmp {
@@ -1214,7 +1234,7 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
             std::env::set_var("GITHUB_TOKEN", "unit-test-token");
         }
         let before = count_tempfile_entries(&private_tmp);
-        let _ = chelis_reef::install_from_github("chelis-lang/chelis-std@v0.4.0", &registry);
+        let _ = chelis_reef::install_from_github(&std_spec(), &registry);
         let after = count_tempfile_entries(&private_tmp);
         unsafe {
             match prior_tmp {
@@ -1274,7 +1294,7 @@ fn phaseA_item6_io_error_category_on_tempdir_failure() {
         std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9");
     }
     let registry = outer.path().join("reef-home");
-    let result = chelis_reef::install_from_github("chelis-lang/chelis-std@v0.4.0", &registry);
+    let result = chelis_reef::install_from_github(&std_spec(), &registry);
     unsafe {
         match prior_tmp {
             Some(p) => std::env::set_var("TMPDIR", p),

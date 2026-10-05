@@ -30,10 +30,12 @@ fn validate_counters(
 
 impl CheckResult {
     pub fn validate(&self) -> Result<(), String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         validate_counters(self.typed_nodes, self.untyped_nodes, self.total_nodes)
     }
 
     pub fn try_from_fitness(report: &chelis_types::FitnessReport) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let result = Self {
             score: UnitInterval::new(report.score)?,
             components: FitnessComponents {

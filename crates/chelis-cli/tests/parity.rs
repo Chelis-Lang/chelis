@@ -8,9 +8,8 @@
 //!
 //!       1. `chelis check <file>`              -> score == 1.0
 //!       2. `chelis eval --file <file>`        -> stdout (IR evaluator lane)
-//!       3. `chelis build --target c <file>`   -> writes <name>.c + runtime
-//!       4. `gcc <name>.c libchelis_runtime.a -o <name>` -> binary
-//!       5. `<name>`                           -> stdout (C backend lane)
+//!       3. `chelis build --target c <file>`   -> native binary/library + sources
+//!       4. `<name>`                           -> stdout (C backend lane)
 //!
 //!     Then assert the eval lane and the C lane agree: every line
 //!     byte-equal, tensor lines included.
@@ -44,7 +43,7 @@
 //! define functions but never invoke them at top level — produce empty eval
 //! output. We still check that both lanes parse and codegen cleanly, and
 //! that both lanes produce empty stdout (vacuous parity). The C source is
-//! compiled with `gcc -c` to confirm the object file is well-formed. There
+//! archived by the native build; the harness confirms the library exists. There
 //! is no executable to run, so the run+compare step is skipped for those
 //! files (with a comment noting the reason).
 //!
@@ -221,14 +220,13 @@ fn assert_exact_tagged_c_callers(stem: &str, source: &str) {
             assert!(call.contains("CHELIS_DTYPE_I64"), "{call}");
         }
         "scalar_string_foundation" => {
-            let calls = source
-                .lines()
-                .filter(|line| line.contains("chelis_parse_scalar("))
-                .collect::<Vec<_>>();
+            // `to_int` and `to_float` lower to [05-OP-59]'s own entries, never
+            // to [05-OP-31]'s scalar-carrier parse (chelis#2870).
+            exact_call("chelis_to_int(");
+            exact_call("chelis_to_float(");
             assert!(
-                calls.iter().any(|line| line.contains("CHELIS_DTYPE_I64"))
-                    && calls.iter().any(|line| line.contains("CHELIS_DTYPE_F64")),
-                "[scalar_string_foundation] parse calls must carry both exact result dtypes:\n{source}"
+                !source.contains("chelis_parse_scalar("),
+                "[scalar_string_foundation] to_int/to_float must not lower to the scalar-carrier parse:\n{source}"
             );
         }
         "tensor_structural_ops" => {
@@ -239,70 +237,34 @@ fn assert_exact_tagged_c_callers(stem: &str, source: &str) {
     }
 }
 
-fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
-    fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false)
-}
-
-fn cpu_toolchain(out_dir: &Path, source: &str) -> chelis_backend_c::toolchain::NativeToolchain {
-    chelis_backend_c::toolchain::runtime_toolchain(
-        chelis_backend_c::toolchain::CodegenRequirements {
-            wants_openmp: true,
-            needs_blas: generated_source_needs_blas(out_dir, source),
-        },
-    )
-}
-
-/// Try to link the generated C into a binary. Returns `Ok(binary_path)` on
-/// success, or `Err(reason)` if linking fails (e.g. missing BLAS headers in
-/// this environment, or there is no `main` because the program defines only
-/// library functions).
-fn try_link(out_dir: &Path, source: &str, binary: &str) -> Result<PathBuf, String> {
-    let toolchain = cpu_toolchain(out_dir, source);
-    let mut cmd = StdCommand::new(&toolchain.compiler);
-    cmd.current_dir(out_dir);
-    // Use -O0 for predictable parity (no FMA/reassoc reordering surprises).
-    cmd.arg("-O0");
-    cmd.args(&toolchain.compile_flags);
-    cmd.arg(source);
-    cmd.arg("libchelis_runtime.a");
-    cmd.args(&toolchain.link_flags);
-    cmd.args(["-o", binary]);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("gcc failed to spawn: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "gcc link failed (status {}):\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-        ));
+/// Locate the executable produced by the native CLI build.
+fn try_link(out_dir: &Path, _source: &str, binary: &str) -> Result<PathBuf, String> {
+    let path = out_dir.join(binary);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "native build produced no executable at {}",
+            path.display()
+        ))
     }
-    Ok(out_dir.join(binary))
 }
 
-/// Compile the generated C as an object file only. Used for library-only
-/// programs (no `main`) so we still prove the C backend produced
-/// well-formed output.
+/// Confirm the definitions-only native build produced its module archive.
 fn try_compile_object(out_dir: &Path, source: &str) -> Result<(), String> {
-    let toolchain = cpu_toolchain(out_dir, source);
-    let mut cmd = StdCommand::new(&toolchain.compiler);
-    cmd.current_dir(out_dir);
-    cmd.arg("-O0");
-    cmd.args(&toolchain.compile_flags);
-    cmd.args(["-I.", "-c", source]);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("gcc failed to spawn: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "gcc -c failed (status {}):\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-        ));
+    let stem = Path::new(source)
+        .file_stem()
+        .expect("source stem")
+        .to_string_lossy();
+    let archive = out_dir.join(format!("lib{stem}.a"));
+    if archive.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "native build produced no static library at {}",
+            archive.display()
+        ))
     }
-    Ok(())
 }
 
 fn run_binary(binary: &Path) -> Vec<u8> {
@@ -416,7 +378,7 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 //   * "executable": top-level bindings produce stdout and the C target
 //     produces a runnable binary
 //   * "library":    only `def`s, no top-level work; both lanes emit nothing.
-//                   We compile the C source as an object file to confirm the
+//                   We check the native static library to confirm the
 //                   backend output is well-formed.
 //
 // The completeness check derives membership from these test inputs. A new
@@ -645,6 +607,13 @@ fn parity_checked_runtime_extents() {
     drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
 }
 
+/// chelis#469: `expand`/`insert` sizes taken from scalar parameters and
+/// arithmetic over them, with no tensor carrying the extent.
+#[test]
+fn parity_runtime_scalar_extents() {
+    drive_parity(&examples_root().join("runtime_scalar_extents.ch"), true);
+}
+
 #[test]
 fn parity_mixed_signature_extents() {
     drive_parity(&examples_root().join("mixed_signature_extents.ch"), true);
@@ -701,6 +670,11 @@ fn parity_recursive_generic() {
 #[test]
 fn parity_scalar_string_foundation() {
     drive_parity(&examples_root().join("scalar_string_foundation.ch"), true);
+}
+
+#[test]
+fn parity_scalar_special_values() {
+    drive_parity(&examples_root().join("scalar_special_values.ch"), true);
 }
 
 #[test]
@@ -925,6 +899,11 @@ fn parity_comparator_rejects_missing_newline_and_invalid_rendering() {
 }
 
 #[test]
+fn parity_softmax_adjoint() {
+    drive_parity(&examples_root().join("softmax_adjoint.ch"), true);
+}
+
+#[test]
 fn parity_generic_host_permutation() {
     drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
 }
@@ -949,4 +928,34 @@ fn parity_keyed_state_wrapper() {
 #[test]
 fn parity_staged_adt_control() {
     drive_parity(&examples_root().join("staged_adt_control.ch"), true);
+}
+
+#[test]
+fn parity_native_program() {
+    drive_parity(&examples_root().join("native_program.ch"), true);
+}
+
+#[test]
+fn parity_native_library() {
+    drive_parity(&examples_root().join("native_library.ch"), false);
+}
+
+#[test]
+fn parity_construct_alternatives() {
+    drive_parity(&examples_root().join("construct_alternatives.ch"), true);
+}
+
+#[test]
+fn parity_literal_ascriptions() {
+    let path = examples_root().join("literal_ascriptions.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\n",
+    );
+    drive_parity(&examples_root().join("literal_ascriptions.ch"), true);
+}
+
+#[test]
+fn parity_linspace() {
+    drive_parity(&examples_root().join("linspace.ch"), true);
 }

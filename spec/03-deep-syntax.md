@@ -1,8 +1,12 @@
 # spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
+The Deep format profile is `0.20`. Pipes are Surf sugar and have no Deep node
+or spelling-restoration annotation. Versioned transports MUST reject a payload
+from the preceding pipe-node profile before decoding it as this profile.
+
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
-The 62-tag vocabulary documented here is closed. A form outside that vocabulary is not
+The 61-tag vocabulary documented here is closed. A form outside that vocabulary is not
 Deep unless the controlling specification adds it and updates the vocabulary census in
 the same change.
 
@@ -41,6 +45,7 @@ portable across Surf and Reef boundaries.
 | `effect` | `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
 | `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
 | `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
+| `accumulator` | `(t-prim {} p)` | On `app`: the explicit accumulator dtype of a `matmul`, `sum`, or `einsum` call (spec/04 §5.7); a type error on any other call |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `wrt` | variable or nonempty tuple of variables | On `grad`: `(var {} name)` or `(tuple {} (var {} name) ...)`, preserving target order; see §2.7 |
 | `span` | string | External-source span identifier (see §1.1.1) |
@@ -58,7 +63,6 @@ portable across Surf and Reef boundaries.
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
 | `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all`; its ASCII-lowercased value must equal the node's lowered module-path child |
 | `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
-| `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
 | `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
 | `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
@@ -66,7 +70,7 @@ The `surf_*` namespace is closed. A public Deep parser or programmatic
 validator MUST reject an unknown `surf_*` key. Parsing, validation, and resugaring MUST reject a
 known key with any value or placement outside the table above; a standalone
 metadata map or metadata-expression wrapper is not a permitted
-placement. These five keys preserve only surface distinctions that canonical
+placement. These four keys preserve only surface distinctions that canonical
 Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
 the namespace for arbitrary provenance.
 
@@ -389,13 +393,19 @@ names between its declaration name and type expression. A monomorphic
 whether a listed name is a `t-var`, `d-var`, or `d-rank`; a name absent
 from the list is undeclared. A `defsig` may carry `dtype_bounds`
 metadata restricting its explicitly bound type variables to a dtype
-family (`spec/04-type-system.md` §5.9
-[04-DTYPE-2]):
+bound (`spec/04-type-system.md` §5.9
+[04-DTYPE-2]). A bound is encoded either as the lowercase family
+atom -- `float`, `int`, `numeric` -- or, for §5.9's explicit dtype
+set, as a list of the lowercase active dtype spellings the set
+admits (§6.2 gives the canonical order):
 
 ```lisp
 (defsig {dtype_bounds: {p: int}} arange (n p)
   (t-fn {} (t-var {} p) (t-var {} p)
     (t-tensor {} (d-var {} n) (t-var {} p))))
+
+(defsig {dtype_bounds: {p: (f32 f64)}} widen (p)
+  (t-fn {} (t-var {} p) (t-var {} p)))
 ```
 
 The value is a metadata map whose keys are binder names and whose values
@@ -469,7 +479,6 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `lit` | `(lit {type: prim-type} value)` | Literal value |
 | `record` | `(record {} TypeName (kv {} k₁ v₁) ...)` | Record construction |
 | `access` | `(access {} expr field-name)` | Field access |
-| `pipe` | `(pipe {} expr₁ expr₂ ... exprₙ)` | Pipeline composition |
 | `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
 | `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
@@ -548,9 +557,14 @@ environment or a cached compiler context. Resolution is fail-closed:
   the signature.
   Active, reserved, retired, and deferred primitive spellings cannot be
   rebound as `t-var` names. Its
-  `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
+  `dtype_bounds` metadata attaches a dtype bound to a named `t-var` binder;
   the bound restricts every occurrence of that name, and a bounded name used
-  in a dimension or rank position is an error. A
+  in a dimension or rank position is an error. A family atom and a
+  one-member set list are distinct encodings and do not compare equal,
+  because §5.9 makes a family track §1.1's active set while a set does
+  not. An empty list, a repeated member, and a member that is not an
+  active §1.1 dtype spelling are each ingress errors. §6.2 gives the
+  canonical member order. A
   `deftype` or `typealias` binds only names in its explicit parameter list and
   assigns each one exactly one header kind, `Type` or single `Dimension`, under
   [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An
@@ -602,7 +616,7 @@ wildcard spelling); it does not allocate an inference variable.
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
-| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
+| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional mode selects a named rung: `trunc` [05-OP-6], `saturate` [05-OP-23], or `wrap` [05-OP-24] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
@@ -640,14 +654,14 @@ operative integer selector and the fail-closed consistency checks of
 |---|---|---|
 | Module | 4 | module, import, import-all, export |
 | Declarations | 7 | def, defsig, deftype, typealias, variant, field, defdim |
-| Expressions | 18 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
+| Expressions | 17 | fn, app, let, match, arm, if, var, lit, record, access, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
 | Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 8 | t-prim, t-fn, t-tensor, t-ref, t-adt, t-var, t-unit, t-tuple |
 | Dimensions | 4 | d-name, d-var, d-lit, d-rank |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
 | Helpers | 5 | params, bind, kv, effects, resource |
-| **Total** | **62** | |
+| **Total** | **61** | |
 
 ### 2.11 Vocabulary Extension
 
@@ -766,25 +780,13 @@ orders the argument expressions that produce a primitive's operands.
 
 ---
 
-## 5. Pipe Semantics
+## 5. Surf Composition Sugar
 
-`pipe` is a first-class node, not sugar for nested application:
+Surf `|>` normalizes to applications or dedicated operand forms before
+literal typing, under spec/02 [02-PIPE-1..3]. There is no `pipe` Deep tag and
+no pipe spelling metadata. An authored lambda remains an ordinary `fn`
+applied through `app`.
 
-```scheme
-(pipe {} expr₁ expr₂ expr₃)
-```
-
-Evaluation: `(pipe {} e₁ e₂ e₃)` ≡ `(app {} e₃ (app {} e₂ e₁))`.
-
-`pipe` is preserved in Deep (not desugared to nested `app`) because: (a) it's the primary composition idiom, (b) preserving it enables better Deep → Surf round-tripping, (c) the compiler can reason about dataflow directly.
-
-Each element after the first must be a function (or lambda). Pipes with multi-arg functions use lambdas:
-
-```scheme
-(pipe {} (var {} x)
-  (fn {} (params {} v) (app {} (var {} f) (var {} v) (var {} a)))
-  (var {} g))
-```
 
 ---
 
@@ -807,6 +809,9 @@ Deep has exactly one textual representation per program.
   Producer-specific and `span_*` extension keys take their places in that one
   sequence beside the defined keys rather than forming a separate group.
   [03-META-1] makes every key unique, so the order is total.
+- `dtype_bounds` set members: `spec/04-type-system.md` §1.1 declaration
+  order. §5.9 makes a set bound unordered, so its members carry no authored
+  sequence to preserve.
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
 - Record and record-update `kv` pairs: written order, which is left-to-right
@@ -820,10 +825,8 @@ None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use 
 ### 6.3.1 Canonical Surf resugaring
 
 Every structurally valid public Deep tag has a canonical Surf representation.
-Deep `pipe` resugars as a pipeline. A Deep `app` chain resugars as that same
-pipeline only when the typed proof from `spec/01-nomenclature.md` §3.6
-establishes a linear first-argument chain; otherwise it remains a flat
-parenthesized call. Later-position insertion retains an explicit lambda.
+Deep application chains resugar as calls; authored pipe spelling is erased.
+
 Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
 notation, while the same builtin name remains a value or pipe stage. A finite
 `Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
@@ -914,6 +917,11 @@ unsuffixed canonical numeric pattern token, including `-0.0` and the full
 `i64` minimum.
 
 ### 6.4 Literal Normalization
+
+A literal's `type` metadata binds its dtype. An expression ascription must
+carry its checking constraint separately from that literal metadata, for
+example on a one-expression `block` containing the intact literal. Replacing
+the operand's type metadata is not an ascription.
 
 | Type | Canonical | Normalizations |
 |---|---|---|
@@ -1305,10 +1313,14 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
 
   (def {} forward
     (fn {} (params {} w1 b1 w2 b2 act x)
-      (pipe {} (var {} x)
-        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
-        (fn {} (params {} v) (app {} (var {} activate) (var {} act) (var {} v)))
-        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+      (app {} (var {} add)
+        (app {} (var {} matmul)
+          (app {} (var {} activate) (var {} act)
+            (app {} (var {} add)
+              (app {} (var {} matmul) (var {} x) (var {} w1))
+              (var {} b1)))
+          (var {} w2))
+        (var {} b2)))))
 ```
 
 ### 9.4 ADT with Record Variants

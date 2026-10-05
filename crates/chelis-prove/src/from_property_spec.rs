@@ -5,6 +5,8 @@
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::SmtProperty;
+use chelis_types::types::Prim;
+use chelis_unord::UnordMap;
 use serde::Deserialize;
 
 /// Mirrors c-earchin's PropertySpec via serde (no crate dependency).
@@ -93,6 +95,22 @@ pub fn to_smt_property(spec: &PropertySpecInput) -> SmtProperty {
         preconditions: spec.preconditions.iter().map(pred_to_smt).collect(),
         postcondition: pred_to_smt(&spec.postcondition),
     }
+}
+
+/// Each scalar parameter's declared dtype, for
+/// [`crate::tier_c::fuzz_smt_property`]: the SMT sorts above carry no width,
+/// and a fuzz run evaluates at the declared one (chelis#2965). Tensor
+/// parameters and unknown names have no scalar dtype and are left out.
+pub fn declared_dtypes(spec: &PropertySpecInput) -> UnordMap<String, Prim> {
+    spec.params
+        .iter()
+        .filter_map(|param| match &param.ty {
+            ChelisTypeInput::Prim(name) => {
+                Prim::parse_name(name).map(|prim| (param.name.clone(), prim))
+            }
+            ChelisTypeInput::Tensor(_, _) => None,
+        })
+        .collect()
 }
 
 /// Convert amenability classification for dispatch routing.

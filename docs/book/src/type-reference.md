@@ -4,7 +4,7 @@ Chelis records tensor shape and element dtype in types. It does not implicitly
 broadcast tensors or promote numeric operands. Dimension names preserve axis
 identity: distinct names do not unify, while a literal extent can satisfy a
 named dimension at a call site. This page covers the type surface and its
-checking rules. `spec/04-type-system.md` defines the full semantics.
+checking rules. The [type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) defines the full semantics.
 
 ## Primitive types
 
@@ -27,7 +27,7 @@ host work and cannot be tensor elements.
 
 `key` is the non-numeric type of a random key: `key_from_seed(42i64)` makes one, and
 `tensor[n, key]` holds `n` of them. A key has no arithmetic and no cast, and each key is used
-at most once on every path; see [Effects and Handlers](effects.md#randomness-is-not-an-effect).
+at most once on every path; see [Effects](effects.md#random-keys).
 
 ## Tensor types
 
@@ -49,7 +49,7 @@ tensor[batch, key]          -- random keys
 Dimension positions can hold a declared name such as `batch`, a variable
 introduced in `[...]`, a nonnegative literal such as `512`, or the wildcard
 `*` for an unknown extent. A `..r` spread stands for a run of dimensions
-in a rank-polymorphic signature. See `spec/03-deep-syntax.md` for their Deep forms.
+in a rank-polymorphic signature. See the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) for their Deep forms.
 
 ## Named dimensions and polymorphism
 
@@ -76,17 +76,32 @@ unify with another dimension but is never generalized. A declared result
 dimension can restore a named shape claim, with a runtime equality check when
 the size cannot be proved statically.
 
-### Dtype-family bounds
+### Dtype bounds
 
-A binder in the `[...]` clause may name one dtype family, which restricts every dtype it
-can be instantiated at. The families are `Float` (the four active floats), `Int` (the four
-active signed integers), and `Numeric` (their union). `bool` and `string` belong to no
-family.
+A binder in the `[...]` clause may carry a dtype bound, which restricts every dtype it can
+be instantiated at. A bound is written either as a family name or as an explicit dtype set.
+
+The families are `Float` (the four active floats), `Int` (the four active signed integers),
+and `Numeric` (their union). `bool` and `string` belong to no family.
 
 ```chelis-surf
 def add_ints[p: Int](x: p, y: p) -> p = add(x, y)
 def add_floats[p: Float](x: p, y: p) -> p = add(x, y)
+def add_wide[p: {f32, f64}](x: p, y: p) -> p = add(x, y)
 ```
+
+An explicit set admits exactly the dtypes it lists. The difference from a family is not
+cosmetic: a family denotes whatever the active dtype set admits into it, so it widens if a
+dtype is activated later, while a set never does. A set is therefore the way to exclude a
+member a family would admit - which matters because a bound's literals must be valid at
+*every* admissible instantiation. Under `p: Float`, `cast(1000000.0, p)` is rejected,
+because `Float` admits `f16` and the literal rounds to infinity there; under
+`p: {f32, f64}` the same literal is fine.
+
+A one-member bound is written `{f64}`. There is no bare-dtype spelling: `p: f64` is a
+syntax error, because a binder restricted to one dtype is a set of one rather than a type
+ascription. The formatter prints a set's members in the order the active dtype set
+declares them, not the order you wrote them.
 
 Calling `add_ints` at `f32`, or `add_floats` at `i32`, is a `PrecisionMismatch` naming the
 required family. The bound is part of the function's type, not a check on the callee name,
@@ -121,8 +136,8 @@ def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, 
 
 Rank-polymorphic bodies admit operations whose shape effect can be tracked by
 name, including elementwise operations, named-axis reductions such as `sum`
-and `count`, and named-axis `insert`. The current named-axis `insert` form
-requires a compile-time constant `i64` size. Positional rewriters such as
+and `count`, and named-axis `insert`. Named-axis `insert` requires a
+compile-time constant `i64` size. Positional rewriters such as
 `permute`, `reshape`, and `matmul` are rejected inside a `..r` body.
 
 ## No broadcasting
@@ -152,42 +167,78 @@ result = add(x, cast(y, f32))
 `cast(e, p)` explicitly converts a scalar or tensor to the named dtype; a
 tensor keeps its dimensions. Casts can cross numeric kinds and can target
 `bool`. An integer-to-float cast may round, and a float-to-integer cast
-requires a finite, integral value in range. Integer literals default to
+requires a finite, integral value in range; any other value traps. To narrow
+on purpose, use a named conversion: `cast_trunc` truncates a float toward
+zero, `cast_saturate` clamps to the target's range, and `cast_wrap` wraps a
+signed integer modulo the target width. Integer literals default to
 `i32` and float literals to `f32`, subject to these exact adoption rules:
 
 1. A suffix binds a literal to its stated dtype.
-2. Unsuffixed elements of a tensor literal adopt the element type of a
-   tensor-typed binding, a declared tensor parameter, or a declared tensor
-   return body.
-3. An unsuffixed literal passed directly to `cast` adopts its numeric target
-   dtype, including a bare scalar literal.
+2. Unsuffixed elements of a bare bracket literal adopt the element type of
+   the tensor-typed binding or declared tensor return body that makes it a
+   tensor.
+3. An unsuffixed scalar literal passed directly to `cast` adopts its numeric
+   target dtype.
 
-A list literal and a bare scalar passed to an ordinary function do not adopt
-a callee's dtype. Structural lists such as reshape sizes therefore spell
-their `i64` elements explicitly.
+A bracket literal is a `List`. It becomes a tensor through `to_tensor`, whose
+argument is an ordinary `List` that keeps each element's suffix or default,
+or where its own binding or function result declares a tensor type. A tensor
+parameter or a `cast` never converts a bracket literal, so a tensor argument
+carries its element dtype in suffixes. A list literal and a bare scalar
+passed to an ordinary function do not adopt a callee's dtype. Structural
+lists such as reshape sizes therefore spell their `i64` elements explicitly.
 
 ```chelis-surf-fragment
-a = cast(x, bf16)           -- explicit tensor conversion
-b = 1.0f64                  -- suffix binds f64
-c = cast(3000000000, i64)   -- literal binds directly at i64
-d = cast(1.1, f64)          -- literal binds directly at f64
+-- explicit tensor conversion
+a = cast(x, bf16)
+-- suffix binds f64
+b = 1.0f64
+-- suffix binds i64; cast(3000000000, i64) binds the same literal the same way
+c = 3000000000i64
+-- the scalar binds directly at f64, not at f32 and then widened
+d = cast(1.1, f64)
+-- suffixed elements bind at f64; `to_tensor` keeps each element's dtype
+e = to_tensor([1.1f64, 2.2f64])
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with
 each operation's own dtype domain. Ordered comparisons such as `cmplt` take
 equal numeric types; `eq` and `neq` also compare booleans, strings, unit, and
-supported structured values. Tensor comparisons produce a boolean tensor.
+two `List`, tuple, `Dict`, `Option`, or data-type values of one type,
+structurally, when no part of the value is a function, key, or resource
+handle. Tensor comparisons produce a boolean tensor.
 Logical operations (`and`, `or`, `not`) take `bool`; transcendental operations
 such as `exp`, `log`, and `sqrt` take float types.
 
-`matmul`, `sum`, and `einsum` accept an optional `accumulator=p` argument.
-The compiler resolves the default from the operand dtype. For `bf16` and
+`matmul`, `sum`, and `einsum` accept an optional final argument
+`accumulator=p`, as in `sum(x, 0i32, accumulator=f64)`; any other call that
+supplies it is a type error. Omitted, the compiler resolves the default from
+the operand dtype. For `bf16` and
 `f16`, the default accumulator is `f32`; their result returns to the
 operand dtype. `sum` and `einsum` default to `i32` accumulation and an `i32`
 result for `i8` and `i16` inputs; integer `matmul` is rejected. For `f32`
 and signed integer reductions, an explicitly wider permitted accumulator
 also widens the result. The requested accumulator must have the same numeric
 kind and be no narrower than either the operands or their default.
+
+Small-integer sums widen to `i32` (`spec/04` §5.7.1), because a total of N
+values needs more bits than its elements. Stored `i8` and `i16` tensors stay
+`i8` and `i16`; only the aggregate an operation returns widens:
+
+| Operation | What it sums | Result for an `i8` or `i16` operand | Result for any other operand |
+|---|---|---|---|
+| `sum` | the selected axes | `i32` | the operand dtype |
+| `cumsum` | every prefix along the axis | `i32` | the operand dtype |
+| `trace` | the selected diagonal | `i32` | the operand dtype |
+| `einsum` | every contracted label | `i32` | the operand dtype |
+
+A declared result, or a downstream operation, that expects the operand dtype
+is a type error that names this rule. Declare the result as `i32`, or narrow
+it explicitly with `cast(total, i8)`, which traps `Overflow` when the total
+does not fit. `sum` and `einsum` also take `accumulator=i64` for an `i64`
+total. A function generic over a precision variable must bound it to
+dtypes that share one result, such as `Float`, `{i32, i64}`, or `{i8, i16}`
+with an `i32` result.
 
 ## Function types
 
@@ -204,8 +255,9 @@ tensor[n, f32] -> tensor[n, f32] -> tensor[f32]   -- two args, scalar result
 ## Aggregate types
 
 - Tuples: `(f32, f32)` as a type, `(a, b)` as a value, projected with `.0`, `.1`.
-- Algebraic data types: `type Option[a] = | None | Some { value: a }`, with positional or
-  record-field payloads. Recursive types refer to themselves by name.
+- Algebraic data types: `type Option[a] = | None | Some(a)` has a positional payload, and
+  `type Shape = | Circle { radius: f32 } | Square { side: f32 }` has record-field payloads.
+  Recursive types refer to themselves by name.
 - Records: constructed with `Foo { x: e1, y: e2 }` (punning allowed), read with `e.field`.
 - Type aliases: a `type` without variants is transparent and expanded at desugaring.
 - Lists: `List[T]` holds rank-uniform elements; a list of tensors fixes one rank for every
@@ -225,8 +277,7 @@ sig report[n]: tensor[n, f32] -> unit ! { IO }
 Effect inference runs after type inference. Host operations such as `print`
 and file reads contribute `IO`. Random draws take a `key` and contribute no
 effect. `with device(...)` introduces a resource region checked against the
-build target. See [Effects and Handlers](effects.md) for the effect vocabulary
-and handler rules.
+build target. See [Effects](effects.md) for the effect vocabulary.
 
 ## Linearity and borrowing
 

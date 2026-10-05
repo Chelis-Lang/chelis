@@ -1,10 +1,14 @@
-def predict(w: tensor[features, f32], b: f32, x: tensor[features, f32]) -> f32 = add(dot(w, x), b)
-def mse_loss(pred: f32, target: f32) -> f32 = {
-  diff = sub(pred, target)
+def predict(w: tensor[features, f32], b: tensor[f32], x: tensor[features, f32]) -> tensor[f32] =
+  x
+  |> mul(w)
+  |> sum(0i32)
+  |> add(b)
+def squared_error(w: tensor[features, f32], b: tensor[f32], x: tensor[features, f32], y: tensor[f32]) -> tensor[f32] = {
+  diff = w |> predict(b, x) |> sub(y)
   mul(diff, diff)
 }
-def train_step(w: tensor[features, f32], b: f32, x: tensor[features, f32], y: f32, lr: f32) -> (tensor[features, f32], f32) = {
-  loss_fn = fn (w_, b_) -> mse_loss(predict(w_, b_, x), y)
-  grads = grad(loss_fn)
-  (sub(w, mul(lr, fst(grads(w, b)))), sub(b, mul(lr, snd(grads(w, b)))))
+def train_step(w: tensor[features, f32], b: tensor[f32], x: tensor[features, f32], y: tensor[f32], lr: tensor[f32]) -> (tensor[features, f32], tensor[f32]) = {
+  (dw, db) = grad(squared_error, wrt=(w, b))(w, b, x, y)
+  step = insert(lr, 0, shape(w, 0i32))
+  (sub(w, mul(step, dw)), sub(b, mul(lr, db)))
 }

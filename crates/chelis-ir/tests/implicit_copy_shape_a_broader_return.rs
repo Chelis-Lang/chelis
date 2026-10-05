@@ -14,7 +14,7 @@
 //! `Linearity-ShapeABroadReturn-F1` tracks the broader coverage. This
 //! file pins the gap and the post-fix expectations.
 //!
-//! See `docs/investigations/implicit_copy_shape_a_broader_return.md` for
+//! See `docs/archive/investigations/implicit_copy_shape_a_broader_return.md` for
 //! the diagnosis and chosen fix.
 
 use chelis_ir::dag::Dag;

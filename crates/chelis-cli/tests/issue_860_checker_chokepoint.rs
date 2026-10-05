@@ -384,7 +384,7 @@ fn multi_stage_pipe_rejects_at_the_offending_stage() {
     // must reject.
     assert_check_rejects(
         "module M.Main\n\
-         out = print(cast(2.0, f32) |> recip |> fn (v) -> cast(floor(v), i32) |> recip)\n",
+         out = print(cast(2.0, f32) |> recip |> (fn (v) -> (cast(floor(v), i32) |> recip)))\n",
         "dtype family `Float`",
         "pipe_multi_stage",
     );

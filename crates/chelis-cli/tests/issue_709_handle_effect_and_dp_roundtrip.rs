@@ -127,6 +127,7 @@ fn c_lane_outcome(program: &str, ext: &str, name: &str) -> CLane {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -475,7 +476,7 @@ fn rt721_nullary_applied_with_arg_is_arity_error() {
     let dp = deep_of("def f() -> f32 = 2.5\nout = print(f(3.0))\n");
     let err = eval_with_ext(&dp, ".dp").expect_err("nullary def with an arg must be rejected");
     assert!(
-        err.contains("arity mismatch") && err.contains("expected 0 args, got 1"),
+        err.contains("call `f`") && err.contains("0 argument") && err.contains("1 argument"),
         "expected a clean 0-vs-1 arity error, got: {err}"
     );
 }

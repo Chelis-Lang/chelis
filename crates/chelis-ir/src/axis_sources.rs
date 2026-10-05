@@ -255,7 +255,12 @@ fn shape_preserving(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
 /// `Realize`, or `Store` forwards an existing value rather than becoming the
 /// primitive named by a declared-result guard. Casts remain in the set because
 /// spec/04 §4.7 gives a cast the placement of its input while retaining the
-/// cast as the primitive that produced the returned value.
+/// cast as the primitive that produced the returned value. Comparisons,
+/// logical operations and `where` are in the set although their result dtype
+/// is `bool` or the branches': their operands' extents are proved equal only
+/// where the graph proves them, so each needs the run-time agreement check,
+/// and a declared result extent on one is checked by it (chelis#2642). The
+/// WireDag admission set (`schema/dag_domains.rs`) lists them too.
 pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
     matches!(
         op,
@@ -267,10 +272,14 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::TruncDiv
             | RiscOp::Mod
             | RiscOp::Bitwise(_)
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Neg
             | RiscOp::Exp
@@ -280,6 +289,9 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -289,7 +301,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. }
     )
 }
@@ -440,6 +452,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Exp
@@ -449,6 +462,9 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -461,7 +477,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::Store { .. }
         | RiscOp::KeyFromSeed
@@ -1369,7 +1385,7 @@ pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option
         let producer = dag.get(current)?;
         match producer.op {
             RiscOp::Load { .. } => return Some(current),
-            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
+            RiscOp::Cast { .. } | RiscOp::NamedCast { .. } => {
                 current = *producer.inputs.first()?;
             }
             _ => return None,
@@ -2856,11 +2872,12 @@ pub enum ComputedAxisExtent {
     /// rather than re-derived from the site key, so a consumer reading this
     /// variant needs nothing but the variant.
     ///
-    /// A span whose `start` is not below its `end` computes no extent. The
-    /// operation's own domain rejection owns that failure on both lanes and
-    /// runs first (the C runtime's movement plan rejects it before the guard
-    /// site is reached), so the guard yields nothing rather than comparing a
-    /// fabricated number.
+    /// Equal endpoints compute the real extent zero (spec/05 section 2.4.1,
+    /// chelis#1795). A span whose `start` is above its `end` computes no
+    /// extent. The operation's own domain rejection owns that failure on both
+    /// lanes and runs first (the C runtime's movement plan rejects it before
+    /// the guard site is reached), so the guard yields nothing rather than
+    /// comparing a fabricated number.
     ShrinkSpan {
         start: RtDim,
         end: RtDim,
@@ -2889,13 +2906,10 @@ pub enum ComputedAxisExtent {
     /// own allocation owns that failure, so the guard yields rather than
     /// comparing a wrapped number.
     ///
-    /// There is deliberately NO `> 0` filter here, where [`Self::ShrinkSpan`]
-    /// has one, and the asymmetry is the two quantities rather than an
-    /// oversight. A shrink span of zero selects nothing and computes no
-    /// extent, so the operation's own domain rejection owns it; a pad extent
-    /// of zero is a real extent, and a claim of some other number over it is
-    /// a mismatch the guard still owes. Filtering it would be a silent hole
-    /// rather than parity.
+    /// There is deliberately NO `> 0` filter here, as there is none on
+    /// [`Self::ShrinkSpan`]: a pad extent of zero is a real extent, and a
+    /// claim of some other number over it is a mismatch the guard still
+    /// owes. Filtering it would be a silent hole rather than parity.
     ///
     /// Measured, and the zero extent is REACHABLE, which is what decides it.
     /// A runtime bound resolving to zero is guarded correctly today:
@@ -3307,7 +3321,7 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
             while let Some(node) = dag.get(producer) {
                 if !matches!(
                     node.op,
-                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
                 ) {
                     break;
                 }
@@ -3373,7 +3387,7 @@ fn checked_result_extent_site(
         }
         if !matches!(
             node.op,
-            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
         ) {
             break;
         }
@@ -3436,7 +3450,7 @@ fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> b
         };
         if matches!(
             node.op,
-            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
         ) && let Some(input) = node.inputs.first()
         {
             pending.push(*input);
@@ -3608,7 +3622,7 @@ fn literal_result_interface_observation(
                 axis: RtAxis::Lit(read),
             } if matches!(
                 node.op,
-                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
             ) =>
             {
                 walk(

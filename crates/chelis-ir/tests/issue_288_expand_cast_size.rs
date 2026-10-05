@@ -126,52 +126,74 @@ def f(x) = tensor_to_scalar(sum(mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 
 }
 
 // ---------------------------------------------------------------------------
-// chelis#530 (the #288 cast-wrapped sibling, residual inline-form bypass):
-// a §4.7.2 Form-3 `expand` size that is a tuple projection (`t.0`), or a
-// `cast`/arithmetic CONTAINING one, has no backend-materializable shape
-// source and must be REJECTED at check — never lowered to a hardcoded
-// extent-1 `Expand` (the silent C miscompile this gate prevents: eval
-// `[3, 2]` vs compiled C `[1, 2]`). The reject must FAIL CLOSED: a real
-// check error, not a swallowed `Type::Error` that lowers to a default size.
+// chelis#530 (the #288 cast-wrapped sibling, residual inline-form bypass): a
+// `expand` size that is a tuple projection (`t.0`), or a `cast`/arithmetic
+// CONTAINING one, used to reach lowering as a swallowed `Type::Error` and
+// lower to a hardcoded extent-1 `Expand` (eval `[3, 2]` vs compiled C
+// `[1, 2]`). #530 rejected it at check. chelis#469 admits it
+// (spec/04-type-system.md section 4.7.2 forbids rejecting an extent for its
+// provenance), so the property these rows keep is the one #530 existed for:
+// the size lowers to a runtime extent node, never to the extent-1 default.
+//
+// The arithmetic spelling does not reach the static DAG at all: its def routes
+// to the host lane, where a tuple-typed parameter of this dim-polymorphic def
+// is a separate, loud lowering gap on both lanes. Its row therefore asserts
+// only the half #530 owns, that no extent-1 `Expand` is produced.
 // ---------------------------------------------------------------------------
 
-fn assert_form3_reject_before_lowering(src: &str, label: &str) {
-    let err = lower_surf(src)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: sourceless inline expand size must reject at check"));
-    assert!(
-        err.contains("insert")
-            && err.contains("no tensor in scope carries it")
-            && err.contains("chelis#469"),
-        "{label}: expected the Form-3 sourceless-size reject citing #469, got: {err}"
+fn assert_runtime_size_lowers_to_a_node(src: &str, label: &str) {
+    assert_no_default_extent(src, label, true);
+}
+
+fn assert_no_default_extent(src: &str, label: &str, reaches_the_dag: bool) {
+    let dag = lower_surf(src).unwrap_or_else(|err| panic!("{label}: must lower, got: {err}"));
+    let sizes: Vec<_> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.op {
+            RiscOp::Expand { size, .. } => Some(size.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        !sizes.is_empty(),
+        reaches_the_dag,
+        "{label}: whether the insert lowers to a static-DAG Expand node; got {sizes:?}"
     );
     assert!(
-        !err.contains("internal compiler error"),
-        "{label}: the reject must be a clean diagnostic, never an ICE; got: {err}"
+        sizes
+            .iter()
+            .all(|size| matches!(size, chelis_ir::dag::RtDim::Node(_))),
+        "{label}: the size is a runtime extent node, never the extent-1 default; got {sizes:?}"
+    );
+    assert!(
+        verify::verify(&dag).is_empty(),
+        "{label}: the lowered DAG must verify clean"
     );
 }
 
 #[test]
-fn issue_530_tuple_get_size_rejected_before_lowering() {
-    assert_form3_reject_before_lowering(
+fn issue_530_tuple_get_size_lowers_to_a_runtime_extent() {
+    assert_runtime_size_lowers_to_a_node(
         "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
         "tuple-get size",
     );
 }
 
 #[test]
-fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
-    assert_form3_reject_before_lowering(
+fn issue_530_cast_wrapped_tuple_get_size_lowers_to_a_runtime_extent() {
+    assert_runtime_size_lowers_to_a_node(
         "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, i64))\n",
         "cast(tuple-get) size",
     );
 }
 
 #[test]
-fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
-    assert_form3_reject_before_lowering(
+fn issue_530_arith_over_tuple_get_size_never_lowers_to_the_default_extent() {
+    assert_no_default_extent(
         "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, i64)))\n",
         "add(tuple-get, ...) size",
+        false,
     );
 }
 

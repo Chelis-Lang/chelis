@@ -727,14 +727,14 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         ),
-        # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
-        # retains the same sourceless-Const class and therefore keeps #1482's
-        # typed receipt live rather than falsely closing the broader issue.
+        # Chelis#1313 removed the synthesized zero from ReLU; #1482 gives
+        # sigmoid's, silu's and gelu's synthesized constants the activation's
+        # input as their shape source, so the composite executes.
         _row(
             "shrink.elementwise_const.build",
             "ice",
-            "typed_unsupported(#1482)",
-            "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+            EXECUTES,
+            "cli_slice_b.runtime_bound_shrink_consumed_by_sigmoid_builds_and_matches_eval",
         ),
         _row(
             "guard.local.numeric_carriers.eval_c",
@@ -2352,18 +2352,26 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds",
         ),
-        # chelis#1791 half B: `check_expand_signature` matches the operand's
-        # type before applying the size rule and its unresolved-operand arm
-        # returns early, so in pipe position the rule was dropped and a
-        # sourceless size reached the lowerer. The fold above repairs it
-        # without touching that rule, because after the fold the operand is
-        # resolved. One row, not a lane pair: this is a checker verdict, and
-        # no lane varies once check rejects.
+        # chelis#1791 half B made a pipe-stage `expand` size reach the same
+        # size rule as the direct spelling. That rule then rejected a size with
+        # no tensor shape source, so this was one checker-verdict row,
+        # `expand.sourceless_size.pipe_position`, exiting `rejects_exactly`.
+        # spec/04-type-system.md section 4.7.2 forbids rejecting an extent
+        # because of its provenance, and chelis#469 removes that gate, so the
+        # program now executes and the lanes can differ: one row per lane, each
+        # receipted by the test that runs both spellings on both lanes and
+        # requires byte-identical output.
         _row(
-            "expand.sourceless_size.pipe_position",
+            "expand.runtime_size.pipe_position.eval",
             "nonconforming_rejection",
-            "rejects_exactly",
-            "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+            EXECUTES,
+            "cli_slice_b.a_runtime_expand_size_in_pipe_position_executes_on_both_lanes",
+        ),
+        _row(
+            "expand.runtime_size.pipe_position.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_runtime_expand_size_in_pipe_position_executes_on_both_lanes",
         ),
         # chelis#1788. One signature spelling `seq` on two parameter axes. In
         # the split-kernel tuple form each tensor leaf is lowered from its own

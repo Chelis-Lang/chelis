@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive"] }
 chelis-conformance.workspace = true
 chelis-deep.workspace = true
 chelis-reef.workspace = true
+# The chelis-std runtime this binary embeds, passed to every graph entry point.
+chelis-std-bundle.workspace = true
 # WS-C orchestration: reuse chelisup's toolchain-store path math (paths::Store)
 # and pin resolution (resolve) so `reef setup`/`doctor`/the unknown-subcommand
 # hint share one source of truth with the installer. chelisup has no `chelis-*`
@@ -24,7 +26,7 @@ chelis-reef.workspace = true
 # (see the shim-corruption guard in cmd_reef_setup).
 chelisup = { path = "../chelisup" }
 chelis-macros.workspace = true
-chelis-surf.workspace = true
+chelis-surf = { workspace = true, features = ["pre-020-pipe-migration"] }
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
@@ -66,6 +68,9 @@ ownership-ledger = ["chelis-runtime/ownership-ledger"]
 assert_cmd = "2"
 chelis-reef.workspace = true
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+# `copy_elision.rs` separates the linked correctly rounded kernel text, whose
+# bit casts are memcpy, from the code the probe's own lowering emits.
+chelis-crmath.workspace = true
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
 # (`chelis-vX.Y.Z-<build>.tar.gz`, gzip) so the auto-install-via-chelisup path
@@ -76,7 +81,6 @@ flate2 = "1"
 # checker (tests/common/mod.rs) needs the same f16/bf16 nearest-value
 # rounding - one dev-dep serves both; same crate the backends already use.
 half.workspace = true
-chelis-std-bundle.workspace = true
 predicates = "3"
 sha2 = "0.10"
 syn.workspace = true

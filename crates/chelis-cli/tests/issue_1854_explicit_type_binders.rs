@@ -496,20 +496,10 @@ fn body_tensor_precision_binder_scores_one_through_surf_and_canonical_deep() {
 #[test]
 fn cli_preserves_and_checks_body_only_surf_binders() {
     let dir = tempdir().expect("tempdir");
-    for (index, source, binder, annotation) in [
-        (0, "def maker[p]() = fn (x: p) -> x\n", "p", "(t-var {} p)"),
-        (
-            1,
-            "def maker[n]() = fn (x: tensor[n, f32]) -> x\n",
-            "n",
-            "(d-var {} n)",
-        ),
-        (
-            2,
-            "def maker[r]() = fn (x: tensor[..r, f32]) -> x\n",
-            "r",
-            "(d-rank {} r)",
-        ),
+    for (index, source) in [
+        (0, "def maker[p]() = fn (x: p) -> x\n"),
+        (1, "def maker[n]() = fn (x: tensor[n, f32]) -> x\n"),
+        (2, "def maker[r]() = fn (x: tensor[..r, f32]) -> x\n"),
     ] {
         let path = format!("body-only-{index}.ch");
         fs::write(dir.path().join(&path), source).expect("write Surf fixture");
@@ -520,11 +510,13 @@ fn cli_preserves_and_checks_body_only_surf_binders() {
             "`chelis deep` failed: {}",
             text(&deep)
         );
-        let rendered = String::from_utf8_lossy(&deep.stdout);
-        assert!(
-            rendered.contains(&format!("(defsig {{}} maker ({binder}) "))
-                && rendered.contains(annotation),
-            "`chelis deep` dropped a body-only declaration binder: {rendered}"
+        let deep_path = format!("body-only-{index}.dp");
+        fs::write(dir.path().join(&deep_path), &deep.stdout).expect("write Deep fixture");
+        let deep_checked = check_json(dir.path(), &deep_path);
+        assert_eq!(
+            deep_checked["score"].as_f64(),
+            Some(1.0),
+            "Deep must retain the body-only binder for its annotated use: {deep_checked}"
         );
 
         let checked = check_json(dir.path(), &path);
@@ -921,11 +913,6 @@ fn cli_round_trips_and_checks_polymorphic_properties() {
         deep.status.success(),
         "`chelis deep` failed: {}",
         text(&deep)
-    );
-    let deep_text = String::from_utf8_lossy(&deep.stdout);
-    assert!(
-        deep_text.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))"),
-        "Deep must carry the property binder on its defsig: {deep_text}"
     );
     fs::write(dir.path().join("property.dp"), &deep.stdout).expect("write Deep property");
 

@@ -107,14 +107,19 @@ fn rectangular_list_ingress_preserves_recursive_shape_and_every_element_dtype() 
 #[test]
 fn recursive_list_ingress_rejects_ragged_shapes_and_nonnumeric_leaves() {
     for depth in 0..4 {
-        let mut ragged = "[[1.0f32], [2.0f32, 3.0f32]]".to_string();
+        // Computed rows keep this a runtime ingress witness; known literal
+        // raggedness is rejected statically by the checker.
+        let mut ragged = "[row([1.0f32]), row([2.0f32, 3.0f32])]".to_string();
         for _ in 0..depth {
             ragged = format!("[{ragged}]");
         }
-        let output = evaluate(&format!("result = to_tensor({ragged})\n"));
+        let output = evaluate(&format!(
+            "def row(xs: List[f32]) -> List[f32] = xs\nresult = to_tensor({ragged})\n"
+        ));
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("uniform inner shape"),
+            String::from_utf8_lossy(&output.stderr)
+                .contains("numeric trap: domain in to_tensor at i64"),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

@@ -123,11 +123,16 @@ fn flatten_module_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::as
 }
 
 fn format_library_plus_snippet(package_dir: &Path, snippet: &str) -> String {
-    let graph = chelis_reef::prepare_reef_graph(package_dir).expect("prepare_reef_graph");
+    let graph = chelis_reef::prepare_reef_graph(package_dir, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("prepare_reef_graph");
     let entry_decls = chelis_surf::parser::parse_str(snippet).expect("parse snippet");
     let flat_decls = flatten_module_decls(&entry_decls);
-    let prepared =
-        chelis_reef::compile_with_reef_graph(&graph, &flat_decls).expect("compile_with_reef_graph");
+    let prepared = chelis_reef::compile_with_reef_graph(
+        &graph,
+        &flat_decls,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile_with_reef_graph");
     chelis_surf::format::format_program(&prepared.decls)
 }
 
@@ -153,7 +158,12 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     let snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
                    def unwrapped() -> i32 = match lib_some with {\n  | None => 0\n  | Some(x) => x\n}\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
     let by = collect_named_roots_json(&result.roots, &["unwrapped"]);
     // baseline parity (must equal monolithic)
@@ -190,7 +200,12 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
     let bad_snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
                        def bad() -> i32 = match lib_some with {\n  | Some(x) => x\n}\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let in_context = check_in_context(&ctx, bad_snippet);
 
     // Monolithic via the full prepare_eval pipeline (compile_source) —
@@ -245,7 +260,12 @@ fn g3_recursive_newcode_def_calling_library_helper() {
                      if (n <= 1) then 1 else mul(n, fact(n - 1))\n\
                    def fact5() -> i32 = fact(5)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
     // baseline parity
     let formatted = format_library_plus_snippet(&root, snippet);
@@ -275,7 +295,12 @@ fn g4_bincode_tampering_truncates_library_then_eval_must_not_silently_succeed() 
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let bytes = ctx.encode().expect("encode");
 
     // Replace the byte sequence "lib_double" with a different name of the
@@ -354,7 +379,12 @@ fn g5_cold_path_overhead_at_most_2x_monolithic() {
     // Warm caches by running each path once first (so we measure the
     // steady-state cold path, not first-time compilation overhead in the
     // chelis_macros / chelis_surf parsers).
-    let _ = compile_reef_context(Path::new("/tmp/x"), &root).expect("warm ctx");
+    let _ = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("warm ctx");
     let _ = prepare_eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: format_library_plus_snippet(&root, snippet),
@@ -381,7 +411,12 @@ fn g5_cold_path_overhead_at_most_2x_monolithic() {
     let mut cold_elapsed = std::time::Duration::ZERO;
     for _ in 0..3 {
         let t0 = Instant::now();
-        let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+        let ctx = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx");
         let _ = eval_in_context(&ctx, snippet).expect("eval");
         cold_elapsed += t0.elapsed();
     }
@@ -415,13 +450,23 @@ fn g6_source_hash_changes_when_library_mutates_between_encode_and_recompile() {
 
     let (_dir, root) = build_pkg(library_v1, main);
 
-    let ctx_v1 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx v1");
+    let ctx_v1 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx v1");
     let bytes_v1 = ctx_v1.encode().expect("encode v1");
 
     // Mutate the library on disk.
     fs::write(root.join("mylib/src/math.ch"), library_v2).expect("rewrite math.ch");
 
-    let ctx_v2 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx v2");
+    let ctx_v2 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx v2");
     assert_ne!(
         ctx_v1.source_hash, ctx_v2.source_hash,
         "mutating library source must change source_hash"
@@ -464,7 +509,12 @@ fn g7_eval_many_in_context_one_failing_root_does_not_poison_others() {
 
     let names = vec!["good".to_string(), "bad".to_string()];
     let outcomes = eval_many_in_context(
-        &compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx"),
+        &compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx"),
         snippet,
         &names,
     );
@@ -494,7 +544,12 @@ fn g7_eval_many_in_context_runtime_isolation_matches_combined() {
                    def good_a() -> i32 = add(1, 2)\n\
                    def good_b() -> i32 = add(10, 20)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     let combined = eval_in_context(&ctx, snippet).expect("combined eval");
     let combined_a = collect_named_roots_json(&combined.roots, &["good_a"]);
@@ -541,8 +596,65 @@ fn g7_eval_many_in_context_runtime_isolation_matches_combined() {
 
 // ─── G9 — Name shadowing across stages ───────────────────────────────────
 
+/// The collision diagnostic for new code that imports `name` from
+/// `Mylib.Math` and also declares it (spec/02 §P2, chelis#2885).
+fn import_collision_diagnostic(name: &str) -> String {
+    format!(
+        "`{name}` is both imported and declared locally: `import Mylib.Math ({name})` brings it \
+         into unqualified scope, and `def {name}` declares it. Rename the local declaration, or \
+         stop importing `{name}` unqualified and refer to the imported one by its qualified name \
+         (`Mylib.Math.{name}`)"
+    )
+}
+
+/// The single diagnostic message of a rejected compile.
+fn sole_error_message(error: &chelis_compiler_api::compiler::CompilerError) -> &str {
+    assert_eq!(error.errors.len(), 1, "one diagnostic: {error:?}");
+    &error.errors[0].message
+}
+
 #[test]
-fn g9_newcode_shadows_library_def_for_new_callers() {
+fn g9_newcode_redeclaring_an_imported_library_def_is_rejected_at_every_stage() {
+    // New code that imports the library's `foo` and declares its own `foo`
+    // gives `foo` two candidate meanings. No precedence rule picks one
+    // (spec/02 §P2, chelis#2885): the in-context eval and check, and the
+    // monolithic reef link the baseline uses, all reject it with the same
+    // diagnostic naming the import and the local declaration.
+    let library = "module Mylib.Math\nexport (foo)\n\n\
+                   def foo(x: i32) -> i32 = x + 100\n";
+    let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
+    let (_dir, root) = build_pkg(library, main);
+    let snippet = "module App.Eval\nimport Mylib.Math (foo)\n\n\
+                   def foo(x: i32) -> i32 = x + 1\n\
+                   def caller() -> i32 = foo(0)\n";
+
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
+    let expected = import_collision_diagnostic("foo");
+    let evaluated = eval_in_context(&ctx, snippet).expect_err("eval must reject the collision");
+    assert_eq!(sole_error_message(&evaluated), expected, "eval_in_context");
+    let checked = check_in_context(&ctx, snippet).expect_err("check must reject the collision");
+    assert_eq!(sole_error_message(&checked), expected, "check_in_context");
+
+    let graph = chelis_reef::prepare_reef_graph(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("prepare_reef_graph");
+    let entry = flatten_module_decls(&chelis_surf::parser::parse_str(snippet).expect("parse"));
+    let linked =
+        chelis_reef::compile_with_reef_graph(&graph, &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
+            .err();
+    assert_eq!(
+        linked.as_deref(),
+        Some(expected.as_str()),
+        "monolithic link"
+    );
+}
+
+#[test]
+fn g9_newcode_def_beside_a_qualified_library_import_keeps_both_identities() {
     // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
@@ -552,19 +664,25 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
 
-    // New-code redef of foo with a different body. Another new-code def
-    // calls foo. Per the Phase C plan, new code shadows the library on
-    // name collision. So `caller(0)` must use the new-code's foo
-    // (returns 0 + 1 = 1), NOT the library's (which returns 100).
-    let snippet = "module App.Eval\nimport Mylib.Math (foo)\n\n\
+    // A qualified-only import leaves the library's `foo` reachable as
+    // `Mylib.Math.foo` and out of unqualified scope, so new code may declare
+    // its own `foo`. A bare `foo` is the new code's (0 + 1 = 1); the
+    // qualified one is the library's (0 + 100 = 100), in the context and in
+    // the monolithic baseline alike.
+    let snippet = "module App.Eval\nimport Mylib.Math\n\n\
                    def foo(x: i32) -> i32 = x + 1\n\
-                   def caller() -> i32 = foo(0)\n";
+                   def caller() -> i32 = foo(0)\n\
+                   def library_caller() -> i32 = Mylib.Math.foo(0)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
-    let by = collect_named_roots_json(&result.roots, &["caller"]);
+    let by = collect_named_roots_json(&result.roots, &["caller", "library_caller"]);
 
-    // Baseline parity:
     let formatted = format_library_plus_snippet(&root, snippet);
     let baseline = eval(EvalRequest {
         source_kind: SourceKind::Surf,
@@ -572,11 +690,12 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
         bindings: BTreeMap::new(),
     })
     .expect("baseline");
-    let by_baseline = collect_named_roots_json(&baseline.roots, &["caller"]);
+    let by_baseline = collect_named_roots_json(&baseline.roots, &["caller", "library_caller"]);
     assert_eq!(
         by, by_baseline,
-        "shadow result for caller must match monolithic baseline (regardless of which side wins)"
+        "both identities must agree with the monolithic baseline"
     );
+    assert_eq!(by.len(), 2, "both roots are observed: {by:?}");
 }
 
 // ─── G11 — check_in_context does NOT eval ────────────────────────────────
@@ -600,7 +719,12 @@ fn g11_check_in_context_does_not_run_user_code() {
                    def landmine(x: i32) -> i32 = trunc_div(x, cast(0, i32))\n\
                    def safe() -> i32 = add(1, 2)\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     // check_in_context: must succeed; the landmine fn is well-typed but
     // never called.
     let _ = check_in_context(&ctx, snippet).expect("check should succeed");
@@ -622,8 +746,18 @@ fn g12_source_hash_differs_when_library_text_differs_by_one_char() {
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (dir_a, root_a) = build_pkg(library_a, main);
     let (dir_b, root_b) = build_pkg(library_b, main);
-    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx a");
-    let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx b");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx b");
     assert_ne!(
         ctx_a.source_hash, ctx_b.source_hash,
         "single-char library diff must produce different source_hash"
@@ -669,8 +803,18 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     write_pkg(&mylib_b, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
     fs::write(root_b.join("reef.lock"), app_reef_lock("app-b")).expect("lock B");
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx A");
-    let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx B");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx A");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx B");
     assert_ne!(
         ctx_a.source_hash, ctx_b.source_hash,
         "different package_name with identical sources must produce different source_hash"
@@ -703,7 +847,12 @@ fn g1_newcode_inheriting_test_effect_from_library_with_strict_signature_rejected
                           sig my_check: i64 -> unit ! {}\n\
                           def my_check(x: i64) -> unit = lib_check_eq(x, cast(1, i64))\n";
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     // Use prepare_eval — that's the monolithic path that runs effects +
     // linearity + lower (compile_source). The bare `check` API only runs
@@ -762,7 +911,12 @@ fn g4_deep_tamper_keeps_referenced_lib_eval_correct_or_fails_loudly() {
                    def lib_unused(x: i32) -> i32 = x * 999\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     let snippet = "module App.Eval\nimport Mylib.Math (lib_used)\n\n\
                    def out() -> i32 = lib_used(5)\n";
@@ -832,7 +986,12 @@ fn g10_newcode_tensor_use_after_consume_through_library_call() {
                    def id_tensor(x: tensor[3, f32]) -> tensor[3, f32] = x\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     // Snippet that takes a tensor parameter and uses it twice (linearity
     // violation) — also flowing through the library function.
@@ -911,7 +1070,12 @@ fn g8_multi_module_parity_with_monolithic() {
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = multi_module_fixture();
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     // Snippet imports from BOTH library modules and combines them.
     let snippet = "module App.Eval\nimport Mylib.Math (add)\nimport Mylib.Util (square_plus_one)\n\n\
@@ -945,7 +1109,12 @@ fn gextra_eval_many_parity_with_eval_in_context_for_each_root_individually() {
                    def add(x: i32, y: i32) -> i32 = x + y\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
                    def root_a() -> i32 = add(1, 2)\n\
@@ -979,8 +1148,18 @@ fn gextra_source_hash_independent_of_tempdir_path() {
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir1, root1) = build_pkg(library, main);
     let (_dir2, root2) = build_pkg(library, main);
-    let ctx1 = compile_reef_context(Path::new("/tmp/x"), &root1).expect("ctx1");
-    let ctx2 = compile_reef_context(Path::new("/tmp/x"), &root2).expect("ctx2");
+    let ctx1 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root1,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx1");
+    let ctx2 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root2,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx2");
     assert_eq!(
         ctx1.source_hash, ctx2.source_hash,
         "identical source contents in different tempdirs must hash identically; \
@@ -988,50 +1167,53 @@ fn gextra_source_hash_independent_of_tempdir_path() {
     );
 }
 
-// ─── G9-deep — Effects/linearity respect new-code shadow of library def ──
+// ─── G9-deep — Effect inference uses the new code's own def ─────────────
 
 #[test]
-fn g9deep_effect_inference_uses_newcode_shadow_not_library_for_inferred_row() {
+fn g9deep_effect_inference_uses_the_newcode_def_not_the_same_named_library_def() {
     // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library has `lib_io(x)` that performs Io (calls print).
-    // New code redefines `lib_io(x)` with NO effects (just identity).
-    // Another new-code def `caller(x)` calls `lib_io(x)`.
-    // The inferred effect of `caller` MUST be the new-code shadow (no
-    // effects), NOT the library's Io effect — otherwise Phase D's
-    // effect-shadow contract is broken.
+    // New code imports the library qualified and declares its own pure
+    // `lib_io(x)` (just identity). Another new-code def `caller(x)` calls the
+    // bare `lib_io(x)`, which is the new code's own (spec/02 §P2: a
+    // qualified-only import brings no name into unqualified scope). The
+    // inferred effect of `caller` MUST be the new code's (no effects), NOT
+    // the library's Io effect.
     //
     // We probe via the declared-vs-inferred validator: declare `caller`
-    // with `! {}`. If the new-code shadow is honoured, that succeeds.
+    // with `! {}`. If the new code's def is the one called, that succeeds.
     // If the library's Io leaks through, the validator rejects.
     let library = "module Mylib.Math\nexport (lib_io)\n\n\
                    def lib_io(x: i32) -> i32 = { ignore = print(\"in lib\")\n  x }\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
-    let snippet = "module App.Eval\nimport Mylib.Math (lib_io)\n\n\
+    let snippet = "module App.Eval\nimport Mylib.Math\n\n\
                    def lib_io(x: i32) -> i32 = x\n\
                    sig caller: i32 -> i32 ! {}\n\
                    def caller(x: i32) -> i32 = lib_io(x)\n";
 
-    // Parity vs monolithic prepare_eval.
     let mono = prepare_eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: format_library_plus_snippet(&root, snippet),
         bindings: BTreeMap::new(),
     });
     let inctx = check_in_context(&ctx, snippet);
-    let mono_rejects = mono.is_err();
-    let inctx_rejects = inctx.is_err();
-    let mono_err = mono.err();
-    let inctx_err = inctx.err();
-    assert_eq!(
-        mono_rejects, inctx_rejects,
-        "shadow-respecting effect verdict must match monolithic; \
-         mono_err={mono_err:?}, inctx_err={inctx_err:?}"
+    assert!(
+        mono.is_ok() && inctx.is_ok(),
+        "the pure new-code def must satisfy `! {{}}` in both paths; \
+         mono_err={:?}, inctx_err={:?}",
+        mono.err(),
+        inctx.err()
     );
 }
 
@@ -1051,7 +1233,14 @@ fn gextra_eval_in_context_is_thread_safe_across_arc_clones() {
                    def add(x: i32, y: i32) -> i32 = x + y\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = Arc::new(compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx"));
+    let ctx = Arc::new(
+        compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx"),
+    );
 
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
                    def out() -> i32 = add(7, 8)\n";
@@ -1107,9 +1296,18 @@ fn gextra_newcode_referencing_removed_library_def_fails() {
     let (_dir1, root_full) = build_pkg(library_full, main);
     let (_dir2, root_partial) = build_pkg(library_partial, main);
 
-    let ctx_full = compile_reef_context(Path::new("/tmp/x"), &root_full).expect("ctx full");
-    let ctx_partial =
-        compile_reef_context(Path::new("/tmp/x"), &root_partial).expect("ctx partial");
+    let ctx_full = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_full,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx full");
+    let ctx_partial = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_partial,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx partial");
 
     let snippet = "module App.Eval\nimport Mylib.Math (lib_a, lib_b)\n\n\
                    def out() -> i32 = lib_a(0) + lib_b(0)\n";
@@ -1177,8 +1375,18 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
     );
     fs::write(root_b.join("reef.lock"), app_reef_lock("myapp")).expect("lock B");
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx A");
-    let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx B");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx A");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx B");
     assert_ne!(
         ctx_a.source_hash, ctx_b.source_hash,
         "source_hash must include module name; identical body content under \
@@ -1203,7 +1411,12 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
                    def lib_drop(k: key, t: tensor[3, f32]) -> tensor[3, f32] = dropout(k, t, cast(0.5, f32))\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     for (snippet, rejects) in [
         (
@@ -1217,9 +1430,10 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
             false,
         ),
     ] {
+        let mono_source = format_library_plus_snippet(&root, snippet);
         let mono = prepare_eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: format_library_plus_snippet(&root, snippet),
+            source: mono_source.clone(),
             bindings: BTreeMap::new(),
         });
         let inctx = check_in_context(&ctx, snippet);
@@ -1234,10 +1448,33 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
              snippet={snippet}, errors={errors:?}"
         );
         if rejects {
-            assert!(
-                errors.0.contains("arity") && errors.1.contains("arity"),
-                "a keyless call is an arity error on both paths: {errors:?}"
-            );
+            for (lane, error, source) in [
+                (
+                    "monolithic",
+                    mono.err().expect("keyless call rejects"),
+                    mono_source.as_str(),
+                ),
+                ("context", inctx.expect_err("keyless call rejects"), snippet),
+            ] {
+                let caller = source.find("def caller").expect("source contains caller");
+                let call_offset = u64::try_from(
+                    caller + source[caller..].find(" = ").expect("caller has a body") + " = ".len(),
+                )
+                .expect("source call offset fits u64");
+                assert_eq!(error.stage, "check", "{lane}: {error:?}");
+                assert!(
+                    error.errors.iter().any(|diagnostic| {
+                        diagnostic.kind() == chelis_vocab::DiagnosticKind::ArityMismatch
+                            && diagnostic.expected.as_deref() == Some("2 arguments")
+                            && diagnostic.got.as_deref() == Some("1 argument")
+                            && diagnostic.message.contains("lib_drop")
+                            && diagnostic
+                                .span
+                                .is_some_and(|span| span.offset() == call_offset)
+                    }),
+                    "{lane}: keyless library call must reject with its authored arity and call site: {error:?}"
+                );
+            }
         }
     }
 }
@@ -1256,7 +1493,12 @@ fn gextra_repeated_calls_against_same_context_are_independent() {
                    def add(x: i32, y: i32) -> i32 = x + y\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
 
     let snippet_a = "module App.Eval\nimport Mylib.Math (add)\n\n\
                      sig my_test: i64 -> unit ! { Test }\n\

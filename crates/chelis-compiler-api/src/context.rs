@@ -27,13 +27,12 @@
 //! Then, it restores that proof. The provisional `TypeResolutionEnv` is serde-skipped.
 //! A later stacked check reconstructs it from validated ADT and alias definitions.
 //! Rejected declaration headers cannot persist in either compiler cache.
-//!
-//! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
-//! for the full plan.
 
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
-use chelis_reef::{EntryImports, PreparedReefGraph, SourceDigest, prepare_reef_graph_for_entries};
+use chelis_reef::{
+    EmbeddedRuntime, EntryImports, PreparedReefGraph, SourceDigest, prepare_reef_graph_for_entries,
+};
 use chelis_types::{CheckedProgram, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,6 +93,7 @@ impl CacheIdentity {
     /// fails (path removed mid-build, permission error), the raw path is
     /// used so the identity is still distinct rather than empty.
     pub fn for_package_root(package_root: &Path) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let canonical = fs::canonicalize(package_root)
             .unwrap_or_else(|_| package_root.to_path_buf())
             .to_string_lossy()
@@ -123,6 +123,7 @@ impl ContextHash {
     /// to disambiguate concatenation collisions; per-file `sha256` is
     /// fixed-width so it's appended directly.
     pub fn from_digests(digests: &[SourceDigest]) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let mut hasher = Sha256::new();
         for d in digests {
             hasher.update((d.package_name.len() as u64).to_le_bytes());
@@ -287,6 +288,7 @@ impl CompiledContext {
     /// digest with it. A producer that can reach its reader over a second
     /// channel should use [`Self::encode_for_handoff`] instead.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.envelope_bytes()
             .map(|(bytes, _)| bytes)
             .map_err(|e| format!("encode CompiledContext: {e}"))
@@ -300,6 +302,7 @@ impl CompiledContext {
     /// `chelis test` puts it in the worker's environment while the bytes go to a
     /// tempfile -- and the reader can then use [`Self::decode_authenticated`].
     pub fn encode_for_handoff(&self) -> Result<(Vec<u8>, HandoffDigest), String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.envelope_bytes()
             .map_err(|e| format!("encode CompiledContext: {e}"))
     }
@@ -316,6 +319,7 @@ impl CompiledContext {
     /// identity pins them to a producer running this compiler, which ran both
     /// checkers before writing.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         CacheEnvelope::from_bytes(bytes)
             .and_then(CacheEnvelope::into_context)
             .map_err(|e| format!("decode CompiledContext: {e}"))
@@ -337,6 +341,7 @@ impl CompiledContext {
     /// transmitted checked program the same way, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         CacheEnvelope::from_bytes(bytes)
             .and_then(|envelope| envelope.into_authenticated_context(expected))
             .map_err(|e| format!("decode CompiledContext: {e}"))
@@ -379,6 +384,7 @@ impl CompiledContext {
     /// a `.tmp.<pid>` orphan but never a half-written final file. Parent
     /// directories are created lazily.
     pub fn save(&self, path: &Path) -> Result<(), CacheError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let (bytes, _) = self.envelope_bytes()?;
 
         if let Some(parent) = path.parent()
@@ -522,8 +528,16 @@ impl CompiledContext {
         path: &Path,
         reef_home: &Path,
         package_dir: &Path,
+        runtime: &'static EmbeddedRuntime,
     ) -> Result<Option<Self>, CacheError> {
-        Self::load_if_fresh_for_entries(path, reef_home, package_dir, &EntryImports::none())
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        Self::load_if_fresh_for_entries(
+            path,
+            reef_home,
+            package_dir,
+            &EntryImports::none(),
+            runtime,
+        )
     }
 
     /// [`Self::load_if_fresh`] for a caller that will also run `entries`
@@ -535,7 +549,9 @@ impl CompiledContext {
         _reef_home: &Path,
         package_dir: &Path,
         entries: &EntryImports,
+        runtime: &'static EmbeddedRuntime,
     ) -> Result<Option<Self>, CacheError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         // Read the entire file into memory before any decode work — no
         // streaming-decode windows where a half-written tail looks like
         // a full envelope.
@@ -556,9 +572,11 @@ impl CompiledContext {
         // Recompute the source hash from the live package_dir. If the file
         // was named with a hash prefix that collides with a different
         // package, the recomputed hash will not match → cache miss.
-        let live_graph =
-            prepare_reef_graph_for_entries(package_dir, entries).map_err(CacheError::Reef)?;
-        let live_digests = live_graph.source_digests().map_err(CacheError::Reef)?;
+        let live_graph = prepare_reef_graph_for_entries(package_dir, entries, runtime)
+            .map_err(CacheError::Reef)?;
+        let live_digests = live_graph
+            .source_digests(runtime)
+            .map_err(CacheError::Reef)?;
         let live_hash = ContextHash::from_digests(&live_digests);
         if envelope.source_hash != live_hash {
             return Ok(None);
@@ -597,6 +615,7 @@ impl CompiledContext {
         source_hash: ContextHash,
         identity: &CacheIdentity,
     ) -> PathBuf {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         reef_home
             .join(".cache")
             .join("compiled")
@@ -613,6 +632,7 @@ impl CompiledContext {
         source_hash: ContextHash,
         identity: &CacheIdentity,
     ) -> String {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let (name, version) = package_id;
         let src_hex = hex_prefix(&source_hash.0, 8);
         let id_hex = identity.fingerprint_hex();
@@ -637,6 +657,7 @@ impl CompiledContext {
     /// path for `chelis test`. The performance win still comes from
     /// skipping the per-worker reef walk.
     pub fn reef_state(&self) -> &PreparedReefGraph {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.reef_state
     }
 }
@@ -672,7 +693,9 @@ pub fn load_or_compile_for_package(
     package_dir: &Path,
     entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
     // is set, `reef_home` is non-empty and the cache lives at
     // `<reef_home>/.cache/compiled/`. When it is unset, `reef_home` is
@@ -686,7 +709,9 @@ pub fn load_or_compile_for_package(
     let cache_dir = if reef_home.as_os_str().is_empty() {
         match crate::stdlib_cache::cache_dir_for("compiled") {
             Some(dir) => dir,
-            None => return compile_reef_context_for_entries(reef_home, package_dir, entries),
+            None => {
+                return compile_reef_context_for_entries(reef_home, package_dir, entries, runtime);
+            }
         }
     } else {
         reef_home.join(".cache").join("compiled")
@@ -695,11 +720,11 @@ pub fn load_or_compile_for_package(
     // mandatory pre-work for both the cache probe AND a full compile, so
     // we always pay it. On Coral-shape packages this is ~5s; the savings
     // come from skipping the rest of `compile_reef_context` on a hit.
-    let live_graph = match prepare_reef_graph_for_entries(package_dir, entries) {
+    let live_graph = match prepare_reef_graph_for_entries(package_dir, entries, runtime) {
         Ok(g) => g,
         Err(e) => return Err(reef_error(&e)),
     };
-    let live_digests = match live_graph.source_digests() {
+    let live_digests = match live_graph.source_digests(runtime) {
         Ok(d) => d,
         Err(e) => {
             // LocalRegistry packages don't have source_digests support
@@ -725,7 +750,13 @@ pub fn load_or_compile_for_package(
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
     // Corrupt / version-skewed / hash-mismatched files fall through to a
     // full compile + overwrite, with a stderr breadcrumb for the operator.
-    match CompiledContext::load_if_fresh_for_entries(&cache_path, reef_home, package_dir, entries) {
+    match CompiledContext::load_if_fresh_for_entries(
+        &cache_path,
+        reef_home,
+        package_dir,
+        entries,
+        runtime,
+    ) {
         Ok(Some(ctx)) => return Ok(ctx),
         Ok(None) => {}
         // A cancelled load judged nothing: propagate the cancellation and
@@ -749,7 +780,7 @@ pub fn load_or_compile_for_package(
     // The save is best-effort — if it fails, the compile result is still
     // usable for this invocation; only the next invocation pays the cold
     // cost again.
-    let ctx = compile_reef_context_for_entries(reef_home, package_dir, entries)?;
+    let ctx = compile_reef_context_for_entries(reef_home, package_dir, entries, runtime)?;
     if let Err(e) = ctx.save(&cache_path)
         && verbose_corruption_to_stderr
     {
@@ -798,16 +829,19 @@ pub fn load_or_compile_with_local_registry_fallback(
     package_dir: &Path,
     entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<(CompiledContext, ContextLoadPath), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match load_or_compile_for_package(
         reef_home,
         package_dir,
         entries,
         verbose_corruption_to_stderr,
+        runtime,
     ) {
         Ok(context) => Ok((context, ContextLoadPath::Cached)),
         Err(err) if is_local_registry_hash_gap(&err) => {
-            compile_reef_context_for_entries(reef_home, package_dir, entries)
+            compile_reef_context_for_entries(reef_home, package_dir, entries, runtime)
                 .map(|context| (context, ContextLoadPath::LocalRegistryFallback))
         }
         Err(err) => Err(err),
@@ -932,7 +966,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V39 (chelis#2647): generalized schemes retain result-equation origins.
 /// Main separately used V39 for #2419's Iota and ordered List DAG layout.
 /// V40 combines both payloads without accepting either V39 encoding.
-const CACHE_FORMAT_VERSION: u32 = 40;
+// Deep 0.20 (#3130) removes Pipe and SurfPipeStage from serialized syntax.
+const CACHE_FORMAT_VERSION: u32 = 41;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1131,6 +1166,7 @@ pub struct HandoffDigest([u8; 32]);
 impl HandoffDigest {
     /// Lower-case hex, the form that crosses a process boundary.
     pub fn to_hex(&self) -> String {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         hex_prefix(&self.0, 32)
     }
 
@@ -1141,6 +1177,7 @@ impl HandoffDigest {
     /// silently repairing it would let a truncated value authenticate bytes it
     /// does not cover.
     pub fn from_hex(text: &str) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if text.len() != 64 {
             return Err(format!(
                 "handoff digest must be 64 lower-case hex characters, got {} characters",
@@ -1241,7 +1278,12 @@ impl fmt::Display for CacheError {
             CacheError::Corrupt(msg) => write!(f, "cache file is corrupt: {msg}"),
             CacheError::UnsupportedVersion { stored, expected } => write!(
                 f,
-                "cache file format version {stored} not supported by this binary (expects {expected})"
+                "cache file format version {stored} not supported by this binary (expects {expected}); {}regenerate the cache",
+                if (*stored, *expected) == (40, 41) {
+                    "Deep 0.20 removes pipe nodes; "
+                } else {
+                    ""
+                }
             ),
             CacheError::HandoffDigestMismatch { expected, actual } => write!(
                 f,
@@ -1329,8 +1371,10 @@ fn sanitize_path_component(s: &str) -> String {
 pub fn compile_reef_context(
     reef_home: &Path,
     package_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
-    compile_reef_context_for_entries(reef_home, package_dir, &EntryImports::none())
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    compile_reef_context_for_entries(reef_home, package_dir, &EntryImports::none(), runtime)
 }
 
 /// [`compile_reef_context`] for a caller that will also run `entries`
@@ -1341,7 +1385,9 @@ pub fn compile_reef_context_for_entries(
     _reef_home: &Path,
     package_dir: &Path,
     entries: &EntryImports,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
     // (internal-name-mangled), so the reserved linker-name rejection is
     // off for this whole context build.
@@ -1372,12 +1418,12 @@ pub fn compile_reef_context_for_entries(
     // lives in `chelis-types`; `prepare_reef_graph_cached` itself is
     // filesystem work and is not covered.
     bail_if_cancelled("reef")?;
-    let reef_state =
-        prepare_reef_graph_for_entries(package_dir, entries).map_err(|e| reef_error(&e))?;
+    let reef_state = prepare_reef_graph_for_entries(package_dir, entries, runtime)
+        .map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
     bail_if_cancelled("check")?;
     let digests = reef_state
-        .source_digests()
+        .source_digests(runtime)
         .map_err(|error| hash_error(&error))?;
     log_phase("source_digests", &mut t);
     let source_hash = ContextHash::from_digests(&digests);
@@ -1689,9 +1735,38 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn context_version_rejection_names_pipe_removal_only_for_its_predecessor() {
+        for version in [39_u32, 40, 99] {
+            let mut bytes = CACHE_MAGIC.to_vec();
+            bytes.extend_from_slice(&version.to_le_bytes());
+            let error = match CompiledContext::decode(&bytes) {
+                Err(error) => error,
+                Ok(_) => panic!("incompatible version {version} must reject before payload decode"),
+            };
+            let cause = if version == 40 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            };
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 41); {cause}regenerate the cache"
+                )
+            );
+        }
+        let mut current = CACHE_MAGIC.to_vec();
+        current.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+        assert!(
+            CompiledContext::decode(&current).is_err(),
+            "a current header is not a complete payload"
+        );
+    }
+
+    #[test]
     fn cache_format_version_tracks_result_origins_and_ordered_list_operations() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 40);
+        assert_eq!(CACHE_FORMAT_VERSION, 41);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1793,8 +1868,12 @@ mod tests {
     #[test]
     fn compile_reef_context_succeeds_on_path_dep_fixture() {
         let (_dir, root) = path_dep_fixture();
-        let ctx = compile_reef_context(Path::new("/tmp/reef_home_unused"), &root)
-            .expect("compile_reef_context succeeds");
+        let ctx = compile_reef_context(
+            Path::new("/tmp/reef_home_unused"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile_reef_context succeeds");
         // Hash must not be all-zeros — that would mean either no sources
         // were hashed or every source was empty.
         assert_ne!(ctx.source_hash.0, [0u8; 32]);
@@ -1803,8 +1882,18 @@ mod tests {
     #[test]
     fn compile_reef_context_hash_is_stable_across_repeat_calls() {
         let (_dir, root) = path_dep_fixture();
-        let ctx1 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx1");
-        let ctx2 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx2");
+        let ctx1 = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx1");
+        let ctx2 = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx2");
         assert_eq!(
             ctx1.source_hash, ctx2.source_hash,
             "repeat calls on unchanged sources must produce identical hashes"
@@ -1814,14 +1903,24 @@ mod tests {
     #[test]
     fn compile_reef_context_hash_changes_when_path_dep_source_changes() {
         let (_dir, root) = path_dep_fixture();
-        let ctx_before = compile_reef_context(Path::new("/tmp/x"), &root).expect("before");
+        let ctx_before = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("before");
         // Edit the path-dep file, not the root, to exercise the
         // cross-package walk inside source_digests.
         let math_path = root.join("mylib/src/math.ch");
         let mut math_src = fs::read_to_string(&math_path).expect("read math.ch");
         math_src.push_str("-- a comment that changes file content\n");
         fs::write(&math_path, math_src).expect("rewrite math.ch");
-        let ctx_after = compile_reef_context(Path::new("/tmp/x"), &root).expect("after");
+        let ctx_after = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("after");
         assert_ne!(
             ctx_before.source_hash, ctx_after.source_hash,
             "editing a path-dep source file must invalidate the hash"
@@ -1831,7 +1930,12 @@ mod tests {
     #[test]
     fn context_round_trips_through_bincode() {
         let (_dir, root) = path_dep_fixture();
-        let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+        let ctx = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("ctx");
         let bytes = ctx.encode().expect("encode");
         let restored = CompiledContext::decode(&bytes).expect("decode");
         assert_eq!(ctx.source_hash, restored.source_hash);
@@ -1855,7 +1959,12 @@ mod tests {
     #[test]
     fn worker_handoff_uses_the_exact_disk_compatibility_envelope() {
         let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let context = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("context");
         let bytes = context.encode().expect("encode handoff");
         assert!(bytes.starts_with(CACHE_MAGIC));
         let path = root.join("handoff.ctx");
@@ -1871,7 +1980,7 @@ mod tests {
         let unversioned = bincode::serialize(&context).expect("raw positional payload");
         let error = CompiledContext::decode(&unversioned).expect_err("no raw fallback");
         assert!(error.contains("magic"), "{error}");
-        for version in [21_u32, 22, 23, 24, 25, 26, 39, CACHE_FORMAT_VERSION + 1] {
+        for version in [21_u32, 22, 23, 24, 25, 26, 39, 40, CACHE_FORMAT_VERSION + 1] {
             let mut truncated = CACHE_MAGIC.to_vec();
             truncated.extend_from_slice(&version.to_le_bytes());
             let error = CompiledContext::decode(&truncated)
@@ -1883,7 +1992,12 @@ mod tests {
     #[test]
     fn worker_handoff_checks_build_and_integrity_before_inner_decode() {
         let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let context = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("context");
         let bytes = context.encode().expect("encode handoff");
         let mut envelope: CacheEnvelope =
             bincode::deserialize(&bytes[CACHE_MAGIC.len()..]).expect("envelope");
@@ -1927,7 +2041,12 @@ mod tests {
     #[test]
     fn context_decode_rejects_missing_or_forged_authored_signatures() {
         let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let context = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("context");
         let lowered = serde_json::to_value(context.library_dag.raw()).unwrap();
         assert!(
             !lowered["program_signatures"]
@@ -1965,7 +2084,12 @@ mod tests {
     #[test]
     fn context_decode_rejects_a_foreign_type_environment() {
         let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let context = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("context");
         let wire = CompiledContextWire {
             source_hash: context.source_hash,
             identity: context.identity.clone(),
@@ -1984,15 +2108,24 @@ mod tests {
     #[test]
     fn context_decode_rejects_a_foreign_lowered_library() {
         let (_first_dir, first_root) = path_dep_fixture();
-        let first = compile_reef_context(Path::new("/tmp/x"), &first_root).expect("first context");
+        let first = compile_reef_context(
+            Path::new("/tmp/x"),
+            &first_root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("first context");
         let (_second_dir, second_root) = path_dep_fixture();
         fs::write(
             second_root.join("src/main.ch"),
             "module App.Main\n\ndef main_value() -> i32 = cast(8, i32)\n",
         )
         .expect("rewrite second main.ch");
-        let second =
-            compile_reef_context(Path::new("/tmp/x"), &second_root).expect("second context");
+        let second = compile_reef_context(
+            Path::new("/tmp/x"),
+            &second_root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("second context");
         let wire = CompiledContextWire {
             source_hash: first.source_hash,
             identity: first.identity.clone(),
@@ -2011,7 +2144,12 @@ mod tests {
     #[test]
     fn context_decode_rejects_a_changed_lowered_payload_with_the_same_identity() {
         let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let context = compile_reef_context(
+            Path::new("/tmp/x"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("context");
         let mut lowered_value =
             serde_json::to_value(context.library_dag.raw()).expect("lowered library must encode");
         lowered_value["rootless_defs"] = serde_json::json!(["forged_rootless_def"]);

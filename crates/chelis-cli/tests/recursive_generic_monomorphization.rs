@@ -254,6 +254,7 @@ fn build_ok(source: &str, stem: &str) -> (TempDir, PathBuf) {
     chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -274,6 +275,7 @@ fn build_err(source: &str, stem: &str) -> (TempDir, PathBuf, String) {
     let assert = chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -364,8 +366,12 @@ fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
     // embedded bundle, so literals here go stale at every release bump.
     let ver = chelis_compiler_api::COMPILER_VERSION;
     let std_version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
-    let archive_sha256 = chelis_std_bundle::archive_sha256();
-    let shell_sha256 = chelis_std_bundle::shell_sha256();
+    let archive_sha256 = chelis_std_bundle::EMBEDDED_RUNTIME
+        .archive_sha256()
+        .to_string();
+    let shell_sha256 = chelis_std_bundle::EMBEDDED_RUNTIME
+        .shell_sha256()
+        .to_string();
     write_file(
         &root.join("reef.toml"),
         &format!(
@@ -634,6 +640,7 @@ fn polymorphic_recursion_rejection_is_lane_uniform() {
     let build_assert = chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -899,6 +906,7 @@ fn package_defs_with_one_terminal_name_keep_distinct_specializations() {
         .current_dir(dir.path())
         .args([
             "build",
+            "--emit-c",
             main.strip_prefix(dir.path()).unwrap().to_str().unwrap(),
             "--target",
             "c",

@@ -83,6 +83,7 @@ fn build_c(source: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -145,15 +146,17 @@ fn assert_error_parity(source: &str, stem: &str, eval_needle: &str, c_needle: &s
     let (_dir, build_dir) = build_c(source, stem);
     let bin = gcc(&build_dir, stem, "self_bin");
     let run = StdCommand::new(&bin).output().expect("run emitted program");
-    assert!(
-        !run.status.success(),
-        "{stem}: C binary must abort, never compute over mismatched shapes; stdout={}",
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "{stem}: C binary must fail as eval does ([04-NUM-10]), never compute over \
+         mismatched shapes or abort; stdout={} stderr={stderr}",
         String::from_utf8_lossy(&run.stdout)
     );
-    let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
         stderr.contains(c_needle),
-        "{stem}: C abort must name the guard ({c_needle}); stderr={stderr}"
+        "{stem}: the C failure must name the guard ({c_needle}); stderr={stderr}"
     );
 }
 
@@ -193,8 +196,8 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elemstride",
-        "tensor shapes must match for elementwise op",
-        "elementwise operand shape mismatch",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
     );
 }
 
@@ -211,7 +214,7 @@ fn issue_667_grad_stride_operand_mismatch_is_a_diagnostic() {
     assert!(!eval.status.success(), "mismatched grad unexpectedly ran");
     let stderr = String::from_utf8_lossy(&eval.stderr);
     assert!(
-        stderr.contains("tensor shapes must match for elementwise op, got [3] vs [6]"),
+        stderr.contains("add operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6\nnumeric trap: domain in add at i64"),
         "gradient mismatch must report the elementwise guard: {stderr}"
     );
     assert!(
@@ -227,6 +230,7 @@ fn issue_667_grad_stride_operand_mismatch_is_a_diagnostic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -273,8 +277,8 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elempad",
-        "tensor shapes must match for elementwise op, got [4] vs [3]",
-        "elementwise operand shape mismatch",
+        "operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3",
+        "operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3",
     );
 }
 
@@ -295,8 +299,8 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elemshrink",
-        "tensor shapes must match for elementwise op, got [3] vs [6]",
-        "elementwise operand shape mismatch",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
     );
 }
 
@@ -313,8 +317,8 @@ fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "reshapesym",
-        "reshape expects 6 elements but tensor has 3",
-        "reshape numel mismatch",
+        "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64",
+        "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64",
     );
 }
 
@@ -330,8 +334,8 @@ fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "reshapestatic",
-        "reshape expects 6 elements but tensor has 3",
-        "reshape numel mismatch",
+        "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64",
+        "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64",
     );
 }
 
@@ -398,8 +402,8 @@ fn issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim() {
     assert_error_parity(
         &source,
         "elempadok",
-        "tensor shapes must match for elementwise op, got [4] vs [3]",
-        "elementwise operand shape mismatch",
+        "operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3",
+        "operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3",
     );
 }
 
@@ -421,7 +425,7 @@ fn issue_664_elementwise_shrink_operand_check_survives_an_agreeing_claim() {
     assert_error_parity(
         &source,
         "elemshrinkok",
-        "tensor shapes must match for elementwise op, got [3] vs [6]",
-        "elementwise operand shape mismatch",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
+        "operands disagree at axis 0: lhs [3] has 3, rhs [6] has 6",
     );
 }

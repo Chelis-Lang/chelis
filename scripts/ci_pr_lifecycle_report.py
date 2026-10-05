@@ -44,6 +44,7 @@ WORKFLOW_RUN_PARENTS = {
         "Changelog",
         "PR Contract Acknowledgements",
         "PR Base Retarget Validation",
+        "Secret scan",
     },
     ".github/workflows/openspec-autoland-controller.yml": {
         "OpenSpec autoland signal",

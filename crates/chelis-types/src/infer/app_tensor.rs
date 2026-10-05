@@ -6,6 +6,7 @@
 use super::*;
 
 pub(super) fn check_layer_norm_signature(
+    site: CheckSite<'_>,
     arg_tys: &[Type],
     result_ty: &Type,
     _vg: &mut VarGen,
@@ -13,7 +14,13 @@ pub(super) fn check_layer_norm_signature(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 4 {
-        return report_builtin_arity_bare(errors, "layer_norm", "4 arguments", arg_tys.len());
+        return report_builtin_arity_range(
+            errors,
+            site,
+            "layer_norm",
+            "4 arguments",
+            arg_tys.len(),
+        );
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -24,13 +31,16 @@ pub(super) fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("layer_norm expects tensor input, got {other}"),
+                    format!("layer_norm argument 1 (input): expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -39,13 +49,16 @@ pub(super) fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("layer_norm expects tensor gamma, got {other}"),
+                    format!("layer_norm argument 2 (gamma): expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -54,102 +67,152 @@ pub(super) fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("layer_norm expects tensor beta, got {other}"),
+                    format!("layer_norm argument 3 (beta): expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if x_dims.is_empty() {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                "layer_norm expects rank >= 1 input tensor".to_string(),
+                "layer_norm argument 1 (input): expected rank >= 1 tensor, got rank 0".to_string(),
+                "rank >= 1".to_string(),
+                "rank 0".to_string(),
                 vec![],
             ),
+            site,
         );
     }
     if gamma_dims.len() != 1 {
-        return report(
+        let got = format!("rank {}", gamma_dims.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "layer_norm expects rank-1 gamma, got rank {}",
-                    gamma_dims.len()
-                ),
+                format!("layer_norm argument 2 (gamma): expected rank 1 tensor, got {got}"),
+                "rank 1".to_string(),
+                got,
                 vec![],
             ),
+            site,
         );
     }
     if beta_dims.len() != 1 {
-        return report(
+        let got = format!("rank {}", beta_dims.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "layer_norm expects rank-1 beta, got rank {}",
-                    beta_dims.len()
-                ),
+                format!("layer_norm argument 3 (beta): expected rank 1 tensor, got {got}"),
+                "rank 1".to_string(),
+                got,
                 vec![],
             ),
+            site,
         );
     }
     if x_prec != gamma_prec || x_prec != beta_prec {
-        return report(
+        let (position, got) = if x_prec != gamma_prec {
+            ("argument 2 (gamma)", gamma_prec.name())
+        } else {
+            ("argument 3 (beta)", beta_prec.name())
+        };
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "layer_norm requires matching precisions, got {}, {}, {}",
-                    x_prec.name(),
-                    gamma_prec.name(),
-                    beta_prec.name()
+                    "layer_norm {position}: expected {}, got {got}",
+                    x_prec.name()
                 ),
+                x_prec.name().to_string(),
+                got.to_string(),
                 vec!["Insert explicit cast".to_string()],
             ),
+            site,
         );
     }
 
     if let TensorPrec::Concrete(prim) = x_prec {
         if !prim.is_float() {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::PrecisionMismatch,
-                    "layer_norm requires one active float dtype".to_string(),
+                    format!(
+                        "layer_norm argument 1 (input): expected floating-point tensor dtype, got {}",
+                        prim.name()
+                    ),
+                    "floating-point dtype".to_string(),
+                    prim.name().to_string(),
                     vec![],
                 ),
+                site,
             );
         }
         let epsilon_ty = type_for_readonly_check(&arg_tys[3], subst);
         if let Err(error) = unify(&epsilon_ty, &Type::Prim(prim), subst) {
-            return report(errors, error.into());
+            let mut error: CheckError = error.into();
+            error.message = format!(
+                "layer_norm argument 4 (epsilon): expected {}, got {epsilon_ty} ({})",
+                prim.name(),
+                error.message
+            );
+            error.expected = Some(prim.name().to_string());
+            error.got = Some(epsilon_ty.to_string());
+            return report_at_check_site(errors, error, site);
         }
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
     if subst.observe_dim(&hidden_dim).known_extent() == Some(0) {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                "layer_norm requires a positive hidden extent".to_string(),
+                "layer_norm argument 1 (input), last axis: expected positive extent, got 0"
+                    .to_string(),
+                "positive extent".to_string(),
+                "0".to_string(),
                 vec![],
             ),
+            site,
         );
     }
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
-        return report(errors, te.into());
+        let expected = subst.apply_dim(&hidden_dim).to_string();
+        let got = subst.apply_dim(&gamma_dims[0]).to_string();
+        let mut error: CheckError = te.into();
+        error.message = format!(
+            "layer_norm argument 2, axis 0 (gamma): expected {expected} (argument 1 last axis), got {got} ({})",
+            error.message
+        );
+        error.expected = Some(expected);
+        error.got = Some(got);
+        return report_at_check_site(errors, error, site);
     }
     if let Err(te) = unify_dim(&hidden_dim, &beta_dims[0], subst) {
-        return report(errors, te.into());
+        let expected = subst.apply_dim(&hidden_dim).to_string();
+        let got = subst.apply_dim(&beta_dims[0]).to_string();
+        let mut error: CheckError = te.into();
+        error.message = format!(
+            "layer_norm argument 3, axis 0 (beta): expected {expected} (argument 1 last axis), got {got} ({})",
+            error.message
+        );
+        error.expected = Some(expected);
+        error.got = Some(got);
+        return report_at_check_site(errors, error, site);
     }
 
     let canonical = Type::Tensor(
@@ -157,7 +220,9 @@ pub(super) fn check_layer_norm_signature(
         x_prec,
     );
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        let mut error: CheckError = te.into();
+        error.message = format!("layer_norm result: {}", error.message);
+        return report_at_check_site(errors, error, site);
     }
     subst.apply(&canonical)
 }
@@ -236,6 +301,7 @@ pub(super) fn compute_concrete_conv_spatial(
 }
 
 pub(super) fn check_conv_signature(
+    site: CheckSite<'_>,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
@@ -244,7 +310,7 @@ pub(super) fn check_conv_signature(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 4 {
-        return report_builtin_arity_bare(errors, "conv", "4 arguments", arg_tys.len());
+        return report_builtin_arity_range(errors, site, "conv", "4 arguments", arg_tys.len());
     }
     let input = type_for_readonly_check(&arg_tys[0], subst);
     let kernel = type_for_readonly_check(&arg_tys[1], subst);
@@ -254,54 +320,96 @@ pub(super) fn check_conv_signature(
         }
         (Type::Tensor(ds, p), Type::Tensor(ks, q)) => (ds, p, ks, q),
         _ => {
-            return report(
+            let (position, got) = if matches!(input, Type::Tensor(..)) {
+                ("argument 2 (kernel)", &kernel)
+            } else {
+                ("argument 1 (input)", &input)
+            };
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    "conv requires tensor input and kernel".to_string(),
+                    format!("conv {position}: expected tensor, got {got}"),
+                    "tensor".to_string(),
+                    got.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
     if input_dims.len() < 3 || kernel_dims.len() != input_dims.len() {
-        return report(
+        let (position, expected, got) = if input_dims.len() < 3 {
+            (
+                "argument 1 (input)",
+                "rank >= 3".to_string(),
+                format!("rank {}", input_dims.len()),
+            )
+        } else {
+            (
+                "argument 2 (kernel)",
+                format!("rank {}", input_dims.len()),
+                format!("rank {}", kernel_dims.len()),
+            )
+        };
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "conv requires equal input/kernel ranks of at least 3, got {} and {}",
-                    input_dims.len(),
-                    kernel_dims.len()
-                ),
+                format!("conv {position}: expected {expected}, got {got}"),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
     if input_prec != kernel_prec {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
-                "conv requires matching input/kernel precision".to_string(),
+                format!(
+                    "conv argument 2 (kernel): expected {} (input dtype), got {}",
+                    input_prec.name(),
+                    kernel_prec.name()
+                ),
+                input_prec.name().to_string(),
+                kernel_prec.name().to_string(),
                 vec![],
             ),
+            site,
         );
     }
     if let TensorPrec::Concrete(p) = input_prec
         && !p.is_float()
     {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
-                "conv requires an active float dtype".to_string(),
+                format!(
+                    "conv argument 1 (input): expected floating-point tensor dtype, got {}",
+                    p.name()
+                ),
+                "floating-point dtype".to_string(),
+                p.name().to_string(),
                 vec![],
             ),
+            site,
         );
     }
     if let Err(error) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
-        return report(errors, error.into());
+        let expected = subst.apply_dim(&input_dims[1]).to_string();
+        let got = subst.apply_dim(&kernel_dims[1]).to_string();
+        let mut error: CheckError = error.into();
+        error.message = format!(
+            "conv argument 2, axis 1 (kernel): expected {expected} (argument 1 axis 1), got {got} ({})",
+            error.message
+        );
+        error.expected = Some(expected);
+        error.got = Some(got);
+        return report_at_check_site(errors, error, site);
     }
     let rank = input_dims.len() - 2;
     let spatial = compute_concrete_conv_spatial(arg_exprs, input_dims, kernel_dims, subst);
@@ -315,19 +423,35 @@ pub(super) fn check_conv_signature(
     });
     let output = Type::Tensor(output_dims, input_prec.clone());
     if let Err(error) = unify(result_ty, &output, subst) {
-        return report(errors, error.into());
+        let mut error: CheckError = error.into();
+        error.message = format!("conv result: {}", error.message);
+        return report_at_check_site(errors, error, site);
     }
     subst.apply(&output)
 }
 
 pub(super) fn check_matmul_signature(
+    site: CheckSite<'_>,
     arg_tys: &[Type],
     result_ty: &Type,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 2 {
-        return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
+        return report_at_check_site(
+            errors,
+            CheckError::with_types(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "call `matmul`: expected 2 arguments, got {} arguments",
+                    arg_tys.len()
+                ),
+                "2 arguments".to_string(),
+                format!("{} arguments", arg_tys.len()),
+                vec![],
+            ),
+            site,
+        );
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -337,13 +461,16 @@ pub(super) fn check_matmul_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("matmul expects tensor lhs, got {other}"),
+                    format!("matmul argument 1: expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -351,29 +478,33 @@ pub(super) fn check_matmul_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("matmul expects tensor rhs, got {other}"),
+                    format!("matmul argument 2: expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if lhs_prec != rhs_prec {
-        return report(
+        let expected = lhs_prec.name();
+        let got = rhs_prec.name();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "matmul requires matching precisions, got {} and {}",
-                    lhs_prec.name(),
-                    rhs_prec.name()
-                ),
+                format!("matmul argument 2 dtype: expected {expected} (argument 1), got {got}"),
+                expected.to_string(),
+                got.to_string(),
                 vec!["Insert explicit cast".to_string()],
             ),
+            site,
         );
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
@@ -383,18 +514,18 @@ pub(super) fn check_matmul_signature(
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
     if lhs_prec.is_integer() {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "matmul on integer operand precision `{}` is not admitted in this \
-                 cycle per spec/04-type-system.md §5.7.2: integer matmul not admitted \
-                 (the spec deliberately defers the integer-matmul accumulator rule; \
-                 use reduce_sum over an explicit expand+mul lowering for integer \
-                 inner products)",
+                    "matmul arguments 1 and 2: expected floating-point tensor precision, got `{}`; \
+                 integer matmul is not admitted this cycle per spec/04-type-system.md §5.7.2 \
+                 (use reduce_sum over an explicit expand+mul lowering for integer inner products)",
                     lhs_prec.name()
                 ),
+                "floating-point tensor precision".to_string(),
+                lhs_prec.name().to_string(),
                 vec![
                     "spec/04-type-system.md §5.7.2: there is no current backend that \
                  supports integer BLAS, and an integer-matmul surface raises \
@@ -404,28 +535,47 @@ pub(super) fn check_matmul_signature(
                         .to_string(),
                 ],
             ),
+            site,
         );
     }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
-        return report(
+        let (slot, rank) = if lhs_dims.len() < 2 {
+            (1, lhs_dims.len())
+        } else {
+            (2, rhs_dims.len())
+        };
+        let got = format!("rank {rank} tensor");
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "matmul expects tensors of rank >= 2, got rank {} and {}",
-                    lhs_dims.len(),
-                    rhs_dims.len()
-                ),
+                format!("matmul argument {slot}: expected rank >= 2 tensor, got {got}"),
+                "rank >= 2 tensor".to_string(),
+                got,
                 vec![],
             ),
+            site,
         );
     }
-    if let Err(te) = unify_dim(
-        &lhs_dims[lhs_dims.len() - 1],
-        &rhs_dims[rhs_dims.len() - 2],
-        subst,
-    ) {
-        return report(errors, te.into());
+    let lhs_axis = lhs_dims.len() - 1;
+    let rhs_axis = rhs_dims.len() - 2;
+    if let Err(te) = unify_dim(&lhs_dims[lhs_axis], &rhs_dims[rhs_axis], subst) {
+        let expected = subst.apply_dim(&lhs_dims[lhs_axis]).to_string();
+        let got = subst.apply_dim(&rhs_dims[rhs_axis]).to_string();
+        return report_at_check_site(
+            errors,
+            CheckError::with_types(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "matmul argument 2, axis {rhs_axis}: expected {expected} (argument 1, axis {lhs_axis}), got {got}; {}",
+                    te.message
+                ),
+                expected,
+                got,
+                vec![],
+            ),
+            site,
+        );
     }
 
     let lhs_lead = &lhs_dims[..lhs_dims.len() - 2];
@@ -448,7 +598,24 @@ pub(super) fn check_matmul_signature(
                     lhs_applied
                 } else {
                     if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
-                        return report(errors, te.into());
+                        let expected = lhs_applied.to_string();
+                        let got = rhs_applied.to_string();
+                        return report_at_check_site(
+                            errors,
+                            CheckError::with_types(
+                                CheckErrorKind::DimensionMismatch,
+                                format!(
+                                    "matmul argument 2, axis {}: expected {expected} (argument 1, axis {}), got {got}; {}",
+                                    rhs_idx.expect("both batch axes are present"),
+                                    lhs_idx.expect("both batch axes are present"),
+                                    te.message
+                                ),
+                                expected,
+                                got,
+                                vec![],
+                            ),
+                            site,
+                        );
                     }
                     subst.apply_dim(&lhs_applied)
                 }
@@ -464,21 +631,32 @@ pub(super) fn check_matmul_signature(
 
     let canonical = Type::Tensor(out_dims, lhs_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        let mut error: CheckError = te.into();
+        error.message = format!("matmul result: {}", error.message);
+        return report_at_check_site(errors, error, site);
     }
     subst.apply(&canonical)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_reduction_signature(
+    site: CheckSite<'_>,
     name: &str,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
+    vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() < 2 {
-        return report_builtin_arity_bare(errors, name, "at least 2 arguments", arg_tys.len());
+        return report_builtin_arity_range(
+            errors,
+            site,
+            name,
+            "at least 2 arguments",
+            arg_tys.len(),
+        );
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -486,28 +664,34 @@ pub(super) fn check_reduction_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("{name} expects tensor input, got {other}"),
+                    format!("{name} argument 1: expected tensor input, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool)) {
-        return report(
+        let got = prec.render();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "count expects exactly a bool tensor, got tensor precision {}",
-                    prec.render()
+                    "count argument 1: expected exactly a bool tensor, got tensor precision {got}"
                 ),
+                "bool tensor".to_string(),
+                got,
                 vec!["Use count for bool tensors; numeric reductions use sum/prod_reduce.".into()],
             ),
+            site,
         );
     }
 
@@ -540,31 +724,41 @@ pub(super) fn check_reduction_signature(
             .iter()
             .all(|axis| extract_int_for_dim(axis).is_some())
     {
-        for axis_expr in axis_exprs {
+        for (position, axis_expr) in axis_exprs.iter().enumerate() {
             let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
             let Some(axis) = normalize_static_axis(dims.len(), raw) else {
-                return report(
+                let expected = format!("axis in -{}..{}", dims.len(), dims.len());
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name} axis {raw} is out of bounds for rank {} tensor",
+                            "{name} argument {}, axis {raw}: expected {expected} for rank {} tensor, got {raw}",
+                            position + 2,
                             dims.len()
                         ),
+                        expected,
+                        raw.to_string(),
                         vec![],
                     ),
+                    site,
                 );
             };
             if remove.contains(&axis) {
-                return report(
+                let got = format!("duplicate axis {raw}");
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name}: duplicate reduction axis {raw}; each normalized axis may appear at most once"
+                            "{name} argument {}, axis {raw}: expected unique normalized axis, got {got}",
+                            position + 2
                         ),
+                        "unique normalized axis".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             }
             remove.push(axis);
@@ -579,32 +773,54 @@ pub(super) fn check_reduction_signature(
                 })
             });
         if selects_concrete_named_axis {
-            return report(
+            let (position, selected) = axis_exprs
+                .iter()
+                .enumerate()
+                .find_map(|(position, axis)| {
+                    let axis_name = symbolic_dim_ref_name(axis)?;
+                    dims.iter()
+                        .any(|dim| matches!(subst.semantic_dim(dim), Dim::Name(name) if name == axis_name))
+                        .then_some((position + 2, axis_name))
+                })
+                .expect("guarded matching named axis");
+            let got = format!("named axis `{selected}`");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    "count on a concrete-rank operand requires one or more positional i32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    format!(
+                        "count argument {position}, axis `{selected}`: expected positional i32 axis on a concrete-rank operand, got {got}; named axes are reserved for rank-polymorphic operands"
+                    ),
+                    "positional i32 axis".to_string(),
+                    got,
                     vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
                 ),
+                site,
             );
         }
-        for ax in axis_exprs {
+        for (position, ax) in axis_exprs.iter().enumerate() {
             // A positional integer that reaches the named path: either the
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
             if extract_int_for_dim(ax).is_some() {
-                return report(
+                let got = describe_axis_arg(Some(ax));
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name}: positional and named axes cannot be mixed, and positional axes \
-                         require a concrete-rank operand; name every selected axis on a \
-                         rank-spread operand (e.g. `{name}(x, seq, head)`) \
-                         (spec/04-type-system.md \u{00a7}4.5.3)"
+                            "{name} argument {}, axis {got}: expected named axis of the operand, got {got}; \
+                             positional and named axes cannot be mixed, and positional axes \
+                             require a concrete-rank operand; name every selected axis on a \
+                             rank-spread operand (e.g. `{name}(x, seq, head)`) \
+                             (spec/04-type-system.md \u{00a7}4.5.3)",
+                            position + 2
                         ),
+                        "named axis of the operand".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             }
             // Issue #259: a non-literal, non-name axis (a runtime `i32`
@@ -612,20 +828,23 @@ pub(super) fn check_reduction_signature(
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
             let Some(axis_name) = symbolic_dim_ref_name(ax) else {
-                return report(
+                let got = describe_axis_arg(Some(ax));
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name} axis must be a compile-time constant or a named axis of the \
-                         operand, got {}",
-                            describe_axis_arg(Some(ax)),
+                            "{name} argument {} (axis): expected compile-time constant or named axis of the operand, got {got}",
+                            position + 2
                         ),
+                        "compile-time constant or named axis of the operand".to_string(),
+                        got,
                         vec![format!(
                             "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
-                         name the axis (e.g. `{name}(x, seq)`) to reduce by name."
+                             name the axis (e.g. `{name}(x, seq)`) to reduce by name."
                         )],
                     ),
+                    site,
                 );
             };
             let hits: Vec<usize> = dims
@@ -639,32 +858,43 @@ pub(super) fn check_reduction_signature(
                     // chelis#339: a duplicate axis name in the variadic list
                     // is a hard error, never a silent deduplication.
                     if remove.contains(i) {
-                        return report(
+                        let got = format!("duplicate `{axis_name}`");
+                        return report_at_check_site(
                             errors,
-                            CheckError::new(
+                            CheckError::with_types(
                                 CheckErrorKind::DimensionMismatch,
                                 format!(
-                                    "{name}: duplicate reduction axis `{axis_name}`; each named \
-                                 axis may appear at most once in a variadic reduction \
-                                 (spec/04-type-system.md \u{00a7}4.5.3)"
+                                    "{name} argument {}, axis `{axis_name}`: expected unique reduction axis, got {got}; \
+                                     each named axis may appear at most once in a variadic reduction \
+                                     (spec/04-type-system.md \u{00a7}4.5.3)",
+                                    position + 2
                                 ),
+                                "unique reduction axis".to_string(),
+                                got,
                                 vec![],
                             ),
+                            site,
                         );
                     }
                     remove.push(*i);
                 }
                 [] if has_spread => {
-                    return report(
+                    let got = format!("`{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name}: rank-spread operand has no named `{axis_name}` axis to \
-                             reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                                "{name} argument {}, axis `{axis_name}`: expected named axis of operand, got {got}; \
+                                 rank-spread operand has no named `{axis_name}` axis to reduce \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)",
+                                position + 2
                             ),
+                            "named axis of operand".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
                 [] => {
@@ -673,33 +903,44 @@ pub(super) fn check_reduction_signature(
                     // runtime `i32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
-                    return report(
+                    let got = format!("`{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name} axis `{axis_name}` is neither a compile-time constant nor a \
-                             named axis of the operand: a reduction axis must be a literal or \
-                             `cast(N, i32)` constant, or the name of an existing axis"
+                                "{name} argument {}, axis `{axis_name}`: expected literal or named axis of the operand, got {got}; \
+                                 axis `{axis_name}` is neither a compile-time constant nor a \
+                                 named axis of the operand: a reduction axis must be a literal or \
+                                 `cast(N, i32)` constant, or the name of an existing axis",
+                                position + 2
                             ),
+                            "literal or named axis of the operand".to_string(),
+                            got,
                             vec![format!(
                                 "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, i32)`, or \
-                             name an existing axis of the operand (e.g. `{name}(x, seq)`)."
+                                 name an existing axis of the operand (e.g. `{name}(x, seq)`)."
                             )],
                         ),
+                        site,
                     );
                 }
                 _ => {
-                    return report(
+                    let got = format!("ambiguous `{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
-                             once in the operand shape"
+                                "{name} argument {}, axis `{axis_name}`: expected unique named axis, got {got}; \
+                                 it appears more than once in the operand shape",
+                                position + 2
                             ),
+                            "unique named axis".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
             }
@@ -735,11 +976,10 @@ pub(super) fn check_reduction_signature(
     // caveat documented on `RiscOp::Argmax`; the i64 label is the
     // declarative output type.)
     //
-    // WS-A5: the §5.7.1 widening rule is defined over a known operand
-    // precision. If the operand precision is still polymorphic
-    // (TensorPrec::Var), defer the decision until the precision is
-    // resolved by unification — return the canonical-but-still-poly
-    // result type and let the standard unify path proceed.
+    // WS-A5: the §5.7.1 widening rule over a precision variable is decided
+    // over every dtype its bound admits ([04-INF-6]); see
+    // `default_sum_result_precision`.
+    let mut pending_sum_result = None;
     let result_prec: TensorPrec = if name == "count" {
         TensorPrec::Concrete(Prim::Int64)
     } else if name == "sum" {
@@ -747,60 +987,87 @@ pub(super) fn check_reduction_signature(
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),
                 Err(msg) => {
-                    return report(
+                    let got = prec.render();
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::TypeMismatch,
-                            format!("sum: {msg}"),
+                            format!(
+                                "sum argument 1: expected reducible tensor precision, got {got}; {msg}"
+                            ),
+                            "reducible tensor precision".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
             },
-            TensorPrec::Var(_) => prec.clone(),
+            TensorPrec::Var(_) => match default_sum_result_precision("sum", &prec, subst) {
+                Ok(SumResultPrecision::Decided(result)) => result,
+                Ok(SumResultPrecision::Pending(variable)) => {
+                    pending_sum_result = Some(variable);
+                    prec.clone()
+                }
+                Err(message) => {
+                    return report_at_check_site(
+                        errors,
+                        CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]),
+                        site,
+                    );
+                }
+            },
         }
     } else if name == "argmax_reduce" || name == "argmin_reduce" {
         TensorPrec::Concrete(Prim::Int64)
     } else {
         prec.clone()
     };
-    // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
-    // before falling back to the generic unify error, so users binding
-    // `sum(i8 tensor)` to `tensor[i8]` see the spec-row hint
-    // instead of the opaque "doesn't match declared signature" trail.
-    if name == "sum" && result_prec != prec {
+    // A declared result that the §5.7.1 widening contradicts is reported at
+    // the call with the rule and its repairs, rather than as a mismatch of
+    // the whole enclosing signature.
+    if name == "sum" && pending_sum_result.is_none() && result_prec != prec {
         let resolved_result = subst.apply(result_ty);
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
         {
-            return report(
+            let expected = declared_prec.render();
+            let got = result_prec.render();
+            let note = sum_result_widening_note(
+                Some("sum"),
+                &Type::Tensor(Vec::new(), prec.clone()),
+                &Type::Tensor(Vec::new(), result_prec.clone()),
+            )
+            .map(|note| format!("; {note}"))
+            .unwrap_or_default();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "sum on operand precision `{}` produces result precision `{}` per \
-                     spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
-                     widens narrow integer operands to i32 to prevent silent overflow); \
-                     declared result precision `{}` is incompatible. Use `tensor[{}]` or \
-                     omit the result type to accept the spec default.",
-                        prec.render(),
-                        result_prec.render(),
-                        declared_prec.render(),
-                        result_prec.render(),
-                    ),
-                    vec![format!(
-                        "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
-                     produces a `{}` result by default to prevent silent overflow",
-                        prec.render(),
-                        result_prec.render(),
-                    )],
+                    format!("sum's declared result: expected {expected}, got {got}{note}"),
+                    expected,
+                    got,
+                    vec![],
                 ),
+                site,
             );
         }
     }
-    let canonical = Type::Tensor(out_dims, result_prec);
+    let canonical = match pending_sum_result {
+        Some(variable) => publish_sum_result(
+            "sum",
+            out_dims,
+            SumResultPrecision::Pending(variable),
+            SumResultSlot::Fresh(vg),
+            site.owned_location(),
+            subst,
+        ),
+        None => Type::Tensor(out_dims, result_prec),
+    };
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        let mut error: CheckError = te.into();
+        error.message = format!("{name} result (from argument 1): {}", error.message);
+        return report_at_check_site(errors, error, site);
     }
     subst.apply(&canonical)
 }
@@ -829,13 +1096,15 @@ fn unit_extent_claim_error(
         .and_then(|d| subst.observe_dim(d).literal_extent())
     {
         Some(1) => None,
-        Some(extent) => Some(CheckError::new(
+        Some(extent) => Some(CheckError::with_types(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "{builtin} requires the operand's extent at axis {axis} to be 1, got \
                  {extent}: {builtin} broadcasts a size-1 axis and cannot replace an \
                  axis that already carries data (spec/05-risc-primitives.md \u{00a7}2.4.1)"
             ),
+            "1".to_string(),
+            extent.to_string(),
             vec![],
         )),
         _ => None,
@@ -844,12 +1113,12 @@ fn unit_extent_claim_error(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_expand_signature(
+    site: CheckSite<'_>,
     builtin: &'static str,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
     axis_is_dim_name: bool,
-    size_class: SizeClass,
     env: &Env,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -858,8 +1127,24 @@ pub(super) fn check_expand_signature(
     // before the result typing, including what happens to a pending operand,
     // is shared byte for byte.
     let inserts_only = builtin == "insert";
-    if arg_tys.len() != 3 && arg_tys.len() != 4 {
-        return report_builtin_arity_bare(errors, builtin, "3 or 4 arguments", arg_tys.len());
+    if (inserts_only && !matches!(arg_tys.len(), 3 | 4)) || (!inserts_only && arg_tys.len() != 3) {
+        return report_builtin_arity_range(
+            errors,
+            site,
+            builtin,
+            if inserts_only {
+                "3 or 4 arguments"
+            } else {
+                "3 arguments"
+            },
+            arg_tys.len(),
+        );
+    }
+    if let Some(error) = arg_exprs
+        .get(2)
+        .and_then(|size| ambiguous_size_name_error(builtin, size, env, subst))
+    {
+        return report_at_check_site(errors, error, site);
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -867,13 +1152,16 @@ pub(super) fn check_expand_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("{builtin} expects tensor input, got {other}"),
+                    format!("{builtin} argument 1: expected tensor input, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -899,23 +1187,25 @@ pub(super) fn check_expand_signature(
         && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
     {
         if !inserts_only {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} takes a positional i32 axis, not the dimension \
-                         name `{new_name}`: the named-axis form adds an axis and \
-                         belongs to `insert`. Write `insert(x, {new_name}, size)` to \
-                         add a named axis, or `{builtin}(x, <i32 axis>, size)` to \
-                         broadcast an existing size-1 axis \
+                        "{builtin} argument 2 (axis): expected positional i32 axis, got dimension name `{new_name}`: \
+                         the named-axis form adds an axis and belongs to `insert`. Write \
+                         `insert(x, {new_name}, size)` to add a named axis \
                          (spec/05-risc-primitives.md \u{00a7}2.4)"
                     ),
+                    "positional i32 axis".to_string(),
+                    format!("dimension name `{new_name}`"),
                     vec![],
                 ),
+                site,
             );
         }
         return check_named_expand_signature(
+            site,
             builtin,
             new_name,
             arg_exprs,
@@ -932,26 +1222,19 @@ pub(super) fn check_expand_signature(
     // (anchor) argument is only meaningful in the named-axis form, which is
     // `insert`'s.
     if arg_exprs.len() == 4 {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                if inserts_only {
-                    format!(
-                        "{builtin} takes a fourth (anchor) argument only in the named-axis \
-                         form `{builtin}(x, new, size, anchor)`, where `new` names the \
-                         inserted axis (spec/04-type-system.md \u{00a7}4.5.3)"
-                    )
-                } else {
-                    format!(
-                        "{builtin} takes exactly three arguments `(x, axis, size)`. The \
-                         four-argument anchored form adds a named axis and belongs to \
-                         `insert`: write `insert(x, new, size, anchor)` \
-                         (spec/05-risc-primitives.md \u{00a7}2.4)"
-                    )
-                },
+                format!(
+                    "{builtin} argument 2 (axis): expected a named axis for the fourth anchor argument, got a positional axis \
+                     (spec/04-type-system.md \u{00a7}4.5.3)"
+                ),
+                "named axis".to_string(),
+                "positional axis".to_string(),
                 vec![],
             ),
+            site,
         );
     }
     // A positional index is meaningless at symbolic rank: against a spread
@@ -962,30 +1245,26 @@ pub(super) fn check_expand_signature(
     // an axis the operand's static rank has. Tracked as a spec gap by
     // chelis#1575.
     if has_spread {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
                 if inserts_only {
                     format!(
-                        "{builtin}: a positional integer axis is only valid on a \
-                         concrete-rank operand; on a rank-spread operand, name the \
-                         inserted axis (e.g. `{builtin}(x, one, 1)` for a trailing insert, \
-                         or `{builtin}(x, c, n, seq)` to insert before the named `seq` \
-                         anchor) so the insertion point stays name-anchored \
-                         (spec/04-type-system.md \u{00a7}4.5.3)"
+                        "{builtin} argument 2 (axis): expected concrete-rank operand for positional axis, got rank-spread operand; \
+                         name the inserted axis (spec/04-type-system.md \u{00a7}4.5.3)"
                     )
                 } else {
                     format!(
-                        "{builtin}: a positional integer axis is only valid on a \
-                         concrete-rank operand, because the axis it broadcasts must be \
-                         one the operand's static rank has; a rank-spread operand has \
-                         no fixed position. `{builtin}` has no named-axis form \
-                         (spec/05-risc-primitives.md \u{00a7}2.4)"
+                        "{builtin} argument 2 (axis): expected concrete-rank operand for positional axis, got rank-spread operand; \
+                         `{builtin}` has no named-axis form (spec/05-risc-primitives.md \u{00a7}2.4)"
                     )
                 },
+                "concrete-rank operand".to_string(),
+                "rank-spread operand".to_string(),
                 vec![],
             ),
+            site,
         );
     }
 
@@ -995,13 +1274,16 @@ pub(super) fn check_expand_signature(
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    format!("{builtin} requires non-negative axis, got {axis}"),
+                    format!("{builtin} argument 2 (axis): expected non-negative axis, got {axis}"),
+                    "non-negative axis".to_string(),
+                    axis.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
         // Issue #259: the input is a concrete tensor (past the
@@ -1014,21 +1296,23 @@ pub(super) fn check_expand_signature(
         // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
         // targeted diagnostic at the expand call site naming the root cause.
         None => {
-            return report(
+            let got = describe_axis_arg(arg_exprs.get(1));
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} axis must be a compile-time constant of type i32 for the output \
-                     shape to be inferable, got {}",
-                        describe_axis_arg(arg_exprs.get(1)),
+                        "{builtin} argument 2 (axis): expected compile-time constant i32 axis for the output \
+                         shape to be inferable, got {got}"
                     ),
+                    "compile-time constant i32 axis".to_string(),
+                    got,
                     vec![format!(
                         "Pass a literal axis (e.g. `{builtin}(x, 0, n)`) or a \
-                             `cast(N, i32)` literal. The axis selects where the new \
-                             dimension is inserted, so it must be known at compile time."
+                         `cast(N, i32)` literal. The axis must be known at compile time."
                     )],
                 ),
+                site,
             );
         }
     };
@@ -1050,26 +1334,30 @@ pub(super) fn check_expand_signature(
         axis >= input_dims.len()
     };
     if axis_out_of_range {
-        return report(
+        let expected = if inserts_only {
+            format!("axis in 0..={}", input_dims.len())
+        } else {
+            format!("axis in 0..{}", input_dims.len())
+        };
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                if inserts_only {
-                    format!(
-                        "{builtin} axis {axis} is out of bounds for rank {} tensor",
-                        input_dims.len()
-                    )
-                } else {
-                    format!(
-                        "{builtin} axis {axis} is out of bounds for rank {} tensor: \
-                         {builtin} broadcasts an existing axis, so its axis must be \
-                         within the operand's rank. Use `insert` to add an axis \
-                         (spec/04-type-system.md \u{00a7}4.7.2)",
-                        input_dims.len()
-                    )
-                },
+                format!(
+                    "{builtin} argument 2 (axis): expected {expected}, got {axis} for rank {} tensor; \
+                     {builtin} {} (spec/04-type-system.md \u{00a7}4.7.2)",
+                    input_dims.len(),
+                    if inserts_only {
+                        "adds an axis"
+                    } else {
+                        "broadcasts an existing axis; use `insert` to add an axis"
+                    }
+                ),
+                expected,
+                axis.to_string(),
                 vec![],
             ),
+            site,
         );
     }
     let size = match arg_exprs
@@ -1078,47 +1366,38 @@ pub(super) fn check_expand_signature(
     {
         Some(size) if size >= 0 => Dim::Lit(size),
         Some(size) => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    format!("{builtin} requires non-negative size, got {size}"),
+                    format!("{builtin} argument 3 (size): expected non-negative size, got {size}"),
+                    "non-negative size".to_string(),
+                    size.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
-        // A non-literal runtime size. chelis#397/#469: discriminate by
-        // PROVENANCE (computed by the caller as `size_class`), not by the
-        // surface spelling. A size whose value provably folds to a constant
-        // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
-        // read / dimension name (`ShapeSourced`) is materializable; a truly
-        // sourceless runtime scalar (`Sourceless` — a bare `i32`/`i64`
-        // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
-        // has no backend representation and is rejected here so check, build,
-        // and eval all agree (a check-clean program must build). The walk
-        // unifies the four spellings the #397 red team found drifting:
-        // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
+        // A non-literal runtime size. spec/04-type-system.md section 4.7.2
+        // admits any `i64` size and forbids rejecting an extent because of
+        // its provenance (chelis#469), so no spelling is refused here: a
+        // parameter, binding, cast, call result or arithmetic size is a
+        // fresh runtime extent, and a literal or named claim over it is
+        // checked at run time.
         None => {
-            if size_class == SizeClass::Sourceless {
-                return report(
-                    errors,
-                    sourceless_expand_size_error(builtin, arg_exprs.get(2)),
-                );
-            }
-            // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
-            // declared dim parameter (not a value binding) or a dim carried
-            // by an in-scope tensor — stamps the named dim into the output so
-            // declared results refer to it by name. Every other materializable
-            // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
-            // and `let`-bound sizes) defers the output dim slot to
-            // the declared return-type / call-context via unification.
+            // A bare `var` naming a dimension of this definition, a binder of
+            // the enclosing definition or a dim carried by a tensor type in
+            // scope, stamps the named dim into the output so declared results
+            // refer to it by name. Every other spelling, a value included,
+            // gives a fresh extent that the declared return type or call
+            // context may claim through unification. The stamp is the one
+            // record of the reading: lowering reads a size as a dimension only
+            // where this axis carries the size's own name, so no later stage
+            // re-decides it in another scope (chelis#469). A name that is
+            // neither a dimension here nor a value has nothing to read, and
+            // lowering rejects it.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-                Some(name)
-                    if env.lookup(name).is_none()
-                        || env.tensor_carries_dim_with_subst(name, subst) =>
-                {
-                    Dim::Name(name.to_string())
-                }
+                Some(name) if definition_dimension(env, name, subst) => Dim::Name(name.to_string()),
                 _ => Dim::Wildcard,
             }
         }
@@ -1128,17 +1407,20 @@ pub(super) fn check_expand_signature(
     let canonical = match resolved_result {
         Type::Tensor(out_dims, out_prec) => {
             if out_prec != input_prec {
-                return report(
+                let expected = input_prec.name();
+                let got = out_prec.name();
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::PrecisionMismatch,
                         format!(
-                            "{builtin} output precision {} does not match input precision {}",
-                            out_prec.name(),
-                            input_prec.name()
+                            "{builtin} output precision: expected {expected} (input precision), got {got}"
                         ),
+                        expected.to_string(),
+                        got.to_string(),
                         vec![],
                     ),
+                    site,
                 );
             }
             // One result shape per operation (spec/04-type-system.md §4.7.2:
@@ -1150,28 +1432,30 @@ pub(super) fn check_expand_signature(
                 input_dims.len()
             };
             if out_dims.len() != expected_rank {
-                return report(
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         if inserts_only {
                             format!(
-                                "{builtin} output rank {} must equal input rank {} plus one",
-                                out_dims.len(),
-                                input_dims.len()
+                                "{builtin} output rank: expected {expected_rank} (input rank {} plus one), got {}",
+                                input_dims.len(),
+                                out_dims.len()
                             )
                         } else {
                             format!(
-                                "{builtin} output rank {} must equal input rank {}: \
+                                "{builtin} output rank: expected {expected_rank} (same as input), got {}: \
                                  {builtin} broadcasts an existing size-1 axis and leaves \
                                  the rank alone. Use `insert` to add an axis \
                                  (spec/04-type-system.md \u{00a7}4.7.2)",
-                                out_dims.len(),
-                                input_dims.len()
+                                out_dims.len()
                             )
                         },
+                        expected_rank.to_string(),
+                        out_dims.len().to_string(),
                         vec![],
                     ),
+                    site,
                 );
             }
             if inserts_only {
@@ -1180,7 +1464,7 @@ pub(super) fn check_expand_signature(
                 Type::Tensor(expected, input_prec)
             } else {
                 if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
-                    return report(errors, error);
+                    return report_at_check_site(errors, error, site);
                 }
                 let mut expected = input_dims.clone();
                 expected[axis] = size.clone();
@@ -1198,7 +1482,7 @@ pub(super) fn check_expand_signature(
                 Type::Tensor(expected, input_prec)
             } else {
                 if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
-                    return report(errors, error);
+                    return report_at_check_site(errors, error, site);
                 }
                 let mut expected = input_dims.clone();
                 expected[axis] = size.clone();
@@ -1207,19 +1491,22 @@ pub(super) fn check_expand_signature(
         }
         Type::Error(witness) => return propagate(&witness),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("{builtin} expects tensor output, got {other}"),
+                    format!("{builtin} output: expected tensor, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        return report_at_check_site(errors, te.into(), site);
     }
     subst.apply(&canonical)
 }
@@ -1232,6 +1519,7 @@ pub(super) fn check_expand_signature(
 /// meets it. The scheme's free result dimension is never the answer: it
 /// would take whatever extent the context offers, whatever the count.
 pub(super) fn check_split_keys_signature(
+    site: CheckSite<'_>,
     arg_exprs: &[deep::Expr],
     result_ty: &Type,
     env: &Env,
@@ -1244,13 +1532,18 @@ pub(super) fn check_split_keys_signature(
     {
         Some(count) if count >= 0 => Dim::Lit(count),
         Some(count) => {
-            return report(
+            let expected = "non-negative count";
+            let got = count.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    format!("split_keys requires a non-negative count, got {count} ([05-OP-71])"),
+                    format!("split_keys argument 2: expected {expected}, got {got} ([05-OP-71])"),
+                    expected.to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         None => Dim::Wildcard,
@@ -1287,6 +1580,7 @@ pub(super) fn check_split_keys_signature(
 /// and call-site monomorphization carries it through.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_named_expand_signature(
+    site: CheckSite<'_>,
     builtin: &'static str,
     new_name: &str,
     arg_exprs: &[deep::Expr],
@@ -1304,18 +1598,20 @@ pub(super) fn check_named_expand_signature(
         .iter()
         .any(|d| matches!(subst.semantic_dim(d), Dim::Name(n) if n == new_name))
     {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "{builtin}: inserted axis `{new_name}` already names an axis of the operand; \
-                 a duplicate dim name would make later by-name axis lookups ambiguous \
-                 (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
-                 axis."
+                    "{builtin} argument 2 (axis): expected a fresh name, got `{new_name}` which already names an axis of the operand; \
+                     a duplicate dim name makes later by-name lookups ambiguous \
+                     (spec/04-type-system.md \u{00a7}4.5.3)"
                 ),
+                "fresh axis name".to_string(),
+                format!("`{new_name}`"),
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1331,29 +1627,35 @@ pub(super) fn check_named_expand_signature(
         .get(2)
         .and_then(|expr| fold_static_int_expr(expr, |_| None))
     else {
-        return report(
+        let got = describe_axis_arg(arg_exprs.get(2));
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "{builtin}: the named-axis insert form requires a compile-time literal size \
-                 (an Ni64 literal or `cast(N, i64)` constant), got {}; the inserted axis's \
-                 extent must be stampable onto the new named dim at lowering \
-                 (spec/04-type-system.md \u{00a7}4.5.3)",
-                    describe_axis_arg(arg_exprs.get(2)),
+                    "{builtin} argument 3 (size): expected compile-time literal size (an Ni64 literal or \
+                     `cast(N, i64)` constant), got {got}; the inserted axis's extent must be \
+                     stampable onto the new named dim at lowering \
+                     (spec/04-type-system.md \u{00a7}4.5.3)"
                 ),
+                "compile-time literal size".to_string(),
+                got,
                 vec![],
             ),
+            site,
         );
     };
     if size < 0 {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                format!("{builtin} requires non-negative size, got {size}"),
+                format!("{builtin} argument 3 (size): expected non-negative size, got {size}"),
+                "non-negative size".to_string(),
+                size.to_string(),
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1362,17 +1664,20 @@ pub(super) fn check_named_expand_signature(
     let insert_at = match arg_exprs.get(3) {
         Some(anchor_expr) => {
             let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
-                return report(
+                let got = describe_axis_arg(arg_exprs.get(3));
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{builtin} anchor must name an existing axis of the operand, got {} \
-                         (spec/04-type-system.md \u{00a7}4.5.3)",
-                            describe_axis_arg(arg_exprs.get(3)),
+                            "{builtin} argument 4 (anchor): expected named axis of the operand, got {got} \
+                             (spec/04-type-system.md \u{00a7}4.5.3)"
                         ),
+                        "named axis of the operand".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             };
             let hits: Vec<usize> = input_dims
@@ -1384,46 +1689,53 @@ pub(super) fn check_named_expand_signature(
             match hits.as_slice() {
                 [i] => *i,
                 [] if has_spread => {
-                    return report(
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{builtin}: rank-spread operand has no named `{anchor}` axis to \
-                             anchor the insertion; insertion strictly inside an opaque \
-                             spread has no anchor and is rejected \
-                             (spec/04-type-system.md \u{00a7}4.5.3)"
+                                "{builtin} argument 4 (anchor): expected named axis of the operand, got `{anchor}`; \
+                                 insertion inside an opaque rank spread has no anchor \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)"
                             ),
+                            "named axis of the operand".to_string(),
+                            format!("`{anchor}`"),
                             vec![],
                         ),
+                        site,
                     );
                 }
                 [] => {
-                    return report(
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{builtin} anchor `{anchor}` is not a named axis of the operand: \
-                             the named-axis form inserts at the trailing end or immediately \
-                             before an existing named anchor (spec/04-type-system.md \
-                             \u{00a7}4.5.3)"
+                                "{builtin} argument 4 (anchor): expected named axis of the operand, got `{anchor}`; \
+                                 insert at the trailing end or before an existing named anchor \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)"
                             ),
+                            "named axis of the operand".to_string(),
+                            format!("`{anchor}`"),
                             vec![],
                         ),
+                        site,
                     );
                 }
                 _ => {
-                    return report(
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{builtin}: anchor `{anchor}` is ambiguous; it appears more than \
-                             once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
+                                "{builtin} argument 4 (anchor): expected unique named axis, got ambiguous `{anchor}` \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)"
                             ),
+                            "unique named axis".to_string(),
+                            format!("ambiguous `{anchor}`"),
                             vec![],
                         ),
+                        site,
                     );
                 }
             }
@@ -1437,7 +1749,7 @@ pub(super) fn check_named_expand_signature(
     out_dims.insert(insert_at, Dim::Name(new_name.to_string()));
     let canonical = Type::Tensor(out_dims, input_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        return report_at_check_site(errors, te.into(), site);
     }
     subst.apply(&canonical)
 }

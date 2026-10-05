@@ -90,7 +90,7 @@ fn issue254_emit_reduce_window_sum_uses_adjacent_pair_tree() {
         "Sum emit must use the canonical balanced tree, got:\n{src}"
     );
     assert!(
-        src.contains("level[left] + level[right]"),
+        src.contains("level[__pair_left] + level[__pair_right]"),
         "Sum emit must combine adjacent pairs, got:\n{src}"
     );
     // Sum must NOT emit a division by the window volume; that's the
@@ -106,7 +106,8 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("while (level_n > 1)") && src.contains("level[left] + level[right]"),
+        src.contains("while (level_n > 1)")
+            && src.contains("level[__pair_left] + level[__pair_right]"),
         "Mean emit must first use the canonical balanced sum, got:\n{src}"
     );
     // Window volume = 2 * 2 = 4.

@@ -261,7 +261,12 @@ fn issue_319_imported_precision_poly_sdpa_grad_lowers_and_matches_inline() {
         grad_driver("sdpa"),
     );
 
-    let ctx = compile_reef_context(Path::new("/tmp/issue319"), &root).expect("compile reef ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/issue319"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile reef ctx");
     let result = eval_in_context(&ctx, &snippet).unwrap_or_else(|err| {
         panic!(
             "issue #319: grad through an IMPORTED precision-poly sdpa verb must lower \

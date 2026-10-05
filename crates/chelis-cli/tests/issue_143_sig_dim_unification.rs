@@ -19,6 +19,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -66,10 +67,19 @@ fn sig_dim_unification_mismatched_concrete_args_is_caught() {
     // is the failure signal. Issue #207 ties the exit code to the
     // errors array (exit 2 here), but this test asserts on the JSON
     // content; the dedicated invariant test covers the exit code.
-    check_file(&fixture)
-        .stdout(predicate::str::contains("DimensionMismatch"))
-        .stdout(predicate::str::contains("Lit(2)"))
-        .stdout(predicate::str::contains("Lit(3)"));
+    let checked = check_file(&fixture);
+    let report: Value = serde_json::from_slice(&checked.get_output().stdout).expect("checker JSON");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "2"
+                    && error["got"] == "3"
+                    && error["span"]["offset"].is_number()
+            })),
+        "declared dimension shared by both arguments must reject: {report}"
+    );
 }
 
 #[test]
@@ -123,12 +133,21 @@ fn sig_dim_unification_wildcard_arg_does_not_mask_downstream_mismatch() {
 
     // Post-fix: `a` binds the sig var to `Lit(2)`, `result` is
     // `tensor[2, f32]`, and the `expect_three(&result)` call unifies
-    // `Lit(2)` against `Lit(3)` — DimensionMismatch with both literals
-    // in the diagnostic. Pre-fix: zero DimensionMismatch entries here,
-    // because every concrete dim went through a Wildcard sentinel that
-    // matched-anything.
-    check_file(&fixture)
-        .stdout(predicate::str::contains("DimensionMismatch"))
-        .stdout(predicate::str::contains("Lit(2)"))
-        .stdout(predicate::str::contains("Lit(3)"));
+    // `Lit(2)` against `Lit(3)` — a located DimensionMismatch with the
+    // downstream callee's expected extent and the actual extent.
+    // Pre-fix: zero DimensionMismatch entries here because Wildcard
+    // matched every concrete extent, dropping the cross-argument contract.
+    let checked = check_file(&fixture);
+    let report: Value = serde_json::from_slice(&checked.get_output().stdout).expect("checker JSON");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "3"
+                    && error["got"] == "2"
+                    && error["span"]["offset"].is_number()
+            })),
+        "downstream declared dimension must reject the propagated extent: {report}"
+    );
 }

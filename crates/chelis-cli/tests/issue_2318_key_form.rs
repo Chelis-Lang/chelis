@@ -65,7 +65,14 @@ fn build(dir: &Path, stem: &str, source: &str) -> std::path::PathBuf {
     let out_dir = dir.join(format!("{stem}-out"));
     write_file(&path, source);
     chelis()
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out_dir)
         .assert()
         .success();
@@ -158,7 +165,14 @@ fn keyless_2318_programs_are_arity_errors_at_check() {
             "{stem}: expected uniform_like's retired-spelling error: {report}"
         );
         chelis()
-            .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+            .args([
+                "build",
+                "--emit-c",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+            ])
             .arg(dir.path().join(format!("{stem}-out")))
             .assert()
             .failure();
@@ -190,7 +204,7 @@ fn key_form_2318_draws_match_eval_and_the_reference_in_both_lanes() {
             DAG_DRAW,
             "__tensor_0__private: input `k` at slot",
         ),
-        ("host_draw", HOST_DRAW, "__uniform_dtype_"),
+        ("host_draw", HOST_DRAW, "__uniform_low_"),
     ] {
         let out_dir = build(dir.path(), stem, source);
         let header = std::fs::read_to_string(out_dir.join(format!("{stem}.h"))).unwrap();

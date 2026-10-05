@@ -26,7 +26,7 @@ use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::{FitnessReport, InferResult, check_ir_fitness, check_ir_program};
+use chelis_types::{FitnessReport, check_ir_fitness, check_ir_program};
 
 const ACTIVE_CAST_TARGETS: [&str; 9] = [
     "f32", "f64", "bf16", "f16", "bool", "i8", "i16", "i32", "i64",
@@ -40,18 +40,6 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
     )
     .expect("macro expand")
     .into_exprs()
-}
-
-fn reject_messages(source: &str, label: &str) -> Vec<String> {
-    let deep = surf_to_deep(source);
-    let rep: InferResult = check_ir_program(&deep)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
-    assert!(
-        !rep.errors.is_empty(),
-        "{label}: a rejection must carry at least one diagnostic"
-    );
-    rep.errors.iter().map(|e| e.message.clone()).collect()
 }
 
 fn accept(source: &str, label: &str) {
@@ -113,11 +101,22 @@ fn every_active_canonical_t_prim_cast_target_is_accepted() {
 
 #[test]
 fn cast_to_unknown_type_name_is_rejected() {
-    // The exact chelis#756 repro: `cast(1.0, madeup)`.
-    let msgs = reject_messages("def f() -> f32 = cast(1.0, madeup)\n", "cast to madeup");
+    let source = "def f() -> f32 = cast(1.0, madeup)\n";
+    let errors = check_ir_program(&surf_to_deep(source))
+        .expect_err("unrecognized cast target must reject")
+        .errors;
     assert!(
-        msgs.iter().any(|m| m.contains("madeup")),
-        "expected a diagnostic naming the unknown cast target `madeup`, got: {msgs:?}"
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::CastNonTensor)
+                && error.message.contains("cast")
+                && error.message.contains("argument 2")
+                && error.message.contains("not a recognized primitive type")
+                && error.expected.as_deref() == Some("primitive dtype")
+                && error.got.as_deref() == Some("madeup")
+                && (error.span_offset == source.find("cast(")
+                    || error.span_offset == source.find("madeup"))
+        }),
+        "cast target must retain its reason, operand and source: {errors:?}"
     );
 }
 
@@ -138,11 +137,13 @@ fn unknown_bare_and_canonical_deep_cast_targets_are_rejected_loudly() {
         assert!(
             report.errors.iter().any(|error| {
                 matches!(error.kind, CheckErrorKind::CastNonTensor)
-                    && error
-                        .message
-                        .contains("cast target `madeup` is not a recognized primitive type")
+                    && error.message.contains("not a recognized primitive type")
+                    && error.message.contains("argument 2")
+                    && error.expected.as_deref() == Some("primitive dtype")
+                    && error.got.as_deref() == Some("madeup")
+                    && error.span_offset.is_some()
             }),
-            "unknown target `{target}` must produce the intended cast diagnostic, got {:?}",
+            "unknown target `{target}` must retain the reason, operand and location: {:?}",
             report.errors
         );
     }

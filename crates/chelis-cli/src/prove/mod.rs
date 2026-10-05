@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, Metadata};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 #[cfg(not(feature = "chelis-prove"))]
 use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
 use chelis_surf::ast::{Decl, Expr, Literal, Param, TensorPrecision, TypeExpr};
@@ -41,9 +42,10 @@ pub struct ProveOptions<'a> {
     pub beacon_budget: std::time::Duration,
     #[cfg_attr(not(feature = "chelis-prove"), allow(dead_code))]
     pub beacon_deadline: Option<std::time::Instant>,
-    /// Floor for invariant rejection-sampling acceptance rate before the
-    /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
-    /// classifier and preserves the legacy exhaustion => Error path.
+    /// Minimum acceptance rate when sampling inputs that must satisfy an
+    /// opaque type's invariant; below it the property is unsupported
+    /// (generator starvation). `0.0` disables the floor, and an exhausted
+    /// generator is then an error.
     #[allow(dead_code)]
     pub invariant_min_rate: f64,
     /// Explicit reef package root for import resolution.
@@ -231,7 +233,7 @@ fn compute_compiler_dependency_graph(
     path: &Path,
 ) -> Result<Option<chelis_reef::CompilerDependencyGraph>, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("ch") => chelis_reef::dependency_graph_for_file(path),
+        Some("ch") => chelis_reef::dependency_graph_for_file(path, &EMBEDDED_RUNTIME),
         Some("dp") => Ok(None),
         _ => Ok(None),
     }
@@ -521,6 +523,7 @@ fn prove_surf_file(
         fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    require_package_option_to_match_module_file(path, &parsed, options.package)?;
     let flat = flatten_module_decls(&parsed);
     let mut file_status = Status::Passed;
     // Default (no obligation engine) build: type-check the module up-front so a
@@ -560,8 +563,8 @@ fn prove_surf_file(
         let _ = (&flat, &parsed);
         let package_root = resolve_package_root(path, options.package);
         let linked_program = match &package_root {
-            Some(root) => chelis_reef::prepare_program_for_eval_file(path, root),
-            None => chelis_reef::prepare_program_for_file(path),
+            Some(root) => chelis_reef::prepare_program_for_eval_file(path, root, &EMBEDDED_RUNTIME),
+            None => chelis_reef::prepare_program_for_file(path, &EMBEDDED_RUNTIME),
         };
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {
@@ -1271,8 +1274,13 @@ fn eval_surf_sample(
         value: sample_block_expr(property, sample, precondition),
         span: chelis_deep::Span::new(0, 0),
     });
-    let source = chelis_surf::format::format_program(&source_decls);
-    eval_bool_with_bindings(SourceKind::Surf, source, root, sample_bindings(sample))
+    // The assembled declarations are checked and run as they are, never
+    // printed and parsed again (chelis#3129).
+    bool_property_root(chelis_compiler_api::compiler::eval_decls_selected(
+        &source_decls,
+        sample_bindings(sample),
+        &[root.to_string()],
+    ))
 }
 
 #[cfg(not(feature = "chelis-prove"))]
@@ -1319,15 +1327,23 @@ fn eval_bool_with_bindings(
     root: &str,
     bindings: BTreeMap<String, TensorValue>,
 ) -> Result<bool, String> {
-    let result = chelis_compiler_api::compiler::eval_selected(
+    bool_property_root(chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
             source_kind,
             source,
             bindings,
         },
         &[root.to_string()],
-    )
-    .map_err(|err| {
+    ))
+}
+
+fn bool_property_root(
+    result: Result<
+        chelis_compiler_api::schema::EvalResult,
+        chelis_compiler_api::compiler::CompilerError,
+    >,
+) -> Result<bool, String> {
+    let result = result.map_err(|err| {
         err.errors
             .iter()
             .map(|diag| diag.message.clone())
@@ -1816,6 +1832,7 @@ fn run_deep_obligations(
         tier: options.tier.to_string(),
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
+        runtime: &EMBEDDED_RUNTIME,
     };
     let outcomes = run_module_obligations(exprs, &sigs, &run_opts);
 
@@ -3047,6 +3064,38 @@ impl Lcg {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
     }
+}
+
+/// spec/02 §P2: `--package` names the package that a file with no `module`
+/// declaration is linked into. A file that declares a `module` belongs to the
+/// package its own location finds, so naming a different package for it is
+/// rejected rather than silently ignored.
+fn require_package_option_to_match_module_file(
+    path: &Path,
+    parsed: &[Decl],
+    explicit: Option<&Path>,
+) -> Result<(), String> {
+    let Some(explicit) = explicit else {
+        return Ok(());
+    };
+    if !matches!(parsed, [Decl::Module { .. }]) {
+        return Ok(());
+    }
+    let located = chelis_reef::find_package_root_for_input(path)?;
+    let named = chelis_reef::find_package_root_for_dir(explicit)?;
+    if located == named {
+        return Ok(());
+    }
+    let located = match &located {
+        Some(root) => format!("the reef package at `{}`", root.display()),
+        None => "no reef package".to_string(),
+    };
+    Err(format!(
+        "`{}` declares a `module`, so it belongs to {located} by its own location; \
+         `--package {}` links only files with no `module` declaration",
+        path.display(),
+        explicit.display(),
+    ))
 }
 
 /// Resolve the effective package root: explicit `--package` wins, otherwise

@@ -123,6 +123,7 @@ fn build_c_source(source: &str, name: &str) -> (TempDir, Vec<u8>) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

@@ -29,6 +29,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    "dropout",
     // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
     "key_from_seed",
     "split_key",
@@ -57,8 +58,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "relu",
     "sigmoid",
     "tanh",
+    "erf",
+    "erfc",
     "silu",
     "gelu",
+    "gelu_tanh",
+    "standard_normal_cdf",
     "softmax",
     "mean",
     "matmul",
@@ -151,10 +156,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
+    "clock_wall_read",
+    "clock_monotonic_read",
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
     // column accessors over List[Dict[string,string]].
-    // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
     "parse_csv",
     "to_csv",
     "csv_f64s",
@@ -238,6 +244,8 @@ pub enum BuiltinSiblingCaseId {
     MmapRead,
     MmapLen,
     ProcessRun,
+    ClockWallRead,
+    ClockMonotonicRead,
     ParseCsv,
     ToCsv,
     CsvF64s,
@@ -360,6 +368,8 @@ pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEqua
         | Case::MmapRead
         | Case::MmapLen
         | Case::ProcessRun
+        | Case::ClockWallRead
+        | Case::ClockMonotonicRead
         | Case::ParseCsv
         | Case::ToCsv
         | Case::CsvF64s
@@ -622,6 +632,8 @@ pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
         | Case::MmapRead
         | Case::MmapLen
         | Case::ProcessRun
+        | Case::ClockWallRead
+        | Case::ClockMonotonicRead
         | Case::ParseCsv
         | Case::ToCsv
         | Case::CsvF64s
@@ -800,27 +812,8 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
 ];
 
 const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
-    "add",
-    "mul",
-    "max_elem",
-    "neg",
-    "recip",
-    "exp",
-    "log",
-    "sin",
-    "tan",
-    "atan",
-    "sqrt",
-    "floor",
-    "ceil",
-    "round",
-    "uniform_like",
     "split_keys",
     "cmplt",
-    "sub",
-    "div",
-    "floor_div",
-    "trunc_div",
     "mod",
     "eq",
     "neq",
@@ -836,13 +829,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "and",
     "or",
     "not",
-    "relu",
-    "sigmoid",
-    "tanh",
-    "silu",
-    "gelu",
     "softmax",
-    "min_elem",
     "reduce_window_max",
     "reduce_window_min",
     "reduce_window_sum",
@@ -855,15 +842,9 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "print",
     "fail",
     "debug",
-    "test_assert_close_tensor",
-    "char_code",
-    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
-    "string_contains",
-    "string_starts_with",
-    "string_ends_with",
     "string_trim",
     "to_string",
     "to_int",
@@ -904,16 +885,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "to_list",
     "pad_sequences",
     "pad_sequences_to",
-    "read_file",
-    "write_file",
-    "read_lines",
-    "read_bytes",
-    "file_exists",
-    "list_dir",
-    "mmap_file",
-    "mmap_read",
-    "mmap_len",
-    "process_run",
     "round_to",
     "parse_csv",
     "to_csv",
@@ -938,7 +909,9 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "clamp",
     // Linearity, not a container operation: the explicit one-argument
     // consume of [05-OP-67], paired with the `copy` keyword. The list
-    // slice that once shared this name is `skip` ([05-OP-54]).
+    // slice that once shared this name is `skip` ([05-OP-54]). Its scheme
+    // states its type but not that it ends the operand's lifetime, so it is
+    // applicable only by name ([04-INF-9]).
     "drop",
 ];
 
@@ -1035,7 +1008,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "add",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1043,7 +1018,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "mul",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1051,7 +1028,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "sub",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1059,7 +1038,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "div",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1067,7 +1048,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "floor_div",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1075,7 +1058,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "trunc_div",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1083,7 +1068,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "max_elem",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1091,7 +1078,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "min_elem",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1099,7 +1088,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "neg",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1107,7 +1098,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "recip",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1115,7 +1108,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "exp",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1123,7 +1118,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "log",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1131,7 +1128,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "sin",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1139,7 +1138,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "sqrt",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1157,7 +1158,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "tan",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1165,7 +1168,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "atan",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1183,7 +1188,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "floor",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1191,7 +1198,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "ceil",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1199,7 +1208,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "round",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1207,7 +1218,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "relu",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1215,7 +1228,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "sigmoid",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1223,7 +1238,29 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "tanh",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "erf",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "erfc",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1231,7 +1268,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "silu",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1239,7 +1278,29 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "gelu",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gelu_tanh",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "standard_normal_cdf",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1247,9 +1308,23 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "uniform_like",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-37]: the keyed dropout draw. Its shape class keeps the
+    // `shape_class` default it had before it was declared here.
+    BuiltinDecl {
+        name: "dropout",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
@@ -1731,7 +1806,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "read_file",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadFile),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1739,7 +1816,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "write_file",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, WriteFile),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1747,7 +1826,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "read_lines",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadLines),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1755,7 +1836,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "read_bytes",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadBytes),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1763,7 +1846,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "file_exists",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, FileExists),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1771,7 +1856,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "list_dir",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ListDir),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1779,7 +1866,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "mmap_file",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapFile),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1787,7 +1876,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "mmap_read",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapRead),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1795,7 +1886,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "mmap_len",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapLen),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1803,7 +1896,31 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "process_run",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ProcessRun),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-75]: the host clock reads. Each takes no argument, so its exact
+    // monomorphic signature leaves nothing for a specialized rule to decide.
+    BuiltinDecl {
+        name: "clock_wall_read",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ClockWallRead),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the exact nullary signature fully determines this builtin type",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "clock_monotonic_read",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ClockMonotonicRead),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the exact nullary signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1816,7 +1933,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
+    // ─── Host-lane CSV I/O (chelis#903, HostOnly) ─────────
     BuiltinDecl {
         name: "parse_csv",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ParseCsv),
@@ -1901,7 +2018,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "char_code",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharCode),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1909,7 +2028,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "char_from_code",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharFromCode),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1941,7 +2062,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "string_contains",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringContains),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1949,7 +2072,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "string_starts_with",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringStartsWith),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1957,7 +2082,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "string_ends_with",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringEndsWith),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -2350,7 +2477,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "test_assert_close_tensor",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TestAssertCloseTensor),
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -2370,6 +2499,68 @@ pub const BUILTINS: &[BuiltinDecl] = &[
 /// Look up a builtin's declaration by name. Returns `None` for non-builtins.
 pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
     BUILTINS.iter().find(|b| b.name == name)
+}
+
+/// The effect a call to this builtin performs, if any. The effect checker
+/// charges it at every call and wherever the builtin is named as a value, as
+/// it charges an anonymous function that calls it, so an alias cannot shed
+/// it. A random draw is a pure function of its key ([05-RNG-1]): `dropout`
+/// and `uniform_like` perform none.
+pub fn builtin_call_effect(name: &str) -> Option<Effect> {
+    match name {
+        "print"
+        | "debug"
+        | "read_file"
+        | "write_file"
+        | "read_lines"
+        | "read_bytes"
+        | "file_exists"
+        | "list_dir"
+        | "mmap_file"
+        | "process_run"
+        | "clock_wall_read"
+        | "clock_monotonic_read" => Some(Effect::Io),
+        "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor" => {
+            Some(Effect::Test)
+        }
+        _ => None,
+    }
+}
+
+/// [04-INF-9]: a builtin is a function value exactly when its whole
+/// operation contract travels with the value. Either the reviewed
+/// declaration says the scheme states that contract completely
+/// (`GenericAccepted`), or the scheme carries the operation's checked
+/// operand/result relation: a collection or key relation (`constraints`)
+/// that sees every operand fact the direct checker reads, or a result-origin
+/// equation (`result_origin`, as `fold` and `scan` carry).
+/// Every other builtin owes a rule that only its direct application runs, so
+/// it is applicable only by name until its scheme carries that rule.
+/// The names `builtin_env` binds: every builtin a program can name. The
+/// value predicate fails closed on these, so a bound builtin without a
+/// [`BuiltinDecl`] is applicable only by name rather than admitted unclassified.
+pub fn builtin_env_names() -> &'static std::collections::BTreeSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        builtin_env()
+            .0
+            .sorted_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bool {
+    let relation_carried = !scheme.constraints.is_empty()
+        && scheme
+            .constraints
+            .iter()
+            .all(CollectionConstraint::transports_static_operand_rule);
+    matches!(decl.inference, InferenceDisposition::GenericAccepted { .. })
+        || relation_carried
+        || scheme.result_origin.is_some()
 }
 
 pub fn axis_argument_layout(name: &str) -> Option<AxisArgumentLayout> {
@@ -2426,11 +2617,54 @@ pub fn shape_class(name: &str) -> ShapeClass {
         "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
-        "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
-        | "min_elem" | "neg" | "recip" | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan"
-        | "atan" | "abs" | "floor" | "ceil" | "round" | "relu" | "sigmoid" | "tanh" | "silu"
-        | "gelu" | "not" | "clamp" | "uniform_like" | "where" | "eq" | "neq" | "lt" | "gt"
-        | "lte" | "gte" | "cmplt" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "and"
+        "add"
+        | "mul"
+        | "sub"
+        | "div"
+        | "floor_div"
+        | "trunc_div"
+        | "mod"
+        | "max_elem"
+        | "min_elem"
+        | "neg"
+        | "recip"
+        | "exp"
+        | "log"
+        | "sin"
+        | "sqrt"
+        | "cos"
+        | "tan"
+        | "atan"
+        | "abs"
+        | "floor"
+        | "ceil"
+        | "round"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "not"
+        | "clamp"
+        | "uniform_like"
+        | "where"
+        | "eq"
+        | "neq"
+        | "lt"
+        | "gt"
+        | "lte"
+        | "gte"
+        | "cmplt"
+        | "bitand"
+        | "bitor"
+        | "bitxor"
+        | "shl"
+        | "shr"
+        | "and"
         | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
@@ -2468,17 +2702,39 @@ pub fn shape_class(name: &str) -> ShapeClass {
 pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
     use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
     match name {
-        "mean" | "softmax" | "div" | "matmul" | "layer_norm" | "exp" | "log" | "sin" | "cos"
-        | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+        "mean"
+        | "softmax"
+        | "div"
+        | "matmul"
+        | "layer_norm"
+        | "exp"
+        | "log"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "atan"
+        | "sqrt"
+        | "relu"
+        | "sigmoid"
+        | "tanh"
+        | "erf"
+        | "erfc"
+        | "silu"
+        | "gelu"
+        | "gelu_tanh"
+        | "standard_normal_cdf"
+        | "recip"
         | "reduce_window_mean" => Some(ActiveFloat),
         // [05-OP-64], [05-OP-47] and truncating division.
-        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        "trunc_div" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
         // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
         // and the arithmetic rows of spec/04 section 5.4.
-        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "mod" | "abs" | "floor" | "ceil" | "round"
         | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
         | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
-        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min" => Some(ActiveNumeric),
+        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min"
+        // [05-OP-53]'s arithmetic domain, chelis#3044.
+        | "cumsum" | "sort" | "trace" | "clamp" => Some(ActiveNumeric),
         _ => None,
     }
 }
@@ -2767,24 +3023,26 @@ pub fn builtin_env() -> (Env, VarGen) {
     }
 
     fn tensor_with_bounds(name: &str, env: &mut Env, vg: &mut VarGen) {
-        let input = vg.fresh_tvar();
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let template = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         let scheme = Scheme {
             result_origin: None,
             constraints: vec![],
-            tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvars: vec![precision],
+            tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
-            rvars: vec![],
+            rvars: vec![rank],
             // [05-OP-8]: the key comes first and is consumed; the template
-            // is borrowed.
+            // is borrowed; `low` and `high` have the template's dtype `p`.
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::Key),
-                    borrowed(Type::Var(input)),
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::F32),
+                    borrowed(template.clone()),
+                    Type::Var(precision),
+                    Type::Var(precision),
                 ],
-                Box::new(Type::Var(input)),
+                Box::new(template),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2894,6 +3152,29 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    // [05-OP-47] and [05-OP-64] (chelis#3101): two read-only operands, each
+    // a scalar or a `&tensor[D, p]` (spec/05 section 1.3.1). The operands
+    // stay independent variables so the integer rule decides their
+    // agreement and names the cause of a refusal.
+    fn integer_binop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let lhs = vg.fresh_tvar();
+        let rhs = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            result_origin: None,
+            constraints: vec![],
+            tvars: vec![lhs, rhs, output],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(lhs)), borrowed(Type::Var(rhs))],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_triop(name: &str, env: &mut Env, vg: &mut VarGen) {
         let a = vg.fresh_tvar();
         let b = vg.fresh_tvar();
@@ -2923,7 +3204,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2963,7 +3244,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a, b, c]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -3087,7 +3368,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -3188,18 +3469,18 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    generic_binop("mod", &mut env, &mut vg);
+    integer_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
     cmplt_sig("lt", &mut env, &mut vg);
     cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
-    generic_binop("bitand", &mut env, &mut vg);
-    generic_binop("bitor", &mut env, &mut vg);
-    generic_binop("bitxor", &mut env, &mut vg);
-    generic_binop("shl", &mut env, &mut vg);
-    generic_binop("shr", &mut env, &mut vg);
+    integer_binop("bitand", &mut env, &mut vg);
+    integer_binop("bitor", &mut env, &mut vg);
+    integer_binop("bitxor", &mut env, &mut vg);
+    integer_binop("shl", &mut env, &mut vg);
+    integer_binop("shr", &mut env, &mut vg);
 
     logical_binop("and", &mut env, &mut vg);
     logical_binop("or", &mut env, &mut vg);
@@ -3213,8 +3494,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     // C-backend lowerings live in `chelis-compiler-api/src/runtime/host_ops.rs`
     // and `chelis-backend-c/src/host_emit.rs` respectively.
     tensor_unop("tanh", &mut env, &mut vg);
+    tensor_unop("erf", &mut env, &mut vg);
+    tensor_unop("erfc", &mut env, &mut vg);
     tensor_unop("silu", &mut env, &mut vg);
     tensor_unop("gelu", &mut env, &mut vg);
+    tensor_unop("gelu_tanh", &mut env, &mut vg);
+    tensor_unop("standard_normal_cdf", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
@@ -3590,6 +3875,17 @@ pub fn builtin_env() -> (Env, VarGen) {
             vec![string(), list_of(string())],
             Type::Tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
         ),
+        // [05-OP-75]: `(seconds, nanoseconds)` from one host clock reading.
+        (
+            "clock_wall_read",
+            vec![],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
+        ),
+        (
+            "clock_monotonic_read",
+            vec![],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
+        ),
     ] {
         env.bind(
             name.to_string(),
@@ -3852,8 +4148,12 @@ mod tests {
             "relu",
             "sigmoid",
             "tanh",
+            "erf",
+            "erfc",
             "silu",
             "gelu",
+            "gelu_tanh",
+            "standard_normal_cdf",
             "not",
             "clamp",
             "uniform_like",
@@ -3940,7 +4240,7 @@ mod tests {
     /// block") and promises to list every name verbatim, so any drift in
     /// either direction is a documentation bug: a builtin missing from the
     /// doc (an op that silently fell out of the inventory) or a doc entry
-    /// that is not in the array (`const`/`load`/`dropout` live outside it by
+    /// that is not in the array (`const`/`load` live outside it by
     /// design — see the §4 preamble — and must not appear in the block).
     /// `include_str!` makes the doc a compile-time dependency of this test,
     /// so a moved or deleted file fails loudly instead of skipping.

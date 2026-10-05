@@ -65,6 +65,7 @@ fn c_result(dir: &TempDir, stem: &str, source: &str) -> LaneResult {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),
             "--target",
@@ -187,7 +188,9 @@ fn an_agreeing_same_shape_result_claim_executes_exactly() {
 
 /// The elementwise operation has no result until its positive-rank operands
 /// agree. Their independent shape guard therefore wins before the declared
-/// result claim; #1948 must not mask it with an `add` extent trap.
+/// result claim; #1948 must not mask it with the claim's `add` extent trap.
+/// Both are `Domain` traps in `add` (spec/04-type-system.md section 4.7), so
+/// the context line is what tells them apart.
 #[test]
 fn runtime_operand_disagreement_precedes_the_result_claim() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -199,19 +202,15 @@ fn runtime_operand_disagreement_precedes_the_result_claim() {
                   )\n";
     for (lane, result) in both_lanes(&dir, "operand_disagreement", source) {
         assert!(!result.success, "{lane}: shape disagreement must fail");
-        let expected = match lane {
-            "eval" => "tensor shapes must match for elementwise op, got [3] vs [2]",
-            "c" => "elementwise operand shape mismatch",
-            _ => unreachable!(),
-        };
+        let expected = "add operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+                        numeric trap: domain in add at i64";
         assert!(
             result.text.contains(expected),
             "{lane}: expected the operand guard `{expected}`: {}",
             result.text
         );
         assert!(
-            !result.text.contains("extent `2`")
-                && !result.text.contains("numeric trap: domain in add at i64"),
+            !result.text.contains("extent `2`"),
             "{lane}: the later result claim must not pre-empt operand agreement: {}",
             result.text
         );

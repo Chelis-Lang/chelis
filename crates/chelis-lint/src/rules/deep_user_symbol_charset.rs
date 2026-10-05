@@ -50,7 +50,6 @@ pub const CLOSED_TAGS: &[&str] = &[
     "lit",
     "record",
     "access",
-    "pipe",
     "block",
     "tuple",
     "tuple-get",

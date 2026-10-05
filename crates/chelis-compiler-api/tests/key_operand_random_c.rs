@@ -3,6 +3,7 @@
 //! and [05-OP-8] from the spec text, and against the DAG evaluator.
 mod ownership_support;
 
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
@@ -107,8 +108,8 @@ fn storage_bits(prim: Prim, value: f64) -> u64 {
     match prim {
         Prim::F64 => value.to_bits(),
         Prim::F32 => u64::from((value as f32).to_bits()),
-        Prim::F16 => u64::from(half::f16::from_f64(value).to_bits()),
-        Prim::Bf16 => u64::from(half::bf16::from_f64(value).to_bits()),
+        Prim::F16 => u64::from(storage_reference(value.to_bits(), 64, Output::F16)),
+        Prim::Bf16 => u64::from(storage_reference(value.to_bits(), 64, Output::Bf16)),
         other => panic!("{other:?}"),
     }
 }
@@ -219,8 +220,8 @@ fn seeded_runtime_controls_match_the_spec_in_c_and_eval() {
             let decl = dag.declare("test");
             let x = load(&mut dag, decl, "x", tensor(prim, len));
             let rate = load(&mut dag, decl, "rate", scalar(prim));
-            let low = load(&mut dag, decl, "low", scalar(Prim::F32));
-            let high = load(&mut dag, decl, "high", scalar(Prim::F32));
+            let low = load(&mut dag, decl, "low", scalar(prim));
+            let high = load(&mut dag, decl, "high", scalar(prim));
             let seed_node = dag.add_node(
                 decl,
                 RiscOp::synth_const(Prim::Int64, seed as f64),
@@ -254,8 +255,8 @@ fn seeded_runtime_controls_match_the_spec_in_c_and_eval() {
             let inputs = [
                 ("x", prim, vec![len], data),
                 ("rate", prim, vec![], vec![0.3125]),
-                ("low", Prim::F32, vec![], vec![-2.5]),
-                ("high", Prim::F32, vec![], vec![0.75]),
+                ("low", prim, vec![], vec![-2.5]),
+                ("high", prim, vec![], vec![0.75]),
             ];
             let seed_bits = seed as u64;
             let expected = vec![
@@ -291,8 +292,8 @@ fn native_replay_and_bound_adjoints_match_eval() {
         let x = load(&mut dag, decl, "x", tensor(prim, len));
         let w = load(&mut dag, decl, "w", tensor(prim, len));
         let rate = load(&mut dag, decl, "rate", scalar(prim));
-        let low = load(&mut dag, decl, "low", scalar(Prim::F32));
-        let high = load(&mut dag, decl, "high", scalar(Prim::F32));
+        let low = load(&mut dag, decl, "low", scalar(prim));
+        let high = load(&mut dag, decl, "high", scalar(prim));
         let seed = dag.add_node(
             decl,
             RiscOp::synth_const(Prim::Int64, 5.0),
@@ -370,8 +371,8 @@ fn native_replay_and_bound_adjoints_match_eval() {
                 (0..len).map(|i| (i as f64 - 3.0) / 2.0).collect(),
             ),
             ("rate", prim, vec![], vec![0.25]),
-            ("low", Prim::F32, vec![], vec![-1.0]),
-            ("high", Prim::F32, vec![], vec![3.5]),
+            ("low", prim, vec![], vec![-1.0]),
+            ("high", prim, vec![], vec![3.5]),
         ];
         let eval = run_eval(&backward, &inputs);
         assert_eq!(run_c(backward, &inputs), eval, "{prim:?}");

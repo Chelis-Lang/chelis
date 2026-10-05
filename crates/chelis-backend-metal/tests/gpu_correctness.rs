@@ -1,4 +1,4 @@
-//! GPU execution correctness tests for the Metal backend (Phase M6).
+//! GPU execution correctness tests for the Metal backend.
 //!
 //! These require an Apple Silicon Mac with a usable Metal device. They
 //! are `#[ignore]` by default — run with:
@@ -7,15 +7,18 @@
 //! cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
 //! ```
 //!
-//! Manual gate per CLAUDE.md "One Acceptance Oracle Per Phase" + the
-//! Phase M section in spec/08-backends.md. Not part of default CI; the M3
-//! macOS-smoke step gates compile+link only because GitHub's
+//! Manual gate (`docs/manual_gates.md`) for the Metal agreement contract in
+//! spec/08-backends.md §4.6. Not part of default CI; the macOS smoke step gates compile+link only because GitHub's
 //! macos-latest VMs may return null from `MTLCreateSystemDefaultDevice`.
 //!
 //! Numerical tolerance: MSL's default `exp`/`log`/`sqrt`/`sin` are fast-math
 //! variants. We use a Metal-specific tolerance that's wider than HIP's
 //! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
 //! the per-test relaxations.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
@@ -589,51 +592,9 @@ fn m6_unary_neg_matches_evaluator() {
 
 #[test]
 #[ignore]
-fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(4),
-        None,
-    );
-    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
-    dag.add_root(e);
-
-    let inputs = vec![TestInput::new("a", &[4], &[0.0, 0.5, 1.0, 1.5])];
-    let actual = compile_and_run_single_output(&dag, "exp_test", &inputs);
-    let expected = evaluator_single_output(&dag, &inputs);
-    // MSL `exp` is fast-math — widen relative tolerance for transcendentals.
-    assert_close(&actual, &expected, 1e-3, 1e-3, "unary exp (fastmath)");
-}
-
-#[test]
-#[ignore]
-fn m6_unary_sqrt_matches_evaluator() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(4),
-        None,
-    );
-    let s = dag.add_node(decl, RiscOp::Sqrt, vec![a], vec_f32(4), None);
-    dag.add_root(s);
-
-    let inputs = vec![TestInput::new("a", &[4], &[1.0, 4.0, 9.0, 16.0])];
-    let actual = compile_and_run_single_output(&dag, "sqrt_test", &inputs);
-    let expected = evaluator_single_output(&dag, &inputs);
-    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "unary sqrt");
-}
-
-#[test]
-#[ignore]
 fn m6_chained_elementwise_matches_evaluator() {
-    // exp(add(mul(a, b), c)) — three kernels, single output.
+    // abs(add(mul(a, b), c)) — three kernels, single output; the
+    // transcendentals and sqrt are fenced on device lanes (chelis#2957).
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -659,7 +620,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     );
     let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Abs, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -669,8 +630,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     ];
     let actual = compile_and_run_single_output(&dag, "chain_test", &inputs);
     let expected = evaluator_single_output(&dag, &inputs);
-    // exp at the tail; widen for fastmath.
-    assert_close(&actual, &expected, 1e-3, 1e-3, "chain exp(add(mul, c))");
+    assert_close(&actual, &expected, 1e-3, 1e-3, "chain abs(add(mul, c))");
 }
 
 #[test]
@@ -948,7 +908,7 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
         let node = dag.node_mut(neg).unwrap();
         node.merged_spans = vec!["op.merged_b".into(), "op.merged_a".into()];
     }
-    let exp = dag.add_node(decl, RiscOp::Exp, vec![neg], vec_f32(8), None);
+    let exp = dag.add_node(decl, RiscOp::Abs, vec![neg], vec_f32(8), None);
     {
         // merged_spans only (no canonical) — the defensive case the
         // emitter must still handle correctly.
@@ -968,13 +928,12 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
     // comments. compile_and_run_single_output asserts this internally.
     let actual = compile_and_run_single_output(&dag, "span_test", &inputs);
     let expected = evaluator_single_output(&dag, &inputs);
-    // Tail op is exp — fastmath tolerance.
     assert_close(
         &actual,
         &expected,
         1e-3,
         1e-3,
-        "span-attributed exp(neg(a))",
+        "span-attributed abs(neg(a))",
     );
 
     // Structural assertion: regenerate the source and verify the spans
@@ -1181,7 +1140,7 @@ int main(void) {{
 // `-framework Metal -framework Foundation`, runs it on the Metal device, and
 // asserts agreement with the `chelis-ir` evaluator within the Metal f32
 // tolerance. `#[ignore]` because they require an Apple Silicon Mac with a
-// usable Metal device (see `spec/08-backends.md` §M6 + §4).
+// usable Metal device (see `spec/08-backends.md` §4.6).
 // ===========================================================================
 
 fn mat_f32(r: usize, c: usize) -> TensorType {

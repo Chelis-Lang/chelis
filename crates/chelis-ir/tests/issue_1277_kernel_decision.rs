@@ -102,7 +102,7 @@ fn a_runtime_pad_fill_is_host_before_lowering() {
 #[test]
 fn a_host_only_builtin_inside_the_body_is_host_before_lowering() {
     let src = "def f(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-               z = [7i64]\n  m = len(z)\n  if (m > 0i64) then x else x\n}\n";
+               z: List[i64] = [7i64]\n  m = len(z)\n  if (m > 0i64) then x else x\n}\n";
     assert_eq!(decision(src, "f"), Ok(false));
 }
 

@@ -24,6 +24,8 @@ CLAUSES = {
     14: ("canonical balanced tree", "Integer overflow is checked at every multiplication", "reverse-mode"),
     15: ("`i64` indices", "lowest axis index containing NaN", "`grad` rejects it"),
     16: ("exact-comparison", "non-differentiability", "lowest axis index whose stored value is minimal"),
+    23: ("truncated toward zero, then the resulting mathematical integer is clamped", "NaN traps `Domain`", "It never traps `Overflow`", "`grad` rejects it"),
+    24: ("congruent to the exact stored source modulo `2^target_width`", "It never traps for overflow", "`grad` rejects it"),
     25: ("reachable elements are recursively admitted", "ADTs, functions, resource handles, and deferred values are type errors", "non-differentiable"),
     26: ("exactly two `bool`", "not short-circuiting", "no accumulator", "`grad` rejects it"),
     27: ("evaluation-order, rejection", "either operand is true"),
@@ -76,6 +78,9 @@ CLAUSES = {
          "the new axis last"),
     72: ("consumes the key `k`", "`derive(derive(k, 2), n)`", "negative ones included, is valid",
          "with no broadcasting"),
+    75: ("Both halves come from one host reading", "`nanoseconds` lies in `0..999999999`",
+         "`seconds` lies in `-377705030401..253402214400`", "never runs backwards",
+         "`<operation>: io: <detail>`", "No default, zero, clamped, or wrapped reading"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring
@@ -103,12 +108,14 @@ CASE_CLAUSES = {
 CALLABLE_CLAUSES = {
     operation: clause
     for operations, clause in (
-        (("abs", "cos", "exp", "log", "neg", "round", "sqrt"),
+        (("abs", "cos", "erf", "erfc", "exp", "log", "neg", "recip", "round", "sqrt"),
          "`neg(x)`, `recip(x)`, `exp(x)`, `log(x)`"),
         (("add", "div", "mul"), "`add(x,y)`, `mul(x,y)`, `div(x,y)`"),
         (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
         (("clamp", "cumsum", "diagonal", "sort", "split", "trace", "where"),
          "`where(condition,a,b)` uses a bool condition and same-shaped same-dtype branches"),
+        (("clock_monotonic_read", "clock_wall_read"),
+         "`clock_wall_read()->(i64,i64)!{IO}` and"),
         (("cmplt",), "`comparison(left, right) -> result` governs exactly the seven language identities"),
         (("count",), "`count(x, axes...) -> result` admits exactly a `bool` tensor operand"),
         (("dict_get", "dict_insert", "dict_merge", "dict_remove"),
@@ -128,6 +135,8 @@ CALLABLE_CLAUSES = {
         (("reduce_window_sum", "reduce_window_mean", "reduce_window_max", "reduce_window_min"),
          "`window_reduction(arguments...) -> result` governs exactly"),
         (("relu",), "`relu(x) -> result` admits every active float dtype"),
+        (("standard_normal_cdf",),
+         "`gelu_tanh(x)`, and `standard_normal_cdf(x)` preserve one float scalar or tensor's shape and dtype"),
         (("shape",), "The runtime extent read (`shape(x, axis)`; C ABI"),
         (("sub",), "`sub(left, right) -> result` admits two values"),
         (("sum",), "`sum(x, axes..., accumulator = default(p)) -> result` admits"),

@@ -110,8 +110,10 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
         let PointLocation::Point { offset: reported } =
             error.span.as_ref().expect("reserved dtype location");
         assert_eq!(*reported, offset, "{error:?}");
-        let expected_span = format!("source:{offset}..{}", offset + name.len());
-        assert_eq!(error.span_id.as_deref(), Some(expected_span.as_str()));
+        assert_eq!(
+            error.span_id, None,
+            "type site has no authored external ID: {error:?}"
+        );
         assert!(error.message.contains(name), "{error:?}");
     }
 }
@@ -702,8 +704,7 @@ fn a_rejected_tensor_precision_keeps_the_independent_shape_error() {
         let PointLocation::Point { offset: reported } =
             reserved[0].span.as_ref().expect("reserved dtype location");
         assert_eq!(*reported, offset, "{name}: {reserved:?}");
-        let expected_span = format!("source:{offset}..{}", offset + name.len());
-        assert_eq!(reserved[0].span_id.as_deref(), Some(expected_span.as_str()));
+        assert_eq!(reserved[0].span_id, None, "{name}: {reserved:?}");
         assert!(reserved[0].message.contains(name), "{name}: {reserved:?}");
 
         let dimensions: Vec<_> = report
@@ -783,7 +784,7 @@ fn a_failed_signature_does_not_hide_a_cli_body_error() {
     assert_eq!(report.errors.len(), 2, "{report:?}");
     assert!(report.errors[0].message.contains("f8e4m3"), "{report:?}");
     assert!(report.errors[1].message.contains("f8e5m2"), "{report:?}");
-    assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+    assert_eq!(report.errors[0].span_id, None);
     let start = source.find("cast(").expect("cast site");
     let PointLocation::Point { offset } = report.errors[1]
         .span
@@ -809,7 +810,7 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cli_cast_error() {
             .all(|error| error.message.contains("f8e4m3")),
         "{report:?}"
     );
-    assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+    assert_eq!(report.errors[0].span_id, None);
     let start = source.find("cast(").expect("cast site");
     let PointLocation::Point { offset } = report.errors[1]
         .span

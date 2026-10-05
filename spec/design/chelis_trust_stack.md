@@ -28,26 +28,26 @@ The Chelis type system statically checks properties that matter for numerical co
 | Differentiability | Wrong gradients from non-differentiable operations, in-place mutation inside grad | `grad(f)` only compiles if f is pure and differentiable |
 | Reproducibility | Unseeded Monte Carlo, non-deterministic simulation | `chelis manifest --check` verifies every random draw's key derives from a `key_from_seed` root |
 
-The shipped `Effect` enum has four variants: `Accum`, `Io`, `Test`, and `Resource(String)`. Randomness is not an effect: `dropout`, `uniform_like`, and the stdlib random helpers take an explicit `key` ([05-RNG-1]). `Accum` is reserved as an internal design hook for backward-pass accumulation (not yet user-facing). `Io` covers print/debug, filesystem builtins, and `process_run` (`spec/04-type-system.md` §7.1, [05-HOST-2], [05-HOST-4]); it does not cover network access. `process_run` is implemented for evaluation today, while its compiled host parity remains outstanding under chelis#1297. `Test` is the in-language test runner's effect. `Resource(String)` carries device-resource boundaries (`gpu:0`, `cpu`) and is validated by `chelis build --target {c,hip}` at the build boundary. The proposed finer taxonomy lives in `effect_taxonomy_expansion.md`.
+The shipped `Effect` enum has four variants: `Accum`, `Io`, `Test`, and `Resource(String)`. Randomness is not an effect: `dropout`, `uniform_like`, and the stdlib random helpers take an explicit `key` ([05-RNG-1]). `Accum` is reserved as an internal design hook for backward-pass accumulation (not yet user-facing). `Io` covers print/debug, filesystem builtins, `process_run`, and the clock reads `clock_wall_read` and `clock_monotonic_read` (`spec/04-type-system.md` §7.1, [05-HOST-2], [05-HOST-4], [05-OP-75]); it does not cover network access. `process_run` runs under evaluation and in compiled C through one runtime definition. `Test` is the in-language test runner's effect. `Resource(String)` carries device-resource boundaries (`gpu:0`, `cpu`) and is validated by `chelis build --target {c,hip}` at the build boundary. The proposed finer taxonomy lives in `effect_taxonomy_expansion.md`.
 
 #### Planned expansion
 
-The current taxonomy is bounded but does not yet distinguish network or filesystem access as separate effect variants. The existing filesystem operations and `process_run` carry `Io`; an evaluator-internal typed policy boundary can refuse them during invariant revalidation without changing language-visible effects or weakening [05-HOST-2]'s compiled host requirement. The expansion in `effect_taxonomy_expansion.md` is bounded to four items:
+The current taxonomy is bounded but does not yet distinguish network or filesystem access as separate effect variants. The existing filesystem operations, `process_run`, and the clock reads carry `Io`; an evaluator-internal typed policy boundary can refuse them during invariant revalidation without changing language-visible effects or weakening [05-HOST-2]'s compiled host requirement. The expansion in `effect_taxonomy_expansion.md` is bounded to four items:
 
 - **Item 1** — add `Network` and `Filesystem` variants to the `Effect` enum and annotate every `Std.Io` and shell function that touches them.
 - **Item 2** — ship `chelis audit --effects <package.chb>` to surface the union of effects across a package's public API; same data exposed via Tide HTTP and as an MCP `chelis_audit` tool.
 - **Item 3** — `chelis run --refuse Network,Filesystem` for signature-based pre-flight refusal of binaries whose declared effects exceed an operator's allowlist (not runtime sandboxing; the binary is still trusted to honestly describe itself).
 - **Item 4** — wire effect aggregation into `chelis reef install` so the install path can `--print-effects` and `--refuse` at the package boundary.
 
-A distinct subprocess *effect variant* is deferred; today's evaluator implements `process_run` under `Io`, and [05-HOST-2] also requires compiled host execution (chelis#1297). Signing of artifacts is a separate concern tracked but not in the bounded taxonomy expansion.
+A distinct subprocess *effect variant* is deferred; `process_run` runs under `Io` in every execution mode ([05-HOST-2]). Signing of artifacts is a separate concern tracked but not in the bounded taxonomy expansion.
 
 These guarantee that a program is internally consistent. They do NOT guarantee it computes the right answer. A program can be dimension-safe, effect-correct, linear, and differentiable while implementing the wrong formula entirely.
 
-### Level 2 -- Executable Properties as Spec (V1 shipped, core value prop)
+### Level 2 -- Executable Properties as Spec (V1 shipped)
 
 The user writes executable Chelis functions that define what "correct" means in their domain. These properties ARE the spec. The toolchain verifies the generated code against them empirically on random inputs.
 
-This is the capability that addresses the customer's concern directly: "I can't define a spec and ensure it's actually in the generated code." The answer: "You define the spec as executable properties. We verify the code satisfies them."
+This addresses a central concern about generated code: how an author states a spec and ensures the generated code implements it. The author states the spec as executable properties, and `chelis prove` checks that the code satisfies them.
 
 **Properties are Chelis functions that return bool:**
 
@@ -85,7 +85,7 @@ This is the capability that addresses the customer's concern directly: "I can't 
 
 The last pattern -- `matches_textbook` -- is the highest-value property type. The user (or their quant) writes a 5-line direct transcription of the formula from a textbook. It's obviously correct by inspection. The AI generates the optimized `price` function (vectorized, fused, GPU-dispatched). The toolchain runs both on deterministic samples from the property binders and verifies they agree.
 
-**The customer doesn't review the generated code. They review the properties.** Properties say what correct means. If the properties are right and the code satisfies them, the code is right. If the AI generates code that violates a property, it doesn't ship.
+**The reviewer reads the properties, not the generated code.** Properties say what correct means. If the properties are right and the code satisfies them, the code is right. If the AI generates code that violates a property, it doesn't ship.
 
 **Three property categories:**
 
@@ -149,11 +149,11 @@ The convention is a hard rule: properties are co-located with the implementation
 
 The "spec correspondence" property category requires a reference implementation to compare against. For standard domain models, the user does not write the reference — the domain shell provides it. Domain shells ship a `references/` directory alongside `properties/`, containing simple, obviously-correct implementations of standard models (Black-Scholes, Heston, Vasicek for finance; standard control laws for aerospace; etc.).
 
-The customer writes:
+The user writes:
 - Properties (declarative invariants and reference-correspondence checks)
 - References for proprietary models that don't have a textbook formula
 
-The customer does NOT write:
+The user does NOT write:
 - References for standard models (provided by the shell)
 - The optimized implementations themselves (these are AI-generated or human-written, verified against references)
 
@@ -195,7 +195,7 @@ Not currently designed. Recorded as a future shell (Hydrostatic) in the ecosyste
 
 ---
 
-## How This Answers the Customer's Concern
+## Questions the Trust Stack Answers
 
 **"How do I know the AI-generated code does what I asked?"**
 
@@ -211,9 +211,9 @@ The spec is executable Chelis code. It runs. It produces pass/fail results. It's
 
 **"What if the AI writes wrong properties too?"**
 
-Properties are much simpler than implementations. "Price is positive" is a one-line function. The customer can verify it by reading one line. The implementation of Black-Scholes is 50 lines of optimized tensor code. The failure mode where the AI writes wrong properties AND the properties look correct to the customer is much narrower than the failure mode where the AI writes a wrong implementation.
+Properties are much simpler than implementations. "Price is positive" is a one-line function. A reviewer can verify it by reading one line. The implementation of Black-Scholes is 50 lines of optimized tensor code. The failure mode where the AI writes wrong properties AND the properties look correct to the reviewer is much narrower than the failure mode where the AI writes a wrong implementation.
 
-For the strongest guarantee, the customer writes the properties themselves. They don't need to understand the implementation -- they need to understand their own domain well enough to state invariants. "Put-call parity holds" is something every quant knows. The AI's job is to produce code that satisfies the quant's stated invariants, not to invent the invariants.
+For the strongest guarantee, the user writes the properties themselves. They don't need to understand the implementation -- they need to understand their own domain well enough to state invariants. "Put-call parity holds" is something every quant knows. The AI's job is to produce code that satisfies the quant's stated invariants, not to invent the invariants.
 
 ---
 
@@ -232,8 +232,6 @@ Scope of v0.1.0: the PURE in-fragment surface (tensor/scalar ops, lambda, let, i
 **Phase 5g (trusted annotations).** `@convex`, `@lipschitz` start as trusted, evolve toward verified as Hydrostatic (abstract interpretation) matures. No change to the current plan -- this document extends the vision.
 
 **Octant.** LaTeX-to-Deep provenance gives formula traceability. Combined with `@property matches_textbook forall(...)`, the trust chain is: LaTeX formula (human-verified) -> compiled Deep (provenance-linked) -> optimized code (property-verified against the formula). Every link in the chain is machine-checkable, and the chain is shipped end-to-end. Octant emits span-attributed Deep + sidecar `.spans.json`; the chelis-side preservation of those spans through IR lowering, transformation passes, and backend codegen lands per `chelis_span_survival.md` (phases S0-S6, all shipped). Both the DAG-routed path (compute-heavy tensor kernels, §2.4) and the host-routed path (pure-scalar / control-flow / scaffolding, §2.4 host-path rules + §2.4.2) preserve spans, and the post-S6 canary in §4 demonstrably runs Black-Scholes scalar form end-to-end: LaTeX byte range -> Deep node -> IR / HostExpr node -> emitted `// span: <id>` comment in the generated C source line.
-
-**CProof.** The commercial pitch incorporates the trust stack directly: "Your quants write pricing models. AI generates optimized code. The compiler guarantees structural soundness. Your quants write domain properties. The toolchain verifies the code satisfies them. You deploy with confidence."
 
 ---
 
@@ -281,13 +279,13 @@ This section keeps future readers from claiming more than is built. Each bullet 
   required by [05-HOST-2] and tracked separately by chelis#1297. Compiled
   Chelis programs cannot call arbitrary C through an FFI or route around the
   type system through string-to-code conversion.
-- **Effect taxonomy is narrower than the broader trust pitch suggests.**
+- **Effect taxonomy is narrower than broader trust claims suggest.**
   `Network` and `Filesystem` are not yet distinct effect variants: filesystem
   builtins carry `Io`, while network access is not tracked. The bounded plan
   in `effect_taxonomy_expansion.md` closes that gap; claims that Chelis tracks
   network access at compile time remain roadmap, not shipped.
 
-These limits are stable: each will move from "limit" to "shipped" only when a corresponding item lands and produces a demo-able CLI command. They are NOT the same as future-product aspirations; they are specifically the gap between what is sometimes attributed to the stack and what the stack actually demonstrates today.
+These limits are stable: each will move from "limit" to "shipped" only when a corresponding item lands and produces a demo-able CLI command. They are NOT the same as future aspirations; they are specifically the gap between what is sometimes attributed to the stack and what the stack actually demonstrates today.
 
 ## Shells and Tools Affected
 

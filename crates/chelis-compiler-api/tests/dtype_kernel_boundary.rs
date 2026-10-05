@@ -118,3 +118,45 @@ fn host_reductions_can_only_plan_groups_and_call_typed_kernels() {
         );
     }
 }
+
+/// The body of the host function `name`, up to the next item.
+fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("missing `fn {name}(`"));
+    let rest = &source[start + 3..];
+    let end = rest
+        .find("\nfn ")
+        .into_iter()
+        .chain(rest.find("\npub(super) fn "))
+        .min();
+    &rest[..end.unwrap_or(rest.len())]
+}
+
+/// chelis#2971 and chelis#2972: softmax, cumsum, clamp and scatter compute at
+/// the declared dtype's arithmetic width, so no binary64 funnel is reachable
+/// from them ([05-OP-33], [05-OP-48]).
+#[test]
+fn width_preserving_host_operations_cannot_reintroduce_a_binary64_funnel() {
+    let source = include_str!("../src/runtime/host_ops.rs");
+    for name in [
+        "tensor_softmax_host",
+        "tensor_cumsum_value",
+        "tensor_clamp_value",
+        "tensor_scatter_value",
+    ] {
+        let body = function_body(source, name);
+        for forbidden in [
+            ".to_f64_lossy_vec()",
+            "element_f64_lossy",
+            "as_f64_lossy",
+            "from_wide(",
+            "from_wide_int(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "`{name}` must not use `{forbidden}`: it computes at the declared width"
+            );
+        }
+    }
+}

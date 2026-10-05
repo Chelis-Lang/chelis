@@ -11,10 +11,10 @@
 //! dynamically bound IR (R3, R4).
 //!
 //! Every row here reaches the checker through the CLI, so what it pins is the
-//! command's exit status, score, and error kinds. The diagnostic texts and the
-//! `check_typed_program` ingress belong to
-//! `chelis-types/tests/issue_668_rank_agreement_is_unification.rs`, which is
-//! the completion oracle.
+//! command's exit status, score, and error kinds; the proven positive-rank
+//! mismatch additionally pins its directional ranks and call location. The
+//! diagnostic texts and `check_typed_program` ingress belong to
+//! `chelis-types/tests/issue_668_rank_agreement_is_unification.rs`.
 //!
 //! # Evidentiary status
 //!
@@ -95,7 +95,8 @@ fn rank_divergent_source(rhs: &str) -> String {
 
 #[test]
 fn provable_positive_rank_mismatch_is_a_dimension_error() {
-    let (status, report) = check(&rank_divergent_source("add(s, e)"));
+    let source = rank_divergent_source("add(s, e)");
+    let (status, report) = check(&source);
     assert!(!status.success(), "rank mismatch must fail check: {report}");
     assert!(
         report["score"].as_f64().is_some_and(|score| score < 1.0),
@@ -105,18 +106,9 @@ fn provable_positive_rank_mismatch_is_a_dimension_error() {
     assert!(
         errors.iter().any(|error| {
             error["kind"] == "DimensionMismatch"
-                && error["message"].as_str().is_some_and(|message| {
-                    // chelis#668's subject is that a PROVABLE rank mismatch is a
-                    // dimension error rather than a soft score. Since chelis#1277
-                    // fixed `insert`'s rank at the call, the operand's rank is
-                    // known before the elementwise op, so unification reports the
-                    // mismatch there. The disjunction survives the deletion of the
-                    // identity-rank validator, whose phrasing the first arm
-                    // matched: `spec/04` \u{00a7}4.7 asks for the earliest proof, not a
-                    // particular phrasing.
-                    (message.contains("elementwise") && message.contains("rank"))
-                        || message.contains("tensor rank mismatch")
-                })
+                && error["expected"] == "rank-1 tensor"
+                && error["got"] == "rank-2 tensor"
+                && error["span"]["offset"] == source.find("add(s, e)").unwrap()
         }),
         "expected a located elementwise rank diagnostic: {errors:#?}"
     );
@@ -579,6 +571,7 @@ fn build_link_run(dir: &tempfile::TempDir, stem: &str, source: &str) -> (bool, S
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),
             "--target",

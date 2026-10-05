@@ -701,7 +701,8 @@ fn census_host_expr<'a>(
         ConcreteHostExprKind::ResultClaimScope { body, .. } => {
             census_host_expr(body, helpers, unit, sites)?;
         }
-        ConcreteHostExprKind::FormalIngress { value, .. } => {
+        ConcreteHostExprKind::FormalIngress { value, .. }
+        | ConcreteHostExprKind::ExtentSites { value, .. } => {
             census_host_expr(value, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::Int(_)

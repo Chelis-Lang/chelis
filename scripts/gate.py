@@ -49,13 +49,13 @@ uncommitted work). The derived crate list is always printed so nothing is
 silently skipped.
 
 `--fast` is the pre-push gate, run before every push. It fixes in place
-(`regen_all.py --tier 0`, plus `--tier 1` when a chelis-std path changed, then
-`cargo fmt --all`), then runs `chelis lint --check .`, `cargo clippy -p <crate>
---tests -- -D warnings` for each changed crate, one nextest run over the drift
-tripwires, and, when a chelis-std path changed, the bundle's self-consistency
-test. Every writer runs before every check. It exits non-zero for any failing
-stage (fmt, regeneration, lint, per-crate clippy, the tripwire run, or the
-std-bundle self-test), never for a file it fixed, and it
+(`regen_all.py --tier 0`, then `cargo fmt --all`), then runs `chelis lint
+--check .`, the std-bundle tracking guard, `cargo clippy -p <crate>
+--all-targets -- -D warnings` for each changed crate, one nextest run over the drift tripwires,
+and, when a chelis-std path changed, the bundle crate's own tests. Every writer
+runs before every check. It exits non-zero for any failing stage (fmt,
+regeneration, lint, the tracking guard, per-crate clippy, the tripwire run, or
+the bundle tests), never for a file it fixed, and it
 prints every file the run changed (content hashes of the porcelain set before
 and after, so a file that was already dirty and that fmt changed further is
 still reported). It never runs the workspace clippy rows, the chelis#908
@@ -232,6 +232,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 from unrepresentable_domain_oracle import ORACLE_BINARY_ENV  # noqa: E402
+from ci_setup_uv_python import pyo3_environment_signature  # noqa: E402
 
 # NB: `tomllib` is intentionally NOT imported at module top. It is stdlib
 # only from Python 3.11. The gate bootstrap now re-executes an unmanaged
@@ -309,9 +310,14 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--no-default-features",
     "--", "-D", "warnings",
 ]
+# CLI dependency feature unification enables the historical migration reader
+# even in the workspace's no-default row. Compile the ordinary core separately.
+CLIPPY_CORE_WITHOUT_MIGRATION: list[str] = [
+    "cargo", "clippy", "-p", "chelis-deep", "-p", "chelis-surf",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
-    "chelis-backend-c/sleef,"
     "chelis-cli/ownership-ledger,"
     "chelis-compiler-api/compilation-trace,"
     "chelis-compiler-api/ownership-ledger,"
@@ -344,11 +350,12 @@ CHELIS_LINT_CHECK: list[str] = [
     "--check",
     ".",
 ]
-CHELIS_STD_BUNDLE_CHECK: list[str] = [
+# The chelis-std runtime is packed by the bundle crate's build script; two
+# runs of it, in their own output directories of one fresh target directory,
+# must pack byte-identical bytes.
+STD_BUNDLE_REPRODUCIBILITY: list[str] = [
     MANAGED_PYTHON,
-    "scripts/regenerate_chelis_std_bundle.py",
-    "--debug",
-    "--check",
+    "scripts/check_std_bundle_reproducible.py",
 ]
 # The default profile is the complete developer workspace suite. The `ci`
 # profile writes JUnit XML and delegates two census binaries to the parallel
@@ -463,6 +470,13 @@ EVAL_SYSTEM_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/eval_system_oracle.py",
 ]
+# Generated chelis-std files stay out of the index: the bundle crate's build
+# script packs the runtime, so a tracked dist pair or a lock recording the
+# bundled runtime would go stale with the first std edit. Pure git and Python.
+STD_BUNDLE_TRACKING_GUARD: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/check_std_bundle_untracked.py",
+]
 
 # The chelis#908 unrepresentable-domain oracle. #908's "Constraint on every
 # fix in this class" requires it to run in a continuous job: before this it
@@ -544,44 +558,21 @@ EMISSION_OBSERVER_TESTS: list[str] = [
 
 # The ownership-ledger harnesses link the runtime their own build carries, so
 # each target requires its package's `ownership-ledger` feature and the
-# featureless workspace runs skip it. The CLI command rebuilds
-# <target>/debug/chelis against the instrumented runtime, so it runs after
-# every command that trusts the binary the producers above built.
+# featureless workspace runs skip it. `ownership_ledger_tests.py` derives each
+# package's targets from that Cargo `required-features` declaration, so adding
+# a target edits no list here or in the macOS nightly job. The CLI command
+# rebuilds <target>/debug/chelis against the instrumented runtime, so it runs
+# after every command that trusts the binary the producers above built.
+OWNERSHIP_LEDGER_RUNTIME_TESTS: list[str] = [
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-runtime",
+]
+
 OWNERSHIP_LEDGER_API_TESTS: list[str] = [
-    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
-    "ownership-ledger",
-    "--test", "builtin_named_kernel_inputs",
-    "--test", "dropout_fixed_stream_api",
-    "--test", "fixed_control_host_c",
-    "--test", "generated_header_native_probe",
-    "--test", "invocation_local_random",
-    "--test", "issue_1684_entry_cleanup",
-    "--test", "issue_1685_multi_root_cleanup",
-    "--test", "issue_2445_match_arm_ownership",
-    "--test", "issue_2485_region_entry_terminals",
-    "--test", "issue_2508_list_step_ownership",
-    "--test", "issue_2522_data_type_c_lane",
-    "--test", "issue_2576_option_items_render",
-    "--test", "issue_2577_filter_named_predicate",
-    "--test", "issue_2781_loop_result_captured_by_a_loop",
-    "--test", "key_admission_lanes",
-    "--test", "key_affinity_lanes",
-    "--test", "key_alias_lowering",
-    "--test", "key_extent_lanes",
-    "--test", "key_operand_random_c",
-    "--test", "key_operations_c",
-    "--test", "key_root_lanes",
-    "--test", "key_split_count_lanes",
-    "--test", "key_surface_lanes",
-    "--test", "key_tensor_forms",
-    "--test", "local_ascription_activation",
-    "--test", "rule_d_entered_lanes",
-    "--test", "untaken_arm_gradients",
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-compiler-api",
 ]
 
 OWNERSHIP_LEDGER_CLI_TESTS: list[str] = [
-    "cargo", "nextest", "run", "-p", "chelis-cli", "--features",
-    "ownership-ledger", "--test", "issue_1314_json_bigint_ledger",
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-cli",
 ]
 
 STAGES: dict[str, list[list[str]]] = {
@@ -591,9 +582,10 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,
         CLIPPY_NO_DEFAULT_FEATURES,
+        CLIPPY_CORE_WITHOUT_MIGRATION,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
-        CHELIS_STD_BUNDLE_CHECK,
+        STD_BUNDLE_REPRODUCIBILITY,
         DOCTEST_TYPES,
         DOCTEST_IR,
         DOCTEST_COMPILER_API,
@@ -605,11 +597,13 @@ STAGES: dict[str, list[list[str]]] = {
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
         EVAL_SYSTEM_GUARD,
+        STD_BUNDLE_TRACKING_GUARD,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
         LOWERING_TRACE_TESTS,
         EMISSION_OBSERVER_TESTS,
+        OWNERSHIP_LEDGER_RUNTIME_TESTS,
         OWNERSHIP_LEDGER_API_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
@@ -661,7 +655,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_SOLVER_FREE_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
-    CHELIS_STD_BUNDLE_CHECK,
+    STD_BUNDLE_REPRODUCIBILITY,
     DOCTEST_TYPES,
     DOCTEST_IR,
     DOCTEST_COMPILER_API,
@@ -672,10 +666,12 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     EVAL_SYSTEM_GUARD,
+    STD_BUNDLE_TRACKING_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
     EMISSION_OBSERVER_TESTS,
+    OWNERSHIP_LEDGER_RUNTIME_TESTS,
     OWNERSHIP_LEDGER_API_TESTS,
     OWNERSHIP_LEDGER_CLI_TESTS,
 ]
@@ -689,9 +685,6 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
 FMT_WRITE: list[str] = ["cargo", "fmt", "--all"]
 REGEN_TIER0_WRITE: list[str] = [
     MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "0",
-]
-REGEN_TIER1_WRITE: list[str] = [
-    MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "1",
 ]
 
 
@@ -709,10 +702,11 @@ def classify_paths_command(changed_paths: list[str]) -> list[str]:
         MANAGED_PYTHON, "scripts/ci_change_owned.py", "classify-paths",
         "--from-git",
     ]
-# The bundle crate's in-crate `archive_self_consistency` test: the compile-time
-# counterpart of the std-bundle regeneration check. It cannot join
-# FAST_TRIPWIRE_NEXTEST because `--lib` would apply to every `-p` there and
-# pull in `chelis-compiler-api`'s 25 s source-architecture test.
+# The bundle crate's own tests: the embedded pair against the std sources and
+# the staging rule, the stray-file and SOURCE_DATE_EPOCH controls, and the
+# library-graph guards. It cannot join FAST_TRIPWIRE_NEXTEST because `--lib`
+# would apply to every `-p` there and pull in `chelis-compiler-api`'s 25 s
+# source-architecture test.
 STD_BUNDLE_SELF_CONSISTENCY: list[str] = [
     "cargo", "nextest", "run", "-p", "chelis-std-bundle", "--lib",
     "--no-fail-fast",
@@ -741,58 +735,18 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "stack_guard_coverage",
     "--test", "runtime_extent_target_manifest",
 ]
-# Both halves of the bundled-lock invariant in `chelis-reef`'s lib suite: every
-# committed bundled `reef.lock` must pin the embedded bundle's hashes, and the
-# compiled `chelis-std-bundle` rlib must embed the same bytes that are on disk.
-# Neither is reachable from any other local stage. They are lib unit tests in a
-# crate the changed-crate stage never selects, because the paths that invalidate
-# them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`)
-# or to no crate at all (`examples/**/reef.lock`, the root `Cargo.toml` whose
-# workspace version the verdict keys on). Until chelis#2309 that made `--fast`
-# report PASS on a head that CI then failed on, on this exact test
-# (chelis#2305). The
-# `-E` filterset keeps the rest of `chelis-reef`'s lib suite out; the two named
-# tests share one target, so covering both costs one filter token, and leaving
-# the rlib half out would reproduce the same false green one test over.
-REEF_BUNDLED_LOCK_HASHES: list[str] = [
-    "cargo", "nextest", "run", "-p", "chelis-reef", "--lib",
-    "-E",
-    "test(bundled_chelis_std_lock_hashes_match_embedded_artifacts) "
-    "| test(embedded_bundle_rlib_matches_disk)",
-    "--no-fail-fast",
-]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
     FMT_WRITE,
     CHELIS_LINT_CHECK,
     EVAL_SYSTEM_GUARD,
+    STD_BUNDLE_TRACKING_GUARD,
 ]
-# A change under either prefix appends the two std legs to `--fast`.
+# A change under either prefix appends the bundle crate's tests to `--fast`.
 STD_PATH_PREFIXES: tuple[str, ...] = (
     "packages/chelis-std/",
     "crates/chelis-std-bundle/",
 )
-# The bundled-lock invariant has two sides, and a std path is only one of them.
-# The other is the committed locks that record the hashes the bundle must still
-# have, and the workspace version those locks pin the compiler to:
-#
-#   * any `reef.lock` - matched by basename, not by a path prefix, because the
-#     guard discovers its lock set by walking the tree rather than from an
-#     enumerated list, so a lock added at a new path is in scope the moment it
-#     is committed;
-#   * the root `Cargo.toml` - `chelis-reef` takes `version.workspace = true`,
-#     and the guard feeds its own `CARGO_PKG_VERSION` into the comparison, so a
-#     workspace version bump that does not also refresh the locks moves the
-#     verdict. The root manifest belongs to no workspace member, so the
-#     changed-crate stage cannot see it either.
-#   * `crates/chelis-reef/` - the guard's own crate. `--fast` runs clippy, not
-#     nextest, per changed crate, so a change to the discovery walk, the
-#     package-name constant, or the `ReefLock` deserializer never ran the guard
-#     locally either. This PR's own refactor of that file would not have
-#     triggered its own leg (chelis#2309 round 1).
-LOCK_FILE_NAME = "reef.lock"
-WORKSPACE_MANIFEST = "Cargo.toml"
-GUARD_CRATE_PREFIX = "crates/chelis-reef/"
 
 LOCAL_ANNOTATION = "validation + ci"
 FAST_ANNOTATION = "fast + validation + ci"
@@ -800,13 +754,10 @@ CI_OWNED_ANNOTATION = "ci-owned"
 FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
-    "--tier 0 (and --tier 1 when a std path changed); cargo fmt --all; the "
-    "chelis lint and eval-system guard rows above; cargo clippy -p <crate> "
-    "--tests -- -D warnings per changed crate; one nextest run over the "
-    "drift tripwires; when a std path changed, cargo nextest run -p "
-    "chelis-std-bundle --lib; and "
-    "when a std path, any reef.lock, or the root Cargo.toml changed, the "
-    "chelis-reef bundled-lock hash guard"
+    "--tier 0; cargo fmt --all; the chelis lint, eval-system guard, and "
+    "std-bundle tracking rows above; cargo clippy -p <crate> --all-targets -- "
+    "-D warnings per changed crate; one nextest run over the drift tripwires; "
+    "and when a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
     "# --validation also runs: cargo nextest run -p <crate> --no-fail-fast "
@@ -1063,6 +1014,13 @@ def gate_environment(
                 "`uv python install 3.11` and retry."
             )
         environment["PYO3_PYTHON"] = str(executable)
+
+    try:
+        environment["PYO3_ENVIRONMENT_SIGNATURE"] = pyo3_environment_signature(
+            Path(environment["PYO3_PYTHON"]), environ=environment,
+        )
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
     root = repo_root.resolve()
     configured_target = environment.get("CARGO_TARGET_DIR", "target")
@@ -1330,50 +1288,17 @@ def std_paths_changed(paths: list[str]) -> bool:
     )
 
 
-def bundled_lock_guard_paths_changed(paths: list[str]) -> bool:
-    """Whether the changed set can invalidate the `chelis-reef` bundled-lock
-    guard, which no other local stage reaches (chelis#2309).
-
-    Either side of the invariant counts: a std path moves the embedded bundle
-    bytes; a committed `reef.lock` or the root `Cargo.toml` moves what those
-    bytes are compared against; and the guard's own crate moves the comparison
-    itself. `STD_PATH_PREFIXES`, `LOCK_FILE_NAME`, `WORKSPACE_MANIFEST`, and
-    `GUARD_CRATE_PREFIX` carry the reasoning for each.
-
-    This is deliberately not `std_paths_changed`: of the three path classes
-    chelis#2309 names, the std prefixes cover only `crates/chelis-std-bundle/
-    dist/`, and `examples/**/reef.lock` belongs to no crate at all, so neither
-    the std prefixes nor the changed-crate stage can see it."""
-    return std_paths_changed(paths) or any(
-        path == LOCK_FILE_NAME
-        or path.endswith("/" + LOCK_FILE_NAME)
-        or path == WORKSPACE_MANIFEST
-        or path.startswith(GUARD_CRATE_PREFIX)
-        for path in paths
-    )
-
-
 def fast_command_list(
     crates: list[str],
     *,
     std_changed: bool,
     changed_paths: list[str],
-    lock_guard_changed: bool,
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, changed-path
-    classification, lint, evaluator system guard, `cargo clippy -p <crate>
-    --tests` per changed crate, and one nextest run over the drift tripwires.
-    When a std path changed, tier-1 regeneration precedes the checks and the
-    bundle self-consistency test follows them. Every writer precedes every
-    check: a changed `.ch` source makes the
-    embedded bundle stale, and the `bundled_chelis_std_loader` tripwire would
-    fail on it before a later regeneration could fix it.
-
-    `lock_guard_changed` appends the `chelis-reef` bundled-lock leg last, after
-    the tier-1 regeneration has written whatever `dist/` bytes the committed
-    locks are about to be compared against. Its trigger is a superset of
-    `std_changed` (see `bundled_lock_guard_paths_changed`) and it is the only
-    local stage that reaches that guard at all.
+    classification, lint, evaluator system guard, std-bundle tracking guard,
+    `cargo clippy -p <crate> --all-targets` per changed crate, and one nextest run
+    over the drift tripwires. When a std path changed, the bundle crate's own
+    tests follow them. Every writer precedes every check.
 
     The classification is first among the checks because it is the cheapest
     thing here that can reject a push, and because until chelis#2250 an
@@ -1388,22 +1313,25 @@ def fast_command_list(
     Never the chelis#908 oracle: minutes of work whose `chelis check`
     timeouts under load are a known false-red source."""
     commands = [REGEN_TIER0_WRITE]
-    if std_changed:
-        commands.append(REGEN_TIER1_WRITE)
     commands.append(FMT_WRITE)
     commands.append(classify_paths_command(changed_paths))
     commands.append(CHELIS_LINT_CHECK)
     commands.append(EVAL_SYSTEM_GUARD)
+    commands.append(STD_BUNDLE_TRACKING_GUARD)
     for crate in crates:
-        commands.append(
-            ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]
-        )
+        commands.append(per_crate_clippy(crate))
     commands.append(FAST_TRIPWIRE_NEXTEST)
     if std_changed:
         commands.append(STD_BUNDLE_SELF_CONSISTENCY)
-    if lock_guard_changed:
-        commands.append(REEF_BUNDLED_LOCK_HASHES)
     return commands
+
+
+def per_crate_clippy(crate: str) -> list[str]:
+    """CI's workspace clippy narrowed to one crate: the same target selection
+    and lint level, so a lint that fires only in a non-test library or binary
+    build fails `--fast` as it fails CI (chelis#3126)."""
+    workspace = CLIPPY_WORKSPACE.index("--workspace")
+    return [*CLIPPY_WORKSPACE[:workspace], "-p", crate, *CLIPPY_WORKSPACE[workspace + 1:]]
 
 
 def _git_output(args: list[str]) -> str:
@@ -2763,19 +2691,11 @@ def run_fast(
         return derived
     paths, crates = derived
     std_changed = std_paths_changed(paths)
-    lock_guard_changed = bundled_lock_guard_paths_changed(paths)
     report.git["std_changed"] = std_changed
-    report.git["lock_guard_changed"] = lock_guard_changed
     if std_changed:
         print(
             "gate --fast: chelis-std paths changed; appending the bundle "
-            "self-consistency test and regen_all.py --tier 1",
-            flush=True,
-        )
-    if lock_guard_changed:
-        print(
-            "gate --fast: the bundled-lock invariant can have moved; appending "
-            "the chelis-reef bundled-lock hash guard (chelis#2309)",
+            "crate's tests",
             flush=True,
         )
     take_lease(mode="fast", args=args, report=report, environ=environment)
@@ -2786,7 +2706,6 @@ def run_fast(
             crates,
             std_changed=std_changed,
             changed_paths=paths,
-            lock_guard_changed=lock_guard_changed,
         ),
         stage_label="fast",
         environ=environment,
@@ -2914,7 +2833,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Run the pre-push gate before every push: regen_all.py --tier 0 "
             "and cargo fmt --all fix in place, then classify-paths, chelis "
             "lint --check ., eval_system_guard.py, cargo clippy -p <crate> "
-            "--tests per changed crate, and one nextest run over the drift "
+            "--all-targets per changed crate, and one nextest run over the drift "
             "tripwires. Prints the files it changed; never takes the lease."
         ),
     )

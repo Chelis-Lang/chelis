@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, builtin_decl};
+use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
@@ -93,6 +93,12 @@ enum KeyOperand {
 struct ConsumeSite {
     description: String,
     kind: ConsumeKind,
+    /// `true` when the consume ends the owner's lifetime: an explicit `drop`
+    /// ([05-OP-67]). No inserted copy can keep the owner usable after it, so
+    /// every later use of the owner, through any name bound to it, is
+    /// `UseAfterConsume` rather than consuming fan-out repaired by copy
+    /// insertion ([04-LIN-11]; chelis#3177).
+    terminal: bool,
 }
 
 /// What a single binding generation was introduced by.  One record per
@@ -186,6 +192,18 @@ struct BindingRecord {
     /// projected at most once, and a binding with a moved component cannot
     /// be used whole again. Empty for every binding that carries no key.
     moved_key_components: BTreeSet<usize>,
+    /// The sites of closures whose captures borrow this owner (spec/04
+    /// section 8.3: a capture whose body uses are all borrow-reads borrows
+    /// the outer binding). The checker does not bound a closure value's
+    /// lifetime, since it can be stored, returned, or passed on, so the
+    /// borrow stays current for the rest of the owner's scope, and a `drop`
+    /// of the owner is refused ([04-LIN-2]; chelis#3178).
+    closure_borrows: Vec<String>,
+    /// [04-LIN-11]: the components a `drop` of a projection moved out of
+    /// this owner, each with its `drop` site. A use of the owner whole, or of
+    /// a projection overlapping a dropped component, is `UseAfterConsume`;
+    /// a projection disjoint from every dropped component stays usable.
+    dropped_components: Vec<(Vec<ProjectionStep>, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -232,6 +250,8 @@ impl LinearScope {
                 },
                 origin: BindingOrigin::default(),
                 moved_key_components: BTreeSet::new(),
+                closure_borrows: Vec::new(),
+                dropped_components: Vec::new(),
             },
         );
         self.visible.entry(name).or_default().push(id);
@@ -476,6 +496,11 @@ struct Checker {
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
     type_headers: crate::deep_type::TypeResolutionEnv,
+    /// The owner whose projection chain `check_projection_use` already
+    /// checked against its dropped components ([04-LIN-11]), while the walk
+    /// is inside that chain. Its root variable's read or consume there is a
+    /// use of the projected component, not of the owner whole.
+    projection_root: Option<BindingId>,
 }
 
 impl Checker {
@@ -530,6 +555,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         key_carrying_adts,
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
+        projection_root: None,
     };
     let mut scope = LinearScope::default();
 
@@ -658,6 +684,7 @@ pub fn check_linearity_with_context(
         key_carrying_adts,
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
+        projection_root: None,
     };
 
     let mut scope = LinearScope::default();
@@ -795,6 +822,7 @@ impl Checker {
             ConsumeSite {
                 description: format!("the root observation of `{name}`"),
                 kind: ConsumeKind::Structural,
+                terminal: false,
             },
         );
     }
@@ -871,6 +899,7 @@ impl Checker {
                             ConsumeSite {
                                 description: format!("binding `{name}` {}", diag_site(body)),
                                 kind: ConsumeKind::Structural,
+                                terminal: false,
                             },
                         );
                     } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
@@ -889,6 +918,7 @@ impl Checker {
                             ConsumeSite {
                                 description: format!("binding `{name}` {}", diag_site(body)),
                                 kind: ConsumeKind::Aliasing,
+                                terminal: false,
                             },
                         );
                         if let Some((alias_id, source_id)) = alias_link {
@@ -958,6 +988,9 @@ impl Checker {
                 if let TagKeys::Refuses(refusal) = tag_keys(tag) {
                     self.refuse_key_children(tag, children, refusal, scope);
                 }
+                let entered_projection = matches!(tag, DeepTag::TupleGet | DeepTag::Access)
+                    && self.projection_root.is_none()
+                    && self.check_projection_use(expr, scope);
                 match tag {
                     DeepTag::Var => self.consume_var_expr(expr, scope, generic_site(expr)),
                     DeepTag::Copy => self.check_copy(children, scope),
@@ -966,23 +999,6 @@ impl Checker {
                         self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                     }
                     DeepTag::App => self.check_app(expr, children, scope),
-                    // chelis#1923: a pipe cannot reach linearity, which reads the
-                    // checked program, because every checker entry folds it into
-                    // the application it denotes. The arm that used to sit here
-                    // peered through the desugarer's synthesized stage lambda to
-                    // ask the inner callee whether the piped value is borrowed or
-                    // consumed; the folded application puts that callee in callee
-                    // position, so `check_app` asks the same question once. Fail
-                    // closed rather than falling through to the structural walk,
-                    // which would answer silently.
-                    DeepTag::Pipe => self.push_diagnostic(CheckError::new(
-                        CheckErrorKind::MalformedForm,
-                        "a pipe reached linearity unfolded: every checker entry folds a pipe into \
-                         the application it denotes (spec/02-surf-syntax.md section 0.1; \
-                         chelis#1923)"
-                            .to_string(),
-                        vec![],
-                    )),
                     DeepTag::Let => self.check_let(children, scope),
                     DeepTag::Fn => self.check_fn(expr, children, scope),
                     DeepTag::If => self.check_if(children, scope),
@@ -998,7 +1014,11 @@ impl Checker {
                     // forward (via the alias chain) to the underlying
                     // tuple source.  Treat the var argument as a borrow.
                     DeepTag::TupleGet => self.check_tuple_get(children, scope),
+                    DeepTag::Cast => self.check_cast(children, scope),
                     _ => self.check_children_by_role(tag, children, scope),
+                }
+                if entered_projection {
+                    self.projection_root = None;
                 }
             }
             ExprCarrier::StructuralList(elements) => {
@@ -1050,6 +1070,32 @@ impl Checker {
             ),
             vec![],
         ));
+    }
+
+    /// chelis#3101, [05-OP-63], [05-OP-6], [05-OP-23], [05-OP-24]: every
+    /// cast rung's tensor source is a read-only parameter (spec/05 section
+    /// 1.3.1). An explicit borrow there is a read, as at a call argument, and
+    /// an owned variable auto-borrows: it is read, not consumed, as a
+    /// borrowed builtin argument is. A key holder is never borrowed
+    /// ([04-LIN-9]), so it keeps the by-role check. The target and mode slots
+    /// are types and selectors.
+    fn check_cast(&mut self, children: &[Expr], scope: &mut LinearScope) {
+        let Some(source) = children.first() else {
+            return;
+        };
+        if let Some(inner) = borrow_inner(source) {
+            self.check_borrow_arg(source, inner, scope);
+        } else if is_var_expr(source)
+            && !self.expr_holds_key(source, scope)
+            && self.expr_is_owned_linear(source, scope)
+        {
+            self.read_var_expr(source, scope);
+        } else {
+            self.check_child_by_role(DeepTag::Cast, 0, children.len(), source, scope);
+        }
+        for (index, child) in children.iter().enumerate().skip(1) {
+            self.check_child_by_role(DeepTag::Cast, index, children.len(), child, scope);
+        }
     }
 
     fn check_children_by_role(
@@ -1175,6 +1221,11 @@ impl Checker {
     fn check_app(&mut self, expr: &Expr, children: &[Expr], scope: &mut LinearScope) {
         let builtin = children.first().and_then(var_name);
         let builtin_callee = builtin.filter(|name| self.is_builtin_reference(name, scope));
+        // Borrow dispositions also cover intrinsic calls such as `dropout`,
+        // which intentionally lives outside the ordinary builtin vocabulary.
+        // The closed borrow policy below recognizes the intrinsic; lexical
+        // bindings must still use their actual function signature.
+        let borrowing_callee = builtin.filter(|name| scope.top_id(name).is_none());
         // A builtin callee is judged operand by operand below; a builtin
         // named as a value is judged by the type checker
         // (`infer::expr::forbid_keys_a_builtin_value_does_not_admit`).
@@ -1210,22 +1261,27 @@ impl Checker {
                 // A callee position that only borrows cannot take one.
                 if verdicts[index - 1] != KeyOperand::Refused
                     && !observational
-                    && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+                    && self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 {
                     self.reject_key_read(arg, "borrowed by this call");
                 } else {
-                    self.consume_var_expr(arg, scope, app_site(expr, children));
+                    self.consume_var_expr(arg, scope, app_site(expr, children, builtin_callee));
                 }
-            } else if self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+            } else if self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 && is_var_expr(arg)
                 && self.expr_is_owned_linear(arg, scope)
             {
                 self.read_var_expr(arg, scope);
             } else if is_var_expr(arg) && self.expr_is_owned_linear(arg, scope) {
-                self.consume_var_expr(arg, scope, app_site(expr, children));
+                self.consume_var_expr(arg, scope, app_site(expr, children, builtin_callee));
             } else {
                 self.check_expr(arg, scope);
             }
+        }
+        if builtin_callee == Some("drop")
+            && let [_, operand] = children
+        {
+            self.record_component_drop(operand, &app_site(expr, children, builtin_callee), scope);
         }
         self.maybe_mark_reusable_app_input(expr, children, scope);
     }
@@ -1342,16 +1398,28 @@ impl Checker {
                         ConsumeSite {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Structural,
+                            terminal: false,
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
-                    alias_source_id = var_name(value).and_then(|source| scope.top_id(source));
+                    // A bind refused because the source had a component
+                    // dropped ([04-LIN-11]) records no alias: the refusal
+                    // names the source, and later uses of the new name must
+                    // not repeat it under that name, which for a destructure
+                    // is a desugarer carrier the source never spells.
+                    alias_source_id = var_name(value)
+                        .and_then(|source| scope.top_id(source))
+                        .filter(|source| {
+                            let owner = scope.resolve_alias_chain(*source).unwrap_or(*source);
+                            dropped_component_overlapping(scope, &[*source, owner], &[]).is_none()
+                        });
                     self.consume_var_expr(
                         value,
                         scope,
                         ConsumeSite {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Aliasing,
+                            terminal: false,
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1513,6 +1581,7 @@ impl Checker {
                         ConsumeSite {
                             description: format!("closure capture {}", diag_site(expr)),
                             kind: ConsumeKind::Structural,
+                            terminal: false,
                         },
                     );
                 }
@@ -1527,6 +1596,14 @@ impl Checker {
                 // the outer binding state.
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.borrow(name.as_str(), borrow_site(expr));
+                if let Some(use_id) = outer_scope.top_id(&name) {
+                    let owner = outer_scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+                    if let Some(record) = outer_scope.record_mut(owner) {
+                        record
+                            .closure_borrows
+                            .push(format!("closure {}", diag_site(expr)));
+                    }
+                }
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
             }
         }
@@ -1600,6 +1677,7 @@ impl Checker {
                 ConsumeSite {
                     description: format!("match scrutinee {}", diag_site(&children[0])),
                     kind: ConsumeKind::Structural,
+                    terminal: false,
                 },
             );
         } else {
@@ -1690,6 +1768,7 @@ impl Checker {
                 site.description
             ),
             kind: ConsumeKind::Structural,
+            terminal: false,
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -1730,6 +1809,7 @@ impl Checker {
                             binding.name
                         ),
                         kind: ConsumeKind::Structural,
+                        terminal: false,
                     },
                 ));
             }
@@ -1852,20 +1932,48 @@ impl Checker {
             {
                 record.moved_key_components.extend(moved_in_branches);
             }
+            // A closure a branch created may outlive the join, so its borrow
+            // does too.
+            for branch in branches {
+                let Some(branch_record) = branch.record(*id) else {
+                    continue;
+                };
+                if let Some(record) = scope.record_mut(*id) {
+                    for site in &branch_record.closure_borrows {
+                        if !record.closure_borrows.contains(site) {
+                            record.closure_borrows.push(site.clone());
+                        }
+                    }
+                    // [04-LIN-11]: a component a branch dropped is gone
+                    // after the join, whichever arm ran.
+                    for dropped in &branch_record.dropped_components {
+                        if !record.dropped_components.contains(dropped) {
+                            record.dropped_components.push(dropped.clone());
+                        }
+                    }
+                }
+            }
             // A branch's `Structural` consume is the one that destroys the
             // value, so it is the one that must survive the join. Prefer it
             // over an `Aliasing` record from another branch: an alias bind
             // does not destroy anything, and letting it win would report the
-            // wrong site.
+            // wrong site. A terminal consume ends the owner on its path, so
+            // it outranks an ordinary one (chelis#3177).
             let consumed_site = branches
                 .iter()
                 .find_map(|branch| match branch.state(*id) {
-                    Some(BindingState::Consumed(site))
-                        if matches!(site.kind, ConsumeKind::Structural) =>
-                    {
-                        Some(site.clone())
-                    }
+                    Some(BindingState::Consumed(site)) if site.terminal => Some(site.clone()),
                     _ => None,
+                })
+                .or_else(|| {
+                    branches.iter().find_map(|branch| match branch.state(*id) {
+                        Some(BindingState::Consumed(site))
+                            if matches!(site.kind, ConsumeKind::Structural) =>
+                        {
+                            Some(site.clone())
+                        }
+                        _ => None,
+                    })
                 })
                 .or_else(|| {
                     branches.iter().find_map(|branch| match branch.state(*id) {
@@ -1899,6 +2007,10 @@ impl Checker {
             //   Consumed(Aliasing), and
             //     the name is an ordinary
             //     binding                 -> unchanged.
+            //   Consumed, not by a `drop`,
+            //     and a branch dropped
+            //     the owner               -> the `drop` wins, as in
+            //                                `consume_var_expr` (chelis#3177).
             //
             // The carve-out is deliberately narrow. The justification above
             // is entirely about carriers: a component's `Aliasing` record is
@@ -1914,9 +2026,10 @@ impl Checker {
             let replaces_outer = match scope.state(*id) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
-                    matches!(outer.kind, ConsumeKind::Aliasing)
-                        && matches!(site.kind, ConsumeKind::Structural)
-                        && scope.is_component_id(*id)
+                    (site.terminal && !outer.terminal)
+                        || (matches!(outer.kind, ConsumeKind::Aliasing)
+                            && matches!(site.kind, ConsumeKind::Structural)
+                            && scope.is_component_id(*id))
                 }
                 None => false,
             };
@@ -1955,6 +2068,108 @@ impl Checker {
         }
     }
 
+    /// [04-LIN-11]: check a projection chain rooted at a variable against the
+    /// components a `drop` moved out of that variable's owner, then mark the
+    /// owner as the chain's root so the root's own read or consume inside the
+    /// chain is not taken for a use of the owner whole. Returns whether the
+    /// root was marked.
+    fn check_projection_use(&mut self, expr: &Expr, scope: &LinearScope) -> bool {
+        let Some((root, path)) = projection_chain(expr) else {
+            return false;
+        };
+        let Some(name) = var_name(root) else {
+            return false;
+        };
+        let Some(use_id) = scope.top_id(name) else {
+            return false;
+        };
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        if let Some((dropped, site)) = dropped_component_overlapping(scope, &[use_id, owner], &path)
+        {
+            self.report_use_after_component_drop(name, &dropped, &site, expr);
+        }
+        self.projection_root = Some(owner);
+        true
+    }
+
+    /// [04-LIN-11]: refuse a use of `name`'s owner whole after a `drop` moved
+    /// one of its components out. Returns whether it reported.
+    fn reject_use_after_component_drop(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        scope: &LinearScope,
+    ) -> bool {
+        let Some(use_id) = scope.top_id(name) else {
+            return false;
+        };
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        if self.projection_root == Some(owner) {
+            return false;
+        }
+        match dropped_component_overlapping(scope, &[use_id, owner], &[]) {
+            Some((dropped, site)) => {
+                self.report_use_after_component_drop(name, &dropped, &site, expr);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn report_use_after_component_drop(
+        &mut self,
+        name: &str,
+        dropped: &[ProjectionStep],
+        site: &str,
+        expr: &Expr,
+    ) {
+        let component = render_projection(dropped);
+        self.push_diagnostic(CheckError::new(
+            CheckErrorKind::UseAfterConsume,
+            with_macro_provenance(
+                expr,
+                format!(
+                    "variable `{name}` had its component `{name}{component}` moved out and \
+                     consumed by {site}; later use {} of `{name}` or of that component is invalid \
+                     ([04-LIN-11])",
+                    diag_site(expr)
+                ),
+            ),
+            vec![format!(
+                "Use only the components of `{name}` that were not dropped, or bind \
+                 `copy({name}{component})` and drop that instead"
+            )],
+        ));
+    }
+
+    /// [04-LIN-11]: a `drop` of a projection rooted at an owned variable moves
+    /// that component out of the variable's owner.
+    fn record_component_drop(
+        &mut self,
+        operand: &Expr,
+        site: &ConsumeSite,
+        scope: &mut LinearScope,
+    ) {
+        let Some((root, path)) = projection_chain(operand) else {
+            return;
+        };
+        if path.is_empty()
+            || !self.expr_is_owned_linear(root, scope)
+            || self.expr_holds_key(root, scope)
+        {
+            return;
+        }
+        let Some(use_id) = var_name(root).and_then(|name| scope.top_id(name)) else {
+            return;
+        };
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        if let Some(record) = scope.record_mut(owner) {
+            record
+                .dropped_components
+                .push((path, site.description.clone()));
+        }
+    }
+
     fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, site: ConsumeSite) {
         let Some(name) = var_name(expr) else {
             return;
@@ -1968,6 +2183,9 @@ impl Checker {
         let Some(use_id) = scope.top_id(name) else {
             return;
         };
+        if self.reject_use_after_component_drop(name, expr, scope) {
+            return;
+        }
         // Linearity-AliasedConsume-F1: a `Structural` consume on an
         // aliased binding forwards to the underlying source generation's
         // record, so a later borrow of the source trips `read_or_error`
@@ -1982,6 +2200,65 @@ impl Checker {
             self.consume_key_holder(expr, name, target, scope, site);
             return;
         }
+        // A `drop` ends the owner, so every later use is refused, whatever
+        // this use's own kind (chelis#3177). The owner is checked through the
+        // alias chain as well as on the use's own binding: after `y = x;
+        // c = drop(x)`, binding `z = y` is an `Aliasing` consume whose target
+        // is `y`'s live record, but it names the dropped owner.
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        let ended_at = [use_id, owner]
+            .into_iter()
+            .find_map(|id| match scope.state(id) {
+                Some(BindingState::Consumed(consumed_at)) if consumed_at.terminal => {
+                    Some(consumed_at.description.clone())
+                }
+                _ => None,
+            });
+        if let Some(description) = ended_at {
+            // chelis#1200: report the name the user wrote, not
+            // `target`. `target` is the alias chain's terminal, which
+            // for a destructured component is the desugarer's
+            // `__chelis_tmpN` — a name that appears nowhere in the
+            // user's source and that they cannot act on.
+            self.push_diagnostic(located_error(expr, CheckError::new(
+                CheckErrorKind::UseAfterConsume,
+                with_macro_provenance(
+                    expr,
+                    format!(
+                        "variable `{name}` was already consumed by {description}; later use {} is invalid",
+                        diag_site(expr)
+                    ),
+                ),
+                vec![format!(
+                    "Move the later use before the `drop`, or bind `copy({name})` before it"
+                )],
+            )));
+            return;
+        }
+        // A `drop` cannot end an owner that a closure still borrows: the
+        // closure would read it after its lifetime ends ([04-LIN-2]).
+        if site.terminal
+            && let Some(closure) = scope
+                .record(owner)
+                .and_then(|record| record.closure_borrows.first().cloned())
+        {
+            self.push_diagnostic(CheckError::new(
+                CheckErrorKind::InvalidBorrow,
+                with_macro_provenance(
+                    expr,
+                    format!(
+                        "variable `{name}` is dropped {} while the {closure} still borrows it; \
+                         the closure would read it after its lifetime ends ([04-LIN-2])",
+                        diag_site(expr)
+                    ),
+                ),
+                vec![format!(
+                    "Remove the `drop` and let the compiler release `{name}` after its last \
+                     use, or bind a `copy({name})` before the closure and capture that instead"
+                )],
+            ));
+            return;
+        }
         match scope.state(target) {
             Some(BindingState::Live { .. }) => scope.consume_id(target, site),
             Some(BindingState::Consumed(consumed_at))
@@ -1990,12 +2267,7 @@ impl Checker {
                         || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
-                // chelis#1200: report the name the user wrote, not
-                // `target`. `target` is the alias chain's terminal, which
-                // for a destructured component is the desugarer's
-                // `__chelis_tmpN` — a name that appears nowhere in the
-                // user's source and that they cannot act on.
-                self.push_diagnostic(CheckError::new(
+                self.push_diagnostic(located_error(expr, CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
@@ -2005,7 +2277,7 @@ impl Checker {
                         ),
                     ),
                     vec!["Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()],
-                ));
+                )));
             }
             Some(BindingState::Consumed(consumed_at))
                 if matches!(consumed_at.kind, ConsumeKind::Aliasing)
@@ -2058,7 +2330,7 @@ impl Checker {
                 } else {
                     " (an alias of a destructured binding)"
                 };
-                self.push_diagnostic(CheckError::new(
+                self.push_diagnostic(located_error(expr, CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
@@ -2070,8 +2342,12 @@ impl Checker {
                     vec![format!(
                         "Insert `copy({name})` before the first consuming use if you need to reuse it"
                     )],
-                ));
+                )));
             }
+            // A `drop` still ends the owner after an earlier consume: copy
+            // insertion gives the earlier use the copy, so a use after
+            // `a = eat(x); c = drop(x)` is refused.
+            Some(BindingState::Consumed(_)) if site.terminal => scope.consume_id(target, site),
             Some(BindingState::Consumed(_)) => {
                 // The implicit-linearity pass will insert a Copy for
                 // consuming fan-out.  Borrow-after-consume remains an
@@ -2096,6 +2372,9 @@ impl Checker {
         // A structural consume of an alias is recorded on its source
         // generation. Check that generation so reads through either
         // name observe the same consumed state.
+        if self.reject_use_after_component_drop(name, expr, scope) {
+            return;
+        }
         let Some(use_id) = scope.top_id(name) else {
             return;
         };
@@ -2134,10 +2413,9 @@ impl Checker {
         );
         let suggestion =
             format!("Insert `copy({name})` before the first consuming use if you need to reuse it");
-        self.push_diagnostic(CheckError::new(
-            CheckErrorKind::UseAfterConsume,
-            message,
-            vec![suggestion],
+        self.push_diagnostic(located_error(
+            expr,
+            CheckError::new(CheckErrorKind::UseAfterConsume, message, vec![suggestion]),
         ));
     }
 
@@ -2721,7 +2999,6 @@ fn is_runtime_expression_tag(tag: DeepTag) -> bool {
             | DeepTag::Lit
             | DeepTag::Record
             | DeepTag::Access
-            | DeepTag::Pipe
             | DeepTag::Block
             | DeepTag::Tuple
             | DeepTag::TupleGet
@@ -2813,7 +3090,9 @@ fn callee_is_observational_higher_order(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some(DeepTag::Grad | DeepTag::Vmap))
 }
 
-fn param_names(expr: &Expr) -> Vec<String> {
+/// The names a function's `(params ...)` binds, as the checker reads them.
+/// The effect checker resolves names through this same reading.
+pub fn param_names(expr: &Expr) -> Vec<String> {
     let Some(params) = tagged_children(expr, DeepTag::Params) else {
         return Vec::new();
     };
@@ -2823,7 +3102,9 @@ fn param_names(expr: &Expr) -> Vec<String> {
         .collect()
 }
 
-fn pattern_names(expr: &Expr) -> Vec<String> {
+/// The names a pattern binds, as the checker reads them. The effect checker
+/// resolves names through this same reading.
+pub fn pattern_names(expr: &Expr) -> Vec<String> {
     let mut names = Vec::new();
     collect_pattern_names(expr, &mut names);
     names
@@ -3300,21 +3581,25 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     let Some(name) = name else {
         return false;
     };
+    if COMPARISON_OPS.contains(&name) {
+        return arg_index < 2;
+    }
     matches!(
         name,
         "add"
             | "mul"
             | "max_elem"
+            | "min_elem"
             | "sub"
             | "div"
             | "floor_div"
             | "trunc_div"
-            | "eq"
-            | "neq"
-            | "lt"
-            | "gt"
-            | "lte"
-            | "gte"
+            | "mod"
+            | "bitand"
+            | "bitor"
+            | "bitxor"
+            | "shl"
+            | "shr"
             | "and"
             | "or"
             | "matmul"
@@ -3339,13 +3624,18 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "floor"
                 | "ceil"
                 | "round"
-                | "cmplt"
                 | "not"
                 | "relu"
                 | "sigmoid"
+                | "tanh"
+                | "erf"
+                | "erfc"
+                | "silu"
+                | "gelu"
+                | "gelu_tanh"
+                | "standard_normal_cdf"
                 | "softmax"
                 | "mean"
-                | "min_elem"
                 | "sum"
                 | "max_reduce"
                 | "min_reduce"
@@ -3407,7 +3697,23 @@ fn type_metadata(expr: &Expr) -> Option<&Expr> {
 /// grad-helper collision. Prefer the metadata (rendered `at
 /// surf:a..b`, matching `infer.rs::validator_span_suffix`); fall back
 /// to the structural offset only for fully synthesized nodes that
-/// carry no span entry (e.g. desugared pipe-stage lambdas).
+/// carry no span entry.
+fn located_error(expr: &Expr, mut error: CheckError) -> CheckError {
+    if let Some(id) = span_metadata_id(expr) {
+        error.span_id = Some(id.to_string());
+        if let Some(start) = id
+            .strip_prefix("surf:")
+            .and_then(|id| id.split_once(".."))
+            .and_then(|(start, _)| start.parse().ok())
+        {
+            error.span_offset = Some(start);
+        }
+    } else {
+        error.span_offset = Some(expr.span().offset);
+    }
+    error
+}
+
 fn diag_site(expr: &Expr) -> String {
     match span_metadata_id(expr) {
         Some(id) => format!("at {id}"),
@@ -3765,6 +4071,65 @@ fn type_expr_holds_key(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> boo
     )
 }
 
+/// [04-LIN-11]: one step of a projection chain, `.i` or `.f`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectionStep {
+    Index(usize),
+    Field(String),
+}
+
+/// The variable a chain of tuple projections and field accesses is rooted at,
+/// and the chain's steps from the root outward. A bare variable is the empty
+/// chain; any other root is no chain.
+fn projection_chain(expr: &Expr) -> Option<(&Expr, Vec<ProjectionStep>)> {
+    if is_var_expr(expr) {
+        return Some((expr, Vec::new()));
+    }
+    let (step, target) = if let Some([target, index]) = tagged_children(expr, DeepTag::TupleGet) {
+        (ProjectionStep::Index(literal_index(index)?), target)
+    } else if let Some([target, field]) = tagged_children(expr, DeepTag::Access) {
+        let name = match field {
+            Expr::Atom(Atom::Name(name), _) => name.to_string(),
+            other => symbol_name(other)?.to_string(),
+        };
+        (ProjectionStep::Field(name), target)
+    } else {
+        return None;
+    };
+    let (root, mut path) = projection_chain(target)?;
+    path.push(step);
+    Some((root, path))
+}
+
+/// Two projection paths overlap when one is a prefix of the other: the empty
+/// path, the owner whole, overlaps every component.
+fn projection_paths_overlap(lhs: &[ProjectionStep], rhs: &[ProjectionStep]) -> bool {
+    lhs.iter().zip(rhs).all(|(left, right)| left == right)
+}
+
+/// The first dropped component, among the records of `ids`, that overlaps
+/// `path`, with its `drop` site.
+fn dropped_component_overlapping(
+    scope: &LinearScope,
+    ids: &[BindingId],
+    path: &[ProjectionStep],
+) -> Option<(Vec<ProjectionStep>, String)> {
+    ids.iter()
+        .filter_map(|id| scope.record(*id))
+        .flat_map(|record| record.dropped_components.iter())
+        .find(|(dropped, _)| projection_paths_overlap(dropped, path))
+        .cloned()
+}
+
+fn render_projection(path: &[ProjectionStep]) -> String {
+    path.iter()
+        .map(|step| match step {
+            ProjectionStep::Index(index) => format!(".{index}"),
+            ProjectionStep::Field(field) => format!(".{field}"),
+        })
+        .collect()
+}
+
 /// The literal position of a `tuple-get` selector, when it is one.
 fn literal_index(expr: &Expr) -> Option<usize> {
     let literal = tagged_children(expr, DeepTag::Lit)
@@ -3967,7 +4332,9 @@ fn type_expr_eq(lhs: &Expr, rhs: &Expr) -> bool {
         == chelis_deep::printer::print_canonical(std::slice::from_ref(rhs))
 }
 
-fn app_site(expr: &Expr, children: &[Expr]) -> ConsumeSite {
+/// `builtin_callee` is the callee when it names a builtin rather than a
+/// lexical binding; only the builtin `drop` ends its argument's lifetime.
+fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> ConsumeSite {
     let name = children
         .first()
         .and_then(var_name)
@@ -3976,6 +4343,7 @@ fn app_site(expr: &Expr, children: &[Expr]) -> ConsumeSite {
     ConsumeSite {
         description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: builtin_callee == Some("drop"),
     }
 }
 
@@ -3983,6 +4351,7 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("use {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: false,
     }
 }
 
@@ -3990,6 +4359,7 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("realize {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
+        terminal: false,
     }
 }
 

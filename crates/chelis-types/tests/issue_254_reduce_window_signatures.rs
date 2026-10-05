@@ -16,8 +16,9 @@
 //! aligned.
 
 use chelis_types::check_ir_program;
+use chelis_types::errors::{CheckError, CheckErrorKind};
 
-fn check_surf(source: &str) -> Result<Vec<String>, Vec<String>> {
+fn check_surf(source: &str) -> Result<Vec<String>, Vec<CheckError>> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
     let exprs = chelis_macros::expand_program(
         &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
@@ -27,7 +28,7 @@ fn check_surf(source: &str) -> Result<Vec<String>, Vec<String>> {
     .into_exprs();
     match check_ir_program(&exprs) {
         Ok(_) => Ok(Vec::new()),
-        Err(r) => Err(r.errors.iter().map(|e| e.message.clone()).collect()),
+        Err(r) => Err(r.errors),
     }
 }
 
@@ -36,7 +37,7 @@ fn check_reducer(
     input_shape: &[usize],
     window: &[usize],
     strides: &[usize],
-) -> Result<Vec<String>, Vec<String>> {
+) -> Result<Vec<String>, Vec<CheckError>> {
     let shape_str = input_shape
         .iter()
         .map(|d| d.to_string())
@@ -111,10 +112,13 @@ fn issue254_reduce_window_rejects_window_larger_than_input_dim_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 2, 2], &[3, 3], &[1, 1])
         .expect_err("window > input dim must be a check-time error");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.contains("input dim") || e.contains("window_shape")),
-        "expected a window-vs-input-dim diagnostic, got {errors:?}"
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window extent <= 2")
+                && error.got.as_deref() == Some("3")
+                && error.span_offset.is_some()
+        ),
+        "expected an input-vs-window extent diagnostic, got {errors:?}"
     );
 }
 
@@ -123,8 +127,13 @@ fn issue254_reduce_window_rejects_zero_stride_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 3, 3], &[2, 2], &[1, 0])
         .expect_err("stride 0 must be a check-time error");
     assert!(
-        errors.iter().any(|e| e.contains("strides")),
-        "expected a strides positivity diagnostic, got {errors:?}"
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("stride >= 1")
+                && error.got.as_deref() == Some("0")
+                && error.span_offset.is_some()
+        ),
+        "expected stride positivity failure, got {errors:?}"
     );
 }
 
@@ -133,8 +142,13 @@ fn issue254_reduce_window_rejects_zero_window_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 3, 3], &[0, 2], &[1, 1])
         .expect_err("window 0 must be a check-time error");
     assert!(
-        errors.iter().any(|e| e.contains("window_shape")),
-        "expected a window-shape positivity diagnostic, got {errors:?}"
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window extent >= 1")
+                && error.got.as_deref() == Some("0")
+                && error.span_offset.is_some()
+        ),
+        "expected window extent positivity failure, got {errors:?}"
     );
 }
 
@@ -143,10 +157,13 @@ fn issue254_reduce_window_rejects_window_arity_exceeding_rank_at_check() {
     let errors = check_reducer("reduce_window_max", &[3, 3], &[2, 2, 2], &[1, 1, 1])
         .expect_err("window arity > rank must be a check-time error");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.contains("window arity") || e.contains("rank")),
-        "expected a rank-vs-arity diagnostic, got {errors:?}"
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window arity at most 2")
+                && error.got.as_deref() == Some("window arity 3")
+                && error.span_offset.is_some()
+        ),
+        "expected window arity relative to input rank, got {errors:?}"
     );
 }
 
@@ -157,8 +174,13 @@ fn issue254_reduce_window_rejects_window_strides_length_mismatch_at_check() {
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("window_shape") || e.contains("strides")),
-        "expected a window/strides-len mismatch diagnostic, got {errors:?}"
+            .any(|error| matches!(error.kind, CheckErrorKind::ArityMismatch)
+                && error.expected.is_none()
+                && error.got.is_none()
+                && error.span_offset.is_some()
+                && error.message.contains("arguments 2")
+                && error.message.contains("3 (strides)")),
+        "equal-list-length rejection must remain symmetric, got {errors:?}"
     );
 }
 
@@ -172,7 +194,9 @@ def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
 "#;
     let errors = check_surf(src).expect_err("wrong declared output shape must NOT typecheck");
     assert!(
-        !errors.is_empty(),
-        "expected a shape-mismatch diagnostic, got an empty error list"
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "expected a declared output dimension mismatch, got {errors:?}"
     );
 }

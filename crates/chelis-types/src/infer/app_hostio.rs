@@ -70,21 +70,15 @@ fn unify_host_slot(
 ///
 /// `round_to` still uses this. The deferring form carries ONE expected type
 /// and discharge unifies the operand against it, but `round_to` accepts more
-/// than one: the arm above admits `f64` and `f32` and returns the operand's own
-/// precision. Deferring it against `f64` alone made an operand that later bound
-/// to `f32` emit a rejection naming `f32` as acceptable -- false on its face,
-/// and a disagreement with the eager arm. The ten csv slots each accept exactly
-/// one type, so they defer correctly.
+/// than one: the arm above admits [05-OP-1]'s four float dtypes and returns
+/// the operand's own precision. Deferring it against `f64` alone made an
+/// operand that later bound to `f32` emit a rejection naming `f32` as
+/// acceptable -- false on its face, and a disagreement with the eager arm. The
+/// ten csv slots each accept exactly one type, so they defer correctly.
 ///
-/// `{f64, f32}` is this CHECKER's set, not the normative one. [05-OP-1] declares
-/// four operand dtypes -- f64, f32, f16 and bf16 -- and the narrowing to two is
-/// a known divergence tracked as chelis#1295, not authority for the pair. Do not
-/// cite the atom for it.
-///
-/// Converting this slot therefore needs the gate to carry an accepted SET, sized
-/// by the atom rather than by today's checker, and a deferred result. That is
-/// more than the relabelling the rest of the conversion is, so it stays on
-/// chelis#1489 rather than being bolted on here.
+/// Converting this slot therefore needs the gate to carry an accepted SET and
+/// a deferred result. That is more than the relabelling the rest of the
+/// conversion is, so it stays on chelis#1489 rather than being bolted on here.
 fn unify_host_slot_eager(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
@@ -126,7 +120,7 @@ fn loose_integer_host_slot(
     })
 }
 
-/// [05-OP-1]'s current f32/f64 `round_to` checker boundary.
+/// [05-OP-1]: `round_to` admits every active float dtype and returns it.
 pub(super) fn check_round_to_builtin_signature(
     node: &DeepNode,
     arg_tys: &[Type],
@@ -135,11 +129,11 @@ pub(super) fn check_round_to_builtin_signature(
 ) -> Type {
     const FNAME: &str = "round_to";
     if arg_tys.len() != 2 {
-        return report_builtin_arity(errors, node, FNAME, 2, arg_tys.len());
+        return report_builtin_arity(errors, node, CheckSite::Node(node), FNAME, 2, arg_tys.len());
     }
     let operand = type_for_readonly_check(&arg_tys[0], subst);
     let result = match &operand {
-        Type::Prim(p @ (Prim::F64 | Prim::F32)) => Type::Prim(*p),
+        Type::Prim(p @ (Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16)) => Type::Prim(*p),
         Type::Error(_) => Type::Prim(Prim::F64),
         // chelis#1489: deliberately NOT deferred -- see `unify_host_slot_eager`.
         Type::Var(_) => {
@@ -149,7 +143,7 @@ pub(super) fn check_round_to_builtin_signature(
                 FNAME,
                 &operand,
                 &Type::Prim(Prim::F64),
-                "an f64 or f32 first argument",
+                "a float (f64, f32, f16, or bf16) first argument",
                 subst,
             ) {
                 return error;
@@ -161,7 +155,7 @@ pub(super) fn check_round_to_builtin_signature(
                 errors,
                 node,
                 FNAME,
-                "an f64 or f32 first argument",
+                "a float (f64, f32, f16, or bf16) first argument",
                 other,
             );
         }
@@ -194,7 +188,14 @@ pub(super) fn check_csv_builtin_signature(
         _ => 2,
     };
     if arg_tys.len() != expected_arity {
-        return report_builtin_arity(errors, node, fname, expected_arity, arg_tys.len());
+        return report_builtin_arity(
+            errors,
+            node,
+            CheckSite::Node(node),
+            fname,
+            expected_arity,
+            arg_tys.len(),
+        );
     }
 
     macro_rules! require_slot {

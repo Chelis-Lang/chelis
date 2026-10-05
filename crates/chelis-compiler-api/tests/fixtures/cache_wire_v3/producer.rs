@@ -95,7 +95,8 @@ fn main() {
     let package = output.join("package");
     package_fixture(&package);
     let reef_home = PathBuf::from(std::env::var_os("CHELIS_REEF_HOME").unwrap());
-    let context = compile_reef_context(&reef_home, &package).unwrap();
+    let context =
+        compile_reef_context(&reef_home, &package, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
     assert_literal_result(&serde_json::to_value(&context).unwrap()["library_dag"]);
     let context_payloads = context_numeric_payloads(&context);
     assert_eq!(
@@ -105,16 +106,26 @@ fn main() {
     let context_path = output.join("context-v17.ctx");
     context.save(&context_path).unwrap();
     assert!(
-        CompiledContext::load_if_fresh(&context_path, &reef_home, &package)
-            .unwrap()
-            .is_some()
+        CompiledContext::load_if_fresh(
+            &context_path,
+            &reef_home,
+            &package,
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        )
+        .unwrap()
+        .is_some()
     );
     let worker_bytes = context.encode().expect("old worker producer");
     let worker_context = CompiledContext::decode(&worker_bytes).expect("old worker consumer");
     assert_literal_result(&serde_json::to_value(&worker_context).unwrap()["library_dag"]);
-    let disk_context = CompiledContext::load_if_fresh(&context_path, &reef_home, &package)
-        .unwrap()
-        .unwrap();
+    let disk_context = CompiledContext::load_if_fresh(
+        &context_path,
+        &reef_home,
+        &package,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap()
+    .unwrap();
     assert_literal_result(&serde_json::to_value(&disk_context).unwrap()["library_dag"]);
     assert_eq!(
         bincode::serialize(&context).unwrap(),

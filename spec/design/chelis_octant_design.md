@@ -224,9 +224,9 @@ This enables:
   that piece. "Does `\sigma\sqrt{T}` have the right dimensions?" — the overlay
   shows `f32 × f32 → f32`, confirming it is a scalar-scalar multiply.
 
-**This is the core value proposition of Octant and therefore lands in sub-phase
+**This is the central purpose of Octant and therefore lands in sub-phase
 `3n` (Part A), not `3o`.** A Black-Scholes `d_1` round-trip without source spans
-on every emitted Deep node would ship a parser, not a product.
+on every emitted Deep node would ship only a parser.
 
 ### 4.6 `Octant.Notebook` — Interactive environment
 
@@ -374,7 +374,7 @@ Rationale for the split:
 - `3o` needs `3l` (Shoals) green for SDE / MC / curve lowering, so it is
   sequential after `3l`.
 - Provenance is moved into `3n` (originally Octant Phase 3) because the audit
-  trail is Octant's core value proposition. Without it, the first round-trip
+  trail is Octant's central purpose. Without it, the first round-trip
   test is meaningless.
 - Document ingestion is parked as a post-Phase-3 stub alongside `school` and
   `darwin`: its parser scope is significantly larger than the quant-finance
@@ -409,7 +409,7 @@ deferrals, infrastructure decisions) live in `phase3n_octant.md`.
 4. **What about MathML / Presentation MathML as an alternative input format?**
    Some systems (Word equation editor, web-based tools) produce MathML rather
    than LaTeX. Supporting both input formats doubles the parser work but
-   increases the addressable workflow. Defer unless a specific customer
+   increases the addressable workflow. Defer unless a specific user
    workflow requires it.
 
 5. **Interaction with the Lean mechanization.** The provenance annotations and type

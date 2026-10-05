@@ -31,6 +31,7 @@ enum GradListShape {
     Tuple(Vec<GradListShape>),
     Adt {
         ctor: String,
+        source_name: String,
         field_names: Option<Vec<String>>,
         fields: Vec<GradListShape>,
     },
@@ -71,10 +72,12 @@ impl GradListShape {
             ),
             Self::Adt {
                 ctor,
+                source_name,
                 field_names,
                 fields,
             } => RuntimeValue::Adt {
                 ctor: ctor.clone(),
+                source_name: source_name.clone(),
                 fields: fields
                     .iter()
                     .map(|field| field.repack(leaves))
@@ -679,7 +682,7 @@ impl<'a> EvalContext<'a> {
         let prepared_inputs =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare_input)
                 .map_err(|error| {
-                if provider_failed {
+                if provider_failed || is_numeric_trap_failure(&error) {
                     error
                 } else {
                     let kind_label = match kind {
@@ -720,7 +723,7 @@ impl<'a> EvalContext<'a> {
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.
-            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+            if is_numeric_trap_failure(&err) {
                 return err;
             }
             let kind_label = match kind {
@@ -1089,6 +1092,7 @@ fn stage_grad_list_value(
         }
         RuntimeValue::Adt {
             ctor,
+            source_name,
             fields,
             field_names,
         } => {
@@ -1113,6 +1117,7 @@ fn stage_grad_list_value(
                 make_adt_construction_exprs(ctor, field_names.as_deref(), field_exprs, span),
                 GradListShape::Adt {
                     ctor: ctor.clone(),
+                    source_name: source_name.clone(),
                     field_names: field_names.clone(),
                     fields: field_shapes,
                 },
@@ -1155,6 +1160,16 @@ fn stage_grad_list_value(
              element is not a supported scalar, tensor, List, tuple, ADT, or unit value"
         )),
     }
+}
+
+/// Whether an evaluation failure is a numeric trap: a canonical [04-NUM-9]
+/// line, after any context lines (spec/04-type-system.md section 4.7). A
+/// trap renders byte-identically on every surface, so a transform's
+/// evaluation wrapper must pass it through unchanged.
+pub(super) fn is_numeric_trap_failure(failure: &str) -> bool {
+    failure
+        .lines()
+        .any(chelis_types::NumericTrap::is_canonical_line)
 }
 
 #[cfg(test)]
@@ -1404,8 +1419,19 @@ pub(super) fn runtime_value_to_dag_input_lossy(
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
+            // A scalar at the parameter's own dtype moves into the graph as
+            // its stored bits; only a different declared dtype is an ingress
+            // conversion from the wide image.
+            let value = if precision == payload.dtype() {
+                IrTensorValue::from_storage(
+                    vec![],
+                    chelis_types::tensor_from_scalars(precision, &[payload.value()]),
+                )
+            } else {
+                IrTensorValue::scalar(payload.as_f64_lossy())
+            };
             Ok((
-                IrTensorValue::scalar(payload.as_f64_lossy()),
+                value,
                 TensorType {
                     dims: vec![],
                     precision,

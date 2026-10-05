@@ -22,8 +22,8 @@ use std::collections::BTreeSet;
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
-    SHRINK_TO_END, TensorType, bind_symbolic_dims,
+    FusedStepOp, LogicalKind, NamedCastMode, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
+    RuntimeCheck, SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -32,7 +32,7 @@ use chelis_types::dtype_semantics::{
     count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
     float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars,
+    scatter_add_tensor_groups, tensor_from_scalars,
 };
 use chelis_types::dtype_semantics::{
     PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
@@ -431,19 +431,26 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
-/// Public entry point for the [05-OP-6] tensor rung, mirroring
-/// [`cast_tensor`] so the host runtime and the DAG evaluator share one
-/// kernel.
-pub fn cast_trunc_tensor(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
-    cast_trunc_value(input, dst)
+/// Public entry point for the named cast rungs of the chelis#759 ladder,
+/// mirroring [`cast_tensor`] so the host runtime and the DAG evaluator
+/// share one kernel per rung.
+pub fn named_cast_tensor(
+    mode: NamedCastMode,
+    input: &TensorValue,
+    dst: Prim,
+) -> Result<TensorValue, String> {
+    named_cast_value(mode, input, dst)
 }
 
-/// Tensor `cast_trunc` ([05-OP-6]): truncate every float element toward
-/// zero, then finalize at the integer target. The source is float and the
-/// target an integer width by the checker's contract, so the sealed
-/// kernel is reached with exactly the shape it accepts.
-fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
-    let storage = chelis_types::cast_trunc_tensor("cast_trunc", input.storage().to_raw(), dst)
+/// Tensor named cast: the rung's sealed kernel over every element, in
+/// order. The checker admits only the rung's source and target pairs, so
+/// the kernel is reached with exactly the shapes it accepts.
+fn named_cast_value(
+    mode: NamedCastMode,
+    input: &TensorValue,
+    dst: Prim,
+) -> Result<TensorValue, String> {
+    let storage = chelis_types::named_cast_tensor(mode, input.storage().to_raw(), dst)
         .map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
@@ -1088,31 +1095,65 @@ impl ElementwiseBinOp {
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
-            Self::TruncDiv | Self::Mod => None,
+            Self::Mod => Some(FloatBinOp::Rem),
+            Self::TruncDiv => None,
         }
     }
 }
 
 /// chelis#664 on the eval lane: an elementwise op indexes every operand
 /// through the output's shape, so operands that disagree at run time are a
-/// typed error, never an assertion. The routing of host-lane def applications
-/// through this evaluator (chelis#1277 B2h) made a runtime disagreement user
-/// input; the phrase is the one the host interpreter reports.
-fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
-    let render = |shape: &[usize]| {
-        let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
-        format!("[{}]", extents.join(", "))
+/// `Domain` trap in `op` (spec/04-type-system.md section 4.7), never an
+/// assertion. The routing of host-lane def applications through this
+/// evaluator (chelis#1277 B2h) made a runtime disagreement user input; the
+/// rendering is the one every lane shares.
+/// The failure of `node`'s operand agreement between `lhs` and `rhs`: a
+/// `Domain` trap in the node's operation, or in `matmul` when the node is
+/// matmul's decomposed product ([`crate::tier2::is_matmul_product`]), with
+/// the operands as written.
+fn agreement_failure(dag: &Dag, node: &DagNode, lhs: &TensorValue, rhs: &TensorValue) -> String {
+    if crate::tier2::is_matmul_product(node, |id| dag.get(id)) {
+        let exact = |shape: &[usize]| {
+            shape
+                .iter()
+                .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+                .collect::<Vec<_>>()
+        };
+        return chelis_abi::failure::matmul_product_disagreement(
+            &exact(&lhs.shape),
+            &exact(&rhs.shape),
+        );
+    }
+    shape_disagreement(crate::grad::risc_op_name(&node.op), lhs, rhs)
+}
+
+/// A scatter's updates disagree at run time with the gathered shape they must
+/// take: a section 4.7 `Domain` trap in the scatter, as compiled C renders it.
+fn sparse_updates_disagreement(op: &str, expected: &[usize], updates: &TensorValue) -> String {
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
     };
-    format!(
-        "tensor shapes must match for elementwise op, got {} vs {}",
-        render(&lhs.shape),
-        render(&rhs.shape)
-    )
+    chelis_abi::failure::operand_shape_disagreement(op, &exact(expected), &exact(&updates.shape))
+}
+
+fn shape_disagreement(op: &str, lhs: &TensorValue, rhs: &TensorValue) -> String {
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    chelis_abi::failure::operand_shape_disagreement(op, &exact(&lhs.shape), &exact(&rhs.shape))
 }
 
 /// Validate a producer's complete positive-rank agreement relation before
 /// reading the extent used by its declared-result claim.
 fn same_shape_agreement_extent(
+    dag: &Dag,
+    node: &DagNode,
     agreement: &crate::axis_sources::SameShapeAgreement,
     axis: usize,
     values: &UnordMap<NodeId, TensorValue>,
@@ -1138,7 +1179,7 @@ fn same_shape_agreement_extent(
             .get(member)
             .ok_or_else(|| format!("same-shape agreement member {} is not available", member.0))?;
         if value.shape != first.shape {
-            return Err(shape_disagreement(first, value));
+            return Err(agreement_failure(dag, node, first, value));
         }
     }
     first.shape.get(axis).copied().ok_or_else(|| {
@@ -1163,6 +1204,7 @@ fn same_shape_agreement_extent(
 /// `an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic`
 /// locks.
 fn broadcast_rank0_operands<'a>(
+    op: &str,
     lhs: &'a TensorValue,
     rhs: &'a TensorValue,
 ) -> Result<(Cow<'a, TensorValue>, Cow<'a, TensorValue>), String> {
@@ -1175,7 +1217,7 @@ fn broadcast_rank0_operands<'a>(
     if rhs.shape.is_empty() {
         return Ok((Cow::Borrowed(lhs), Cow::Owned(splat_rank0(rhs, &lhs.shape))));
     }
-    Err(shape_disagreement(lhs, rhs))
+    Err(shape_disagreement(op, lhs, rhs))
 }
 
 /// The rank-0 element repeated over `shape`, at the operand's own dtype.
@@ -1194,11 +1236,15 @@ fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
 /// removed the rank-0 broadcast from this family: `[05-OP-36]` makes a scalar
 /// beside a tensor a type error, so the lane preservation B2h added for it has
 /// no admitted program left to preserve.
-fn require_matching_comparison_shapes(lhs: &TensorValue, rhs: &TensorValue) -> Result<(), String> {
+fn require_matching_comparison_shapes(
+    op: &str,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<(), String> {
     if lhs.shape == rhs.shape {
         return Ok(());
     }
-    Err(shape_disagreement(lhs, rhs))
+    Err(shape_disagreement(op, lhs, rhs))
 }
 
 fn binary_elementwise(
@@ -1206,7 +1252,7 @@ fn binary_elementwise(
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
+    let (lhs, rhs) = broadcast_rank0_operands(op.name(), lhs, rhs)?;
     let (lhs, rhs) = (&*lhs, &*rhs);
     let storage = if lhs.prim() == Prim::Bool || rhs.prim() == Prim::Bool {
         return Err(format!(
@@ -1252,6 +1298,9 @@ enum ElementwiseUnOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1270,6 +1319,9 @@ impl ElementwiseUnOp {
             Self::Cos => "cos",
             Self::Tan => "tan",
             Self::Atan => "atan",
+            Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1291,7 +1343,10 @@ impl ElementwiseUnOp {
             | Self::Sqrt
             | Self::Cos
             | Self::Tan
-            | Self::Atan => None,
+            | Self::Atan
+            | Self::Tanh
+            | Self::Erf
+            | Self::Erfc => None,
         }
     }
 
@@ -1306,6 +1361,9 @@ impl ElementwiseUnOp {
             Self::Cos => FloatUnOp::Cos,
             Self::Tan => FloatUnOp::Tan,
             Self::Atan => FloatUnOp::Atan,
+            Self::Tanh => FloatUnOp::Tanh,
+            Self::Erf => FloatUnOp::Erf,
+            Self::Erfc => FloatUnOp::Erfc,
             Self::Abs => FloatUnOp::Abs,
             Self::Floor => FloatUnOp::Floor,
             Self::Ceil => FloatUnOp::Ceil,
@@ -1337,11 +1395,12 @@ fn unary_elementwise(op: ElementwiseUnOp, input: &TensorValue) -> Result<TensorV
 }
 
 fn compare_elementwise(
-    op: CompareOp,
+    kind: ComparisonKind,
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    require_matching_comparison_shapes(lhs, rhs)?;
+    require_matching_comparison_shapes(kind.surf_name(), lhs, rhs)?;
+    let op = comparison_kernel(kind);
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
@@ -1386,7 +1445,7 @@ fn logical_elementwise(
                     kind.surf_name()
                 ));
             }
-            require_matching_comparison_shapes(lhs, rhs)?;
+            require_matching_comparison_shapes(kind.surf_name(), lhs, rhs)?;
             let rhs_values = rhs
                 .storage()
                 .to_i64_exact_vec()
@@ -1426,11 +1485,17 @@ fn where_elementwise(
     // an empty condition yields an empty result of its own shape.
     let then_selected = condition_values.iter().any(|selected| *selected != 0);
     let else_selected = condition_values.contains(&0);
-    let shape_error = || "where: condition and branch shapes must match exactly".to_string();
+    // spec/04 section 4.7: a disagreement is a `Domain` trap in `where`,
+    // comparing the condition with a branch as every lane does.
+    let shape_error = |branch: &TensorValue| shape_disagreement("where", condition, branch);
     match (then_selected, else_selected) {
-        (true, false) if condition.shape != then_value.shape => return Err(shape_error()),
+        (true, false) if condition.shape != then_value.shape => {
+            return Err(shape_error(then_value));
+        }
         (true, false) => return Ok(then_value.clone()),
-        (false, true) if condition.shape != else_value.shape => return Err(shape_error()),
+        (false, true) if condition.shape != else_value.shape => {
+            return Err(shape_error(else_value));
+        }
         (false, true) => return Ok(else_value.clone()),
         (false, false) => {
             return Ok(TensorValue::from_storage(
@@ -1440,8 +1505,11 @@ fn where_elementwise(
         }
         (true, true) => {}
     }
-    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
-        return Err(shape_error());
+    if condition.shape != then_value.shape {
+        return Err(shape_error(then_value));
+    }
+    if condition.shape != else_value.shape {
+        return Err(shape_error(else_value));
     }
     let writes = condition_values
         .into_iter()
@@ -1571,10 +1639,17 @@ fn gather(
         let out_index = linear_to_index(out_linear, &out_shape);
         let idx_index = sparse_index_coordinate(&out_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
-        assert!(
-            gathered >= 0 && (gathered as usize) < values.shape[axis],
-            "gather index {gathered} out of bounds for axis {axis}"
-        );
+        // [05-SPARSE-1]: an index outside the axis is a `Domain` trap in the
+        // primitive, rendered as every lane renders it; no lane panics on it
+        // ([04-NUM-10]).
+        if gathered < 0 || gathered as usize >= values.shape[axis] {
+            return Err(chelis_abi::failure::sparse_index_out_of_bounds(
+                "gather",
+                gathered as i64,
+                axis,
+                i64::try_from(values.shape[axis]).unwrap_or(i64::MAX),
+            ));
+        }
         let mut value_index = Vec::with_capacity(values.shape.len());
         value_index.extend_from_slice(&out_index[..axis]);
         value_index.push(gathered as usize);
@@ -1600,26 +1675,43 @@ fn scatter_add(
     let index_rank = indices.shape.len();
     let index_suffix_rank = index_rank - batch_rank;
     let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
-    assert_eq!(updates.shape, expected_updates);
+    if updates.shape != expected_updates {
+        return Err(sparse_updates_disagreement(
+            "scatter",
+            &expected_updates,
+            updates,
+        ));
+    }
 
-    let mut out = target.to_f64_lossy_vec();
-    let upd = updates.to_f64_lossy_vec();
-    for (update_linear, update) in upd.iter().enumerate() {
+    // [05-OP-33]: each destination's leaves are its target value, then the
+    // targeting updates in row-major update order.
+    let mut leaves = vec![Vec::new(); target.len()];
+    for update_linear in 0..updates.len() {
         let update_index = linear_to_index(update_linear, &updates.shape);
         let idx_index = sparse_index_coordinate(&update_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
-        assert!(
-            gathered >= 0 && (gathered as usize) < target.shape[axis],
-            "scatter_add index {gathered} out of bounds for axis {axis}"
-        );
+        // [05-SPARSE-1]: an index outside the axis is a `Domain` trap in the
+        // primitive, rendered as every lane renders it; no lane panics on it
+        // ([04-NUM-10]).
+        if gathered < 0 || gathered as usize >= target.shape[axis] {
+            return Err(chelis_abi::failure::sparse_index_out_of_bounds(
+                "scatter",
+                gathered as i64,
+                axis,
+                i64::try_from(target.shape[axis]).unwrap_or(i64::MAX),
+            ));
+        }
         let mut target_index = Vec::with_capacity(target.shape.len());
         target_index.extend_from_slice(&update_index[..axis]);
         target_index.push(gathered as usize);
         target_index.extend_from_slice(&update_index[axis + index_suffix_rank..]);
         let target_linear = index_to_linear(&target_index, &target.shape);
-        out[target_linear] += update;
+        leaves[target_linear].push(update_linear);
     }
-    finalize_wide("scatter_add", prim, target.shape.clone(), out)
+    debug_assert_eq!(target.prim(), prim);
+    let storage = scatter_add_tensor_groups(target.storage(), updates.storage(), &leaves)
+        .map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(target.shape.clone(), storage))
 }
 
 /// Replace-scatter (last-write-wins) over duplicate target indices.
@@ -1638,22 +1730,35 @@ fn scatter_replace(
     updates: &TensorValue,
     axis: usize,
     batch_rank: usize,
-) -> TensorValue {
+) -> Result<TensorValue, String> {
     assert!(axis < target.shape.len());
     let index_rank = indices.shape.len();
     let index_suffix_rank = index_rank - batch_rank;
     let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
-    assert_eq!(updates.shape, expected_updates);
+    if updates.shape != expected_updates {
+        return Err(sparse_updates_disagreement(
+            "scatter_replace",
+            &expected_updates,
+            updates,
+        ));
+    }
 
     let mut writes = Vec::with_capacity(updates.len());
     for update_linear in 0..updates.len() {
         let update_index = linear_to_index(update_linear, &updates.shape);
         let idx_index = sparse_index_coordinate(&update_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
-        assert!(
-            gathered >= 0 && (gathered as usize) < target.shape[axis],
-            "scatter_replace index {gathered} out of bounds for axis {axis}"
-        );
+        // [05-SPARSE-1]: an index outside the axis is a `Domain` trap in the
+        // primitive, rendered as every lane renders it; no lane panics on it
+        // ([04-NUM-10]).
+        if gathered < 0 || gathered as usize >= target.shape[axis] {
+            return Err(chelis_abi::failure::sparse_index_out_of_bounds(
+                "scatter_replace",
+                gathered as i64,
+                axis,
+                i64::try_from(target.shape[axis]).unwrap_or(i64::MAX),
+            ));
+        }
         let mut target_index = Vec::with_capacity(target.shape.len());
         target_index.extend_from_slice(&update_index[..axis]);
         target_index.push(gathered as usize);
@@ -1663,10 +1768,10 @@ fn scatter_replace(
     }
     // reuse_* contract: replace-scatter moves existing elements only
     // (section C3, element-preserving).
-    TensorValue::from_storage(
+    Ok(TensorValue::from_storage(
         target.shape.clone(),
         target.storage().reuse_overwrite(updates.storage(), writes),
-    )
+    ))
 }
 
 /// Element-wise replace-scatter with ONNX `ScatterElements` semantics
@@ -1686,12 +1791,15 @@ fn scatter_elements(
     indices: &TensorValue,
     updates: &TensorValue,
     axis: usize,
-) -> TensorValue {
+) -> Result<TensorValue, String> {
     assert!(axis < data.shape.len());
-    assert_eq!(
-        indices.shape, updates.shape,
-        "scatter_elements requires indices.shape == updates.shape"
-    );
+    if indices.shape != updates.shape {
+        return Err(sparse_updates_disagreement(
+            "scatter_elements",
+            &indices.shape,
+            updates,
+        ));
+    }
     assert_eq!(
         indices.shape.len(),
         data.shape.len(),
@@ -1702,20 +1810,27 @@ fn scatter_elements(
     for update_linear in 0..updates.len() {
         let coord = linear_to_index(update_linear, &updates.shape);
         let gathered = index_at(indices, update_linear);
-        assert!(
-            gathered >= 0 && (gathered as usize) < data.shape[axis],
-            "scatter_elements index {gathered} out of bounds for axis {axis}"
-        );
+        // [05-SPARSE-1]: an index outside the axis is a `Domain` trap in the
+        // primitive, rendered as every lane renders it; no lane panics on it
+        // ([04-NUM-10]).
+        if gathered < 0 || gathered as usize >= data.shape[axis] {
+            return Err(chelis_abi::failure::sparse_index_out_of_bounds(
+                "scatter_elements",
+                gathered as i64,
+                axis,
+                i64::try_from(data.shape[axis]).unwrap_or(i64::MAX),
+            ));
+        }
         let mut target_index = coord.clone();
         target_index[axis] = gathered as usize;
         // Last-write-wins: deterministic-order overwrite.
         writes.push((index_to_linear(&target_index, &data.shape), update_linear));
     }
     // reuse_* contract: element-preserving overwrite (section C3).
-    TensorValue::from_storage(
+    Ok(TensorValue::from_storage(
         data.shape.clone(),
         data.storage().reuse_overwrite(updates.storage(), writes),
-    )
+    ))
 }
 
 /// Strided windowed reduction over the trailing `window_shape.len()` axes.
@@ -2142,6 +2257,7 @@ fn resolve_eval_bound(
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
     input_extent: usize,
+    axis: usize,
 ) -> Result<usize, String> {
     match bound {
         RtDim::Lit(n) => Ok(*n),
@@ -2166,11 +2282,15 @@ fn resolve_eval_bound(
                 )
             })?;
             if raw < 0 {
-                return Err(format!(
-                    "movement bound at node {}: bound-source (slot {i}) must be a non-negative \
-                     integer, got {raw}",
-                    node.id.0
-                ));
+                return Err(
+                    negative_bound_failure(node, values, axis, raw).unwrap_or_else(|| {
+                        format!(
+                            "movement bound at node {}: bound-source (slot {i}) must be a \
+                         non-negative integer, got {raw}",
+                            node.id.0
+                        )
+                    }),
+                );
             }
             usize::try_from(raw).map_err(|_| {
                 format!(
@@ -2219,6 +2339,46 @@ fn resolve_eval_bound(
     }
 }
 
+/// The non-negativity guard of spec/04-type-system.md section 4.7 for a
+/// negative runtime bound at `axis` of `node`, rendered as every lane renders
+/// it: a target extent of `expand`, `insert` or `reshape`, or a bound of
+/// `pad` or `shrink`. `None` for an operation whose bounds carry their own
+/// guard before they are resolved here.
+fn negative_bound_failure(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    axis: usize,
+    raw: i64,
+) -> Option<String> {
+    match &node.op {
+        RiscOp::Expand { .. } => {
+            // One more output axis than the operand has is an `insert`, as
+            // the expansion below decides.
+            let input_rank = values.get(node.inputs.first()?)?.shape.len();
+            let op = if node.output_type.dims.len() == input_rank + 1 {
+                crate::axis_sources::ExpansionKind::Insert
+            } else {
+                crate::axis_sources::ExpansionKind::Expand
+            };
+            Some(chelis_abi::failure::negative_target_extent(
+                op.primitive_name(),
+                axis,
+                raw,
+            ))
+        }
+        RiscOp::Reshape { .. } => Some(chelis_abi::failure::negative_target_extent(
+            "reshape", axis, raw,
+        )),
+        RiscOp::Pad { .. } => Some(chelis_abi::failure::negative_movement_bound(
+            "pad", axis, raw,
+        )),
+        RiscOp::Shrink { .. } => Some(chelis_abi::failure::negative_movement_bound(
+            "shrink", axis, raw,
+        )),
+        _ => None,
+    }
+}
+
 /// chelis#616: resolve a `(start, end)` bound-pair list against the input shape
 /// (used for `Pad` / `Shrink`).
 fn resolve_eval_pairs(
@@ -2233,8 +2393,8 @@ fn resolve_eval_pairs(
         .map(|(axis, (s, e))| {
             let extent = input_shape.get(axis).copied().unwrap_or(0);
             Ok((
-                resolve_eval_bound(s, node, values, extent)?,
-                resolve_eval_bound(e, node, values, extent)?,
+                resolve_eval_bound(s, node, values, extent, axis)?,
+                resolve_eval_bound(e, node, values, extent, axis)?,
             ))
         })
         .collect()
@@ -2284,7 +2444,7 @@ fn resolve_eval_stride_step(
             })?
         }
         RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => {
-            resolve_eval_bound(step, node, values, input_extent)?
+            resolve_eval_bound(step, node, values, input_extent, 0)?
         }
     };
     std::num::NonZeroUsize::new(resolved).ok_or_else(|| STRIDE_DOMAIN_TRAP.to_string())
@@ -3746,7 +3906,7 @@ where
                 // lane while the C lane keeps emitting it.
                 let observed = match &claim.observed {
                     crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
-                        resolve_eval_bound(carrier, node, &values, 0)?
+                        resolve_eval_bound(carrier, node, &values, 0, *axis)?
                     }
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(
@@ -3756,49 +3916,19 @@ where
                             resolved_stride_steps.as_deref(),
                         )? {
                             Some(extent) => extent,
-                            // A span that selects nothing, or that runs past
-                            // the operand's own extent, computes no extent to
+                            // An inverted span, or one that runs past the
+                            // operand's own extent, computes no extent to
                             // compare, so the guard yields rather than
-                            // comparing a fabricated number.
-                            //
-                            // chelis#1797 added the second of those. An
-                            // overshooting span has an arithmetic width, and
-                            // comparing a claim against it reported a claim
-                            // mismatch for a program whose claim was not the
-                            // defect: `-> tensor[6, f32]` over a span of 6 that
-                            // reads past the end AGREED with the claim and the
-                            // guard passed. `shrink` now returns section
-                            // 2.4.1's overshoot error instead, in the compiled
-                            // lane's words, so declining here is what lets the
-                            // operation report it.
-                            //
-                            // An earlier version of this comment justified the
-                            // decline for the EMPTY case by saying the C
-                            // runtime's movement plan rejects such a span
-                            // before the site is reached. That was checkable
-                            // and false: `ShapeMetadata::shrunk` does not
-                            // reject `start == end` (it rejects a negative
-                            // start, `end < start`, and an overshoot), so an
-                            // empty span builds a plan of extent 0 and C's
-                            // guard runs and reports the claim.
-                            //
-                            // C is the conforming lane there.
-                            // `spec/05-risc-primitives.md` section 2.4.1's
-                            // closed list of runtime-bound errors does not
-                            // include an empty span, and section 4.7.2 makes
-                            // only a NEGATIVE size an error, so an extent-0
-                            // result under a declared `tensor[2, f32]` is a
-                            // claim mismatch. This lane instead rejects the
-                            // span itself under an operation-level admission
-                            // rule the numbered spec does not require; the
-                            // divergence is pre-existing, is tracked by
-                            // chelis#1795, and is pinned rather than repaired
-                            // here.
+                            // comparing a fabricated number, and `shrink`
+                            // reports section 2.4.1's error in the compiled
+                            // lane's words (chelis#1797). An empty span is the
+                            // real extent 0, which the guard compares like any
+                            // other (chelis#1795).
                             None => continue,
                         }
                     }
                     crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
-                        same_shape_agreement_extent(agreement, *axis, &values)?
+                        same_shape_agreement_extent(dag, node, agreement, *axis, &values)?
                     }
                     crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
                         reason,
@@ -3856,7 +3986,13 @@ where
                 // lane (no f64 laundering above 2^53), float payloads
                 // through their exact f64 images. A payload whose value
                 // does not survive the node's dtype traps loudly.
+                // A payload already at the node's dtype is moved, bits
+                // and all, so a NaN constant keeps its encoding.
                 match value.as_i64_exact() {
+                    _ if value.prim() == out_prim => TensorValue::from_storage(
+                        shape,
+                        chelis_types::tensor_from_scalars(out_prim, &vec![*value; n]),
+                    ),
                     Some(i) => finalize_wide_int("const", out_prim, shape, vec![i; n])?,
                     None => finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?,
                 }
@@ -3869,6 +4005,11 @@ where
                 // integer/bool payloads, exact f64 images otherwise
                 // (chelis#856).
                 match data.to_i64_exact_vec() {
+                    _ if data.prim() == out_prim
+                        && data.len() == shape.iter().product::<usize>() =>
+                    {
+                        TensorValue::from_storage(shape, data.clone())
+                    }
                     Some(ints) => finalize_wide_int("const", out_prim, shape, ints)?,
                     None => finalize_wide("const", out_prim, shape, data.to_f64_lossy_vec())?,
                 }
@@ -4056,11 +4197,16 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
-            RiscOp::Mul => binary_elementwise(
-                ElementwiseBinOp::Mul,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Mul => {
+                let (lhs, rhs) = (&values[&node.inputs[0]], &values[&node.inputs[1]]);
+                // A disagreement inside matmul's decomposed product is
+                // matmul's own `Domain` trap (spec/04 section 4.7).
+                if lhs.shape != rhs.shape && crate::tier2::is_matmul_product(node, |id| dag.get(id))
+                {
+                    return Err(agreement_failure(dag, node, lhs, rhs));
+                }
+                binary_elementwise(ElementwiseBinOp::Mul, lhs, rhs)?
+            }
             RiscOp::Div => {
                 if is_runtime_mean_div(dag, node)
                     && values[&node.inputs[1]]
@@ -4087,7 +4233,7 @@ where
             //
             // chelis#550: integer operands trap on a zero divisor with the
             // shared diagnostic, mirroring the host evaluator (`host_ops`,
-            // i64 + trap) and the C backend (`chelis_int_div_guard`) so this
+            // i64 + trap) and the C backend (`chelis_int_checked_floor_div`) so this
             // reference lane fails closed instead of emitting `floor(x/0)`.
             // Float operands keep IEEE semantics (`floor(+inf) == +inf`,
             // never traps), per spec/05-risc-primitives.md §2.1. The integer
@@ -4101,7 +4247,7 @@ where
             RiscOp::Bitwise(kind) => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
-                require_matching_comparison_shapes(lhs, rhs)?;
+                require_matching_comparison_shapes(kind.name(), lhs, rhs)?;
                 let storage = chelis_types::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
                     .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(lhs.shape.clone(), storage)
@@ -4133,6 +4279,9 @@ where
             RiscOp::Cos => unary_elementwise(ElementwiseUnOp::Cos, &values[&node.inputs[0]])?,
             RiscOp::Tan => unary_elementwise(ElementwiseUnOp::Tan, &values[&node.inputs[0]])?,
             RiscOp::Atan => unary_elementwise(ElementwiseUnOp::Atan, &values[&node.inputs[0]])?,
+            RiscOp::Tanh => unary_elementwise(ElementwiseUnOp::Tanh, &values[&node.inputs[0]])?,
+            RiscOp::Erf => unary_elementwise(ElementwiseUnOp::Erf, &values[&node.inputs[0]])?,
+            RiscOp::Erfc => unary_elementwise(ElementwiseUnOp::Erfc, &values[&node.inputs[0]])?,
             RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
             RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
             RiscOp::Ceil => unary_elementwise(ElementwiseUnOp::Ceil, &values[&node.inputs[0]])?,
@@ -4330,7 +4479,7 @@ where
                         }
                         .to_string());
                     }
-                    resolve_eval_bound(count, node, &values, 0)?
+                    resolve_eval_bound(count, node, &values, 0, 0)?
                 } else {
                     inactive_split_count(&node.output_type, &runtime_dims)?
                 };
@@ -4379,6 +4528,30 @@ where
                 .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(lhs.shape.clone(), storage)
             }
+            RiscOp::Softmax { axis } => {
+                let input = &values[&node.inputs[0]];
+                let mut graph = Dag::new();
+                let owner = graph.declare("softmax");
+                let ty = TensorType {
+                    dims: input.shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: node.output_type.precision,
+                };
+                let x = graph.add_node(
+                    owner,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let result =
+                    crate::tier2::decompose_softmax(owner.into(), &mut graph, x, *axis, &ty, None);
+                graph.add_root(result);
+                let mut load = |_: &str| Some(input.clone());
+                let load: &mut dyn FnMut(&str) -> Option<TensorValue> = &mut load;
+                eval_tensor_roots_with_strict(&graph, &[result], load)?
+                    .remove(&result)
+                    .expect("softmax root evaluated")
+            }
             RiscOp::Relu => {
                 let input = &values[&node.inputs[0]];
                 let storage = float_relu(input.storage()).map_err(|error| error.to_string())?;
@@ -4391,11 +4564,9 @@ where
                     .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(input.shape.clone(), storage)
             }
-            RiscOp::Compare(kind) => compare_elementwise(
-                comparison_kernel(*kind),
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Compare(kind) => {
+                compare_elementwise(*kind, &values[&node.inputs[0]], &values[&node.inputs[1]])?
+            }
             RiscOp::Logical(kind) => logical_elementwise(
                 *kind,
                 &values[&node.inputs[0]],
@@ -4496,12 +4667,29 @@ where
             RiscOp::Reshape { new_shape } => {
                 let shape: Vec<usize> = new_shape
                     .iter()
-                    .map(|dim| match dim {
+                    .enumerate()
+                    .map(|(axis, dim)| match dim {
                         RtDim::Lit(n) => Ok(*n),
                         // chelis#616: a runtime target extent reads its rank-0
-                        // integer scalar exactly like a movement bound.
-                        RtDim::Node(_) => resolve_eval_bound(dim, node, &values, 0),
-                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0),
+                        // integer scalar exactly like a movement bound. A
+                        // negative one fails spec/04 section 4.7's
+                        // non-negativity guard: a `Domain` trap in `reshape`.
+                        RtDim::Node(slot) => {
+                            let negative = node
+                                .inputs
+                                .get(*slot)
+                                .and_then(|input| values.get(input))
+                                .filter(|value| !value.is_empty())
+                                .and_then(|value| value.storage().scalar_at(0).as_i64_exact())
+                                .filter(|raw| *raw < 0);
+                            if let Some(raw) = negative {
+                                return Err(chelis_abi::failure::negative_target_extent(
+                                    "reshape", axis, raw,
+                                ));
+                            }
+                            resolve_eval_bound(dim, node, &values, 0, axis)
+                        }
+                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0, axis),
                         // chelis#616: an op-declared symbol resolves from the
                         // mid-evaluation bindings.
                         RtDim::Sym(name) => runtime_dims.get(name).copied().ok_or_else(|| {
@@ -4519,13 +4707,12 @@ where
                 // product traps rather than overflowing (chelis#2491).
                 let input = &values[&node.inputs[0]];
                 let expected = admit_result("reshape", &shape, input.prim())?;
-                // The phrase is the interpreter's and the C runtime's
-                // (`host_emit.rs`), so every lane reports the mismatch alike.
+                // The rendering is every lane's, so the lanes report the
+                // `Domain` trap alike (spec/04-type-system.md section 4.7).
                 if expected != input.len() {
-                    return Err(format!(
-                        "reshape expects {} elements but tensor has {}",
-                        expected,
-                        input.len()
+                    return Err(chelis_abi::failure::reshape_element_count_disagreement(
+                        u64::try_from(expected).unwrap_or(u64::MAX),
+                        u64::try_from(input.len()).unwrap_or(u64::MAX),
                     ));
                 }
                 reshape(input, shape)
@@ -4533,7 +4720,7 @@ where
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes)?,
             RiscOp::Expand { axis, size } => {
                 let input = &values[&node.inputs[0]];
-                let size_value = resolve_eval_bound(size, node, &values, 0)?;
+                let size_value = resolve_eval_bound(size, node, &values, 0, *axis)?;
                 let mut out_shape = input.shape.clone();
                 let kind = if node.output_type.dims.len() == input.shape.len() + 1 {
                     if *axis > out_shape.len() {
@@ -4576,18 +4763,10 @@ where
             }
             RiscOp::Shrink { bounds } => {
                 let input = &values[&node.inputs[0]];
+                // spec/05 section 2.4.1 closes the runtime-bound errors: equal
+                // endpoints select an empty axis (chelis#1795), and only an
+                // inverted or overshooting range traps, inside `shrink`.
                 let resolved = resolve_eval_pairs(bounds, node, &values, &input.shape)?;
-                // chelis#616 on the eval lane: a runtime bound that selects
-                // nothing is rejected as the interpreter rejects it and as
-                // the C runtime aborts it, never returned as an empty tensor.
-                for (axis, (start, end)) in resolved.iter().enumerate() {
-                    if start >= end {
-                        return Err(format!(
-                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted \
-                             (start >= end)"
-                        ));
-                    }
-                }
                 shrink(input, &resolved)?
             }
             RiscOp::Stride { .. } => {
@@ -4703,6 +4882,18 @@ where
                             ElementwiseUnOp::Atan,
                             resolve(&step.input_indices[0]),
                         )?,
+                        FusedStepOp::Tanh => unary_elementwise(
+                            ElementwiseUnOp::Tanh,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Erf => unary_elementwise(
+                            ElementwiseUnOp::Erf,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Erfc => unary_elementwise(
+                            ElementwiseUnOp::Erfc,
+                            resolve(&step.input_indices[0]),
+                        )?,
                         FusedStepOp::Abs => unary_elementwise(
                             ElementwiseUnOp::Abs,
                             resolve(&step.input_indices[0]),
@@ -4737,9 +4928,12 @@ where
                     TensorValue::from_storage(last.shape.clone(), storage)
                 }
             }
-            RiscOp::CastTrunc { new_precision } => {
+            RiscOp::NamedCast {
+                mode,
+                new_precision,
+            } => {
                 let input = &values[&node.inputs[0]];
-                cast_trunc_value(input, *new_precision)?
+                named_cast_value(*mode, input, *new_precision)?
             }
             RiscOp::Cast { new_precision } => {
                 // #380: a `cast` must apply the dtype conversion, not pass the
@@ -4786,13 +4980,13 @@ where
                 &values[&node.inputs[2]],
                 *axis,
                 *batch_rank,
-            ),
+            )?,
             RiscOp::ScatterElements { axis } => scatter_elements(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
                 *axis,
-            ),
+            )?,
         };
         for (id, original) in inactive_operands {
             values.insert(id, original);
@@ -5061,7 +5255,8 @@ fn inactive_unchecked_value(
         }
         RuntimeCheck::EmptyAxis => {
             let axis = match &node.op {
-                RiscOp::MaxReduce { axis }
+                RiscOp::Softmax { axis }
+                | RiscOp::MaxReduce { axis }
                 | RiscOp::MinReduce { axis }
                 | RiscOp::Argmax { axis }
                 | RiscOp::Argmin { axis } => *axis,
@@ -5072,7 +5267,9 @@ fn inactive_unchecked_value(
                 return Ok(None);
             }
             let mut shape = operand.shape.clone();
-            shape.remove(axis);
+            if !matches!(node.op, RiscOp::Softmax { .. }) {
+                shape.remove(axis);
+            }
             zeros(&shape).map(Some)
         }
         RuntimeCheck::ExtentClaims => match &node.op {
@@ -5381,13 +5578,10 @@ where
 /// node's own bounds before that node runs.
 ///
 /// `None` means the operation computes no extent here: a `shrink` span whose
-/// start is not below its end selects nothing, so there is nothing to compare
-/// and the guard yields. THIS lane then reports the span itself. The C lane
-/// does not: `spec/05-risc-primitives.md` section 2.4.1's closed list of
-/// runtime-bound errors does not include an empty span, so an extent-0 result
-/// under a declared literal is a claim mismatch there and C reports the claim.
-/// That divergence is chelis#1795's, not this function's; the inline comment
-/// at the call site carries the full argument.
+/// start is above its end is inverted, so there is nothing to compare and the
+/// guard yields to the operation's own domain trap. An empty span computes
+/// the real extent 0 (`spec/05-risc-primitives.md` section 2.4.1,
+/// chelis#1795), which a declared literal claim then compares on both lanes.
 ///
 /// A span whose END exceeds the operand's extent is declined for the same
 /// reason, and chelis#1797 is why it now can be. Such a span is out of domain,
@@ -5458,12 +5652,12 @@ fn computed_axis_extent_value(
             else {
                 return Ok(None);
             };
-            let start = resolve_eval_bound(start, node, values, extent)?;
-            let end = resolve_eval_bound(end, node, values, extent)?;
+            let start = resolve_eval_bound(start, node, values, extent, *operand_axis)?;
+            let end = resolve_eval_bound(end, node, values, extent, *operand_axis)?;
             if end > extent {
                 return Ok(None);
             }
-            Ok(end.checked_sub(start).filter(|span| *span > 0))
+            Ok(end.checked_sub(start))
         }
         crate::axis_sources::ComputedAxisExtent::PadSpan {
             before,
@@ -5487,8 +5681,8 @@ fn computed_axis_extent_value(
             // which a padding bound never is; passing the operand's extent
             // keeps one resolver for both owners rather than a second that
             // differs only in what it refuses.
-            let before = resolve_eval_bound(before, node, values, extent)?;
-            let after = resolve_eval_bound(after, node, values, extent)?;
+            let before = resolve_eval_bound(before, node, values, extent, *operand_axis)?;
+            let after = resolve_eval_bound(after, node, values, extent, *operand_axis)?;
             // A sum past the host's extent capacity computes no extent. The
             // pad's own allocation owns that failure, so the guard yields
             // instead of comparing a wrapped number.
@@ -5704,6 +5898,41 @@ mod tests {
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
 
+    /// [05-OP-33] (chelis#2972): add-mode scatter combines each destination's
+    /// base value and targeting updates by the canonical balanced tree at
+    /// the operand width. i64 stays exact above 2^53; at f32
+    /// `(2^24 + 1) + 1` rounds back to 2^24 at each node; i32 overflow traps
+    /// under the operation's name, as compiled C does.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 08939bc0e the i64 row returns
+    /// 2^53, the f32 row 2^24 + 2, and the i32 row names `scatter_add`.
+    #[test]
+    fn scatter_add_combines_at_the_operand_width() {
+        let index = finalize_wide_int("test", Prim::Int64, vec![2], vec![0, 0]).unwrap();
+        let above = (1_i64 << 53) + 1;
+        let target = finalize_wide_int("test", Prim::Int64, vec![3], vec![above, 0, 0]).unwrap();
+        let updates = finalize_wide_int("test", Prim::Int64, vec![2], vec![1, 1]).unwrap();
+        let out = scatter_add(&target, &index, &updates, 0, 0, Prim::Int64).unwrap();
+        assert_eq!(
+            out.storage().to_i64_exact_vec(),
+            Some(vec![above + 2, 0, 0])
+        );
+
+        let target = finalize_wide("test", Prim::F32, vec![2], vec![16_777_216.0, 0.0]).unwrap();
+        let updates = finalize_wide("test", Prim::F32, vec![2], vec![1.0, 1.0]).unwrap();
+        let out = scatter_add(&target, &index, &updates, 0, 0, Prim::F32).unwrap();
+        assert_eq!(out.to_f64_lossy_vec(), vec![16_777_216.0, 0.0]);
+
+        let index = finalize_wide_int("test", Prim::Int64, vec![1], vec![0]).unwrap();
+        let target =
+            finalize_wide_int("test", Prim::Int32, vec![1], vec![i64::from(i32::MAX)]).unwrap();
+        let updates = finalize_wide_int("test", Prim::Int32, vec![1], vec![1]).unwrap();
+        assert_eq!(
+            scatter_add(&target, &index, &updates, 0, 0, Prim::Int32).unwrap_err(),
+            "numeric trap: overflow in scatter at i32"
+        );
+    }
+
     /// [05-OP-53]: the condition's shape equals the shape of every branch it
     /// selects, and a branch it selects nowhere is neither read nor
     /// shape-checked. A uniform condition yields the selected branch when
@@ -5729,10 +5958,18 @@ mod tests {
         let selected = where_elementwise(&condition(&[0, 0, 0]), &two, &three).unwrap();
         assert_eq!(selected.shape, vec![3]);
         assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
-        for flags in [&[1, 1, 1][..], &[0, 0][..]] {
+        // spec/04 section 4.7: the condition disagrees with the one branch
+        // it selects, a `Domain` trap in `where`.
+        for (flags, context) in [
+            (&[1, 1, 1][..], "lhs [3] has 3, rhs [2] has 2"),
+            (&[0, 0][..], "lhs [2] has 2, rhs [3] has 3"),
+        ] {
             assert_eq!(
                 where_elementwise(&condition(flags), &two, &three).unwrap_err(),
-                "where: condition and branch shapes must match exactly",
+                format!(
+                    "where operands disagree at axis 0: {context}\n\
+                     numeric trap: domain in where at i64"
+                ),
                 "{flags:?}"
             );
         }
@@ -5741,7 +5978,8 @@ mod tests {
         assert_eq!(empty.prim(), Prim::F64);
         assert_eq!(
             where_elementwise(&condition(&[1, 0, 1]), &three, &two).unwrap_err(),
-            "where: condition and branch shapes must match exactly"
+            "where operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+             numeric trap: domain in where at i64"
         );
         let mixed = where_elementwise(
             &condition(&[1, 0, 1]),
@@ -5851,11 +6089,9 @@ mod tests {
     /// `ShapeMetadata::shrunk` gives it the same `Domain` message on the
     /// compiled lane.
     ///
-    /// This kernel branch is a backstop from the DAG evaluator's side: the
-    /// `RiscOp::Shrink` arm rejects `start >= end` first, with chelis#616's
-    /// admission-rule wording, so a program cannot reach this branch through
-    /// that path. That earlier rejection is a separate lane divergence tracked
-    /// by chelis#1795 and is NOT repaired here.
+    /// The `RiscOp::Shrink` arm reaches this branch for every runtime bound,
+    /// so a program's inverted span reports this trap on eval as on C
+    /// (chelis#1795).
     ///
     /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
     /// with `eval::shrink: axis 0 bound start 3 exceeds end 1`.
@@ -7620,7 +7856,7 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// The `[05-OP-8]` kernel over a shape, f32 bounds and one draw key.
+    /// The `[05-OP-8]` kernel over a shape, bounds at `prim` and one draw key.
     fn uniform_like(
         shape: &[usize],
         low: f64,
@@ -7628,7 +7864,7 @@ mod tests {
         key: RandomKey,
         prim: Prim,
     ) -> Result<TensorValue, String> {
-        let bound = |value| chelis_types::scalar_from_f64("uniform_like", Prim::F32, value);
+        let bound = |value| chelis_types::scalar_from_f64("uniform_like", prim, value);
         let prepared = PreparedUniformLike::new(
             prim,
             numel(shape),
@@ -7941,8 +8177,8 @@ mod tests {
     // values are f64). #178 added `floor_div` / `trunc_div` but computed
     // `(a/b).floor()` / `.trunc()` with no zero-divisor trap, so an integer
     // divide by zero silently produced `floor(x/0) == ±inf` rather than
-    // halting. Spec §2.1 scopes the `integer division or remainder by zero`
-    // trap to BOTH the evaluator and the C backend; these pin that this lane
+    // halting. [05-OP-64] requires the `DivZero` trap in BOTH the
+    // evaluator and the C backend; these pin that this lane
     // now fails closed on integer operands, while float `floor_div` keeps the
     // IEEE no-trap semantics §2.1 also mandates.
 

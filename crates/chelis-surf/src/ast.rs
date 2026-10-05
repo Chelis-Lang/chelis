@@ -1,4 +1,4 @@
-use chelis_deep::{DtypeFamily, Span};
+use chelis_deep::{DtypeBound, DtypeFamily, Span};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// One entry of a declaration's bracketed binder list
@@ -13,7 +13,7 @@ pub struct TypeBinder {
     /// The declared binder name.
     pub name: String,
     /// The declared dtype family, when the binder carries a bound.
-    pub bound: Option<DtypeFamily>,
+    pub bound: Option<DtypeBound>,
 }
 
 impl TypeBinder {
@@ -26,18 +26,24 @@ impl TypeBinder {
         }
     }
 
-    /// A binder bounded by `family`.
-    pub fn bounded(name: impl Into<String>, family: DtypeFamily) -> TypeBinder {
+    /// A binder carrying either `spec/02-surf-syntax.md` §P4c bound form.
+    pub fn bounded(name: impl Into<String>, bound: DtypeBound) -> TypeBinder {
         TypeBinder {
             name: name.into(),
-            bound: Some(family),
+            bound: Some(bound),
         }
     }
 
-    /// The canonical Surf spelling: `name` or `name: Family`.
+    /// A binder bounded by a dtype family.
+    pub fn bounded_by_family(name: impl Into<String>, family: DtypeFamily) -> TypeBinder {
+        TypeBinder::bounded(name, DtypeBound::Family(family))
+    }
+
+    /// The canonical Surf spelling: `name`, `name: Family`, or
+    /// `name: {d1, d2}` with members in §1.1 declaration order (§P4c).
     pub fn render(&self) -> String {
-        match self.bound {
-            Some(family) => format!("{}: {}", self.name, family.surf_name()),
+        match &self.bound {
+            Some(bound) => format!("{}: {}", self.name, bound.surf_spelling()),
             None => self.name.clone(),
         }
     }
@@ -212,12 +218,57 @@ pub struct Param {
 /// node shape owns it) and re-exported so Surf consumers see one type.
 pub use chelis_deep::CastMode;
 
+/// Surf-only stage syntax. The expression preserves source spelling and spans;
+/// the syntax discriminator never travels into Deep or depends on binder names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipeStage {
+    pub expression: Expr,
+    pub syntax: PipeStageSyntax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipeStageSyntax {
+    Callable,
+    CallFirst,
+    Cast(CastMode),
+    Copy,
+    Realize,
+}
+
+impl std::ops::Deref for PipeStage {
+    type Target = Expr;
+    fn deref(&self) -> &Expr {
+        &self.expression
+    }
+}
+impl std::ops::DerefMut for PipeStage {
+    fn deref_mut(&mut self) -> &mut Expr {
+        &mut self.expression
+    }
+}
+impl From<Expr> for PipeStage {
+    fn from(expression: Expr) -> Self {
+        let syntax = if matches!(&expression, Expr::Apply(..))
+            || matches!(&expression, Expr::Accumulate(call, _, _) if matches!(call.as_ref(), Expr::Apply(..)))
+        {
+            PipeStageSyntax::CallFirst
+        } else {
+            PipeStageSyntax::Callable
+        };
+        Self { expression, syntax }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Lit(Literal, Span),
     Var(String, Span),
     Constructor(String, Span),         // Uppercase name
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
+    /// A call with an explicit accumulator dtype, `sum(x, 0i32,
+    /// accumulator=f64)`: the call (always an `Apply`) and the dtype
+    /// spelling (spec/02 `CallArgs`, spec/04 §5.7).
+    Accumulate(Box<Expr>, String, Span),
     List(Vec<Expr>, Span),
     Record(String, Vec<(String, Expr)>, Span),
     RecordUpdate(Box<Expr>, Vec<(String, Expr)>, Span),
@@ -225,7 +276,7 @@ pub enum Expr {
     TupleGet(Box<Expr>, i64, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Unary(UnaryOp, Box<Expr>, Span),
-    Pipe(Box<Expr>, Vec<Expr>, Span), // x |> f |> g
+    Pipe(Box<Expr>, Vec<PipeStage>, Span), // x |> f |> g (Surf only)
     If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body

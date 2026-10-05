@@ -17,8 +17,7 @@ page's text color.
 Markdown, pick between them with a `<picture>` element and a
 `prefers-color-scheme` source, as the root README does.
 
-The art is generated, not hand-edited. `scripts/export_brand.py` in the chelis.ch
-website repository draws it deterministically from the site's art generators
-(`scripts/draw_reef.py`, seed 1729, and `scripts/draw_mark.py`). Regenerate it
+The art is generated, not hand-edited. The chelis.ch site's art generators draw it
+deterministically (the reef with seed 1729), outside this repository. Regenerate it
 there and copy the files here. The mdBook favicon in `docs/book/theme/` comes from
-the same script.
+the same generators.

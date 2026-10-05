@@ -7,6 +7,11 @@ small compiler-critical Rust kernel executable by Chelis **and** verifiable by
 Verus, then measure the cost of doing so. It is discussion evidence, not a
 compiler-soundness or phase-completion claim.
 
+The follow-up merges current main before freezing its comparison baseline. The
+[oracle experiment](axis_oracle_comparison.md) records the post-merge boundary,
+bounded-checking and mutation design, and production rank-domain audit. PR #2851
+remains draft for discussion; experiment success does not authorize adoption.
+
 The crate, compiler call sites, proof runners, and receipts form one reviewable
 slice: without any one of them, a passing proof would not establish that Chelis
 uses the verified executable functions.

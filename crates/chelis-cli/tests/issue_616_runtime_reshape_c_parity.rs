@@ -103,6 +103,7 @@ fn build_c(source: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -287,9 +288,9 @@ fn issue_616_runtime_window_grad_eval_matches_c() {
 }
 
 /// Error-path parity (soundness): a runtime reshape target that resolves to
-/// a NEGATIVE extent must fail LOUDLY in both lanes — the eval lane rejects
-/// the negative scalar, the C lane aborts at the emitted negativity guard —
-/// never a silently mis-sized allocation.
+/// a NEGATIVE extent must fail LOUDLY in both lanes with the same `Domain`
+/// trap in `reshape` (spec/04-type-system.md section 4.7), never a silently
+/// mis-sized allocation.
 #[test]
 fn issue_616_runtime_reshape_negative_extent_errs_in_both_lanes() {
     // m = n - 10 < 0 for the 4-element input.
@@ -307,18 +308,26 @@ fn issue_616_runtime_reshape_negative_extent_errs_in_both_lanes() {
         "eval must reject the negative runtime reshape extent; stdout={}",
         String::from_utf8_lossy(&eval_out.stdout)
     );
+    let eval_err = String::from_utf8_lossy(&eval_out.stderr);
+    assert!(
+        eval_err.contains("numeric trap: domain in reshape at i64"),
+        "eval must report the reshape non-negativity trap; stderr={eval_err}"
+    );
 
     let (_dir, build_dir) = build_c(&source, "rtnegdim");
     let bin = gcc(&build_dir, "rtnegdim", None, "self_bin");
     let run = StdCommand::new(&bin).output().expect("run emitted program");
-    assert!(
-        !run.status.success(),
-        "C binary must abort on the negative runtime reshape extent; stdout={}",
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    // spec/04-type-system.md section 4.7: the non-negativity guard's `Domain`
+    // trap in `reshape`, with eval's status ([04-NUM-10]), never an abort.
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "C binary must fail on the negative runtime reshape extent; stdout={} stderr={stderr}",
         String::from_utf8_lossy(&run.stdout)
     );
-    let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("must be non-negative") || stderr.contains("numel mismatch"),
-        "C abort must name the reshape runtime guard; stderr={stderr}"
+        stderr.contains("is negative") && stderr.contains("numeric trap: domain in reshape at i64"),
+        "the C failure must name the reshape runtime guard; stderr={stderr}"
     );
 }

@@ -1,6 +1,7 @@
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_ir::eval::TensorValue as IrTensorValue;
@@ -21,9 +22,10 @@ use frame::ResultProducer;
 mod host_ops;
 mod invariant;
 mod named_axis;
-mod numeric_text;
 mod program_scope;
 mod shared_values;
+#[cfg(test)]
+mod std_clock_tests;
 mod system;
 mod system_adapter;
 #[cfg(test)]
@@ -34,7 +36,7 @@ pub use shared_values::{Entries, Values};
 mod tests;
 mod transforms;
 
-pub(crate) use host_ops::collect_adt_ctor_fields;
+pub(crate) use host_ops::{collect_adt_ctor_fields, collect_constructor_source_names};
 // The [05-OBS-1] single renderer: compiler.rs uses it to pre-render each
 // evaluated root's display text while the dtype tags still exist (the wire
 // schema's `ExecutionValue` does not carry them), so the CLI's labeled-root
@@ -75,6 +77,21 @@ impl RuntimeTensorValue {
         wide: Vec<f64>,
     ) -> Result<Self, String> {
         IrTensorValue::finalize_from_wide(op, prim, shape, wide).map(Self::new)
+    }
+
+    /// Data-movement constructor: store scalars that already carry `prim`
+    /// by inserting their bits, so a moved NaN keeps its payload, sign and
+    /// signaling bit ([04-NUM-11]). A value produced by arithmetic or
+    /// conversion goes through [`Self::from_wide`] instead.
+    pub(crate) fn from_scalars(
+        prim: Prim,
+        shape: Vec<usize>,
+        values: &[chelis_types::ScalarValue],
+    ) -> Self {
+        Self::new(IrTensorValue::from_storage(
+            shape,
+            chelis_types::tensor_from_scalars(prim, values),
+        ))
     }
 
     /// Exact-integer compute-op constructor for paths that computed in
@@ -175,7 +192,18 @@ pub enum RuntimeValue {
     Dict(Entries),
     Tuple(Values),
     Adt {
+        /// The constructor's identity in the checked program: the linker
+        /// name in a package build, which pattern matching and field lookup
+        /// compare against. Two types may share a source spelling, so the
+        /// identity cannot be the spelling.
         ctor: String,
+        /// The constructor's declared source spelling, the name every exit
+        /// renders ([05-OBS-7]). It is the spelling the compiled lane stores,
+        /// derived by the same rule
+        /// ([`chelis_types::linked_constructor_source_name`] against the
+        /// constructor's declared type); in a program without linker names it
+        /// equals `ctor`.
+        source_name: String,
         /// Field values in DECLARED order (the deftype's field order),
         /// not source or alphabetical order.
         fields: Values,
@@ -493,7 +521,7 @@ pub(crate) fn evaluate_host_program_filtered(
 /// Phase G' — host-runtime entry that seeds the `top_level_defs` table
 /// with library defs in addition to the new-code program. This is the
 /// host-side parity counterpart to `lower_program_with_context`: when
-/// new code calls a library function (e.g. `Std.Time.is_leap_year`),
+/// new code calls a library function (e.g. `Std.Datetime.is_leap_year`),
 /// `eval_app` looks up that name through `lookup_top_level_def`, and
 /// the function body must be reachable. Pre-Phase-G' the runtime only
 /// saw `program.exprs()`, so library names errored as `unknown runtime
@@ -532,9 +560,105 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     )
 }
 
+/// A program prepared once for many host evaluations (chelis#3144): the
+/// host-lowering program with its shared facts, and the lowering
+/// classification of the combined library and new-code definitions, which
+/// every evaluation of the program reads and none changes.
+pub(crate) struct PreparedHostEvaluation {
+    host: chelis_ir::host::PreparedHostProgram,
+    lowering_map: std::sync::OnceLock<BTreeMap<String, bool>>,
+    scope_maps: std::sync::OnceLock<ScopeMaps>,
+}
+
+/// Every top-level definition body in scope and the combined type
+/// environment, which an evaluation reads and never changes.
+type ScopeMaps = (
+    Arc<UnordMap<String, Expr>>,
+    Arc<UnordMap<String, Expr>>,
+    Arc<program_scope::TerminalIndexCell>,
+);
+
+/// Library definitions first, so new code wins on a shared name, as the
+/// type environment's shadow rule has it.
+fn scope_maps(
+    library_exprs: &[Expr],
+    library_type_env: &BTreeMap<String, Expr>,
+    program: &CheckedProgram,
+) -> ScopeMaps {
+    let mut defs = UnordMap::new();
+    collect_top_level_def_bodies(library_exprs, &mut defs);
+    collect_top_level_def_bodies(program.exprs(), &mut defs);
+    let mut type_env = library_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), ty_expr.clone()))
+        .collect::<UnordMap<String, Expr>>();
+    for (name, ty_expr) in program.type_env() {
+        type_env.insert(name.clone(), ty_expr.clone());
+    }
+    (Arc::new(defs), Arc::new(type_env), Arc::default())
+}
+
+impl PreparedHostEvaluation {
+    pub(crate) fn new(host: chelis_ir::host::PreparedHostProgram) -> Self {
+        Self {
+            host,
+            lowering_map: std::sync::OnceLock::new(),
+            scope_maps: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+/// Evaluate against a program prepared once for many evaluations
+/// (chelis#3144). `prepared` holds `library` composed with `program`, or
+/// `program` alone without a library; its sessions reuse the program-wide
+/// host-lowering facts earlier evaluations derived.
+pub(crate) fn evaluate_prepared_host_program(
+    prepared: &PreparedHostEvaluation,
+    program: &CheckedProgram,
+    library: Option<&CheckedProgram>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    inputs: HostEvaluationInputs<'_>,
+    selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
+    evaluate_host_program_core(
+        Some(prepared),
+        program,
+        library,
+        library_lowered_names,
+        inputs,
+        selected_roots,
+        manifested_lowered_names,
+        system::EvalSystemBoundary::permissive(),
+    )
+}
+
 /// Keep the checked-program, transcript and failure-kind path identical for
 /// default and injected evaluators; only the system port differs.
 pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
+    program: &CheckedProgram,
+    library: Option<&CheckedProgram>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    inputs: HostEvaluationInputs<'_>,
+    selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    system_boundary: system::EvalSystemBoundary,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
+    evaluate_host_program_core(
+        None,
+        program,
+        library,
+        library_lowered_names,
+        inputs,
+        selected_roots,
+        manifested_lowered_names,
+        system_boundary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_host_program_core(
+    prepared: Option<&PreparedHostEvaluation>,
     program: &CheckedProgram,
     library: Option<&CheckedProgram>,
     library_lowered_names: Option<&BTreeMap<String, bool>>,
@@ -555,6 +679,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // Looking up an imported function in the new-code-only program silently
     // interpreted it without the kernel's declared shape obligations.
     let kernel_program = library
+        .filter(|_| prepared.is_none())
         .map(|library| {
             CheckedProgram::compose(library, program)
                 .ok_or_else(|| "runtime kernel program lost its checked library proof".to_owned())
@@ -572,7 +697,10 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // library in, so every imported definition takes that path. The session
     // `ctx` owns below is what holds those facts, and the borrow checker, not
     // a declaration order, is what keeps it inside `kernel_program`'s life.
-    let eval_program = kernel_program.as_ref().unwrap_or(program);
+    let eval_program = prepared
+        .map(|prepared| prepared.host.program())
+        .or(kernel_program.as_ref())
+        .unwrap_or(program);
 
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
@@ -588,13 +716,24 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // library + new-code exprs (with the composed type-env) so both
     // sides agree, then keep the library's own precomputed entries on
     // top for names the combined walk doesn't cover.
-    let mut combined_exprs: Vec<Expr> = library_exprs.to_vec();
-    combined_exprs.extend(program.exprs().iter().cloned());
-    let mut combined_type_env: BTreeMap<String, Expr> = library_type_env.clone();
-    for (name, ty_expr) in program.type_env() {
-        combined_type_env.insert(name.clone(), ty_expr.clone());
-    }
-    let mut new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
+    let combined_lowering_map = || {
+        let mut combined_exprs: Vec<Expr> = library_exprs.to_vec();
+        combined_exprs.extend(program.exprs().iter().cloned());
+        let mut combined_type_env: BTreeMap<String, Expr> = library_type_env.clone();
+        for (name, ty_expr) in program.type_env() {
+            combined_type_env.insert(name.clone(), ty_expr.clone());
+        }
+        top_level_lowering_map(&combined_exprs, &combined_type_env)
+    };
+    // The classification depends on the program alone, so a prepared
+    // program derives it once for all of its evaluations.
+    let mut new_lowered_names = match prepared {
+        Some(prepared) => prepared
+            .lowering_map
+            .get_or_init(combined_lowering_map)
+            .clone(),
+        None => combined_lowering_map(),
+    };
     if let Some(manifested) = manifested_lowered_names {
         new_lowered_names.extend(
             manifested
@@ -613,51 +752,38 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // names correctly.
     let mut adt_fields = collect_adt_ctor_fields(library_exprs);
     adt_fields.merge(collect_adt_ctor_fields(program.exprs()));
+    let mut constructor_names = collect_constructor_source_names(library_exprs);
+    constructor_names.merge(collect_constructor_source_names(program.exprs()));
 
-    let mut top_level_defs = UnordMap::new();
     let mut top_level_order = Vec::new();
     let mut declared_signatures = UnordMap::new();
 
     register_declared_signatures(library_exprs, &mut declared_signatures);
     register_declared_signatures(program.exprs(), &mut declared_signatures);
 
-    // Register library defs FIRST. New-code defs will overwrite on
-    // name collision below — matching the Phase C type-env shadow rule
-    // (new code wins).
-    register_top_level_defs(
-        library_exprs,
-        &lowered_names,
-        selected_roots,
-        &mut top_level_defs,
-        &mut top_level_order,
-        /* register_runtime_order = */ false,
-    );
-    // Register new-code defs. New-code is the only source of eager
-    // module-init bindings in `top_level_order`. Building a library context
-    // checks and lowers declarations; it does not execute their effects.
-    // Library values initialize on demand in each evaluation context, and
-    // successful values are reused only within that context.
-    register_top_level_defs(
+    // Every library and new-code definition is in scope, new code winning
+    // on a shared name, under the composed type-env (the Phase C shadow
+    // rule). `grad`, `vmap` and realize routing read that type-env through
+    // `lower_subexpr_program`, which resolves free names as the C backend
+    // does. A prepared program derives both once.
+    let (top_level_defs, type_env, terminal_index) = match prepared {
+        Some(prepared) => prepared
+            .scope_maps
+            .get_or_init(|| scope_maps(library_exprs, library_type_env, program))
+            .clone(),
+        None => scope_maps(library_exprs, library_type_env, program),
+    };
+    // New code is the only source of eager module-init bindings in
+    // `top_level_order`. Building a library context checks and lowers
+    // declarations; it does not execute their effects. Library values
+    // initialize on demand in each evaluation context, and successful values
+    // are reused only within that context.
+    collect_runtime_order(
         program.exprs(),
         &lowered_names,
         selected_roots,
-        &mut top_level_defs,
         &mut top_level_order,
-        /* register_runtime_order = */ true,
     );
-
-    // Compose the runtime's type-env from library + new-code program type
-    // envs. New code wins on shadow, mirroring `compose_type_env` semantics.
-    // We need this for grad/vmap/realize routing through
-    // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
-    // resolves free names against `full_type_env`.
-    let mut type_env = library_type_env
-        .iter()
-        .map(|(name, ty_expr)| (name.clone(), ty_expr.clone()))
-        .collect::<UnordMap<String, Expr>>();
-    for (name, ty_expr) in program.type_env() {
-        type_env.insert(name.clone(), ty_expr.clone());
-    }
 
     let mut ctx = EvalContext {
         bindings: Frame::new(),
@@ -667,12 +793,16 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        program: ProgramScope::new(top_level_defs, type_env),
+        program: ProgramScope::shared(top_level_defs, type_env, terminal_index),
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
         adt_fields,
+        constructor_names,
         tensor_bindings,
-        session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
+        session: Some(match prepared {
+            Some(prepared) => prepared.host.session(),
+            None => chelis_ir::host::HostLoweringSession::new(eval_program),
+        }),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
@@ -681,6 +811,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         cancel: chelis_types::current_cancel_token(),
         system: system_boundary,
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
 
     for name in top_level_order {
@@ -883,6 +1014,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
     }
 }
 
+#[cfg(test)]
 fn register_top_level_defs(
     exprs: &[Expr],
     lowered_names: &BTreeMap<String, bool>,
@@ -891,6 +1023,15 @@ fn register_top_level_defs(
     top_level_order: &mut Vec<String>,
     register_runtime_order: bool,
 ) {
+    collect_top_level_def_bodies(exprs, top_level_defs);
+    if register_runtime_order {
+        collect_runtime_order(exprs, lowered_names, selected_roots, top_level_order);
+    }
+}
+
+/// Every top-level definition's body by name; a later definition replaces
+/// an earlier one of the same name.
+fn collect_top_level_def_bodies(exprs: &[Expr], top_level_defs: &mut UnordMap<String, Expr>) {
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
@@ -902,9 +1043,27 @@ fn register_top_level_defs(
             continue;
         };
         top_level_defs.insert(name.to_string(), body.clone());
-        if !register_runtime_order {
+    }
+}
+
+/// The selected host-lane value definitions of `exprs`, in source order,
+/// which evaluation initializes eagerly.
+fn collect_runtime_order(
+    exprs: &[Expr],
+    lowered_names: &BTreeMap<String, bool>,
+    selected_roots: Option<&[String]>,
+    top_level_order: &mut Vec<String>,
+) {
+    for expr in top_level_items(exprs) {
+        let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
-        }
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
         let is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
             // chelis#614: a tuple- or ADT-valued binding `out = ...` owns
@@ -1000,14 +1159,16 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                     RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
                         value: converted.split_off(converted.len() - items.len()),
                     },
-                    // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
-                    // user-facing constructor name. This is the eval `--json` ABI
-                    // surface; decode (`decode_adt_value`) already keys on bare
-                    // constructor names, so emitting bare here makes the encode/decode
-                    // round-trip consistent and stops internal mangling leaking to
-                    // consumers (chelis#399).
-                    RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-                        ctor: chelis_types::demangle_ident(ctor),
+                    // The eval `--json` ABI surface carries the stored source
+                    // spelling, never the linker name (chelis#399, chelis#2889);
+                    // decode (`decode_adt_value`) keys on source names, so the
+                    // encode/decode round trip stays consistent.
+                    RuntimeValue::Adt {
+                        source_name,
+                        fields,
+                        ..
+                    } => ExecutionValue::Adt {
+                        ctor: source_name.clone(),
                         fields: converted.split_off(converted.len() - fields.len()),
                     },
                     RuntimeValue::Dict(entries) => {
@@ -1163,6 +1324,10 @@ struct EvalContext<'a> {
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,
     adt_fields: UnordMap<String, Vec<String>>,
+    /// Each linker-named constructor's declared source spelling, keyed by
+    /// its linker name (`collect_constructor_source_names`); an ADT value
+    /// built here stores it as the name it renders.
+    constructor_names: UnordMap<String, String>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
     /// The host-lowering session over the checked program under evaluation.
     /// The kernel decision for a def application is read through it by
@@ -1197,6 +1362,8 @@ struct EvalContext<'a> {
     /// Origin of the error currently unwinding through the string-based host
     /// evaluator. Only a trusted numeric producer may set `NumericTrap`.
     failure_kind: RuntimeFailureKind,
+    /// The dimension-binder extents of each executing activation.
+    activation_extents: eval::ActivationExtents,
 }
 
 /// True when the checked-program effect annotation on this node carries a

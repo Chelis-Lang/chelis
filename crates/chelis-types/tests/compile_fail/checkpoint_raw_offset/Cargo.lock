@@ -89,15 +89,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-abi"
+version = "0.18.13"
+dependencies = [
+ "chelis-vocab",
+]
+
+[[package]]
 name = "chelis-axis-core"
-version = "0.18.12"
+version = "0.18.13"
 dependencies = [
  "vstd",
 ]
 
 [[package]]
+name = "chelis-crmath"
+version = "0.18.13"
+dependencies = [
+ "cc",
+ "half",
+]
+
+[[package]]
 name = "chelis-deep"
-version = "0.18.12"
+version = "0.18.13"
 dependencies = [
  "chelis-vocab",
  "miette",
@@ -108,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pred"
-version = "0.18.12"
+version = "0.18.13"
 dependencies = [
  "chelis-deep",
  "thiserror",
@@ -116,9 +131,11 @@ dependencies = [
 
 [[package]]
 name = "chelis-types"
-version = "0.18.12"
+version = "0.18.13"
 dependencies = [
+ "chelis-abi",
  "chelis-axis-core",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-pred",
  "chelis-unord",
@@ -133,14 +150,14 @@ dependencies = [
 
 [[package]]
 name = "chelis-unord"
-version = "0.18.12"
+version = "0.18.13"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chelis-vocab"
-version = "0.18.12"
+version = "0.18.13"
 
 [[package]]
 name = "convert_case"

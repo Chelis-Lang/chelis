@@ -33,7 +33,7 @@ below.
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
+| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Datetime`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | Agent coding research: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
 
@@ -220,7 +220,7 @@ parallel with the type-system track once 2e has enough compiler API surface.
 | Sub-phase | Doc | Summary |
 |---|---|---|
 | Phase 1 dependencies | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dimensions and dotted Deep round-tripping |
-| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Random` / `Resource(D)` boundary effects, `Diff` as capability, `Accum` internal-only |
+| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Resource(D)` boundary effect, `Diff` as capability, `Accum` internal-only; randomness is not an effect (explicit keys, `spec/04-type-system.md` §7.1) |
 | 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
 | 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |
 | 2d: `vmap` | [chelis_phase2_plan.md](chelis_phase2_plan.md) | DAG rewrite for automatic vectorization with correct `grad` interaction |
@@ -232,7 +232,9 @@ parallel with the type-system track once 2e has enough compiler API surface.
 ### 2a: Algebraic Effects
 
 - `Diff` is a compiler capability, not a boundary effect
-- `Random` and `Resource(Device)` are the user-visible Phase 2a boundary effects
+- `Resource(Device)` is the user-visible Phase 2a boundary effect; the original
+  `Random` effect and its `with seed` handler were replaced by explicit keys, so
+  randomness is not an effect (`spec/04-type-system.md` §7.1)
 - `Accum` is the design hook for parallelism-preserving gradient accumulation, but it
   remains internal-only in the shipped subset
 - implementation split: effect types live in `chelis-types`; inference/checking lives in
@@ -338,10 +340,10 @@ domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
 
-Shipped. This remains the stylistic foundation for the remaining Phase 3 work:
-pipe-first Surf, short-form block bindings, width-aware multiline layout, and
-human-readable examples. All new Phase 3 language-completeness examples should continue
-to follow this idiom.
+Shipped. The pipe-first promotion policy is superseded by #3130: `fmt` preserves
+authored pipes, while decompilation emits calls. Use pipes for sequential dataflow
+and calls where nested arguments read more clearly. Short-form block bindings,
+width-aware layout, and readable examples remain the style foundation.
 
 ### 3a: Package System (Shells + Reef)
 
@@ -508,13 +510,17 @@ Standard library modules for real model training and inference:
 
 (The ML modules in this section — `Std.Nn.Generate`, `Std.Optim`, `Std.Schedule` —
 since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chelis-std
-0.4.0; `Std.Time` and `Std.Decimal` stayed in `chelis-std`.)
+0.4.0; `Std.Decimal` and `Std.Datetime`, the successor of `Std.Time` (#2859), are in `chelis-std`.)
 
-- **`Std.Time`:** Date and duration types. Date arithmetic, comparison,
-  formatting/parsing (ISO 8601). UTC only in v1. The callables are currently
-  fenced by #2779 pending exact [05-OP-35] behavior.
-- **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
-  rounding. Host-value type, not tensor dtype.
+- **`Std.Datetime`:** Opaque dates, times, instants, offsets, durations, periods, and
+  date/instant columns over years -9999..9999, with month arithmetic, comparison, and
+  RFC 3339-based text forms under [05-OP-73], and the shared `Std.Rounding` modes
+  under [05-OP-74]. It succeeds `Std.Time` (#2859); zones, business calendars, and
+  the clock are later stages of `spec/design/std_datetime.md`.
+- **`Std.Decimal`:** Opaque exact decimals of at most 38 significant and 38 fractional
+  digits under [05-OP-76]: exact arithmetic that fails rather than rounds, explicit
+  `Std.Rounding` modes wherever digits are dropped, and a named lossy boundary to f64
+  and f32. Host-value type, not tensor dtype.
 - **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
   sampled generation (temperature, top-k, top-p) via record-config APIs. `KVCache` is
   precision-polymorphic so mixed-precision inference does not force an `f32` cache
@@ -550,11 +556,12 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   `cargo test -p chelis-cli --test std_package_acceptance` (the original
   `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
   surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
-  oracle now covers `Std.Decimal` and verifies the `Std.Time` #2779 rejection)
+  oracle covers `Std.Decimal` and `Std.Datetime`), and `std_decimal_oracle` compares
+  `Std.Decimal` on the evaluator and in compiled C with an exact-rational reference
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
-A reef package. The scipy competitor for Chelis. The name references the chambered
+A reef package. The scipy analogue for Chelis. The name references the chambered
 nautilus — nature's logarithmic spiral, mathematical precision. Depends on `chelis-std`
 + 3h primitives + `3j-pre`. Pure Chelis where natural; **nalgebra** as the linear
 algebra backend (pure Rust, BLAS/LAPACK when available, no Fortran dependency). Because
@@ -632,7 +639,7 @@ rationale and the pure-Chelis-vs-Rust-runtime decision point are covered in
 
 ### 3l: Shoals — Finance
 
-A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus` +
+A reef package. Depends on `chelis-std` (`Std.Datetime`, `Std.Decimal`) + `nautilus` +
 `coral`. Contains only finance-specific logic — nothing a non-finance programmer would
 need. Greeks via `grad` for free. Reproducible Monte Carlo via explicit keys. Typed
 market data via named tensor dimensions.
@@ -661,26 +668,25 @@ type system's extension points).
 random draw from the typed AST into a structured JSON report: which operations draw,
 which `key_from_seed` root or entry argument each key derives from, and whether the
 computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating.
-This is a product feature for model-validation teams ("machine-generated certificate
-that your simulation is reproducible"). Now demo-blocking for regulated-finance
-prospects: the compile-time guarantee on explicit random keys is shipped, the CLI tool
-that produces the audit artifact is the missing piece. Full design:
+It gives model-validation work a machine-generated certificate that a simulation is
+reproducible. The compile-time guarantee on explicit random keys is shipped; the CLI
+tool that produces the audit artifact is the missing piece. Full design:
 `chelis_manifest_spec.md` (current concrete spec); historical context in
 `archive/chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
 
 **Trust stack integration.** Shoals ships with example `@property` annotations for
 standard pricing models (put-call parity, delta bounds, price positivity,
 reference-implementation correspondence). These demonstrate the
-executable-properties-as-spec pattern to finance customers — properties are the
-artifact the customer reviews; `chelis prove` enforces that the optimized
-implementation satisfies them. See `chelis_trust_stack.md`.
+executable-properties-as-spec pattern: the author states properties as the reviewable
+artifact, and `chelis prove` checks that the optimized implementation satisfies them.
+See `chelis_trust_stack.md`.
 
 **Canonical domain properties.** Shoals ships with a `properties/` directory
 containing reference `@property` functions for standard finance invariants: put-call
 parity, price positivity, delta/gamma bounds, Monte Carlo convergence, no-arbitrage
 conditions on spreads. These are onboarding tools (run `chelis prove src/` to see them
-pass), credibility artifacts (the shell verifies itself), and templates for
-customer-written properties. Convention: every domain shell ships canonical properties
+pass), self-checks (the shell verifies itself), and templates for
+user-written properties. Convention: every domain shell ships canonical properties
 alongside its implementation code. Properties are NOT a separate shell — they are
 co-located with and version-controlled alongside the functions they constrain.
 
@@ -688,7 +694,7 @@ co-located with and version-controlled alongside the functions they constrain.
 textbook-formula implementations of standard models: Black-Scholes call/put with
 Greeks, Heston, Vasicek, CIR, vanilla Monte Carlo pricer, standard portfolio risk
 measures. These are co-located with the production implementations in `src/`.
-Customer pattern: customer writes proprietary models in their own packages, uses
+Usage pattern: a user writes proprietary models in their own packages, uses
 Shoals references for standard models, writes properties that include
 `@property matches_reference forall(...)`. Full design:
 `chelis_reference_implementations_spec.md`.
@@ -712,7 +718,7 @@ Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsi
 | `Octant.Symbolic` | Thin ~30-node `SymExpr` AST mapping directly to Chelis RISC primitives and Nautilus library calls. |
 | `Octant.Lower` (deterministic path) | SymExpr → Deep for every form the LaTeX uniquely determines. Special functions → `Nautilus.Special`/`Nautilus.Distributions`; integrals → `Nautilus.Integrate`; matrix ops → `Nautilus.LinAlg`. |
 | `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). |
-| `Octant.Provenance` | Source-span annotations on **every** Deep node produced by Octant lowering. Core value proposition — without the audit trail the first round-trip ships a parser, not a product. |
+| `Octant.Provenance` | Source-span annotations on **every** Deep node produced by Octant lowering. The central purpose of Octant — without the audit trail the first round-trip ships only a parser. |
 
 **Canonical properties.** Octant ships with `properties/roundtrip.ch` (parse-render
 round-trip: `parse(render(expr))` recovers the original expression and
@@ -741,7 +747,7 @@ Three further shells (and one Octant sub-scope) are named and reserved but scope
 as stubs beyond Phase 3. They are listed here so the ecosystem story is explicit,
 but no Phase 3 sub-phase implements them.
 
-- **`school`** — classical ML (scikit-learn competitor). Regression, decision trees,
+- **`school`** — machine learning: classical models and the neural-network surface. Regression, decision trees,
   SVMs, clustering, pipelines, cross-validation. Depends on `chelis-std` + `nautilus` +
   `coral`.
 - **`darwin`** — evolutionary algorithms. Genetic algorithms, genetic programming over
@@ -882,12 +888,11 @@ program, the diagnostic should explain which property the rejection protects and
 suggest a fix. Not "type mismatch on line 42" but "mul requires dimension-wise
 equality: your first operand has dimensions [batch, hidden] but your second has
 [hidden, batch]. Did you mean permute(b, [1, 0])?" This is the single highest-leverage
-compiler investment for the AI story: when the RLVR training loop generates a program
-that fails type checking, the quality of the error message IS the reward signal's
-informativeness. "Type error" gives the agent nothing to work with. "Dimension
+compiler investment for agent-driven development: when an agent generates a program
+that fails type checking, the error message is the only information it has for the
+repair. "Type error" gives the agent nothing to work with. "Dimension
 mismatch: expected [batch, hidden] got [hidden, batch] in mul at position 2" gives the
-agent enough information to repair the program. Better error messages = faster RLVR
-convergence = better coding model. Implementation: improve diagnostics in
+agent enough information to repair the program. Implementation: improve diagnostics in
 `crates/chelis-types/` to include the specific rule violated, the expected vs actual
 types/dims/effects, and a repair suggestion where possible. Does not require Lean — the
 existing type checker has the information, it just doesn't format it well.
@@ -896,29 +901,28 @@ existing type checker has the information, it just doesn't format it well.
 into per-property components returned in the fitness JSON: dimension score, effect
 score, linearity score, differentiability score, syntax score. An agent generating a
 program sees which property failed and can focus its repair on that specific issue
-rather than re-generating from scratch. The aggregate fitness score is still computed
-(for RLVR reward), but the components are exposed for agent introspection and for the
+rather than re-generating from scratch. The aggregate fitness score is still computed,
+but the components are exposed for agent introspection and for the
 trajectory-collection step (4c) to record which properties are hardest for the model.
 Implementation: extend the fitness JSON output in `crates/chelis-cli/` to include a
 `components` object alongside the aggregate `score`. The type checker already computes
 these properties independently — the change is formatting, not analysis.
 
-**Fast `chelis eval` with package-aware imports.** The RLVR training pipeline runs
-thousands of Chelis programs and scores them via compiler fitness. If every evaluation
-requires `chelis build` → gcc → link → run, the training loop is bottlenecked by
-compilation (seconds per program). If `chelis eval` resolves reef package imports and
-returns results in milliseconds, the RLVR reward signal is fast enough for online
-training. Investment: make the evaluator resolve imports from installed reef packages,
-optimize startup time, and handle the standard library without filesystem round-trips.
-This also serves agent-driven development (sub-second feedback on whether a generated
-function produces the right value). Target: `chelis eval myfile.ch --expr "erf(0.5)"`
+**Fast `chelis eval` with package-aware imports.** Agent-driven development and the
+trajectory collection in 4c run thousands of Chelis programs and score them via
+compiler fitness. If every evaluation requires `chelis build` → gcc → link → run, that
+loop is bottlenecked by compilation (seconds per program). If `chelis eval` resolves
+reef package imports and returns results in milliseconds, an agent gets sub-second
+feedback on whether a generated function produces the right value. Investment: make
+the evaluator resolve imports from installed reef packages, optimize startup time, and
+handle the standard library without filesystem round-trips. Target: `chelis eval myfile.ch --expr "erf(0.5)"`
 completes in under 200ms with Nautilus imported. `chelis test` is a thin layer on top of fast eval: discover test files, evaluate each, collect assertion results. The fast eval investment directly enables native testing infrastructure.
 
 **Stability labels on shell APIs.** Mark each exported function in every SKILL.md as
-`stable` or `alpha`. The training pipeline's corpus-curation step (4a) uses these
-labels: stable functions are safe to include in training data and will not break
-between releases; alpha functions are excluded or down-weighted because their
-signatures may change. Convention: add a `Stability` column to the API surface tables
+`stable` or `alpha`. Agents and human users both need to know which functions they
+can rely on: stable functions will not break between releases; alpha functions carry
+an explicit warning that their signatures may change. Seed-corpus curation (4a) includes
+stable functions and excludes or down-weights alpha ones. Convention: add a `Stability` column to the API surface tables
 in each shell's SKILL.md. Nautilus v0.1.0 candidates for `stable`: all of Special, all
 of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API may
 change when keyed sampling lands). Apply the same convention to Coral and
@@ -951,7 +955,7 @@ documentation for users.
 - ~10 full models (40+ ops, end-to-end training pipelines)
 
 **Each program ships as:**
-- `corpus/NNN_name.ch` — Surf source (pipe-first style)
+- `corpus/NNN_name.ch` — Surf source (explicit, readable dataflow)
 - `corpus/NNN_name.dp` — Canonical Deep (pretty-printed)
 - `corpus/NNN_name.json` — Fitness score, type info, effect info
 
@@ -960,8 +964,8 @@ ADTs, dimension polymorphism, pipe-heavy data flow, effects (Resource), random k
 linearity (copy, borrow), macros, vmap, tuple returns, grad with multiple wrt targets,
 PyTorch-equivalent translation pairs.
 
-**Quality gate:** All programs compile, type-check with fitness >= 0.9, use idiomatic
-pipe-first style, and exercise the full Phase 2 language surface.
+**Quality gate:** All programs compile, type-check with fitness >= 0.9, use explicit, readable
+dataflow, and exercise the full Phase 2 language surface.
 
 ### 4b: ICL Effect Measurement
 
@@ -1062,8 +1066,7 @@ Wire the local model into the toolchain:
 
 Phase 4 success condition:
 
-- Chelis ships a first-party local coding model as part of the product, not as an
-  optional research extra
+- Chelis ships a first-party local coding model with the toolchain
 - ChelisBench provides reproducible evidence for the "designed for LLMs" thesis
 
 ### `chelis prove` — Executable Properties as Spec
@@ -1095,15 +1098,13 @@ generates type-directed random inputs, tests each property, and reports the firs
 deterministic counterexample. CI integration via `chelis prove` as a gate alongside
 `chelis test`.
 
-This is the highest-ranking new value prop for consequential computing customers. The
-customer writes properties that define correctness. The toolchain verifies the
-generated code satisfies them. The customer reviews properties (simple, one-line domain
+The author or user writes properties that define correctness. The toolchain verifies
+the generated code satisfies them. A reviewer reads properties (simple, one-line domain
 facts), not generated code (complex, optimized, opaque).
 
-Value for the AI story: sampled properties become part of the RLVR reward signal. A
-generated function that passes a deterministic property corpus without NaN is higher
-quality than one that only passes fixed golden tests. The reward function can
-incorporate `chelis prove` results as a continuous reward component alongside the 0-1
+Value for agent-generated code: a generated function that passes a deterministic
+property corpus without NaN is better evidenced than one that only passes fixed golden
+tests, so `chelis prove` results can serve as a fitness component alongside the 0-1
 fitness score.
 
 Value for the numerical library story: catches edge cases that golden fixture grids
@@ -1116,15 +1117,14 @@ includes a `properties/` directory with reference `@property` functions, and (wh
 the domain has standard textbook models) a co-located `references/` directory with
 simple, obviously-correct reference implementations. These are the onboarding entry
 point for new users (install the shell, run `chelis prove src/`, see the canonical
-properties pass), the credibility proof that the shell's implementations satisfy
+properties pass), the evidence that the shell's implementations satisfy
 standard domain invariants, and the spec artifact for the spec-correspondence
 property category. The properties and references are co-located with the
 implementation, NOT packaged separately — a standalone "properties" shell with no
 implementation code is an empty vessel.
 
-**Priority elevation.** `chelis prove` with first-class `@property` annotations is now
-demo-blocking for the first commercial CProof prospect. The trust stack pitch lives
-or dies on this being demonstrable. Specification is concrete (see
+**Priority elevation.** `chelis prove` with first-class `@property` annotations is the
+trust stack's central user-facing mechanism. Specification is concrete (see
 `chelis_property_spec.md`) and the build is a focused project, not a research
 investigation. Components: parser changes for `@property NAME forall(...)`,
 type-directed input generation, deterministic first-counterexample reporting, Deep
@@ -1132,8 +1132,8 @@ bridge metadata discovery, and the CLI subcommand. Move ahead of secondary-prior
 Phase 4 prep work.
 
 **`chelis manifest` priority elevation.** The compile-time guarantee on explicit
-random keys is shipped. The CLI tool that produces the audit artifact is now demo-blocking
-for regulated-finance prospects. Specification is concrete (see
+random keys is shipped. The CLI tool that produces the audit artifact is the missing
+piece. Specification is concrete (see
 `chelis_manifest_spec.md`). Build the subcommand and JSON output format. CI
 integration via `chelis manifest --check` as a gate.
 
@@ -1352,7 +1352,7 @@ separate. Phasing is sequenced by dependency: K1 → K2 → K3 → K4 → K5 →
 | **K3** | Lowering pass from kernel IR to Triton's MLIR dialect. Each tile-level operation has a defined Triton IR equivalent; output validates against Triton's IR specification. | Orthogonal to Phase 5c (Triton backend for whole-program RISC-DAG emission) — see distinction note below. |
 | **K4** | Build integration. Triton compiler invocation from the Chelis build pipeline; kernel artifacts (compiled PTX or AMDGCN) get produced and linked. The Triton dependency is handled cleanly by the build system. | Touches `chelis build` and the manifest surface; needs coordination with the reef/build infrastructure. |
 | **K5** | Runtime integration. Kernel calls from tensor-level Chelis lower to launches against Triton artifacts via the existing HIP/CUDA backend machinery for argument marshaling and grid configuration. | Memory-layout matching at the kernel boundary is where this milestone fails silently rather than loudly — a mismatch corrupts kernel inputs/outputs without any compile-time signal, so the K5 oracle has to actually run the kernel and compare results. |
-| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Customer-visible proof point; the original cost estimate is recorded in `docs/archive/reports/gap_synthesis.md` §Concrete cost picture. |
+| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. | First end-to-end use of the kernel pipeline; the original cost estimate is recorded in `docs/archive/reports/gap_synthesis.md` §Concrete cost picture. |
 
 **Phase 5c distinction.** Phase 5c (§5c: Triton Backend, above) describes a
 whole-program backend that emits Chelis's RISC DAG to Triton IR — i.e.,
@@ -1400,7 +1400,7 @@ roadmap align.
 The "v1 plus Addendum KA" combination is the strategically distinctive scope:
 v1 produces the kernel authorship capability; KA produces the AD-through-
 kernels capability no other framework offers. Everything else is opportunistic
-extension scheduled by customer pull.
+extension scheduled by user demand.
 
 What is explicitly *not* in v1 scope: thread-level addressing, custom shared
 memory patterns, warp-level primitives, AD through kernels (forward-only in
@@ -1449,7 +1449,7 @@ To keep a future `salsa` migration mechanical rather than conceptual:
 
 - **Level 1 (small, ship with next codegen pass):** `restrict` pointer annotations on all tensor parameters (leverages linearity — the type system proves no aliasing, justifying `restrict`), `const` on input pointers, aligned allocation in the runtime, compiler-appropriate SIMD pragmas (`#pragma omp simd` for gcc, `#pragma clang loop vectorize(enable)` for Apple clang). Unlocks auto-vectorization on loops currently skipped due to aliasing.
 - **Level 2 (medium, when profiling shows need):** Hand-written SIMD reduction kernels in the runtime (`sum`, `max`, `min`, `argmax`, `argmin`). AVX2 implementations for x86, NEON for ARM, scalar fallback. Reductions are where auto-vectorization is weakest.
-- **Level 3 (medium, when benchmarks show math-heavy kernels dominate):** Vectorized math library integration. Sleef on Linux (both x86 and ARM), Accelerate vForce on macOS (already linked). The emitter maps math ops in fused kernels to SIMD-width library functions (`expf` → `Sleef_expf8_u10` on AVX2, `vvexpf` via Accelerate on Mac). Highest impact: 3-5x additional speedup on math-heavy kernels (erf, normal_cdf) on top of existing fusion wins.
+- **Level 3 (superseded by `spec/design/correctly_rounded_math.md`):** vendor vector math libraries are not correctly rounded and are excluded by [05-OP-46]; a vectorized form of the compiler-owned kernels is admissible once it passes the exhaustive oracle. The original plan follows for history. Vectorized math library integration. Sleef on Linux (both x86 and ARM), Accelerate vForce on macOS (already linked). The emitter maps math ops in fused kernels to SIMD-width library functions (`expf` → `Sleef_expf8_u10` on AVX2, `vvexpf` via Accelerate on Mac). Highest impact: 3-5x additional speedup on math-heavy kernels (erf, normal_cdf) on top of existing fusion wins.
 - **Level 4 (large, only if Levels 1-3 leave gaps):** Full SIMD-width-aware codegen as a parallel emit path. Diminishing returns if Level 3 handles math functions. Record as future option.
 
 ---

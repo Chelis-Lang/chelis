@@ -72,7 +72,7 @@ key derivations: no handler or ordinal contributes to a draw. `par` currently
 has the documented checker rejection in spec/07, so its positive execution is
 outside this corpus and remains chelis#2503. This disposition does not weaken
 its normative semantics. HIP/Metal execution, every possible key program,
-LaCaDiLE certification completeness, and shell release are not certified here.
+mechanized-proof completeness, and shell release are not certified here.
 
 The retirement invariant scans production Rust under `chelis-ir/src` and
 `chelis-compiler-api/src` for the retired exact identifiers `static_controls`,
@@ -90,7 +90,7 @@ at the final candidate, applicable required CI and package-expansion receipts,
 and the extended validation required for a completion claim. General green CI
 or `gate.py --fast` alone is not the named acceptance decision.
 
-The hub also requires affected-shell migrations/releases and coordinated
-Hull/compiler release. Record those independently, including the explicit
+The hub also requires affected-shell migrations/releases and a coordinated
+compiler release. Record those independently, including the explicit
 `sample(k)` / `f_given(noise, x)` layering and release receipts. A compiler PASS
-does not complete Hull's aggregate acceptance or close those release tasks.
+does not close those release tasks.

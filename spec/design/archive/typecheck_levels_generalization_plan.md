@@ -16,7 +16,7 @@ implementation and executable parity oracle live in
 **Issue:** [chelis#1207](https://github.com/Chelis-Lang/chelis/issues/1207)
 
 **Evidence:**
-[`docs/investigations/typecheck_generalize_superlinear_diagnosis.md`](../../../docs/investigations/typecheck_generalize_superlinear_diagnosis.md)
+[`docs/archive/investigations/typecheck_generalize_superlinear_diagnosis.md`](../../../docs/archive/investigations/typecheck_generalize_superlinear_diagnosis.md)
 
 ## Scope and controlling contract
 

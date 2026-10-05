@@ -144,6 +144,7 @@ fn transformer_block_traceability_state_is_locked() {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             "../../examples/transformer_block.ch",
             "--target",
             "c",
@@ -168,7 +169,7 @@ fn transformer_block_traceability_state_is_locked() {
         .iter()
         .filter(|l| l.contains("// span: surf:"))
         .count();
-    let fused_kernels = source.matches("parallel for simd").count();
+    let fused_kernels = source.matches("omp for simd").count();
     let owned_allocations = source
         .lines()
         .filter(|line| is_owned_tensor_allocation(line))

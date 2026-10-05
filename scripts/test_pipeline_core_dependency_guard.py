@@ -42,6 +42,29 @@ def approved_graph() -> dict[str, list[str]]:
 
 
 class PipelineCoreDependencyGuardTests(unittest.TestCase):
+    def test_axis_leaf_is_an_approved_transitive_dependency(self) -> None:
+        graph = approved_graph()
+        graph["chelis-ir"].append("chelis-axis-core")
+        graph["chelis-axis-core"] = ["vstd"]
+        guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
+
+    def test_axis_leaf_cannot_import_a_forbidden_layer(self) -> None:
+        graph = approved_graph()
+        graph["chelis-ir"].append("chelis-axis-core")
+        graph["chelis-axis-core"] = ["chelis-surf"]
+        graph["chelis-surf"] = []
+        with self.assertRaisesRegex(
+            guard.DependencyBoundaryError,
+            "chelis-pipeline-core -> chelis-ir -> chelis-axis-core -> chelis-surf",
+        ):
+            guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
+
+    def test_axis_leaf_is_not_an_approved_direct_dependency(self) -> None:
+        with self.assertRaisesRegex(guard.DependencyBoundaryError, "unknown dependency"):
+            guard.validate_fixture(
+                manifest_with(*APPROVED_DEPENDENCIES, "chelis-axis-core"), approved_graph()
+            )
+
     def test_approved_manifest_and_resolved_graph_pass(self) -> None:
         guard.validate_fixture(
             manifest_with(*APPROVED_DEPENDENCIES), approved_graph()
@@ -68,6 +91,25 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
             guard.validate_fixture(
                 manifest_with(*APPROVED_DEPENDENCIES), graph
             )
+
+    def test_correctly_rounded_kernel_leaf_is_approved(self) -> None:
+        graph = approved_graph()
+        graph["chelis-types"].append("chelis-crmath")
+        graph["chelis-crmath"] = []
+
+        guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
+
+    def test_correctly_rounded_kernels_must_stay_a_leaf(self) -> None:
+        graph = approved_graph()
+        graph["chelis-types"].append("chelis-crmath")
+        graph["chelis-crmath"] = ["chelis-conformance"]
+        graph["chelis-conformance"] = []
+
+        with self.assertRaisesRegex(
+            guard.DependencyBoundaryError,
+            "chelis-pipeline-core -> chelis-types -> chelis-crmath -> chelis-conformance",
+        ):
+            guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
 
     def test_metadata_excludes_dev_only_edges(self) -> None:
         raw = {

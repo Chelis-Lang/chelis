@@ -6,5 +6,6 @@
 //! lives in the library so it is unit-testable without a process spawn.
 
 fn main() {
+    chelisup::nss::use_builtin_services();
     std::process::exit(chelisup::dispatch());
 }

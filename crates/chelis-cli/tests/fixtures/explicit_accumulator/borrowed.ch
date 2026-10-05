@@ -1,0 +1,20 @@
+module Probe.Borrowed
+def total(x: &tensor[3, f32]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)
+def dot(a: &tensor[3, i8], b: &tensor[3, i8]) -> tensor[i64] = einsum("i,i->", a, b, accumulator=i64)
+def product(a: &tensor[1, 3, f32], b: &tensor[3, 1, f32]) -> tensor[1, 1, f32] = matmul(a, b, accumulator=f64)
+def direct(x: &tensor[batch, seq, head, i8]) -> tensor[batch, i32] = sum(x, seq, head)
+def wide(x: &tensor[batch, seq, head, i8]) -> tensor[batch, i64] = sum(x, seq, head, accumulator=i64)
+def main() -> unit ! { IO } = {
+  floats: tensor[3, f32] = to_tensor([16777216.0f32, 1.0f32, 1.0f32])
+  bytes: tensor[3, i8] = to_tensor([100i8, 100i8, 100i8])
+  row: tensor[1, 3, f32] = to_tensor([[16777216.0f32, 1.0f32, 1.0f32]])
+  column: tensor[3, 1, f32] = to_tensor([[1.0f32], [1.0f32], [1.0f32]])
+  cube: tensor[1, 2, 3, i8] = to_tensor([[[100i8, 100i8, 100i8], [100i8, 100i8, 100i8]]])
+  _ = print(total(&floats))
+  _ = print(dot(&bytes, &bytes))
+  _ = print(product(&row, &column))
+  _ = print(direct(&cube))
+  _ = print(wide(&cube))
+  ()
+}
+out = main()

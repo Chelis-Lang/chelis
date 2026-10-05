@@ -2,9 +2,9 @@
 """macOS smoke test for `chelis build --target metal`.
 
 Drives two fixed-shape elementwise programs through the Metal backend
-A Surf source and a span-attributed Deep source. Then runs
-`clang++ -fobjc-arc -framework Metal -framework Foundation` against
-each emitted `.mm` to prove that:
+A Surf source and a span-attributed Deep source. The native build archives the
+generated Objective-C++ code. A driver then links that library with clang++ to
+prove that:
 
   1. `chelis build --target metal` produces a `.mm`, a header, and the
      Metal runtime header.
@@ -268,8 +268,8 @@ int main(void) {
             "-std=c++17",
             "-fobjc-arc",
             "-O2",
-            str(mm_path),
             str(driver),
+            str(out_dir / "libsimple_add_metal.a"),
             f"-I{out_dir}",
             str(out_dir / "libchelis_runtime.a"),
             "-framework",

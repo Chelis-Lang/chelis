@@ -9,11 +9,11 @@
 //! load — so the rule lives in one place and both call it.
 //!
 //! It sits here, rather than in `chelis-reef`, because `chelis-lint` is
-//! deliberately dependency-pure (see `Rule::fix_requires_typed_pipeline_check`)
-//! and pulling the package manager into the lint crate to reach 30 lines of
-//! string arithmetic would undo that. `chelis-surf` already owns module
-//! declarations, and both `chelis-reef` and `chelis-lint` already depend on
-//! it, so the shared home costs no new edge in either direction.
+//! deliberately dependency-pure, and pulling the package manager into the
+//! lint crate to reach 30 lines of string arithmetic would undo that.
+//! `chelis-surf` already owns module declarations, and both `chelis-reef` and
+//! `chelis-lint` already depend on it, so the shared home costs no new edge in
+//! either direction.
 
 use std::path::Path;
 

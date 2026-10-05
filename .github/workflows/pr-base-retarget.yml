@@ -45,11 +45,12 @@ jobs:
       - name: Dispatch CI and Hull and hold the head receipt
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: >-
           python3 scripts/ci_retarget_validation.py
           --repository "${{ github.repository }}"
           --pr-number "${{ github.event.pull_request.number }}"
           --expected-head-sha "${{ github.event.pull_request.head.sha }}"
           --expected-base-sha "${{ github.event.pull_request.base.sha }}"
-          --expected-base-ref "${{ github.event.pull_request.base.ref }}"
+          --expected-base-ref "$BASE_REF"
           --token "${{ github.run_id }}-${{ github.run_attempt }}"

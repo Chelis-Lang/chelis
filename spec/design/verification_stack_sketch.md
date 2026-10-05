@@ -1,6 +1,5 @@
 # The Chelis Verification Stack: Whole-Stack Sketch
 
-Intended location: `spec/design/verification_stack_sketch.md` (chelis repo).
 Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`), and the composed-verdict evidence-schema contract (`spec/design/composed_verdict_evidence_schema.md`), which fixes the canonical evidence record and honesty requirements a downstream legibility consumer depends on.
 
 A high-level architecture sketch, not a build plan. It states the shape of what we are proposing, what is already shipped versus changing versus new, and the dependency relationships between pieces. Sequencing, and the deeper component-evaluation research, are named as separate passes at the end. The numbered build-of-record is the master plan and the dependency structure is the dependency map; this sketch is the narrative those two formalize.
@@ -11,7 +10,7 @@ One stack that verifies properties of numerical programs by dispatching each goa
 
 ## What Chelis uniquely does versus using these tools raw
 
-This is the moat, and it is the reason the proposal is not "wire up cvc5, dReal, and MetiTarski yourself." Anyone can download those solvers. What no one else has is the integrated compiler and IR underneath them.
+This is the reason the proposal is not "wire up cvc5, dReal, and MetiTarski yourself." Anyone can download those solvers. What no one else has is the integrated compiler and IR underneath them.
 
 **Gap-free: the verified artifact is the executed artifact.** Using solvers raw, you hand-translate your program into each solver's input language, and that translation is itself unverified: you prove things about an SMT encoding that may or may not match the code that runs. In Chelis the program lowers once to the tensor IR, and every engine consumes a goal derived from that single IR through a compiler pass, which can itself be made trustworthy (tested semantics via Hull, eventually mechanized). There is no gap between what you proved and what runs. Raw tool use can never close that gap.
 
@@ -48,17 +47,17 @@ Marked by state: shipped, changing, or new. Arrows are dependency edges, not a s
 - *The honest composite* (new): a qualifier-set rollup (union of qualifiers, minimum soundness) rather than a scalar chain (master WI-6); a non-vacuity guard (the recon confirmed none exists, so this is added, not preserved) (master WI-7); and per-assumption discharge-tier provenance threaded from c-earchin emission through to the artifact (also confirmed absent today) (master WI-8).
 - *Deep-prove lane* versus the interactive lane: shared async infrastructure for the heavy backends (master WI-9).
 
-**L4, domain shells / products.**
-- *Shoals* (finance): pricers in Chelis using the special-function primitives, verified through the orchestrator; C Proof as the commercial vehicle around verified AD/Greeks and verified pricing bounds. (Downstream pickup, master plan section 5.)
+**L4, domain shells.**
+- *Shoals* (finance): pricers in Chelis using the special-function primitives, verified through the orchestrator, yielding verified AD/Greeks and verified pricing bounds. (Downstream pickup, master plan section 5.)
 - *Hydronnx + Beacon* (NN verification): the same IR and the same engine; the entry into the VNN community. A VNN-LIB front-end is the missing piece for a competition entry (see the VNN-LIB front-end placeholder).
 
-**L5, the trust ladder.** Tested semantics (Hull) for the lowering and the transformers; mechanized soundness (LaCaDiLE / Lean) for the transformers and the metatheory; certificate-bearing discharges for independent auditability. This ladder is what lets the product say "verified" rather than "we ran some checks."
+**L5, the trust ladder.** Tested semantics (Hull) for the lowering and the transformers; mechanized soundness (LaCaDiLE / Lean) for the transformers and the metatheory; certificate-bearing discharges for independent auditability. This ladder is what lets a result be called "verified" rather than "we ran some checks."
 
 ## Engine roster evolution
 
 The set of engines we investigated is a starting point to be improved, not a commitment. Two forces reshape it.
 
-**Consolidate toward in-process Rust.** cvc5 (FFI, shipped), Z3 (mature crate), and Clarabel (Rust-native SDP) all link in-process; Beacon is in-house Rust; the interval substrate has good Rust crates. The shell-to-CLI pattern (serialize to a text format, run a process, parse stdout, vendor an unmaintained binary) is reserved for research tools with no in-process equivalent, which in practice is MetiTarski (special-function proofs) and, rarely, full CAD. dReal is the clearest drop: it is CLI-only, unmaintained, lacks erf, and its bounded-box-transcendental capability is largely covered in-process by Beacon's interval layer plus cvc5/Z3. This is also a trust-story decision: shipping and trusting stale research binaries is a real supply-chain cost in a verified-finance product, so in-process and in-house is cleaner for the audit narrative as well as the engineering.
+**Consolidate toward in-process Rust.** cvc5 (FFI, shipped), Z3 (mature crate), and Clarabel (Rust-native SDP) all link in-process; Beacon is in-house Rust; the interval substrate has good Rust crates. The shell-to-CLI pattern (serialize to a text format, run a process, parse stdout, vendor an unmaintained binary) is reserved for research tools with no in-process equivalent, which in practice is MetiTarski (special-function proofs) and, rarely, full CAD. dReal is the clearest drop: it is CLI-only, unmaintained, lacks erf, and its bounded-box-transcendental capability is largely covered in-process by Beacon's interval layer plus cvc5/Z3. This is also a trust-story decision: shipping and trusting stale research binaries is a real supply-chain cost in a verification toolchain, so in-process and in-house is cleaner for auditability as well as the engineering.
 
 **The special-function convergence is the prime rewrite opportunity.** The sound polynomial and rational envelopes you must build for Beacon's special-function relaxations are the same objects MetiTarski uses as its function bounds, and the same objects the L1 special-function primitive layer needs for its contracts. Build that envelope library once in Chelis/Rust and you get Beacon's relaxations, the primitive contracts, and most of MetiTarski's value from a single investment, with an in-process RCF discharge via Z3/cvc5 rather than a shelled QEPCAD. MetiTarski then narrows to a fallback for the special-function inequalities the native bounds cannot yet close. The certificate backend is similarly Rust-native: Clarabel for the SDP core, with the SoS reduction and exact rationalization written on top.
 
@@ -74,7 +73,7 @@ The proposal is not a module you add beside the compiler; it grows a verificatio
 
 The three audiences and the unique value line up, with the special-function layer as the connective tissue.
 
-Quant research and systematic trading at small-to-mid funds get a guarantee class they have never had: not "we tested it," but verified Greeks and verified pricing bounds over the trading range, on the function that actually runs, the C Proof angle. The NN-verification academic community recognizes Beacon as their own field's machinery (the CROWN lineage) on a new substrate, which is the credibility and recruiting story and the VNN-COMP path. Scientific programmers get first-class, verified special functions, which is close to table stakes for that domain and absent from anything statically typed today. The connective fact is that a named special-function primitive with a sound relaxation and an adjoint is the same object whether it is a finance Phi, an ML activation, or a scientific erf, so one layer serves all three, and the cross-domain claim is mechanism rather than marketing.
+Quantitative-finance users get a guarantee class they have never had: not "we tested it," but verified Greeks and verified pricing bounds over the trading range, on the function that actually runs. The NN-verification academic community recognizes Beacon as their own field's machinery (the CROWN lineage) on a new substrate, which opens the VNN-COMP path. Scientific programmers get first-class, verified special functions, which is close to table stakes for that domain and absent from anything statically typed today. The connective fact is that a named special-function primitive with a sound relaxation and an adjoint is the same object whether it is a finance Phi, an ML activation, or a scientific erf, so one layer serves all three, and the cross-domain claim is mechanism rather than marketing.
 
 ## Deliberately left for the next passes
 

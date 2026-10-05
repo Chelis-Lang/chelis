@@ -34,8 +34,8 @@ Neural-verification methods — abstract interpretation, bound propagation — a
 afterthought bolted beside the algebraic path. A verified robustness or
 reachability bound is the same kind of record as an SMT-discharged inequality.
 
-The substrate is the source of trust. A downstream legibility layer (the C Note
-notebook is the first such consumer) renders that trust but cannot manufacture
+The substrate is the source of trust. A downstream legibility layer (a verified-computing
+notebook, for example) renders that trust but cannot manufacture
 it: it can only be as honest as the records it is handed. This document is the
 contract between producer and consumer.
 
@@ -79,7 +79,7 @@ A record carries:
   or vacuous. Absent only when there is genuinely no failure.
 
 Nothing in the legibility layer can exist until results share this
-representation (C Note product spec §4, §8). A field that is absent must be
+representation. A field that is absent must be
 **representable as absent** — never defaulted to a plausible value — so the
 consumer can render absent as absent rather than fabricating a field.
 

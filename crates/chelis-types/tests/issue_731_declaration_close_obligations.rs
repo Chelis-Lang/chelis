@@ -14,7 +14,8 @@
 //! replays that narrowed a binder (chelis#2537).
 //!
 //! Every program is asserted on both checker ingresses (chelis#1107), and each
-//! rejection has an accepted twin that differs only in the operand's type.
+//! rejection has an accepted control. Gather also requires a literal axis
+//! under [05-AXIS-2], so its positive control uses that static spelling.
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
@@ -320,9 +321,15 @@ fn an_access_on_a_binder_is_decided_at_its_instantiations() {
 /// checked and then failed at run time.
 #[test]
 fn a_projection_keeps_its_lambda_monomorphic() {
-    rejects_with(
-        "def f() -> f32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n",
-        &["body has type `() -> i32`, declared type is `() -> f32`"],
+    let source = "def f() -> f32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n";
+    let diagnostics = agreed_diagnostics(source);
+    assert!(!diagnostics.is_empty(), "the mismatched result must reject");
+    let errors = check_typed_program(&desugared(source)).unwrap_err().errors;
+    assert!(
+        errors.iter().any(|e| {
+            e.expected.as_deref() == Some("() -> f32") && e.got.as_deref() == Some("() -> i32")
+        }),
+        "the declaration must reject the inferred i32 result: {errors:?}"
     );
     accepts("def f() -> i32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n");
 }
@@ -352,8 +359,41 @@ fn an_unresolved_axis_is_constrained_to_i32() {
     ] {
         let program =
             format!("def f(x: tensor[3, f32]) -> tensor[*, f32] = (fn (v) -> {call})(0i64)");
-        rejects_with(&program, &["expected i32, got i64"]);
-        accepts(&program.replace("0i64)", &format!("{valid})")));
+        for checked in [
+            check_typed_program(&desugared(&program)),
+            check_ir_program(&expanded(&program)),
+        ] {
+            let report = checked.expect_err("an i64 axis must not satisfy an i32 slot");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.kind.diagnostic_name() == "PrecisionMismatch"
+                        && error.expected.as_deref() == Some("i32")
+                        && error.got.as_deref() == Some("i64")
+                        && error.span_offset == program.find("fn (v)")
+                }),
+                "the later binding must conflict with the axis dtype: {:?}",
+                report.errors
+            );
+        }
+        let correctly_typed = program.replace("0i64)", &format!("{valid})"));
+        if call.starts_with("gather(") {
+            // [05-AXIS-2]: the lambda parameter remains a variable even
+            // when its application supplies a literal. Its i32 constraint
+            // is necessary but does not establish gather's static geometry.
+            rejects_with(
+                &correctly_typed,
+                &["gather axis must be an i32 integer constant", "[05-AXIS-2]"],
+            );
+            accepts(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i32)",
+            );
+            rejects_with(
+                "def f(x: tensor[3, f32]) -> tensor[2, f32] = gather(x, to_tensor([0i64, 1i64]), 0i64)",
+                &["gather argument 3 (axis)", "expected i32, got i64"],
+            );
+        } else {
+            accepts(&correctly_typed);
+        }
     }
 }
 

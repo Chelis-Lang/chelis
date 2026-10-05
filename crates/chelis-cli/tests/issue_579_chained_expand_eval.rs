@@ -14,12 +14,13 @@
 //!   by following let-bound `shape` reads to their source tensor. The
 //!   `issue_579_let_bound_*` tests below FAIL on a pre-#596 compiler and are
 //!   this file's #596 discriminator.
-//! - The bare-runtime-scalar sourceless spellings (school's pre-0.12-bump
-//!   `broadcast_to_achw(v, h_dim, w_dim, a_dim)` signature) were ALREADY
-//!   rejected at check at v0.12.0: the #494 source-tracking predicate
-//!   shipped IN 0.12.0, which is what forced school's §4.7.2 witness rewrite
-//!   at its 0.12.0 pin bump. They are pinned here so the reject stays loud,
-//!   cites #469, and never regresses into the reported rank-mismatch ICE.
+//! - The bare-runtime-scalar spellings (school's pre-0.12-bump
+//!   `broadcast_to_achw(v, h_dim, w_dim, a_dim)` signature) were rejected at
+//!   check from v0.12.0 by the #494 source-tracking predicate, which is what
+//!   forced school's §4.7.2 witness rewrite at its 0.12.0 pin bump.
+//!   chelis#469 removed that predicate (section 4.7.2 admits any `i64` size),
+//!   so they are pinned here executing on both lanes, never regressing into
+//!   the reported rank-mismatch ICE.
 //! - The inline shape-sourced chain (`expand(g, 1, shape(x, cast(2,
 //!   i32)))`) already checked, evaluated, and built correctly at v0.12.0.
 //!   Its chained positive lane (eval + C parity) was previously untested and
@@ -33,11 +34,11 @@
 //! pin bump is the closing oracle for chelis#579 itself; this corpus pins
 //! the adjacent upstream lanes so the failure class cannot silently return.
 //!
-//! Sibling coverage: `rank_poly_tier3.rs` pins the check/build/eval reject of
-//! the sourceless rank-1 -> rank-4 chain and the single-expand
-//! `bias_broadcast` positives. This file adds the let-bound (school-real)
-//! spelling across check/eval/build/C-parity, the missing CHAINED positive
-//! lane (eval + C parity), and the batchnorm1d-flavor reject pins.
+//! Sibling coverage: `rank_poly_tier3.rs` pins the scalar-parameter rank-1 ->
+//! rank-4 chain and the single-expand `bias_broadcast` positives. This file
+//! adds the let-bound (school-real) spelling across check/eval/build/C-parity,
+//! the missing CHAINED positive lane (eval + C parity), and the
+//! batchnorm1d-flavor scalar-parameter pins.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -135,25 +136,25 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
     )
 }
 
-/// Bare-runtime-scalar sourceless spelling, batchnorm1d flavor: the expand
-/// size is a bare `i64` parameter with no tensor source. NOTE: this is the
-/// #469 sourceless family, NOT school's shipped spelling (that one is
-/// `BN1D_LET_BOUND_SOURCE`), and it was ALREADY check-rejected at v0.12.0 by
-/// the #494 source-tracking predicate. Pinned so the reject stays loud,
-/// cites #469, and never regresses into the issue's `rank mismatch` ICE.
-const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
+/// Bare-runtime-scalar spelling, batchnorm1d flavor: the expand size is a
+/// bare `i64` parameter with no tensor source. NOT school's shipped spelling
+/// (that one is `BN1D_LET_BOUND_SOURCE`); check-rejected from v0.12.0 by the
+/// #494 source-tracking predicate until chelis#469 removed it.
+const SCALAR_PARAM_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, i64))\n";
 
-/// The sourceless chained rank-1 -> rank-4 spelling: school's PRE-0.12-bump
-/// `broadcast_to_achw` signature (bare `i64` dim params), retired in
-/// school's §4.7.2 witness rewrite when the 0.12.0 pin bump brought in the
-/// #494 check reject. Already check-rejected at v0.12.0; pinned for the same
-/// loud-reject / no-ICE invariant through the eval lane.
-const SOURCELESS_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: i64, w_dim: i64, a_dim: i64) -> tensor[a, c, h, w, f32] = {\n\
-    \x20 step1: tensor[c, h, f32] = insert(v, 1, h_dim)\n\
-    \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, w_dim)\n\
-    \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, a_dim)\n\
-    \x20 step3\n\
+/// The chained rank-1 -> rank-4 scalar-parameter spelling: school's
+/// PRE-0.12-bump `broadcast_to_achw` signature (bare `i64` dim params),
+/// retired in school's §4.7.2 witness rewrite when the 0.12.0 pin bump brought
+/// in the #494 check reject, and admissible again since chelis#469. School's
+/// intermediate `step1: tensor[c, h, f32]` ascriptions are left out: a local
+/// ascription naming a binder that only the declared result introduces (`h`
+/// here) is refused at lowering on both lanes ("cannot resolve authored
+/// extent"), a local-ascription gap separate from the size rule this file pins.
+const SCALAR_PARAM_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: i64, w_dim: i64, a_dim: i64) -> tensor[a, c, h, w, f32] = {\n\
+    \x20 step1 = insert(v, 1, h_dim)\n\
+    \x20 step2 = insert(step1, 2, w_dim)\n\
+    \x20 insert(step2, 0, a_dim)\n\
     }\n\
     out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, i64), cast(4, i64), cast(5, i64))\n";
 
@@ -264,6 +265,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -578,65 +580,52 @@ fn issue_579_let_bound_shape_extent_chained_c_backend_agrees() {
     assert_eval_agrees_with_backend(&source, "issue_579_achw_let_bound_c", &backend);
 }
 
-// ── Negatives: the bare-scalar sourceless spellings and genuine misuse ───
+// ── The bare-scalar spellings (chelis#469), and genuine misuse ───────────
 
-/// The batchnorm1d-flavor bare-scalar sourceless spelling must be rejected
-/// at CHECK with the #469 sourceless-size diagnostic, and no error may carry
-/// the `rank mismatch` ICE text the issue reported. (The rank-1 -> rank-4
-/// chain's check reject is pinned in rank_poly_tier3.rs; this pins the 1d
-/// flavor.)
+/// The batchnorm1d-flavor bare-scalar spelling checks clean (chelis#469), and
+/// no diagnostic carries the `rank mismatch` ICE text the issue reported.
 #[test]
-fn issue_579_sourceless_bn1d_expand_rejected_at_check_without_rank_ice() {
-    let json = check_json(SOURCELESS_1D_SOURCE);
-    let errors = check_errors(&json, "sourceless bn1d check");
+fn issue_579_scalar_param_bn1d_expand_checks_clean_without_rank_ice() {
+    let json = check_json(SCALAR_PARAM_1D_SOURCE);
+    let errors = check_errors(&json, "scalar-parameter bn1d check");
     assert!(
-        !errors.is_empty(),
-        "sourceless bn1d expand must be rejected at check, got a clean check"
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|m| m.contains("no tensor in scope carries it") && m.contains("chelis#469")),
-        "check rejection must cite the #469 sourceless-size rule, got {errors:?}"
-    );
-    assert!(
-        errors.iter().all(|m| !m.contains("rank mismatch")),
-        "the #579 rank-mismatch ICE text must not reappear in check errors: {errors:?}"
+        errors.is_empty(),
+        "a scalar-parameter bn1d expand size is admissible under section 4.7.2, got {errors:?}"
     );
 }
 
-/// The eval lane rejects both bare-scalar sourceless spellings (1d and the
-/// chained rank-1 -> rank-4) with the same #469 diagnostic and NEVER the
-/// `tensor rank mismatch: N dims vs M dims` ICE the issue reported, nor an
-/// internal compiler error: the reject must stay a loud, targeted
-/// diagnostic so the #579 failure class cannot return silently.
+/// Both bare-scalar spellings (1d and the chained rank-1 -> rank-4) build,
+/// and the evaluator agrees with the compiled C, with NEVER the `tensor rank
+/// mismatch: N dims vs M dims` ICE the issue reported (chelis#469).
 #[test]
-fn issue_579_sourceless_expand_rejects_in_eval_without_rank_ice() {
-    for (source, name) in [
-        (SOURCELESS_1D_SOURCE, "issue_579_sourceless_1d"),
-        (SOURCELESS_ACHW_SOURCE, "issue_579_sourceless_achw"),
+fn issue_579_scalar_param_expand_agrees_in_eval_without_rank_ice() {
+    for (source, name, shape) in [
+        (
+            SCALAR_PARAM_1D_SOURCE,
+            "issue_579_scalar_param_1d",
+            vec![2, 3],
+        ),
+        (
+            SCALAR_PARAM_ACHW_SOURCE,
+            "issue_579_scalar_param_achw",
+            vec![5, 2, 3, 4],
+        ),
     ] {
-        let dir = tempdir().expect("tempdir");
-        let stderr = eval_stderr_expecting_failure(dir.path(), source, name);
-        assert!(
-            stderr.contains("no tensor in scope carries it") && stderr.contains("chelis#469"),
-            "{name}: eval must reject with the #469 sourceless-size diagnostic, got: {stderr}"
-        );
-        assert!(
-            !stderr.contains("rank mismatch"),
-            "{name}: the 0.12.0 rank-mismatch ICE must not reappear: {stderr}"
-        );
-        assert!(
-            !stderr.contains("internal compiler error"),
-            "{name}: the reject must be a clean diagnostic, not an ICE: {stderr}"
-        );
+        let backend = build_compile_run(source, name);
+        let tensors = parse_printed_tensors(&backend);
+        let out = tensors
+            .iter()
+            .find(|(n, _, _)| n == "out")
+            .unwrap_or_else(|| panic!("{name}: backend output missing `out`: {backend}"));
+        assert_eq!(out.1, shape, "{name}: the runtime extents size the result");
+        assert_eval_agrees_with_backend(source, name, &backend);
     }
 }
 
 /// Negative parity for the positive bn1d case: broadcasting over the WRONG
 /// axis (extent read from `x` axis 0 but inserted at axis 1, ascribed
-/// `[3, 2]`) makes the following `mul` shape-invalid and must be rejected at
-/// check with a dimension-mismatch reason.
+/// `[3, 2]`) makes the following `mul` shape-invalid. The error identifies
+/// the mismatched operand extent at the `mul` call.
 #[test]
 fn issue_579_wrong_axis_broadcast_rejected_at_check() {
     let source = "def bad(x: &tensor[2, 3, f32], g: &tensor[3, f32]) -> tensor[2, 3, f32] = {\n\
@@ -645,10 +634,15 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
         }\n\
         out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";
     let json = check_json(source);
-    let errors = check_errors(&json, "wrong-axis broadcast check");
+    let errors = json["errors"].as_array().expect("check errors array");
     assert!(
-        errors.iter().any(|m| m.contains("dimension mismatch")),
-        "wrong-axis broadcast must fail check with a dimension mismatch, got {errors:?}"
+        errors.iter().any(|error| {
+            error["kind"] == "DimensionMismatch"
+                && error["expected"] == "2"
+                && error["got"] == "3"
+                && error["span"]["offset"] == source.find("mul(x, gb)").unwrap()
+        }),
+        "wrong-axis broadcast must fail check at the mismatched axis: {errors:?}"
     );
 }
 
@@ -662,9 +656,21 @@ fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
         out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");
+    let report = check_json(source);
     assert!(
-        stderr.contains("insert") && stderr.contains("out of bounds"),
-        "out-of-bounds insert axis must fail with the targeted insert reason, got: {stderr}"
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "axis in 0..=1"
+                    && error["got"] == "3"
+                    && error["span"]["offset"] == source.find("insert(").unwrap()
+            })),
+        "invalid insert axis must reject at the call: {report}"
+    );
+    assert!(
+        stderr.contains("DimensionMismatch") && stderr.contains("insert"),
+        "eval must surface the targeted insert rejection: {stderr}"
     );
     assert!(
         !stderr.contains("internal compiler error"),

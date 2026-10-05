@@ -24,7 +24,7 @@ move long dated measurement logs into `archive/perf/`.
 
 ## Node-Local Test Parallelism
 
-Current baseline from `/home/jeff/Documents/scratch/coral` on this workstation with
+Current baseline from a Coral checkout on one workstation with
 `target/release/chelis`:
 
 - `chelis test tests/ --jobs auto`: `30.64 s` for 65 tests, 0 failures.

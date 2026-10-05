@@ -21,6 +21,7 @@ fn options(tier: &str) -> ObligationRunOptions {
         tier: tier.to_string(),
         only: None,
         invariant_min_rate: 0.01,
+        runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
     }
 }
 
@@ -243,7 +244,12 @@ fn u1_tensor_nonfinite_element_fails_closed_fuzz() {
 #[test]
 fn u1_chokepoint_signature_is_stable() {
     let _ = validate_produced_env
-        as fn(&ExecutionValue, &OpaqueInvariant, &crate::solver::SmtExpr) -> Result<bool, String>;
+        as fn(
+            &ExecutionValue,
+            &OpaqueInvariant,
+            &crate::solver::SmtExpr,
+            &'static chelis_reef::EmbeddedRuntime,
+        ) -> Result<bool, String>;
 }
 
 // ===================================================================
@@ -266,11 +272,11 @@ fn w5_int_width_field_param_samples_as_integer_at_tier_c() {
             "module M
 export (make)
 @opaque
-@invariant(c) c.n >= ({lo} : {width})
+@invariant(c) c.n >= {lo}{width}
 type Counter =
   | Counter {{ n: {width} }}
 def make(x: {width}) -> Option[Counter] =
-  if x >= ({lo} : {width}) then Some(Counter {{ n: x }}) else None
+  if x >= {lo}{width} then Some(Counter {{ n: x }}) else None
 ",
             lo = 0,
             width = width
@@ -361,10 +367,10 @@ fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
             "module M
 export (make)
 @opaque
-@invariant(c) c.n == (0 : {width})
+@invariant(c) c.n == 0{width}
 type Counter =
   | Counter {{ n: {width} }}
-def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
+def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: 0{width} }}
 "
         );
         let outcomes = run(&surf, "fuzz-only");

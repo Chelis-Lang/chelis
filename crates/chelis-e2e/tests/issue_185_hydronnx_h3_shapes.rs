@@ -19,6 +19,10 @@
 //!   * `layer_norm` on `[2, 4, f32]` with rank-1 gamma/beta of size 4.
 //!   * `conv` on `[1, 3, 8, 8, f32]` with an `[8, 3, 3, 3, f32]`
 //!     kernel, stride=1, padding=0 -> `[1, 8, 6, 6, f32]`.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
 

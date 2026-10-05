@@ -165,6 +165,7 @@ fn c_sampled(program: &str, name: &str) -> Vec<f64> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -378,7 +379,7 @@ fn every_active_float_dtype_matches_eval_with_a_runtime_template() {
         let src = format!(
             "def bc(c: {dtype}) -> tensor[4, {dtype}] = to_tensor([c, c, c, c])\n\
              sampled = uniform_like(key_from_seed(42i64), \
-             bc(cast(0.5, {dtype})), 2.0f32, 5.0f32)\n"
+             bc(cast(0.5, {dtype})), cast(2.0f32, {dtype}), cast(5.0f32, {dtype}))\n"
         );
         let eval = eval_sampled(&src);
         let c = c_sampled(&src, &format!("u2120_dtype_{label}"));

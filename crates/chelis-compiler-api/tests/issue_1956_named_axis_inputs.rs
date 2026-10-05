@@ -22,7 +22,12 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
         format!("module Probe.Values\nexport (total)\n{library}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     // Five discarded draws on their own keys; under explicit keys they do not
     // move the returned draw, which is keyed by `key_from_seed(42)` alone.
     let draws = (0..5)
@@ -158,8 +163,22 @@ fn spread_rank_library_capture_preserves_initializer_error() {
 
 #[test]
 fn spread_rank_call_without_a_named_axis_remains_a_check_error() {
-    let error = eval(request("def total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\nout = total(to_tensor([7.0f32, 11.0f32]))\n")).unwrap_err();
+    let source = "def total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\nout = total(to_tensor([7.0f32, 11.0f32]))\n";
+    let error = eval(request(source)).unwrap_err();
     assert_eq!(error.stage, "check");
     assert!(error.transcript.is_empty());
-    assert!(error.errors.iter().any(|error| error.kind() == chelis_vocab::DiagnosticKind::DimensionMismatch && error.message == "rank-spread operand carries no named `seq` axis; a fully-literal or differently-named operand cannot locate the axis (spec/04-type-system.md §4.5.3)"));
+    assert!(
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind() == chelis_vocab::DiagnosticKind::DimensionMismatch
+                && diagnostic.message.contains("total")
+                && diagnostic.message.contains("argument 1")
+                && diagnostic.message.contains("no named `seq` axis")
+                && diagnostic.expected.is_none()
+                && diagnostic.got.is_none()
+                && diagnostic.span.map(|span| span.offset())
+                    == source.rfind("total(").map(|at| at as u64)
+        }),
+        "{:?}",
+        error.errors
+    );
 }

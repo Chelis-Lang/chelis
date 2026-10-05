@@ -2,10 +2,10 @@
 
 The release workflow's `installed-artifact-canary` matrix downloads the staged
 Linux x86-64 and macOS arm64 artifacts from the same workflow run, before
-publication. On Linux that is the glibc-2.31 build, the one `chelisup` installs
-there (chelis#2686). It uses the staged installer, not a Cargo binary or an existing
+publication. On Linux that is the static build, the one `chelisup` installs
+there. It uses the staged installer, not a Cargo binary or an existing
 user installation. `publish-release` requires this matrix in addition to all
-three existing build jobs; workflow dispatch still does not publish anything.
+four build jobs; workflow dispatch still does not publish anything.
 
 The script verifies archive and installer checksum sidecars (including their
 filenames), rejects ambiguous/link/escaping archive members, inventories every

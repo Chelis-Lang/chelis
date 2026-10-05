@@ -246,7 +246,7 @@ fn metrics_accuracy_accepts_all_arithmetic_dtypes_for_logits() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("acc.ch");
         let src = format!(
-            r#"sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
+            r#"sig row_argmax[piece, classes, p: Numeric]: &tensor[piece, classes, p] -> i64
 def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {{
   pair = sort(row, cast(1, i32))
   cast(0, i64)

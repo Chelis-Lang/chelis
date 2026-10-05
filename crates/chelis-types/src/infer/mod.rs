@@ -29,7 +29,7 @@ use crate::deep_type::{
     TypeUseSite, deferred_family_diagnostic, is_deferred_dtype_name, is_unsigned_dtype_name,
     unsigned_family_diagnostic,
 };
-use crate::env::{DeclarationBinderIdentities, Env, TopLevelValueVisibility};
+use crate::env::{BindingFacts, DeclarationBinderIdentities, Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
 use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
@@ -97,11 +97,14 @@ use std::cell::{Cell, RefCell};
 mod annotate;
 mod app;
 mod app_collection;
+mod app_convert;
+mod app_equality;
 mod app_helpers;
 mod app_hostio;
 mod app_numeric;
 mod app_operand_dtype;
 mod app_post;
+mod app_post_diagonal;
 mod app_route;
 mod app_scatter;
 mod app_shape;
@@ -112,6 +115,8 @@ mod binder_literal;
 mod checked;
 mod common;
 mod declaration_close;
+mod declaration_collect;
+mod declaration_graph;
 mod declarations;
 mod declared_surface;
 mod declared_type;
@@ -128,6 +133,7 @@ mod group_link;
 mod literal_width;
 mod operand_deferral;
 mod program;
+mod program_schedule;
 pub(crate) mod recursion;
 mod rigid;
 mod shape_honesty;
@@ -136,11 +142,14 @@ mod static_int;
 mod static_value;
 mod type_derivation;
 mod validate;
+mod validate_core_transform;
 mod vmap_extent;
 
 use annotate::*;
 use app::*;
 use app_collection::*;
+use app_convert::*;
+use app_equality::*;
 use app_helpers::*;
 use app_hostio::*;
 use app_numeric::*;
@@ -155,12 +164,19 @@ use app_tensor::*;
 use binder_literal::*;
 use checked::*;
 use common::*;
-pub(crate) use common::{decide_shape_route, shape_route_result};
+pub(crate) use common::{
+    SumResultSlot, bound_sum_result_precision, decide_shape_route, settled_sum_result_precision,
+    shape_route_result, sum_result_bound_note, sum_result_widening_note,
+};
 use declaration_close::*;
+use declaration_collect::*;
+use declaration_graph::*;
 use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
-pub(crate) use app_collection::{TensorConcatCallEvidence, decide_collection_constraint};
+pub(crate) use app_collection::{
+    CollectionCallEvidence, TensorConcatCallEvidence, decide_collection_constraint,
+};
 use declarations::*;
 use deferred_operands::*;
 use expr::*;
@@ -175,12 +191,14 @@ pub(crate) use grad_selector::{
 use group_link::*;
 use operand_deferral::*;
 use program::*;
+use program_schedule::*;
 use rigid::*;
 use slot::*;
 pub use static_int::fold_static_int_expr;
 use static_value::*;
 use type_derivation::*;
 use validate::*;
+use validate_core_transform::*;
 use vmap_extent::*;
 
 pub use checked::{

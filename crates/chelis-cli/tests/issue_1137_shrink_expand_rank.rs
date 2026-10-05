@@ -71,6 +71,7 @@ fn build_and_run(source: &str, stem: &str) -> (String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("UTF-8 source path"),
             "--target",
             "c",
@@ -165,11 +166,10 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
 /// so these programs have no unsourced const left to trip over and build
 /// again. They are the parity tests this file said they would return as.
 ///
-/// **chelis#1482 is not fixed**, and nothing here should be read as saying so.
-/// Only this witness stopped reproducing. Replacing `relu` with `sigmoid`,
-/// `silu`, or `gelu`, each of which still synthesizes a const, refuses with
-/// the same receipt on the same shrink result. The gap keeps its own oracle
-/// row, `shrink.elementwise_const.build`, recorded at `typed_unsupported`.
+/// `sigmoid`, `silu` and `gelu` still synthesize constants; chelis#1482 gives
+/// each one the activation's input as its shape source, so they execute on
+/// the same shrink result too. Their oracle row,
+/// `shrink.elementwise_const.build`, records that execution.
 #[test]
 fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(0, i64)", "k");
@@ -269,20 +269,40 @@ out = f(to_tensor([[cast(11.0, f32), cast(22.0, f32)], [cast(33.0, f32), cast(44
 
 #[test]
 fn invalid_shrink_bounds_still_fail_loudly() {
-    let source = "out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[cast(1, i64), cast(1, i64)]])\n";
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("invalid_bounds.ch");
-    fs::write(&path, source).expect("write source");
-    let output = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().expect("UTF-8 source path")])
-        .output()
-        .expect("run eval");
-    assert!(!output.status.success(), "empty shrink must not execute");
+    let run = |bounds: &str| {
+        let source =
+            format!("out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[{bounds}]])\n");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("bounds.ch");
+        fs::write(&path, source).expect("write source");
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().expect("UTF-8 source path")])
+            .output()
+            .expect("run eval")
+    };
+    // An inverted literal range is outside `0 <= start <= end <= input`.
+    let inverted = run("cast(1, i64), cast(0, i64)");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("empty or inverted"),
+        !inverted.status.success(),
+        "inverted shrink must not execute"
+    );
+    assert!(
+        String::from_utf8_lossy(&inverted.stderr).contains("(inverted)"),
         "rejection must name the invalid bound: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&inverted.stderr)
+    );
+    // Equal endpoints select an empty axis (spec/05 section 2.4.1,
+    // chelis#1795), the passing twin.
+    let empty = run("cast(1, i64), cast(1, i64)");
+    assert!(
+        empty.status.success(),
+        "an empty span executes: {}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&empty.stdout),
+        "out = tensor(shape=[0], data=[])\n"
     );
 }

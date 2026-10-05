@@ -80,6 +80,7 @@ mod wire_values;
 use chelis_compiler_api::schema::ExecutionValue;
 
 use assert_cmd::Command;
+use chelis_crmath::profile::{Output, storage_reference};
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -130,6 +131,7 @@ fn c_stdout(program: &str, name: &str) -> Result<String, String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -253,8 +255,8 @@ fn value_bits_at(v: f64, w: Width) -> u64 {
         // double-rounding case exists for these rows; a future appended row
         // must keep that property or extend this decoder.
         Width::F32 => u64::from((v as f32).to_bits()),
-        Width::F16 => u64::from(half::f16::from_f64(v).to_bits()),
-        Width::Bf16 => u64::from(half::bf16::from_f64(v).to_bits()),
+        Width::F16 => u64::from(storage_reference(v.to_bits(), 64, Output::F16)),
+        Width::Bf16 => u64::from(storage_reference(v.to_bits(), 64, Output::Bf16)),
     }
 }
 

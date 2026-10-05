@@ -15,7 +15,7 @@
 use chelis_prove::CompositeVerdict;
 use chelis_prove::obligation_engine::{
     ObligationOutcome, ObligationRunOptions, ObligationRunResult, ObligationStatus, ObligationTier,
-    run_surf_source_obligations,
+    run_surf_decls_obligations,
 };
 use chelis_surf::ast::Decl;
 use serde_json::json;
@@ -30,10 +30,10 @@ pub(super) fn run_obligations(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    // Re-serialize the parsed module to Surf source for the shared engine
-    // entry. (The engine re-parses + desugars + checks; this keeps the
-    // CLI and tide entry identical — both feed module source.)
-    let source = chelis_surf::format::format_program(raw_decls);
+    // The shared engine checks and verifies the parsed module as it is; it
+    // is never printed and parsed again (chelis#3129). Tide reaches the same
+    // engine through `run_surf_source_obligations`, which parses and then
+    // takes this entry.
     let run_opts = ObligationRunOptions {
         seed: options.seed.unwrap_or(0),
         samples: options.samples.unwrap_or(100),
@@ -41,13 +41,14 @@ pub(super) fn run_obligations(
         tier: options.tier.to_string(),
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
+        runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
     };
-    let outcomes = match run_surf_source_obligations(&source, &run_opts) {
+    let outcomes = match run_surf_decls_obligations(raw_decls, &run_opts) {
         Ok(ObligationRunResult::Ran(o)) => o,
         // A module that does not type-check cannot have its obligations
         // meaningfully verified; surface the check diagnostics and Error,
-        // never silent success (RT3-F2). This also affects FlukeBall's
-        // strict prove-compat admission flow.
+        // never silent success (RT3-F2). This also affects strict downstream
+        // prove-compat admission flows.
         Ok(ObligationRunResult::CheckFailed(messages)) => {
             emit_check_failure(options, &messages, totals);
             return Status::Error;

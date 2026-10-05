@@ -41,6 +41,29 @@ impl Nested for (RuntimeValue, RuntimeValue) {
     }
 }
 
+thread_local! {
+    /// Container elements copied out of a shared sequence on this thread
+    /// since the last reset. Counted at the copy, never estimated.
+    static ELEMENT_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record that `elements` container elements were copied.
+pub(super) fn record_element_copies(elements: usize) {
+    ELEMENT_COPIES.with(|copies| copies.set(copies.get() + elements as u64));
+}
+
+/// Container elements copied on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn element_copies() -> u64 {
+    ELEMENT_COPIES.with(std::cell::Cell::get)
+}
+
+/// Reset [`element_copies`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_element_copies() {
+    ELEMENT_COPIES.with(|copies| copies.set(0));
+}
+
 /// A shared, copy-on-write sequence of container elements.
 pub struct Shared<T: Nested>(Arc<Vec<T>>);
 
@@ -55,7 +78,10 @@ impl<T: Nested> Shared<T> {
     /// owner, copied (each element a shallow clone) otherwise.
     pub fn into_vec(mut self) -> Vec<T> {
         let items = std::mem::replace(&mut self.0, Arc::new(Vec::new()));
-        Arc::try_unwrap(items).unwrap_or_else(|shared| shared.as_ref().clone())
+        Arc::try_unwrap(items).unwrap_or_else(|shared| {
+            record_element_copies(shared.len());
+            shared.as_ref().clone()
+        })
     }
 
     /// Move out the elements this is the only owner of, leaving it empty.
@@ -123,6 +149,9 @@ impl<T: Nested> Deref for Shared<T> {
 
 impl<T: Nested> DerefMut for Shared<T> {
     fn deref_mut(&mut self) -> &mut Vec<T> {
+        if Arc::get_mut(&mut self.0).is_none() {
+            record_element_copies(self.0.len());
+        }
         Arc::make_mut(&mut self.0)
     }
 }
@@ -185,6 +214,7 @@ mod tests {
     fn link(head: RuntimeValue, tail: RuntimeValue) -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "Link".to_string(),
+            source_name: "Link".to_string(),
             fields: vec![head, tail].into(),
             field_names: None,
         }
@@ -193,6 +223,7 @@ mod tests {
     fn end() -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "End".to_string(),
+            source_name: "End".to_string(),
             fields: Values::default(),
             field_names: None,
         }

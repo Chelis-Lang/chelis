@@ -325,9 +325,8 @@ fn trace_keeps_only_the_unselected_axis() {
 // disposition locks above keep their exact dispositions.
 // ---------------------------------------------------------------------------
 
-/// The upper-bound rejection, pinned to `DimensionMismatch` and to the EXACT
-/// diagnostic. The same text is asserted at both ingresses and in the CLI twin,
-/// so a reworded rejection cannot pass on one route and drift on another.
+/// The upper-bound rejection retains the admissible bound, attempted
+/// declaration and authored call location at either declaration ingress.
 fn assert_bound_rejection(
     source: &str,
     what: &str,
@@ -335,15 +334,29 @@ fn assert_bound_rejection(
     bound: usize,
     declared: usize,
 ) {
-    let message = sole_dimension_mismatch(source, what);
+    let deep = surf_to_deep(source);
+    let Err(report) = check_ir_program(&deep) else {
+        panic!("{what} must be rejected");
+    };
+    let [error] = report.errors.as_slice() else {
+        panic!("expected one error for {what}, got {:?}", report.errors);
+    };
+    assert!(
+        matches!(error.kind, CheckErrorKind::DimensionMismatch),
+        "{error:?}"
+    );
     assert_eq!(
-        message,
-        format!(
-            "diagonal declares the smaller selected extent ([05-OP-33]): \
-             axis {literal_axis} is literal {bound}, so the result extent is \
-             at most {bound}, but the declared result extent is {declared}"
-        ),
-        "{what} must produce the exact upper-bound diagnostic"
+        error.expected.as_deref(),
+        Some(format!("extent at most {bound}").as_str())
+    );
+    assert_eq!(
+        error.got.as_deref(),
+        Some(format!("declared extent {declared}").as_str())
+    );
+    assert_eq!(error.span_offset, source.find("diagonal("), "{error:?}");
+    assert!(
+        error.message.contains(&format!("axis {literal_axis}")),
+        "{error:?}"
     );
 }
 

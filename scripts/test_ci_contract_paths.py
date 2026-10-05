@@ -19,8 +19,9 @@ REQUIRED_WORKFLOWS = (
     "changelog.yml",
     "pr-contract-acknowledgements.yml",
     "pr-base-retarget.yml",
+    "secret-scan.yml",
 )
-SCRIPT_PATH = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
+SCRIPT_PATH = re.compile(r"(?:\.github/)?scripts/[A-Za-z0-9_./-]+\.py")
 SCRIPT_MODULE = re.compile(r"scripts\.[A-Za-z0-9_]+")
 
 
@@ -42,6 +43,7 @@ class CiContractPathTests(unittest.TestCase):
             "scripts/phase4b_change_report.py",
             "scripts/check_agent_skills.py",
             "scripts/dtype_phase4b_oracle.py",
+            "scripts/ownership_ledger_tests.py",
         ):
             with self.subTest(path=path):
                 self.assertTrue(contract.is_ci_contract_path(path))

@@ -88,7 +88,7 @@ class SourceContractMutationTests(unittest.TestCase):
         source = path.read_text()
         path.write_text(
             source.replace(
-                '"    return x < {} ? {} : x;"',
+                '"    return x < {zero} ? {zero} : x;"',
                 '"    return fmax(x, {});"',
                 1,
             )

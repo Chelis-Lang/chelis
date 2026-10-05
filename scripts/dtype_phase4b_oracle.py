@@ -136,7 +136,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     1: "`round_to(x, places) -> r`",
     2: "Ingestion preserves",
     3: "`io/json::json_int`",
-    4: "`JsonFloat(value)`",
+    4: "`JsonFloat(value, text)`",
     5: "`io/json::to_json`",
     6: "`cast_trunc(source, target)`",
     7: "The runtime extent read",
@@ -342,10 +342,24 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-34": tuple(
         """\
-| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-| `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
-| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
-| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |""".splitlines()
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64,string) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
+| `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
+| `datetime/columns::Durations` | `Durations { seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
+| `datetime::Date` | `Date { epoch_day: i64 }` |
+| `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
+| `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |
+| `datetime::Instant` | `Instant { unix_second: i64, nanosecond: i64 }` |
+| `datetime::Offset` | `Offset { seconds: i64 }` |
+| `datetime::OffsetDateTime` | `OffsetDateTime { instant: Instant, offset: Offset }` |
+| `datetime::Duration` | `Duration { second: i64, nanosecond: i64 }` |
+| `datetime::Period` | `Period { months: i64, days: i64 }` |
+| `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
+| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
+| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |
+| `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
+| `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
+| `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -353,20 +367,246 @@ EXPECTED_OP_MANIFESTS = {
 | `contracts::normal_cdf_contract_samples` | `()->i64` |
 | `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
+| `datetime/business::business_calendar` | `(Weekmask,List[Date],Date,Date)->BusinessCalendar` |
+| `datetime/business::business_calendar_holidays` | `(BusinessCalendar)->List[Date]` |
+| `datetime/business::business_calendar_valid_from` | `(BusinessCalendar)->Date` |
+| `datetime/business::business_calendar_valid_until` | `(BusinessCalendar)->Date` |
+| `datetime/business::business_calendar_weekmask` | `(BusinessCalendar)->Weekmask` |
+| `datetime/business::business_day_count` | `(BusinessCalendar,Date,Date)->i64` |
+| `datetime/business::business_day_offset` | `(BusinessCalendar,Date,i64,NonBusinessStart)->Date` |
+| `datetime/business::business_day_roll` | `(BusinessCalendar,Date,BusinessDayRoll)->Date` |
+| `datetime/business::business_in_all` | `(BusinessCalendar,BusinessCalendar)->BusinessCalendar` |
+| `datetime/business::business_in_any` | `(BusinessCalendar,BusinessCalendar)->BusinessCalendar` |
+| `datetime/business::dates_business_day_count` | `(BusinessCalendar,Dates[n],Dates[n])->tensor[n,i64]` |
+| `datetime/business::dates_business_day_offset` | `(BusinessCalendar,Dates[n],&tensor[n,i64],NonBusinessStart)->Dates[n]` |
+| `datetime/business::dates_business_day_roll` | `(BusinessCalendar,Dates[n],BusinessDayRoll)->Dates[n]` |
+| `datetime/business::dates_is_business_day` | `(BusinessCalendar,Dates[n])->tensor[n,bool]` |
+| `datetime/business::is_business_day` | `(BusinessCalendar,Date)->bool` |
+| `datetime/business::try_business_calendar` | `(Weekmask,List[Date],Date,Date)->Option[BusinessCalendar]` |
+| `datetime/business::try_business_day_count` | `(BusinessCalendar,Date,Date)->Option[i64]` |
+| `datetime/business::try_business_day_offset` | `(BusinessCalendar,Date,i64,NonBusinessStart)->Option[Date]` |
+| `datetime/business::try_business_day_roll` | `(BusinessCalendar,Date,BusinessDayRoll)->Option[Date]` |
+| `datetime/business::try_business_in_all` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
+| `datetime/business::try_business_in_any` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
+| `datetime/business::try_is_business_day` | `(BusinessCalendar,Date)->Option[bool]` |
+| `datetime/clock::clock_now` | `()->Instant!{IO}` |
+| `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
+| `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
+| `datetime/columns::dates_add_days` | `(Dates[n],&tensor[n,i64])->Dates[n]` |
+| `datetime/columns::dates_add_months` | `(Dates[n],&tensor[n,i64],DayOverflow)->Dates[n]` |
+| `datetime/columns::dates_day` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_day_of_year` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_days_until` | `(Dates[n],Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_from_ymd` | `(&tensor[n,i64],&tensor[n,i64],&tensor[n,i64])->Dates[n]` |
+| `datetime/columns::dates_gt` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_gte` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_lt` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_lte` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_month` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_to_strings` | `(Dates[n])->List[string]` |
+| `datetime/columns::dates_weekday_iso_number` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_year` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::durations` | `(&tensor[n,i64],&tensor[n,i64])->Durations[n]` |
+| `datetime/columns::durations_nanoseconds` | `(Durations[n])->tensor[n,i64]` |
+| `datetime/columns::durations_seconds` | `(Durations[n])->tensor[n,i64]` |
+| `datetime/columns::instants_add_duration` | `(Instants[n],Durations[n])->Instants[n]` |
+| `datetime/columns::instants_from_unix_count` | `(&tensor[n,i64],TimeUnit)->Instants[n]` |
+| `datetime/columns::instants_gt` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_gte` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_lt` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_lte` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_round_to` | `(Instants[n],Duration,Rounding)->Instants[n]` |
+| `datetime/columns::instants_seconds_since_f64` | `(Instants[n],Instant)->tensor[n,f64]` |
+| `datetime/columns::instants_to_dates_at` | `(Instants[n],Offset)->Dates[n]` |
+| `datetime/columns::instants_to_unix_count` | `(Instants[n],TimeUnit,Rounding)->tensor[n,i64]` |
+| `datetime/columns::instants_until` | `(Instants[n],Instants[n])->Durations[n]` |
+| `datetime/columns::try_dates_from_ymd` | `(&tensor[n,i64],&tensor[n,i64],&tensor[n,i64])->(Dates[n],tensor[n,bool])` |
+| `datetime/columns::try_durations` | `(&tensor[n,i64],&tensor[n,i64])->(Durations[n],tensor[n,bool])` |
+| `datetime/columns::try_parse_dates` | `(List[string])->(Dates[n],tensor[n,bool])` |
+| `datetime::date` | `(i64,i64,i64)->Date` |
+| `datetime::date_add_days` | `(Date,i64)->Date` |
+| `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |
+| `datetime::date_add_period` | `(Date,Period,DayOverflow)->Date` |
+| `datetime::date_day` | `(Date)->i64` |
+| `datetime::date_day_of_year` | `(Date)->i64` |
+| `datetime::date_days_until` | `(Date,Date)->i64` |
+| `datetime::date_epoch_day` | `(Date)->i64` |
+| `datetime::date_from_epoch_day` | `(i64)->Date` |
+| `datetime::date_from_iso_week` | `(i64,i64,Weekday)->Date` |
+| `datetime::date_gt` | `(Date,Date)->bool` |
+| `datetime::date_gte` | `(Date,Date)->bool` |
+| `datetime::date_iso_week` | `(Date)->(i64,i64)` |
+| `datetime::date_lt` | `(Date,Date)->bool` |
+| `datetime::date_lte` | `(Date,Date)->bool` |
+| `datetime::date_month` | `(Date)->i64` |
+| `datetime::date_period_until` | `(Date,Date)->Period` |
+| `datetime::date_to_string` | `(Date)->string` |
+| `datetime::date_weekday` | `(Date)->Weekday` |
+| `datetime::date_year` | `(Date)->i64` |
+| `datetime::dates_epoch_days` | `(Dates[n])->tensor[n,i64]` |
+| `datetime::dates_from_epoch_days` | `(tensor[n,i64])->Dates[n]` |
+| `datetime::datetime` | `(Date,Time)->DateTime` |
+| `datetime::datetime_add_duration` | `(DateTime,Duration)->DateTime` |
+| `datetime::datetime_add_period` | `(DateTime,Period,DayOverflow)->DateTime` |
+| `datetime::datetime_date` | `(DateTime)->Date` |
+| `datetime::datetime_gt` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_gte` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_lt` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_lte` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_time` | `(DateTime)->Time` |
+| `datetime::datetime_to_instant_at` | `(DateTime,Offset)->Instant` |
+| `datetime::datetime_to_string` | `(DateTime)->string` |
+| `datetime::datetime_until` | `(DateTime,DateTime)->Duration` |
+| `datetime::days_in_month` | `(i64,i64)->i64` |
+| `datetime::days_in_year` | `(i64)->i64` |
+| `datetime::duration` | `(i64,i64)->Duration` |
+| `datetime::duration_add` | `(Duration,Duration)->Duration` |
+| `datetime::duration_from_count` | `(i64,TimeUnit)->Duration` |
+| `datetime::duration_gt` | `(Duration,Duration)->bool` |
+| `datetime::duration_gte` | `(Duration,Duration)->bool` |
+| `datetime::duration_lt` | `(Duration,Duration)->bool` |
+| `datetime::duration_lte` | `(Duration,Duration)->bool` |
+| `datetime::duration_mul` | `(Duration,i64)->Duration` |
+| `datetime::duration_nanosecond` | `(Duration)->i64` |
+| `datetime::duration_negate` | `(Duration)->Duration` |
+| `datetime::duration_second` | `(Duration)->i64` |
+| `datetime::duration_sub` | `(Duration,Duration)->Duration` |
+| `datetime::duration_to_count` | `(Duration,TimeUnit,Rounding)->i64` |
+| `datetime::duration_to_seconds_f64` | `(Duration)->f64` |
+| `datetime::duration_to_string` | `(Duration)->string` |
+| `datetime::easter_sunday_gregorian` | `(i64)->Date` |
+| `datetime::easter_sunday_orthodox` | `(i64)->Date` |
+| `datetime::instant_add_duration` | `(Instant,Duration)->Instant` |
+| `datetime::instant_from_unix` | `(i64,i64)->Instant` |
+| `datetime::instant_from_unix_count` | `(i64,TimeUnit)->Instant` |
+| `datetime::instant_gt` | `(Instant,Instant)->bool` |
+| `datetime::instant_gte` | `(Instant,Instant)->bool` |
+| `datetime::instant_lt` | `(Instant,Instant)->bool` |
+| `datetime::instant_lte` | `(Instant,Instant)->bool` |
+| `datetime::instant_nanosecond` | `(Instant)->i64` |
+| `datetime::instant_round_to` | `(Instant,Duration,Rounding)->Instant` |
+| `datetime::instant_to_datetime_at` | `(Instant,Offset)->DateTime` |
+| `datetime::instant_to_string` | `(Instant)->string` |
+| `datetime::instant_to_unix_count` | `(Instant,TimeUnit,Rounding)->i64` |
+| `datetime::instant_unix_second` | `(Instant)->i64` |
+| `datetime::instant_until` | `(Instant,Instant)->Duration` |
+| `datetime::instants_from_unix` | `(tensor[n,i64],tensor[n,i64])->Instants[n]` |
+| `datetime::instants_nanoseconds` | `(Instants[n])->tensor[n,i64]` |
+| `datetime::instants_unix_seconds` | `(Instants[n])->tensor[n,i64]` |
+| `datetime::is_leap_year` | `(i64)->bool` |
+| `datetime::last_weekday_in_month` | `(i64,i64,Weekday)->Date` |
+| `datetime::nth_weekday_in_month` | `(i64,i64,Weekday,i64)->Option[Date]` |
+| `datetime::offset_datetime` | `(Instant,Offset)->OffsetDateTime` |
+| `datetime::offset_datetime_instant` | `(OffsetDateTime)->Instant` |
+| `datetime::offset_datetime_local` | `(OffsetDateTime)->DateTime` |
+| `datetime::offset_datetime_offset` | `(OffsetDateTime)->Offset` |
+| `datetime::offset_datetime_to_string` | `(OffsetDateTime)->string` |
+| `datetime::offset_from_seconds` | `(i64)->Offset` |
+| `datetime::offset_seconds` | `(Offset)->i64` |
+| `datetime::offset_to_string` | `(Offset)->string` |
+| `datetime::parse_date` | `(string)->Date` |
+| `datetime::parse_datetime` | `(string)->DateTime` |
+| `datetime::parse_duration` | `(string)->Duration` |
+| `datetime::parse_instant` | `(string)->Instant` |
+| `datetime::parse_offset` | `(string)->Offset` |
+| `datetime::parse_offset_datetime` | `(string)->OffsetDateTime` |
+| `datetime::parse_period` | `(string)->Period` |
+| `datetime::parse_time` | `(string)->Time` |
+| `datetime::period` | `(i64,i64)->Period` |
+| `datetime::period_days` | `(Period)->i64` |
+| `datetime::period_months` | `(Period)->i64` |
+| `datetime::period_mul` | `(Period,i64)->Period` |
+| `datetime::period_negate` | `(Period)->Period` |
+| `datetime::period_to_string` | `(Period)->string` |
+| `datetime::time` | `(i64,i64,i64,i64)->Time` |
+| `datetime::time_add_duration` | `(Time,Duration)->(i64,Time)` |
+| `datetime::time_from_nanosecond_of_day` | `(i64)->Time` |
+| `datetime::time_gt` | `(Time,Time)->bool` |
+| `datetime::time_gte` | `(Time,Time)->bool` |
+| `datetime::time_hour` | `(Time)->i64` |
+| `datetime::time_lt` | `(Time,Time)->bool` |
+| `datetime::time_lte` | `(Time,Time)->bool` |
+| `datetime::time_minute` | `(Time)->i64` |
+| `datetime::time_nanosecond` | `(Time)->i64` |
+| `datetime::time_nanosecond_of_day` | `(Time)->i64` |
+| `datetime::time_second` | `(Time)->i64` |
+| `datetime::time_to_string` | `(Time)->string` |
+| `datetime::time_until` | `(Time,Time)->Duration` |
+| `datetime::try_date` | `(i64,i64,i64)->Option[Date]` |
+| `datetime::try_date_add_months` | `(Date,i64,DayOverflow)->Option[Date]` |
+| `datetime::try_date_add_period` | `(Date,Period,DayOverflow)->Option[Date]` |
+| `datetime::try_date_from_epoch_day` | `(i64)->Option[Date]` |
+| `datetime::try_date_from_iso_week` | `(i64,i64,Weekday)->Option[Date]` |
+| `datetime::try_dates_from_epoch_days` | `(tensor[n,i64])->(Dates[n],tensor[n,bool])` |
+| `datetime::try_datetime_add_period` | `(DateTime,Period,DayOverflow)->Option[DateTime]` |
+| `datetime::try_duration_to_count` | `(Duration,TimeUnit,Rounding)->Option[i64]` |
+| `datetime::try_instant_from_unix` | `(i64,i64)->Option[Instant]` |
+| `datetime::try_instant_from_unix_count` | `(i64,TimeUnit)->Option[Instant]` |
+| `datetime::try_instant_to_unix_count` | `(Instant,TimeUnit,Rounding)->Option[i64]` |
+| `datetime::try_instants_from_unix` | `(tensor[n,i64],tensor[n,i64])->(Instants[n],tensor[n,bool])` |
+| `datetime::try_offset_from_seconds` | `(i64)->Option[Offset]` |
+| `datetime::try_parse_date` | `(string)->Option[Date]` |
+| `datetime::try_parse_datetime` | `(string)->Option[DateTime]` |
+| `datetime::try_parse_duration` | `(string)->Option[Duration]` |
+| `datetime::try_parse_instant` | `(string)->Option[Instant]` |
+| `datetime::try_parse_offset` | `(string)->Option[Offset]` |
+| `datetime::try_parse_offset_datetime` | `(string)->Option[OffsetDateTime]` |
+| `datetime::try_parse_period` | `(string)->Option[Period]` |
+| `datetime::try_parse_time` | `(string)->Option[Time]` |
+| `datetime::try_period` | `(i64,i64)->Option[Period]` |
+| `datetime::try_time` | `(i64,i64,i64,i64)->Option[Time]` |
+| `datetime::try_time_from_nanosecond_of_day` | `(i64)->Option[Time]` |
+| `datetime::try_weekday_from_iso_number` | `(i64)->Option[Weekday]` |
+| `datetime::weekday_from_iso_number` | `(i64)->Weekday` |
+| `datetime::weekday_iso_number` | `(Weekday)->i64` |
+| `datetime::weekday_on_or_after` | `(Date,Weekday)->Date` |
+| `datetime::weekday_on_or_before` | `(Date,Weekday)->Date` |
+| `datetime/zone::parse_zoned_text` | `(string)->ZonedText` |
+| `datetime/zone::time_zone_fixed` | `(Offset)->TimeZone` |
+| `datetime/zone::time_zone_from_tzif` | `(string,List[i64])->TimeZone` |
+| `datetime/zone::time_zone_name` | `(TimeZone)->string` |
+| `datetime/zone::time_zone_offset_at` | `(TimeZone,Instant)->Offset` |
+| `datetime/zone::time_zone_utc` | `()->TimeZone` |
+| `datetime/zone::try_parse_zoned_text` | `(string)->Option[ZonedText]` |
+| `datetime/zone::try_time_zone_from_tzif` | `(string,List[i64])->Option[TimeZone]` |
+| `datetime/zone::try_time_zone_offset_at` | `(TimeZone,Instant)->Option[Offset]` |
+| `datetime/zone::try_zoned` | `(Instant,TimeZone)->Option[Zoned]` |
+| `datetime/zone::try_zoned_from_local` | `(DateTime,TimeZone,Disambiguation)->Option[Zoned]` |
+| `datetime/zone::try_zoned_from_text` | `(ZonedText,TimeZone,OffsetConflict)->Option[Zoned]` |
+| `datetime/zone::zoned` | `(Instant,TimeZone)->Zoned` |
+| `datetime/zone::zoned_add_duration` | `(Zoned,Duration)->Zoned` |
+| `datetime/zone::zoned_add_period` | `(Zoned,Period,DayOverflow,Disambiguation)->Zoned` |
+| `datetime/zone::zoned_from_local` | `(DateTime,TimeZone,Disambiguation)->Zoned` |
+| `datetime/zone::zoned_from_text` | `(ZonedText,TimeZone,OffsetConflict)->Zoned` |
+| `datetime/zone::zoned_instant` | `(Zoned)->Instant` |
+| `datetime/zone::zoned_local` | `(Zoned)->DateTime` |
+| `datetime/zone::zoned_offset` | `(Zoned)->Offset` |
+| `datetime/zone::zoned_to_string` | `(Zoned)->string` |
+| `datetime/zone::zoned_zone` | `(Zoned)->TimeZone` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_div` | `(Decimal,Decimal,i64,RoundingMode)->Decimal` |
-| `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-| `decimal::decimal_from_int` | `(i64)->Decimal` |
+| `decimal::decimal_div` | `(Decimal,Decimal,i64,Rounding)->Decimal` |
+| `decimal::decimal_from_f64` | `(f64,i64,Rounding)->Decimal` |
+| `decimal::decimal_from_i64` | `(i64)->Decimal` |
 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_round` | `(Decimal,i64,Rounding)->Decimal` |
+| `decimal::decimal_scale` | `(Decimal)->i64` |
 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_to_float` | `(Decimal)->f64` |
+| `decimal::decimal_to_bf16` | `(Decimal)->bf16` |
+| `decimal::decimal_to_f16` | `(Decimal)->f16` |
+| `decimal::decimal_to_f32` | `(Decimal)->f32` |
+| `decimal::decimal_to_f64` | `(Decimal)->f64` |
+| `decimal::decimal_to_fixed_string` | `(Decimal,i64)->string` |
+| `decimal::decimal_to_i64` | `(Decimal,Rounding)->i64` |
 | `decimal::decimal_to_string` | `(Decimal)->string` |
 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
+| `decimal::try_decimal_div` | `(Decimal,Decimal,i64,Rounding)->Option[Decimal]` |
+| `decimal::try_decimal_from_f64` | `(f64,i64,Rounding)->Option[Decimal]` |
+| `decimal::try_decimal_to_i64` | `(Decimal,Rounding)->Option[i64]` |
 | `index::list_index` | `(List[T],i64)->T` |
 | `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
@@ -397,31 +637,15 @@ EXPECTED_OP_MANIFESTS = {
 | `sort::sort` | `(&tensor[..r,p_numeric],i32)->(tensor[..r,p_numeric],tensor[..r,i64])` |
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
 | `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
-| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]` |
-| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]` |
-| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]` |
+| `tensor/construct::squeeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)` |
+| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)` |
+| `tensor/construct::unsqueeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)` |
 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |
-| `time::add_days` | `(Date,i64)->Date` |
-| `time::date` | `(i64,i64,i64)->Date` |
-| `time::date_gt` | `(Date,Date)->bool` |
-| `time::date_gte` | `(Date,Date)->bool` |
-| `time::date_lt` | `(Date,Date)->bool` |
-| `time::date_lte` | `(Date,Date)->bool` |
-| `time::date_to_string` | `(Date)->string` |
-| `time::day_of_week` | `(Date)->DayOfWeek` |
-| `time::day_of_week_name` | `(Date)->string` |
-| `time::day_of_year` | `(Date)->i64` |
-| `time::days_between` | `(Date,Date)->i64` |
-| `time::duration` | `(i64,i64,i64,i64)->Duration` |
-| `time::is_leap_year` | `(i64)->bool` |
-| `time::parse_date` | `(string)->Option[Date]` |
-| `time::sub_days` | `(Date,i64)->Date` |
-| `time::try_date` | `(i64,i64,i64)->Option[Date]` |""".splitlines()
+| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |""".splitlines()
     ),
     "05-OP-44": tuple(
         """\
@@ -745,10 +969,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 73 or len(set(identities)) != 73:
+    if len(identities) != 283 or len(set(identities)) != 283:
         violations.append(
-            "[05-OP-35] stdlib numeric manifest must have exactly seventy-three "
-            "unique identities"
+            "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
+            "eighty-three unique identities"
         )
 
 
@@ -1148,8 +1372,8 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 23 is explicitly\npresent", "wire v23 presence"),
-            ("versions 1 through 22", "wire old-version rejection"),
+            ("Schema version 27 is explicitly\npresent", "wire v27 presence"),
+            ("versions 1 through 26", "wire old-version rejection"),
             (
                 "Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and\n"
                 "`Scatter` wire operations",
@@ -1828,19 +2052,32 @@ def validate_normative_contract(
         ),
         "05-OP-2": (
             "A JSON number token containing `.`, `e`, or `E`",
-            "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
+            "float-form and SHALL ingest as `JsonFloat(value, text)`",
+            "`text` is the token's exact spelling and `value` is the correctly-rounded "
+            "f64 of `text`",
             "any other number token",
             "ingest as `JsonInt` carrying its exact i64 value",
             "An integer-form token outside i64 range SHALL ingest as",
             "`JsonBigInt` carrying the token's exact decimal spelling",
             "never\n> selects a lossy float image for an integer-form token",
+            "never discards a float-form token's spelling",
+            "`value` is bit-identical to the correctly-rounded f64 of `text`, which is "
+            "finite",
+            "signed zero is distinguished",
+            "Construction does not check validity ([05-OP-4]); serialization does "
+            "([05-OP-5])",
+            "no operation repairs an invalid `JsonFloat` or substitutes one field for "
+            "the other",
+            "`JsonFloat(x, to_string(x))` is valid",
+            "two spellings of one value are unequal documents",
             "CSV cells are TEXT at parse time",
             "integer accessors accept only its integer subset",
             "An empty or non-conforming cell is a loud error",
         ),
         "05-OP-3": (
             "`io/json::json_int` returns the stored `JsonInt` i64 exactly",
-            "`io/json::json_float` returns a stored `JsonFloat` f64 exactly",
+            "`io/json::json_float` returns a stored `JsonFloat`'s f64 exactly, without "
+            "reading or validating its text",
             "It never truncates or rounds a float into an integer",
             "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
             "`csv_ints` | `(List[Dict[string,string]], string) -> List[i64]`",
@@ -1852,7 +2089,8 @@ def validate_normative_contract(
             "They have no accumulator",
         ),
         "05-OP-4": (
-            "`JsonFloat(value)` accepts exactly f64",
+            "`JsonFloat(value, text)` accepts exactly `(f64, string)`",
+            "nor `JsonFloat`'s validity ([05-OP-2]) is a constructor special case",
             "`JsonInt(value)` accepts exactly i64",
             "every other operand width is a type error",
             "No construction path widens or narrows a numeric value",
@@ -1860,8 +2098,10 @@ def validate_normative_contract(
         ),
         "05-OP-5": (
             "emits a stored `JsonInt` i64 as its exact decimal digits",
-            "a stored f64 through the [05-OBS-1]",
-            "every finite emission parses back to the identical f64",
+            "A stored `JsonFloat` emits its `text` verbatim as the number token after "
+            "validating the pair under [05-OP-2]",
+            "an invalid `JsonFloat` is a loud serialization error",
+            "A serialized document therefore reparses to an equal document",
             "A non-finite `JsonFloat` is a loud serialization error",
             "Equal documents serialize to identical bytes",
             "`to_csv` accepts only the text-table type `List[Dict[string,string]]`",
@@ -2289,8 +2529,10 @@ def validate_normative_contract(
             "exported stdlib ADT identities enumerated in the normative registry",
             "`io/json::Json`",
             "`decimal::Decimal`",
-            "`time::Date`",
-            "`time::Duration`",
+            "`datetime::Date`",
+            "`datetime::Instants`",
+            "`datetime/business::BusinessCalendar`",
+            "`datetime/columns::Durations`",
             "accepts every representable declared field tuple",
             "validation and normalization belong to named stdlib functions",
             "A public signature is numeric when any reachable field of an admitted ADT",
@@ -2301,13 +2543,14 @@ def validate_normative_contract(
             "cotangent shape",
             "differentiable float fields receive their corresponding field cotangents",
             "non-differentiable fields carry `unit`",
-            "`JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes the "
-            "cotangent of `y` to `x`",
+            "`JsonFloat(x, s)` followed by an executed `JsonFloat(y, t)` match routes "
+            "the cotangent of `y` to `x`, and the string field carries `unit`",
+            "`JsonFloat`'s string field is the exact spelling of a float-form token",
             "integer-only ADTs naturally have only `unit` field cotangents",
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the seventy-three final exported stdlib numeric definitions",
+            "exactly the two hundred eighty-three final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2327,10 +2570,11 @@ def validate_normative_contract(
             "`test::assert_eq_tensor` | "
             "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`tensor/construct::stack` | "
-            "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
+            "`(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "Decimal rational and calendar ordinal computations explicitly named as "
-            "mathematical below use an exact internal domain",
+            "The `datetime::*`, `datetime/business::*`, `datetime/clock::*`, "
+            "`datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73]",
+            "The `decimal::*` identities follow [05-OP-76]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
             "Numeric tokens follow [05-OP-2]",
@@ -2372,8 +2616,14 @@ def validate_normative_contract(
             "Squeeze removes the selected singleton dimension",
             "Unsqueeze inserts a singleton dimension and stack inserts the "
             "input-list length at the selected position",
-            "all three are rank-polymorphic, bit-preserving reshape/concat "
-            "operations",
+            "All three are bit-preserving reshape/concat operations with concrete-rank signature schemas",
+            "Concrete-rank schemas are instantiated for the resolved callable identity",
+            "The checker computes the result shape from the operand shape and normalized axis",
+            "A statically visible List literal of count n inserts d-lit n",
+            "An unknown List count inserts the ordinary wildcard dimension",
+            "A declared result extent at that wildcard position is a runtime claim",
+            "CountDim(xs) denotes d-lit n for a statically visible List literal",
+            "A genuinely dynamic positional axis is a type error",
             "Squeeze normalizes a negative axis by adding the input rank once",
             "requires `0 <= axis < rank`; its selected extent must be one",
             "Unsqueeze and stack normalize a negative insertion axis by adding "
@@ -2389,11 +2639,6 @@ def validate_normative_contract(
             "and stop receives exact zero",
             "enumerated by increasing output index",
             "separate canonical adjacent-pair balanced trees",
-            "rejects a zero divisor or negative result scale",
-            "interpreted in exact arithmetic and normalized before either "
-            "representation check",
-            "removable trailing zeros do not cause `Overflow`",
-            "proleptic Gregorian calendar",
             "NaN is unequal to every value, including itself",
             "Test tolerances have the same active float dtype as the values",
             "`assert_close_tensor` admits exactly one common active float dtype `p`",
@@ -2416,11 +2661,6 @@ def validate_normative_contract(
             "width and is close exactly when that difference is less than or equal "
             "to the converted tolerance",
             "without invoking a shell",
-            "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "final normalized `days` field has no i64 representation",
-            "A negative year uses `-` followed by exactly "
-            "`max(4, digits(|year|))` decimal digits",
-            "`|year|` is the exact mathematical magnitude rather than an i64 `abs`",
             "No callable derives authority from its implementation body or age",
         ),
         "05-OP-36": (
@@ -2534,6 +2774,129 @@ def validate_normative_contract(
             "float forms use the exact `ReduceWindowGrad` graph",
             "No target-specific rank, reducer, dtype, first-order-only, host-fallback, "
             "alias, or compatibility identity belongs to this atom",
+        ),
+        "05-OP-73": (
+            "governs exactly the `datetime::*`, `datetime/business::*`, "
+            "`datetime/clock::*`, `datetime/columns::*`, and `datetime/zone::*` "
+            "identities of the [05-OP-34] and [05-OP-35] registries",
+            "A day of the horizon is a business day when the weekmask includes its "
+            "weekday and it is not a holiday",
+            "so two calendars with the same business days, weekmask, and horizon are "
+            "[05-OP-36]-equal",
+            "A calendar answers only from the days of its horizon",
+            "except that an end of `business_day_count` or `dates_business_day_count` "
+            "may also be the day after `valid_until`",
+            "A result exists when every choice of business days outside the horizon "
+            "gives the same answer and that answer lies inside the horizon",
+            "The `datetime/business::*` callables fail only `domain`, and the four "
+            "calendar readers never fail",
+            "`ModifiedFollowing` gives the `Following` day when it lies in `d`'s month "
+            "and otherwise the `Preceding` day",
+            "so `n = 0` gives the replaced start",
+            "`a <= b` and `-business_day_count(c,b,a)` otherwise",
+            "Each takes the intersection of the two horizons and fails `domain` when it "
+            "is empty",
+            "the call fails `domain` naming the lowest such element index and the "
+            "twin's detail there",
+            "Each `datetime/columns::*` callable is the elementwise form of the scalar "
+            "callable named below, its twin",
+            "A call fails exactly when the twin fails at some index; it then fails with "
+            "the twin's kind for the lowest such index `k` and the twin's detail prefixed "
+            "`element k: `, under the column callable's name",
+            "A column callable fails `domain` before it reads any element when a column "
+            "argument's length differs from another argument's",
+            "it first fails `domain` with the twin's detail and no element prefix when "
+            "`inc` is not positive or does not divide 86 400 seconds, whatever the column "
+            "holds",
+            "`instants_seconds_since_f64(is,origin)` is "
+            "`duration_to_seconds_f64(instant_until(origin,i))` for each instant `i`, bit "
+            "for bit",
+            "return the column with a `tensor[n,bool]` mask that is false exactly where "
+            "the twin fails",
+            "Every callable consumes its column arguments and borrows its tensor "
+            "arguments",
+            "The calendar is proleptic Gregorian with astronomical year numbering",
+            "The timescale is POSIX: every day has exactly 86 400 seconds",
+            "-4 371 587..2 932 896",
+            "-377 705 030 401..253 402 214 400",
+            "Each value type is opaque (spec/04 §2.5)",
+            "the message `<function>: <kind>: <detail>`",
+            "Every range and validity check precedes the arithmetic it protects",
+            "returns `None` exactly where the twin fails `domain`, and fails "
+            "exactly where the twin fails `overflow`",
+            "`date_days_until(a,b)` is `epoch_day(b) - epoch_day(a)`",
+            "fails `domain` when the normalized second leaves i64",
+            "negation fails only for the second `i64::MIN` with nanosecond 0",
+            "a whole part `w` and a fraction `f` of the same sign",
+            "`f64(w) + f64(f) / 1e9`",
+            "judged as a whole value rather than component by component",
+            "the week-year lies in -9999..9999",
+            "take a [05-OP-74] `Rounding`",
+            "negative years as `-` and six digits",
+            "`-000000` is not a year",
+            "Parsing a value's canonical text returns that value",
+            "`clock_now` and `monotonic_now` are the only callables of this atom that "
+            "read the host or carry an effect",
+            "`monotonic_until(a,b)` is the only datetime callable",
+            "No callable converts a `MonotonicInstant` to or from an `Instant`",
+            "naming the builtin rather than `clock_now` or `monotonic_now`",
+            "reads an RFC 9636 TZif file of version `2`, `3`, or `4`",
+            "when the file has a leap-second record, which is not on the POSIX timescale",
+            "a start prevailing over an end at the same instant",
+            "covers only the instants before its last transition",
+            "within 86 399 seconds of `dt` read at offset zero",
+            "A trial `dt - o` outside the instant range fails `overflow`",
+            "`EarlierInstant` gives `dt - o_a`, and `LaterInstant` and "
+            "`CompatibleInstant` give `dt - o_b`",
+            "when more than one change satisfies this, every policy fails `domain`",
+            "with offset zero written `+00:00`",
+            "any other critical tag fail `domain`, and any other elective tag is ignored",
+            "resolves the record against `tz` whatever its name",
+            "`zoned_add_period(z,p,overflow,policy)` returns `z` when `p` is zero, "
+            "whatever `overflow` and `policy` are",
+            "The offset is absent when it is written `Z`, `z`, or with a `-` sign and value zero",
+            "When the offset is absent, every policy gives the instant that the written "
+            "date and time denote at offset zero",
+            "A key that two suffix tags give different values fails `domain` when either "
+            "tag is critical",
+            "Otherwise an elective tag whose key an earlier tag gives is ignored",
+        ),
+        "05-OP-74": (
+            "governs exactly the seven constructors of the standard-library plain enum "
+            "`Rounding`",
+            "with no intermediate rounding",
+            "`RoundTowardNegative` the largest `k·q <= v`",
+            "`RoundTowardPositive` the smallest `k·q >= v`",
+            "`RoundTowardZero` whichever of those two is nearer zero",
+            "`RoundTiesToEven` the nearest multiple, an exact tie taking the even `k`",
+            "`RejectInexact` selects `v` when it is a multiple and otherwise rejects",
+            "No mode is a default",
+        ),
+        "05-OP-76": (
+            "governs exactly the `decimal::*` identities of the [05-OP-34] and "
+            "[05-OP-35] registries",
+            "`|c| <= 10^38 - 1` and an integer scale `s` with `0 <= s <= 38`",
+            "There is no NaN, infinity, or negative zero",
+            "each rational in the value set has exactly one representation",
+            "`Decimal` is opaque (spec/04 §2.5)",
+            "with each limb in `[0, 10^9)` and `limb4 < 100`",
+            "[05-OP-36] structural equality of two decimals is equality of the "
+            "rationals they denote",
+            "differentiating through `decimal_from_f64`, the one callable with a "
+            "float argument, is a structural rejection, never a zero cotangent",
+            "the message `<function>: <kind>: <detail>`",
+            "Every range and validity check precedes the arithmetic it protects",
+            "each argument's own validity from left to right, then `RejectInexact`, "
+            "then the result's range",
+            "returns `None` exactly where the twin fails `domain`",
+            "each applies it under [05-OP-74] once to the exact rational",
+            "of at most 1000 Unicode scalar values",
+            "so `decimal(decimal_to_string(x))` is `x`",
+            "it never rounds",
+            "correctly rounded once to the target format with ties to even",
+            "a magnitude of at least 65520 rounds to the infinity of `x`'s sign",
+            "They are the named lossy boundary from decimal to binary float",
+            "its result is always in the value set",
         ),
         "05-OP-40": (
             "active\n> signed-integer or float dtype",

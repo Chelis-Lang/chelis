@@ -17,7 +17,7 @@ fn deep_explicit_beacon_is_terminal_and_never_samples() {
           (app {} (var {} gte) (var {} x) (var {} x)))))"#;
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) = run_deep_source_properties(source, &options).unwrap();
     assert_eq!(outcomes.len(), 1);
@@ -32,7 +32,7 @@ fn beacon_tier_rejects_missing_box_bounds_without_smt_or_fuzz_fallback() {
     crate::support::isolate();
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) = run_surf_source_properties(
         "@property bounded forall(x: tensor[f64]) where tensor_to_scalar(x) <= 1.0f64:\n  tensor_to_scalar(x) <= 1.0f64\n", &options).unwrap();
@@ -47,7 +47,7 @@ fn beacon_scalar_bridge_requires_explicit_f64_bounds_and_unshadowed_identity() {
     crate::support::isolate();
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     for (prefix, parameter, upper, reason) in [
         ("", "x", "1", "explicit f64"),
@@ -102,7 +102,7 @@ fn beacon_property_route_reaches_real_engine_and_preserves_all_outcomes() {
         let options = PropertyRunOptions {
             tier: "beacon-only".into(),
             beacon_budget: budget,
-            ..Default::default()
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
         };
         let PropertyRunResult::Ran(outcomes) =
             run_surf_source_properties(&source, &options).unwrap();
@@ -134,7 +134,7 @@ fn expired_outer_deadline_returns_engine_unknown_after_compiler_preparation() {
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
         beacon_deadline: Some(std::time::Instant::now()),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) = run_surf_source_properties(source, &options).unwrap();
     assert_eq!(
@@ -162,7 +162,7 @@ fn named_boxes_keep_parameter_order_and_exclude_unrelated_function_loads() {
     ] {
         let options = PropertyRunOptions {
             tier: "beacon-only".into(),
-            ..Default::default()
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
         };
         let PropertyRunResult::Ran(outcomes) =
             run_surf_source_properties(&source, &options).unwrap();

@@ -77,7 +77,7 @@ that cannot return an error will always invent a value. Meanwhile the
 codebase contains all three possible responses to the same situation -
 silent substitution (the bug), internal panic (loud but user-hostile,
 [#692]), and clean diagnostic (`lower_unsupported`,
-`chelis_int_div_guard`, HIP's narrow-float rejection) - because each site
+`chelis_int_checked_divisor`, HIP's narrow-float rejection) - because each site
 chose independently.
 
 This plan: (1) gives every stage a **failure channel** (Result-typed
@@ -829,7 +829,7 @@ waiting for §C7.4 to discover them.
 | 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (bare keywords are parse-guarded per `spec/03-deep-syntax.md` §8.1; canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
-| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | CONVERTED in the first Phase 3 gate slice: `HOST_ONLY_BUILTINS` now has one definition in compiler-api, and both the CLI and compiler-api build paths consume its typed checked-program and concrete-host-program gates. Those shared APIs accept only `BuildTarget`, so no unknown string target can turn the pre-lowering walk into a no-op. The fallible host emitter remains the independent defense. The shared `tensor_scan` rejection is pinned by `phase3_reject_function_inventory_matches_the_reviewed_manifest` plus the existing CLI/compiler-api `tensor_scan` suites; [#682] no longer depends on this gate |
+| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | RETIRED: `tensor_scan`, its only entry, compiles through the host lane's list `scan` ([#1297]), so the roster, its checked-program and concrete-host-program gates, and their inventory rows are deleted. The fallible host emitter remains the defense against an unlowerable builtin |
 | 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | CONVERTED in the first Phase 3 gate slice. For [#697], both stale CLI C precision preflights were deleted: active-dtype admission no longer changes when an unrelated host declaration changes the lowering path, while the checker still rejects deferred `f8e4m3`. For [#698], the CLI consumes compiler-api's typed HIP gate, preserving supported f64/integer cells and direct-load f16/bf16 `BlasMatmul`, preserving the `ScatterElements` payload/index validation that the former CLI copy lacked, and rejecting real f16/bf16 compute in a matmul operand before emission. `phase3_gate_contract.rs` locks those positive and negative behaviors. `phase3_gate_inventory.rs` recursively freezes the exact syntactic `reject_*` manifest across both crate source trees; it does not pretend that name-based source discovery proves semantic uniqueness under arbitrary names |
 | 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead at P0 (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker were the only defense); CONVERTED - §C1.4's raise-or-prove was applied in PR [#791] and re-typed in PR [#1037]: `host_scalar_literal` is now exhaustive over `Prim` with no catch-all, and f64/f8e4m3/string each return a section C2 `Unsupported` carrying its own authority, so the gate is no longer the only defense; [#745] closed 2026-08-04 |
 
@@ -2483,3 +2483,4 @@ nightly/reporting owner, so source coverage never depends on predicting a path.
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#1297]: https://github.com/Chelis-Lang/chelis/issues/1297

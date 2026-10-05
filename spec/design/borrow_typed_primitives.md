@@ -43,8 +43,8 @@ the matching heap release rather than reconstructing ownership from aliases.
 ## Standard Library
 
 `chelis-std` `0.3.0` retypes read-only tensor helpers as borrowed inputs and removes
-the old noisy `copy()` fan-out patterns from source and examples. The bundled std
-artifacts are regenerated from the new source and embedded in `chelis-std-bundle`.
+the old noisy `copy()` fan-out patterns from source and examples. `chelis-std-bundle`
+packs the bundled std from that source while the compiler builds.
 Post-build verification must confirm the embedded package reports `0.3.0` and that a
 borrow-typed primitive such as `matmul` checks through the bundled loader.
 

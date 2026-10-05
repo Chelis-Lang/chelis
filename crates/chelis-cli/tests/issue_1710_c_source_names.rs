@@ -47,6 +47,7 @@ fn check_os_stem(stem: &OsStr, deep: bool, expected_symbol: &str, explicit_outpu
         .current_dir(dir.path())
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .args(["--target", "c", "--output"])
         .arg(output_arg);
@@ -183,6 +184,7 @@ fn tensor_dag_object_uses_the_encoded_header_symbol() {
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .args(["--target", "c", "--output"])
         .arg(&out)

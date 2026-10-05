@@ -85,7 +85,7 @@ negative_float_overflow = try_parse_json("-1.7976931348623159e308")
         .stdout(predicate::str::contains("invalid_leading_zero = None"))
         .stdout(predicate::str::contains("invalid_in_range = None"))
         .stdout(predicate::str::contains(
-            "max_finite = Some(JsonFloat(1.7976931348623157e308))",
+            "max_finite = Some(JsonFloat(1.7976931348623157e308, 1.7976931348623157e308))",
         ))
         .stdout(predicate::str::contains("positive_float_overflow = None"))
         .stdout(predicate::str::contains("negative_float_overflow = None"));
@@ -162,10 +162,10 @@ import Std.Io.Json (JsonNull, JsonInt, JsonFloat, JsonObject, parse_json, to_jso
 
 ba = to_json(JsonObject(dict_of([
   ("b", JsonInt(cast(1, i64))),
-  ("a", JsonFloat(2.0f64))
+  ("a", JsonFloat(2.0f64, "2.0"))
 ])))
 ab = to_json(JsonObject(dict_of([
-  ("a", JsonFloat(2.0f64)),
+  ("a", JsonFloat(2.0f64, "2.0")),
   ("b", JsonInt(cast(1, i64)))
 ])))
 equal_mappings = eq(ba, ab)

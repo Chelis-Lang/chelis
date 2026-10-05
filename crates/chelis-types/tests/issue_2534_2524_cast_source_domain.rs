@@ -66,15 +66,23 @@ fn accepts(source: &str) {
     );
 }
 
-/// A rejection carrying a diagnostic that contains every fragment.
-fn rejects_with(source: &str, fragments: &[&str]) {
-    let diagnostics = agreed_diagnostics(source);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| fragments.iter().all(|fragment| message.contains(fragment))),
-        "expected a diagnostic containing all of {fragments:?} for:\n{source}\ngot {diagnostics:#?}"
-    );
+/// A rejection preserving its kind and directional operand types at both ingresses.
+fn rejects_with(source: &str, kind: &str, expected: &str, got: &str) {
+    for checked in [
+        check_typed_program(&desugared(source)),
+        check_ir_program(&expanded(source)),
+    ] {
+        let report = checked.expect_err("an invalid cast or later call must reject");
+        assert!(
+            report.errors.iter().any(|error| {
+                error.kind.diagnostic_name() == kind
+                    && error.expected.as_deref() == Some(expected)
+                    && error.got.as_deref() == Some(got)
+            }),
+            "{source}: expected {kind} {expected} -> {got}, got {:?}",
+            report.errors
+        );
+    }
 }
 
 /// REGRESSION TEST (chelis#2534), both witnesses.
@@ -82,9 +90,9 @@ fn rejects_with(source: &str, fragments: &[&str]) {
 fn a_variable_source_of_a_binder_target_cast_is_decided_when_it_binds() {
     rejects_with(
         "def f[q: Int](s: string) -> q = (fn (y) -> cast(y, q))(s)",
-        &[
-            "[CastNonTensor] cast to a quantified scalar dtype requires a numeric or bool scalar, got string",
-        ],
+        "CastNonTensor",
+        "numeric or bool scalar",
+        "string",
     );
     accepts("def f[q: Int](s: i64) -> q = (fn (y) -> cast(y, q))(s)");
     accepts("def f[q: Int](s: bool) -> q = (fn (y) -> cast(y, q))(s)");
@@ -93,10 +101,7 @@ fn a_variable_source_of_a_binder_target_cast_is_decided_when_it_binds() {
                      def f[a, q: Float](k: a) -> q = (fn (y) -> cast(y, q))(k)\n\
                      def go(s: string) -> f32 = f(s)\n\
                      def main() -> tensor[1, f32] = to_tensor([go(\"x\")])\n";
-    rejects_with(
-        unbounded,
-        &["cast to a quantified scalar dtype requires a numeric or bool scalar, got `a`"],
-    );
+    rejects_with(unbounded, "CastNonTensor", "numeric or bool scalar", "`a`");
     accepts(
         &unbounded
             .replace("f[a, q: Float]", "f[a: Numeric, q: Float]")
@@ -112,11 +117,15 @@ fn a_variable_source_of_a_binder_target_cast_is_decided_when_it_binds() {
 fn a_string_is_no_cast_source() {
     rejects_with(
         "def f() -> i64 = (fn (y) -> cast(y, i64))(\"s\")",
-        &["[CastNonTensor] cast requires a numeric or bool source, got string"],
+        "CastNonTensor",
+        "numeric or bool scalar",
+        "string",
     );
     rejects_with(
         "def f(s: string) -> i64 = cast(s, i64)",
-        &["[CastNonTensor] cast requires a numeric or bool source, got string"],
+        "CastNonTensor",
+        "numeric or bool scalar",
+        "string",
     );
     accepts("def f() -> i64 = (fn (y) -> cast(y, i64))(true)");
     accepts("def f(s: i32) -> i64 = cast(s, i64)");
@@ -148,14 +157,16 @@ fn a_let_bound_cast_lambda_is_decided_at_its_application() {
     }
     rejects_with(
         "def f[p: Float](x: f32) -> p = {\n  g = fn (y) -> cast(y, p)\n  g(\"s\")\n}\n",
-        &[
-            "[CastNonTensor] cast to a quantified scalar dtype requires a numeric or bool scalar, got string",
-        ],
+        "CastNonTensor",
+        "numeric or bool scalar",
+        "string",
     );
     // Its first application fixes the operand type for every later use.
     rejects_with(
         "def f[p: Float](x: f32, n: i32) -> p = {\n  g = fn (y) -> cast(y, p)\n  a = g(x)\n  g(n)\n}\n",
-        &["precision mismatch: expected f32, got i32"],
+        "PrecisionMismatch",
+        "f32",
+        "i32",
     );
 }
 
@@ -166,7 +177,9 @@ fn a_let_bound_concrete_target_cast_lambda_is_decided_at_its_application() {
     accepts("def f(x: f32) -> f64 = {\n  g = fn (y) -> cast(y, f64)\n  a = g(x)\n  g(2.0f32)\n}\n");
     rejects_with(
         "def f(x: f32) -> i64 = {\n  g = fn (y) -> cast(y, i64)\n  g(\"s\")\n}\n",
-        &["cast requires a numeric or bool source, got string"],
+        "CastNonTensor",
+        "numeric or bool scalar",
+        "string",
     );
 }
 
@@ -180,12 +193,16 @@ fn a_lambda_carrying_a_pending_cast_is_monomorphic_as_a_whole() {
     rejects_with(
         "def f(a: f32) -> (f64, i32, string) = {\n  g = fn (y, z) -> (cast(y, f64), z)\n  \
          (u, i) = g(a, 1)\n  (v, s) = g(a, \"s\")\n  (add(u, v), i, s)\n}\n",
-        &["precision mismatch: expected i32, got string"],
+        "PrecisionMismatch",
+        "i32",
+        "string",
     );
     rejects_with(
         "def f(a: f32) -> (f64, i32, string) = {\n  mk = fn (k) -> fn (y) -> (cast(y, f64), k)\n  \
          g1 = mk(1i32)\n  g2 = mk(\"s\")\n  (g1(a).0, g1(a).1, g2(a).1)\n}\n",
-        &["precision mismatch: expected i32, got string"],
+        "PrecisionMismatch",
+        "i32",
+        "string",
     );
     // One instantiation throughout checks, and a lambda with no pending
     // obligation still generalizes.

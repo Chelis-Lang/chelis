@@ -203,16 +203,17 @@ class ArtifactTests(unittest.TestCase):
                                              "darwin-arm64"),
                          "chelis-dev-abcd1234-darwin-arm64.tar.gz")
         self.assertEqual(canary.archive_name("0.18.6", "v0.18.6", sha,
-                                             "linux-x86_64-glibc2.31"),
-                         "chelis-v0.18.6-linux-x86_64-glibc2.31.tar.gz")
+                                             "linux-x86_64-static"),
+                         "chelis-v0.18.6-linux-x86_64-static.tar.gz")
         for version, label, source, build in [
             ("0.18.6", "dev-ffffffff", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.5", sha, "darwin-arm64"),
             ("../bad", "v0.18.6", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.6", "unknown", "darwin-arm64"),
             ("0.18.6", "v0.18.6", sha, "other"),
-            # chelisup never installs the Linux build that needs glibc 2.39.
+            # chelisup installs the static Linux build, never the dynamic ones.
             ("0.18.6", "v0.18.6", sha, "linux-x86_64"),
+            ("0.18.6", "v0.18.6", sha, "linux-x86_64-glibc2.31"),
         ]:
             with self.subTest(label=label, version=version, source=source, build=build):
                 with self.assertRaises(ValueError):
@@ -259,6 +260,27 @@ class ProcessTests(unittest.TestCase):
             runner.run("right-negative", [sys.executable, "-c",
                 "import sys; print('expected', file=sys.stderr); sys.exit(1)"],
                 expected_failure="expected")
+
+    def test_consumer_links_with_the_reported_requirements(self) -> None:
+        # glibc before 2.34 needs -lpthread -ldl as well as -lm; the canary must
+        # link with whatever the build tells consumers, not a flag list of its own.
+        stdout = (
+            "Wrote out/callable.c\n"
+            "Link requirements (after module archive): cc "
+            "'out dir/libchelis_runtime.a' -lm -lpthread -ldl\n"
+        )
+        self.assertEqual(canary.reported_link_flags(stdout), ["-lm", "-lpthread", "-ldl"])
+        # macOS: the build runs the compiler through `env` with the SDK it gives its tools.
+        macos = (
+            "Link requirements (after module archive): env SDKROOT='/SDKs/Mac OS X.sdk' clang "
+            "out/libchelis_runtime.a -lm -framework Accelerate\n"
+        )
+        self.assertEqual(canary.reported_link_flags(macos), ["-lm", "-framework", "Accelerate"])
+        for broken in ("Wrote out/callable.c\n",
+                       "Link requirements (after module archive): cc out/libother.a -lm\n",
+                       stdout + stdout):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                canary.reported_link_flags(broken)
 
 
 class WorkflowTests(unittest.TestCase):

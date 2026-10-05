@@ -62,6 +62,21 @@ fn assert_rejected_with(source: &str, needle: &str, what: &str) {
     );
 }
 
+fn assert_rejected_axis_dtype(source: &str, callee: &str) {
+    let errors = typecheck_surf(source);
+    assert!(
+        errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i32")
+                && error.got.as_deref() == Some("i64")
+                && error.message.contains(callee)
+                && error.message.contains("axis")
+        }),
+        "{callee}: i64 axes must be rejected as i32 axes: {}",
+        errors_summary(&errors)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // [05-DIM-2]: shape() returns i64; its axis parameter stays i32.
 // ---------------------------------------------------------------------------
@@ -97,12 +112,11 @@ def f(x: tensor[3, f32]) -> i64 = shape(x, cast(0, i32))
 "#,
         "shape() with cast(0, i32) axis",
     );
-    assert_rejected_with(
+    assert_rejected_axis_dtype(
         r#"
 def g(x: tensor[3, f32]) -> i64 = shape(x, 0i64)
 "#,
-        "i32 axis",
-        "shape() with an i64 axis",
+        "shape",
     );
 }
 
@@ -326,12 +340,11 @@ def f(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1, 0)
 "#,
         "permute with bare i32 axes",
     );
-    assert_rejected_with(
+    assert_rejected_axis_dtype(
         r#"
 def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
 "#,
-        "i32 axis indices",
-        "permute with i64 axes",
+        "permute",
     );
 }
 
@@ -345,12 +358,20 @@ def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 
 "#,
         "reduce_window_max with i64 window/strides",
     );
-    assert_rejected_with(
-        r#"
+    let source = r#"
 def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
-"#,
-        "List[i64]",
-        "reduce_window_max with i32 window",
+"#;
+    let errors = typecheck_surf(source);
+    assert!(
+        errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("List i64")
+                && error.got.as_deref() == Some("List i32")
+                && error.span_offset == source.find("reduce_window_max(")
+                && error.message.contains("argument 2")
+        }),
+        "reduce_window_max must reject the i32 window list in argument 2: {}",
+        errors_summary(&errors)
     );
 }
 

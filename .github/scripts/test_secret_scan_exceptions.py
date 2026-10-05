@@ -53,13 +53,19 @@ class ExactExceptionTests(unittest.TestCase):
         for number,row in enumerate(rows):
             path=literal(row['paths'][0]);text=literal(row['regexes'][0])
             variants=[text+'\nTOKEN='+token+'\n']
-            if path=='.github/workflows/ci.yml':
+            if path in ('.github/workflows/ci.yml', '.github/workflows/ci-cache-warm.yml'):
                 variants.append(text+hashlib.sha256(b'unreviewed cache suffix').hexdigest()+'\n')
             for content in variants:
                 with self.subTest(exception=number),tempfile.TemporaryDirectory() as directory:
                     result=self.scan(Path(directory),path,content)
                     self.assertEqual(result.returncode,1,'Unreviewed content was suppressed')
                     self.assertNotIn(token,result.stdout+result.stderr)
+
+    def test_current_smt_cache_identity_is_reviewed_at_both_exact_paths(self):
+        for path in ['.github/workflows/ci.yml', '.github/workflows/ci-cache-warm.yml']:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as directory:
+                result=self.scan(Path(directory),path,'shared-key: '+'smt-'+'glibc231'+'\n')
+                self.assertEqual(result.returncode,0,'Public cache identity was treated as a credential')
 
 
 if __name__=='__main__':unittest.main()

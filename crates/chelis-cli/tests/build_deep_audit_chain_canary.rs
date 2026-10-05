@@ -52,6 +52,7 @@ fn s6_oracle_audit_chain_resolves_span_to_latex_text() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--deep",
             "--target",
@@ -200,6 +201,7 @@ fn s6_backward_compat_span_free_dp_emits_no_span_comments_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             dp_path.to_str().unwrap(),
             "--target",
             "c",

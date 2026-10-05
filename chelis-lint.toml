@@ -15,3 +15,8 @@ cross_ref = "§12.2"
 pattern = "tests/corpus/opaque_invariants/programs/"
 class = "generated"
 cross_ref = "§12.2"
+
+[[exclude]]
+pattern = ".github/actions/vendor/ci/"
+class = "dependency"
+cross_ref = "§12.2"

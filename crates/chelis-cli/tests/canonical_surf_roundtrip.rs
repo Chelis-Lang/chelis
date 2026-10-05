@@ -286,74 +286,113 @@ fn repository_surf_corpus_obeys_the_normalized_deep_retraction_law() {
     let directory = tempdir().expect("tempdir");
     let resugared_path = directory.path().join("resugared.ch");
     for path in paths {
-        let original_deep = Command::cargo_bin("chelis")
-            .expect("binary")
-            .args(["deep"])
-            .arg(&path)
-            .output()
-            .unwrap_or_else(|error| panic!("desugar {}: {error}", path.display()));
-        assert!(
-            original_deep.status.success(),
-            "initial desugar failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&original_deep.stderr)
-        );
-
-        let resugared = Command::cargo_bin("chelis")
-            .expect("binary")
-            .args(["surf"])
-            .arg(&path)
-            .output()
-            .unwrap_or_else(|error| panic!("resugar {}: {error}", path.display()));
-        assert!(
-            resugared.status.success(),
-            "resugar failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&resugared.stderr)
-        );
-        fs::write(&resugared_path, &resugared.stdout).expect("write resugared fixture");
-
-        Command::cargo_bin("chelis")
-            .expect("binary")
-            .args(["fmt", "--check"])
-            .arg(&resugared_path)
-            .assert()
-            .success();
-
-        let roundtrip_deep = Command::cargo_bin("chelis")
-            .expect("binary")
-            .args(["deep"])
-            .arg(&resugared_path)
-            .output()
-            .expect("desugar resugared source");
-        assert!(
-            roundtrip_deep.status.success(),
-            "roundtrip desugar failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&roundtrip_deep.stderr)
-        );
-
-        let original = chelis_deep::parser::parse_str(
-            std::str::from_utf8(&original_deep.stdout).expect("original Deep is UTF-8"),
-        )
-        .expect("original Deep parses");
-        let roundtrip = chelis_deep::parser::parse_str(
-            std::str::from_utf8(&roundtrip_deep.stdout).expect("roundtrip Deep is UTF-8"),
-        )
-        .expect("roundtrip Deep parses");
-        assert_eq!(
-            chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
-                    .expect("valid metadata for round-trip normalization"),
-            ),
-            chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
-                    .expect("valid metadata for round-trip normalization"),
-            ),
-            "normalized Deep retraction law failed for {}",
-            path.display()
-        );
+        assert_retraction_law(&path, &resugared_path);
     }
+}
+
+/// Desugar `path`, resugar it, check the resugared text is canonical, and
+/// require the two Deep forms to agree after round-trip normalization. Every
+/// printed Deep form must also parse back.
+fn assert_retraction_law(path: &Path, resugared_path: &Path) {
+    let original_deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| panic!("desugar {}: {error}", path.display()));
+    assert!(
+        original_deep.status.success(),
+        "initial desugar failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&original_deep.stderr)
+    );
+
+    let resugared = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| panic!("resugar {}: {error}", path.display()));
+    assert!(
+        resugared.status.success(),
+        "resugar failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&resugared.stderr)
+    );
+    fs::write(resugared_path, &resugared.stdout).expect("write resugared fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", "--check"])
+        .arg(resugared_path)
+        .assert()
+        .success();
+
+    let roundtrip_deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep"])
+        .arg(resugared_path)
+        .output()
+        .expect("desugar resugared source");
+    assert!(
+        roundtrip_deep.status.success(),
+        "roundtrip desugar failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&roundtrip_deep.stderr)
+    );
+
+    let original = chelis_deep::parser::parse_str(
+        std::str::from_utf8(&original_deep.stdout).expect("original Deep is UTF-8"),
+    )
+    .expect("original Deep parses");
+    let roundtrip = chelis_deep::parser::parse_str(
+        std::str::from_utf8(&roundtrip_deep.stdout).expect("roundtrip Deep is UTF-8"),
+    )
+    .expect("roundtrip Deep parses");
+    assert_eq!(
+        chelis_deep::printer::print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
+                .expect("valid metadata for round-trip normalization"),
+        ),
+        chelis_deep::printer::print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                .expect("valid metadata for round-trip normalization"),
+        ),
+        "normalized Deep retraction law failed for {}",
+        path.display()
+    );
+}
+
+/// A program nested deeply enough that an authored lambda's empty `params`
+/// metadata starts past the Deep printer's line width still obeys the
+/// retraction law, independently of the repository corpus's shapes.
+#[test]
+fn deeply_nested_surf_obeys_the_normalized_deep_retraction_law() {
+    let depth = 45;
+    let mut body = String::from("x |> (fn (v: i64) -> v + 1i64)");
+    for level in 0..depth {
+        body = format!("if gt(x, {level}i64) then ({body}) else 0i64");
+    }
+    let directory = tempdir().expect("tempdir");
+    let source = directory.path().join("deeply_nested.ch");
+    fs::write(&source, format!("def nested(x: i64) -> i64 = {body}\n"))
+        .expect("write the nested program");
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep"])
+        .arg(&source)
+        .output()
+        .expect("desugar the nested program");
+    assert!(deep.status.success(), "desugar failed");
+    let printed = String::from_utf8(deep.stdout).expect("Deep is UTF-8");
+    assert!(
+        printed.lines().any(|line| {
+            let column = line.len() - line.trim_start().len();
+            line.trim_start().starts_with("(params") && column + "(params {}".len() > 80
+        }),
+        "the fixture must nest a `params` node deeply enough that its empty metadata does not fit on the line:\n{printed}"
+    );
+    assert_retraction_law(&source, &directory.path().join("resugared.ch"));
 }
 
 #[test]

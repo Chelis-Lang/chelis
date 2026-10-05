@@ -111,7 +111,6 @@ fn bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c() {
             "{}",
             String::from_utf8_lossy(&built.stderr)
         );
-        assert!(common::link_generated(&output_dir, &format!("{stem}.c"), &stem).success());
         let run = std::process::Command::new(output_dir.join(&stem))
             .output()
             .unwrap();
@@ -265,6 +264,9 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                     true,
                 ),
             ] {
+                // [04-INF-9] (chelis#3149): a window reduction is applicable
+                // only by name, so every alias is refused by name.
+                let accepted = accepted && !alias;
                 fs::write(&path, &source).unwrap();
                 let checked = cli("check", &path, &dir.path().join("window-out"));
                 assert_eq!(
@@ -279,6 +281,17 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                 if accepted {
                     assert_eq!(report["score"].as_f64(), Some(1.0), "{source}: {report}");
                     assert!(report["errors"].as_array().unwrap().is_empty());
+                } else if alias {
+                    let refusal = format!("builtin `{operation}` is applicable only by name");
+                    assert!(
+                        report["errors"].as_array().unwrap().iter().any(|error| {
+                            error["kind"] == "TypeMismatch"
+                                && error["message"]
+                                    .as_str()
+                                    .is_some_and(|message| message.contains(&refusal))
+                        }),
+                        "{source}: {report}"
+                    );
                 } else {
                     assert!(
                         report["errors"]
@@ -317,9 +330,15 @@ fn deferred_window_shape_errors_precede_late_family_rejection() {
             serde_json::from_slice(&checked.stdout).expect("check JSON");
         let errors = report["errors"].as_array().expect("check errors");
         assert!(
-            errors.iter().any(|error| error["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("window arity 2 exceeds tensor rank 1"))),
+            errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "window arity at most 1"
+                    && error["got"] == "window arity 2"
+                    && error["span"]["offset"].as_u64()
+                        == invalid_rank
+                            .find("reduce_window_sum(")
+                            .map(|offset| offset as u64)
+            }),
             "{invalid_rank}: {report}"
         );
         assert!(

@@ -56,8 +56,8 @@ pub(crate) enum HostAbiType {
     /// This is deliberately not a general value representation. Projection
     /// admits a local binding only when its initializer is a resolved key
     /// builtin or an already admitted callable alias. Ordinary function
-    /// results and container elements have no callback-value ABI; the closed
-    /// key-builtin carrier below is a separate internal representation.
+    /// results, ADT fields and container elements have no callback-value ABI;
+    /// the closed key-builtin carrier below is a separate internal representation.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
     /// A closed, unspecialized operation. Its identity is fixed in the type;
     /// the private C value is an inert witness until a checked call selects
@@ -661,6 +661,11 @@ fn project_expr(
             value: Box::new(project_expr(*value, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
+        ConcreteHostExprKind::ExtentSites { value, sites, ty } => HostAbiExprKind::ExtentSites {
+            value: Box::new(project_expr(*value, allowed_callbacks)?),
+            sites,
+            ty: HostAbiType::try_from_concrete(&ty)?,
+        },
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
         ConcreteHostExprKind::Bool(value) => HostAbiExprKind::Bool(value),
@@ -784,7 +789,17 @@ fn project_expr(
             ctor,
             fields: fields
                 .into_iter()
-                .map(|expr| project_expr(expr, allowed_callbacks))
+                .map(|expr| {
+                    // Nominal type arguments omit field types. A stored field is
+                    // a value position, not a contextual callback argument.
+                    if let ConcreteHostExprKind::Var(_, ty)
+                    | ConcreteHostExprKind::Builtin { ty, .. } = &expr.kind
+                        && matches!(ty, ConcreteHostType::Function(_, _))
+                    {
+                        HostAbiType::try_from_concrete(ty)?;
+                    }
+                    project_expr(expr, allowed_callbacks)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },

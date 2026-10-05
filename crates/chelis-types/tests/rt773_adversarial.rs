@@ -254,36 +254,42 @@ fn fresh_separate_sig_no_bare_tvar_app_types() {
     );
 }
 
-// ─── (3c) #530 expand gate still fires on an Error-typed inline size ───────
+// ─── (3c) #530 expand size rule still fires on an inline size ─────────────
 
 #[test]
-fn expand_error_inline_size_still_fires_form3_gate_once() {
-    // An inline expand size that infers to Error via `add(t.1, ...)` (a
-    // tuple projection distinct from the PR author's `t.0` cases). With the
-    // arg-Error short-circuit gone, the size still reaches the per-form
-    // Form-3 gate: the #469 sourceless-size reject must fire EXACTLY ONCE
-    // (not skipped, not doubled), and never an ICE.
-    let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = \
-         insert(b, 0, add(t.1, cast(1, i64)))\n",
-        "3c: expand Error size",
-    );
-    let form3: Vec<_> = msgs
+fn expand_inline_size_still_fires_the_size_rule_once() {
+    // An inline expand size computed from a tuple projection via
+    // `add(t.1, ...)` (distinct from the PR author's `t.0` cases). With the
+    // arg-Error short-circuit gone, the size still reaches the per-form size
+    // rule. The rule this row used to watch, the provenance rejection, is gone
+    // (chelis#469: spec/04-type-system.md section 4.7.2 admits any `i64`
+    // size), so the row watches the rule that remains: an `i32` size is
+    // rejected EXACTLY ONCE (not skipped, not doubled), and never an ICE.
+    let source = "def g[a, n](b: tensor[n, f32], t: (i32, i32)) -> tensor[a, n, f32] = \
+         insert(b, 0, add(t.1, cast(1, i32)))\n";
+    let report = check_ir_program(&surf_to_deep_macro(source))
+        .expect_err("an i32 inline insert size must reject");
+    let size_errors: Vec<_> = report
+        .errors
         .iter()
-        .filter(|m| {
-            m.contains("insert")
-                && m.contains("no tensor in scope carries it")
-                && m.contains("chelis#469")
+        .filter(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == source.find("insert(")
         })
         .collect();
     assert_eq!(
-        form3.len(),
+        size_errors.len(),
         1,
-        "3c: the Form-3 sourceless-size reject must fire exactly once, got {msgs:?}",
+        "the size-dtype rejection must fire exactly once at insert: {:?}",
+        report.errors
     );
-    assert!(
-        !msgs.iter().any(|m| m.contains("internal compiler error")),
-        "3c: reject must be a clean diagnostic, never an ICE; got {msgs:?}",
+    assert_eq!(
+        report.errors.len(),
+        1,
+        "the rejected size must not cascade into an unrelated failure: {:?}",
+        report.errors
     );
 }
 

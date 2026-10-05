@@ -87,7 +87,7 @@ impl AuthoredBinderContract {
             // Parameter and body-only dimension roles are rigid under
             // [04-INF-6]; result-only roles retain §4.4.1 output inference.
             check_authored_dvars_rigid(name, &rigidity.decl_ty, &rigidity.dim_names, subst, errors);
-            check_declared_tvars_rigid(name, &self.type_names, subst, errors);
+            check_declared_tvars_rigid(name, &self.type_names, &self.dtype_bounds, subst, errors);
             check_declared_rvars_rigid(name, &rigidity.rank_names, subst, errors);
         }
         check_declared_dtype_bounds(name, &self.type_names, &self.dtype_bounds, subst, errors);
@@ -200,6 +200,26 @@ fn decide_open_obligations(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    // A `sum`-family result waiting on an authored binder's precision is
+    // decided over that binder's dtypes first, since the binder never binds
+    // and a later shape check may wait on the result; replay those before the
+    // next round. One waiting on an inference variable is left for the
+    // boundary's derivations to bind, and decided with the ledgers below.
+    loop {
+        let authored = env
+            .active_declared_type_names()
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(declared, _)| match subst.apply(&Type::Var(*declared)) {
+                Type::Var(root) => Some(root),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !subst.decide_pending_sum_results(Some(&authored)) {
+            break;
+        }
+        product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+    }
     product.finish_deferred_shape_checks(env, vg, subst, adt_reg, errors);
     product.finish_deferred_literal_patterns(env, subst, adt_reg, errors);
     for contract in product.take_authored_binder_contracts() {
@@ -219,6 +239,11 @@ fn report_substitution_ledgers(
     // attribution local and prevents one declaration's deferrals from leaking
     // into the next.
     validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
+    // chelis#3180: a `drop` operand pinned to a borrow after its call.
+    validate_deferred_drop_operands(subst, errors);
+    // chelis#3009: a `sum`-family result whose precision variable nothing
+    // bound is decided over that variable's dtypes before the ledger reports.
+    subst.decide_pending_sum_results(None);
     // chelis#1489: see `validate_deferred_tensor_operands`.
     validate_deferred_tensor_operands(subst, env.active_declared_type_names(), errors);
     // D-CHECK: drain the per-declaration deferred-access ledger.

@@ -63,6 +63,13 @@ Layer 2  ORCHESTRATION              `chelis reef setup` + unified `reef doctor`
 | Binary artifacts (translators, toolchain) | `reef install` | `reef.lock` (Binary) | #468 |
 | One-command reproduce + health | `reef setup` / `doctor` | composes all | this doc |
 
+The chelis-std runtime is packed from `packages/chelis-std` by
+`crates/chelis-std-bundle/build.rs` while the compiler builds, and each binary
+embeds it. A lock records it by the hashes of the running binary's runtime, so
+the compiler repository commits neither the runtime pair nor a lock recording
+it ([`reef_distribution.md`](reef_distribution.md), Item 7, "Bundling and
+lockfile synthesis").
+
 ## 3. The lockfile-ownership rule
 
 `reef.lock` records **exactly the artifacts reef itself fetches and
@@ -112,11 +119,11 @@ Reef verifies the root identity, direct requirements, source kinds, canonical pa
 
 A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
 
-A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+A changed requirement or source declaration invalidates the lock preference. For the graph-loading commands (`chelis check`, `build`, `eval`, `test`, and `reef build`), so does a locked `chelis-std` entry that does not name the compiler's embedded runtime by version, bundled source, and archive and shell hashes: a std rebuild or a compiler upgrade makes that entry stale, not corrupt. Reef then runs bounded local-first resolution. `reef export-bundle` and `reef install --from-lockfile` read the lock without that assessment (chelis#3025).
 
 If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
 
-A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+A locked hash failure of any other package, or an unavailable origin, is an integrity failure. Reef does not search for replacement bytes after that failure.
 
 Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
 
@@ -219,6 +226,16 @@ wholesale. Precedence, first match wins:
    That is a genuine advantage over rustup's separate `rust-toolchain.toml`.
 5. **recorded default** (`chelisup default`) — used outside any package.
 
+For the explicit management invocation `chelis reef setup`, level 4 is skipped:
+the project compiler pin is the provisioning target, and the recorded default
+selects the setup orchestrator. The three explicit overrides retain their
+precedence. This dispatch applies whenever the first two forwarded arguments
+are exactly `reef setup`, regardless of whether the project pin is installed.
+The shim only routes; setup itself delegates installation to `chelisup`.
+A missing selected orchestrator fails normally. It never searches installed
+versions for an alternative. Compiler commands and other Reef verbs retain
+all five resolution levels.
+
 ### 5.3 Invariants
 
 **No auto-install, no silent fallback.** A resolved-but-not-installed version is
@@ -279,15 +296,16 @@ ships, and retire their vendored `install_chelis_toolchain.py`.
 platform, drops it at `~/.chelis/bin/chelisup`, and prompts the user to add
 `~/.chelis/bin` to PATH. The chelis releases page hosts the `chelisup`
 prebuilts alongside the existing toolchain tarballs: `release.yml` publishes
-`chelisup-<slug>` bare executables plus sha256 sidecars (the linux binary is
-built in the glibc-2.31 container job so the first binary a bare machine runs
-loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
-canonical bootstrap URL
+`chelisup-<slug>` bare executables plus sha256 sidecars (the Linux binary comes
+from the static build job, a static-pie executable with no program interpreter
+and no shared library, so the first binary a bare machine runs starts on any
+x86-64 distribution) and `chelisup.sh` itself, making the canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
-For the same reason `chelisup install` takes that job's
-`chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz` on Linux, for every release from
-0.7.24 on; the `linux-x86_64` tarball needs the glibc of the runner that built it,
-and a glibc older than 2.31 runs neither build (chelis#2686).
+On Linux `chelisup install` takes the first build a release publishes, in
+preference order: the static `chelis-v<ver>-linux-x86_64-static.tar.gz`, then,
+for every release from 0.7.24 on, `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
+(chelis#2686); the `linux-x86_64` tarball needs the glibc of the runner that built
+it, and a glibc older than 2.31 runs neither dynamic build.
 **Private-repo caveat:** until chelis releases are public the public release URL
 does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
 an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of
@@ -409,9 +427,21 @@ also report binary-artifact deps (#468) and the active toolchain/shim
 (chelisup), as the read-only health counterpart of `setup`.
 
 `reef setup` is the canonical *current-chelis* entry point for the cross-version
-case §5.4 decided: it runs from a current chelis (it may itself install the
-pinned toolchain), so a clone-and-`setup` does the right thing without the user
-reaching for `+<ver>`. WS-C also lands §5.4's unknown-subcommand hint in chelis.
+case §5.4 decided. The installed shim selects the recorded default compiler for
+this explicit provisioning verb, as §5.2 specifies; it treats the manifest pin
+as setup's target rather than a prerequisite for starting setup. A concrete
+`+<ver>`, `CHELIS_TOOLCHAIN`, or `chelis-toolchain` override still selects the
+orchestrator deliberately. Thus an installed current default can provision a
+fresh clone pinned to an absent or older compiler. Setup continues to read the
+manifest through its existing parse-only management path. No management
+implementation moves into the installer or the shim.
+
+The installed-shim regression oracle is
+`cargo test -p chelis-cli --test reef_setup issue_2818`: seed installed compiler
+A and its actual shim, pin the clone to absent B, run bare `chelis reef setup`,
+and verify B is installed, A remains the default, and both installer copies
+remain chelisup. The corresponding missing-release and explicit-missing-
+override cases fail; ordinary compiler commands still reject an absent pin.
 
 ### 7.1 Shell-scaffolding synchronization
 
@@ -463,7 +493,7 @@ build" walkthrough:
    - `cargo build` / `chelis test` are green with everything at its pin, no
      lockfile churn.
 3. `chelis reef doctor --root ~` reports every shell green across all classes.
-4. octant's `consuming.md` workaround and C Note's verify-in-Dockerfile step
+4. octant's `consuming.md` workaround and downstream verify-in-Dockerfile steps
    retire (WS-A); shells drop their vendored `install_chelis_toolchain.py`
    (WS-B).
 

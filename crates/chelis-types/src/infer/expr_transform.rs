@@ -7,6 +7,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -48,7 +49,9 @@ pub(super) fn infer_grad(
                 subst,
             ) {
                 GradDecision::Decided(Ok(grad_ty)) => grad_ty,
-                GradDecision::Decided(Err(error)) => report(errors, *error),
+                GradDecision::Decided(Err(error)) => {
+                    report_at_check_site(errors, *error, CheckSite::Expr(expr))
+                }
                 // Publish the same parameters with a fresh gradient result,
                 // so application can bind the types before cotangent selection.
                 // This also covers recursive-group inference (chelis#2626).
@@ -250,13 +253,16 @@ fn grad_result_type(
         let mut selected = Vec::with_capacity(indices.len());
         for &index in indices {
             let Some(arg) = args.get(index) else {
-                return Err(Box::new(CheckError::new(
+                let expected = format!("index in 0..{}", args.len());
+                let got = format!("index {index}");
+                return Err(Box::new(CheckError::with_types(
                     CheckErrorKind::ArityMismatch,
                     format!(
-                        "grad `wrt` index {} is out of bounds for function with {} parameters",
-                        index,
+                        "grad `wrt`: expected {expected} for a function with {} parameters, got {got}",
                         args.len()
                     ),
+                    expected,
+                    got,
                     vec![],
                 )));
             };
@@ -877,27 +883,9 @@ pub(super) fn infer_def(
     subst.leave_level(body_level, vg);
     let scheme = env.generalize(&body_ty, subst);
     subst.name_generic_parameters(&scheme, &name, &UnordMap::new());
-    // chelis#397/#469: record the size provenance (see `infer_top_level` /
-    // `infer_let`) so a later `expand` size built from this binding can be
-    // checked for materializability. Classified against the pre-binding scope.
-    match classify_expand_size(&kids[1], env, adt_reg, subst) {
-        SizeClass::Static => {
-            if let Some(value) =
-                fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-            {
-                env.mark_static_size_value(&name, value);
-            } else {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
-            }
-        }
-        SizeClass::ShapeSourced => {
-            env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
-        }
-        SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
-    }
-    // chelis#631: same discipline for list-literal lengths.
-    note_list_literal_binding(env, &name, &kids[1]);
-    env.bind(name, scheme);
+    // The binding's value facts, read against the pre-binding scope.
+    let facts = rhs_binding_facts(env, &kids[1]);
+    env.bind_with_facts(name, scheme, facts);
     body_ty
 }
 

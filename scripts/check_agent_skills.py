@@ -17,14 +17,14 @@ import yaml
 
 try:
     from .regenerate_conformance_assets import (
-        SHARED_SKILLS,
+        REPO_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
         planned_skill_copies,
     )
 except ImportError:
     from regenerate_conformance_assets import (
-        SHARED_SKILLS,
+        REPO_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
         planned_skill_copies,
@@ -98,7 +98,7 @@ def check(root: Path) -> list[str]:
     source = root / "agent-skills"
     try:
         names = {path.name for path in source.iterdir() if path.is_dir()}
-        if names != set(SHARED_SKILLS):
+        if names != set(REPO_SKILLS):
             errors.append("agent-skills directory differs from the registered shared skill set")
         pairs = planned_skill_copies(root)
         for src, dest in pairs:

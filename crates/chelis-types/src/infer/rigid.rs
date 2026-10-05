@@ -26,6 +26,7 @@
 use chelis_unord::UnordMap;
 
 use super::checked::{InferenceProduct, PostAppCall, PostAppReplay};
+use super::common::sum_result_bound_note;
 use super::expr_pattern::family_members;
 use super::type_derivation::{DerivationStep, TypeDerivation, resolve_type_derivation};
 use crate::adt::AdtRegistry;
@@ -33,7 +34,7 @@ use crate::env::Env;
 use crate::env::{free_dvars, free_rvars, free_tvars};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, Prim, RankVar, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::types::{Dim, Prim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::{Subst, unify};
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
@@ -81,6 +82,7 @@ fn render_declared_rank(rank_names: &UnordMap<RankVar, String>, rv: RankVar) -> 
 pub(super) fn check_declared_tvars_rigid(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
+    declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -102,13 +104,26 @@ pub(super) fn check_declared_tvars_rigid(
     for binder in binders {
         let resolved = subst.apply(&Type::Var(binder));
         let Type::Var(resolved_var) = resolved else {
+            let small_integer = declared_bounds
+                .get(&binder)
+                .copied()
+                .flatten()
+                .is_some_and(|bound| bound.admits(Prim::Int8) || bound.admits(Prim::Int16));
+            let note = match &resolved {
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => {
+                    sum_result_bound_note(small_integer, *prim)
+                }
+                _ => None,
+            }
+            .map(|note| format!("; {note}"))
+            .unwrap_or_default();
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!(
                     "declared type parameter {} of `{declaration}` was narrowed to \
                      `{resolved}` by the function body: an authored type binder is rigid and \
                      the body must type-check for every instantiation \
-                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                     (spec/04-type-system.md §3.1.3 [04-INF-6]){note}",
                     render_declared_binder(type_names, binder),
                 ),
                 vec![
@@ -231,22 +246,29 @@ pub(super) fn check_declared_dtype_bounds(
             continue;
         };
         let declared_bound = declared_bounds.get(&binder).copied().flatten();
+        // [04-INF-9]: the declaration satisfies its body when its bound is at
+        // least as narrow as the body's requirement, not only when the two are
+        // equal. §5.9's set form makes the difference observable: `{f32, f64}`
+        // satisfies a `Float` requirement without equalling it.
         if let Some(required) = subst.tvar_restriction(resolved_var)
-            && declared_bound != Some(required)
+            && !declared_bound.is_some_and(|bound| bound.is_at_least_as_narrow_as(required))
         {
             let authored = declared_bound
-                .map(|bound| format!("the declared `{}` family", bound.family_name()))
+                .map(|bound| {
+                    let kind = if bound.is_family() { "family" } else { "set" };
+                    format!("the declared `{}` {kind}", bound.bound_spelling())
+                })
                 .unwrap_or_else(|| "an unbounded authored variable".to_string());
             errors.push(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "declared type parameter {} of `{declaration}` requires dtype family `{}` in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
-                    render_declared_binder(type_names, binder), required.family_name(),
+                    "declared type parameter {} of `{declaration}` requires {} in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
+                    render_declared_binder(type_names, binder), required.bound_description(),
                 ),
                 vec![format!(
                     "Declare this binder with `{}: {}` in the signature's binder list.",
                     type_names.get(&binder).expect("an authored binder has a source name"),
-                    required.family_name(),
+                    required.bound_spelling(),
                 )],
             ));
         }
@@ -599,7 +621,7 @@ fn at_boundary_instantiation(
                 bound: Some(bound),
             } => Some(format!(
                 "`{name}`, declared `{name}: {}`",
-                bound.family_name()
+                bound.bound_spelling()
             )),
             BoundaryOperandKind::Authored { name, bound: None } => {
                 Some(format!("`{name}`, declared with no dtype-family bound"))
@@ -666,7 +688,7 @@ fn at_boundary_instantiation(
              tensor, collection, or string. Declare the operand with the type this operation \
              requires, such as `tensor[n, {name}]`, or narrow `{name}`'s bound to the dtypes the \
              operation admits.",
-            family = bound.family_name(),
+            family = bound.bound_spelling(),
         ),
         BoundaryOperandKind::Authored { name, bound: None } => format!(
             "`{name}` declares no dtype-family bound, so it denotes every type. Declare the \

@@ -13,7 +13,7 @@
 //!   - an f64 fused chain emits `double` step variables, `double`
 //!     data pointers with the reinterpreting cast that
 //!     `chelis_runtime.h`'s `float *data` requires, and the
-//!     double-precision libm symbols (`exp`, not `expf`)
+//!     double-precision kernels (`chelis_cr_exp`, not `chelis_cr_expf`)
 //!   - the emitted f64 C actually compiles
 //!   - the f32 emission is byte-identical to the pre-fix form, casts
 //!     included (the in-place aliasing tests pin that exact text)
@@ -89,16 +89,16 @@ fn f64_fused_chain_uses_double_precision_math_symbols() {
         .expect("an f64 fused chain must emit, not panic")
         .c_source;
 
-    // `expf(` and `exp(` are disjoint substrings, so this is an exact
-    // discrimination rather than a prefix match.
+    // `chelis_cr_expf(` and `chelis_cr_exp(` are disjoint substrings, so
+    // this is an exact discrimination rather than a prefix match.
     assert!(
-        src.contains("exp("),
-        "f64 fused `exp` must call the double-precision libm symbol; got:\n{src}"
+        src.contains("chelis_cr_exp("),
+        "f64 fused `exp` must call the double-precision kernel; got:\n{src}"
     );
     assert!(
-        !src.contains("expf("),
-        "an f64 fused chain must not call `expf`: passing a double to the \
-         single-precision entry point narrows the value before the call, which \
+        !src.contains("chelis_cr_expf("),
+        "an f64 fused chain must not call `chelis_cr_expf`: passing a double to the \
+         single-precision kernel narrows the value before the call, which \
          is exactly the f32 result chelis#919 reports; got:\n{src}"
     );
 }
@@ -187,8 +187,8 @@ fn f32_fused_chain_uses_exact_float_pointer_casts() {
         "f32 fused steps must stay `float`; got:\n{src}"
     );
     assert!(
-        src.contains("expf("),
-        "f32 fused `exp` must stay on the single-precision symbol; got:\n{src}"
+        src.contains("chelis_cr_expf("),
+        "f32 fused `exp` must stay on the single-precision kernel; got:\n{src}"
     );
     assert!(
         !src.contains("(double*)") && !src.contains("double v0"),

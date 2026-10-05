@@ -1,0 +1,162 @@
+name: OpenSpec store acceptance
+
+description: Validate a project against its immutable shared OpenSpec store
+
+inputs:
+  app-client-id:
+    description: Client ID for the read-only OpenSpec store GitHub App
+    required: true
+  app-private-key:
+    description: Private key for the read-only OpenSpec store GitHub App
+    required: true
+  store-lock:
+    description: Repository-relative path to the OpenSpec store lock
+    required: false
+    default: openspec/store.lock.yaml
+  assert-setup-contract:
+    description: Verify the CI-specific shared-chelis-setup migration contract
+    required: false
+    default: 'false'
+
+outputs:
+  store-id:
+    description: Verified OpenSpec store ID
+    value: ${{ steps.store-health.outputs.store-id }}
+  repository:
+    description: Verified store repository
+    value: ${{ steps.store-health.outputs.repository }}
+  commit:
+    description: Verified store commit
+    value: ${{ steps.store-health.outputs.commit }}
+  root-path:
+    description: Verified absolute store root path
+    value: ${{ steps.store-health.outputs.root-path }}
+  root-source:
+    description: Verified OpenSpec root source
+    value: ${{ steps.store-health.outputs.root-source }}
+  openspec-version:
+    description: Verified OpenSpec version
+    value: ${{ steps.store-health.outputs.openspec-version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Parse the store lock
+      id: store-lock
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+      run: >-
+        python3 "$ACTION_PATH/openspec_store.py"
+        --lock "$INPUT_STORE_LOCK"
+        --github-output "$GITHUB_OUTPUT"
+
+    - name: Create the store installation token
+      id: app-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        client-id: ${{ inputs.app-client-id }}
+        private-key: ${{ inputs.app-private-key }}
+        owner: Chelis-Lang
+        repositories: ${{ steps.store-lock.outputs.repository }}
+        permission-contents: read
+
+    - name: Prove read-only store access
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CHELIS_OPENSPEC_STORE_TOKEN: ${{ steps.app-token.outputs.token }}
+        INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+      run: >-
+        python3 "$ACTION_PATH/openspec_store.py"
+        --lock "$INPUT_STORE_LOCK"
+        --check-access
+
+    - name: Checkout the locked store commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ steps.store-lock.outputs.repository }}
+        ref: ${{ steps.store-lock.outputs.commit }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: .ci-store/chelis-plans
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Verify the store checkout
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+      run: >-
+        python3 "$ACTION_PATH/openspec_store.py"
+        --lock "$INPUT_STORE_LOCK"
+        --checkout .ci-store/chelis-plans
+
+    - name: Set up pinned Node for OpenSpec
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 24.18.0
+
+    - name: Install locked OpenSpec CLI
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: >-
+        npm ci --prefix "$ACTION_PATH/../openspec-governance"
+        --ignore-scripts --no-audit --no-fund
+
+    - name: Register and inspect the store
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        OPENSPEC_BIN: ${{ github.action_path }}/../openspec-governance/node_modules/.bin/openspec
+        OPENSPEC_TELEMETRY: '0'
+        STORE_ID: ${{ steps.store-lock.outputs.store-id }}
+        XDG_DATA_HOME: ${{ runner.temp }}/openspec-store-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        test "$("$OPENSPEC_BIN" --version)" = 1.6.0
+        "$OPENSPEC_BIN" store register \
+          "$GITHUB_WORKSPACE/.ci-store/chelis-plans" \
+          --id "$STORE_ID" \
+          --json > "$RUNNER_TEMP/openspec-store-register.json"
+        "$OPENSPEC_BIN" doctor --json > "$RUNNER_TEMP/openspec-store-doctor.json"
+
+    - name: Verify store health and repository dependencies
+      id: store-health
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+        OPENSPEC_BIN: ${{ github.action_path }}/../openspec-governance/node_modules/.bin/openspec
+        OPENSPEC_TELEMETRY: '0'
+        XDG_DATA_HOME: ${{ runner.temp }}/openspec-store-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        python3 "$ACTION_PATH/openspec_store.py" \
+          --lock "$INPUT_STORE_LOCK" \
+          --checkout .ci-store/chelis-plans \
+          --doctor-json "$RUNNER_TEMP/openspec-store-doctor.json" \
+          --openspec-version "$("$OPENSPEC_BIN" --version)" \
+          --github-output "$GITHUB_OUTPUT" \
+          --github-summary "$GITHUB_STEP_SUMMARY" \
+          --check-local-spec-dependencies
+
+    - name: Verify the CI setup contract
+      if: inputs.assert-setup-contract == 'true'
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_STORE_LOCK: ${{ inputs.store-lock }}
+      run: >-
+        python3 "$ACTION_PATH/openspec_store.py"
+        --lock "$INPUT_STORE_LOCK"
+        --checkout .ci-store/chelis-plans
+        --assert-setup-contract
+
+    - name: Validate the resolved store
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        OPENSPEC_BIN: ${{ github.action_path }}/../openspec-governance/node_modules/.bin/openspec
+        OPENSPEC_TELEMETRY: '0'
+        XDG_DATA_HOME: ${{ runner.temp }}/openspec-store-${{ github.run_id }}-${{ github.run_attempt }}
+      run: >-
+        "$OPENSPEC_BIN" validate --all --strict --no-interactive

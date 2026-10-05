@@ -153,7 +153,7 @@ fn fused_empty_batch_does_not_execute_constant_primal_cast() {
 
 #[test]
 fn fused_live_callable_specialization_remains_nonzero() {
-    for call in ["f(x)", "apply(f, x)", "x |> f"] {
+    for call in ["f(x)", "apply(f, x)", "(x |> f)"] {
         roots(
             &format!(
                 "def apply(f: tensor[f32] -> f32, x: tensor[f32]) -> f32 = f(x)\ndef model(x: tensor[f32]) -> f32 = tensor_to_scalar(mul(x, x))\ndef mapped(f: tensor[f32] -> f32, xs: tensor[2, f32]) -> tensor[2, f32] = {{\n target = fn (x: tensor[f32]) -> {call}\n vmap(grad(target))(xs)\n}}\nout = mapped(model, to_tensor([2.0f32, 7.0f32]))\n"

@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
-use chelis_deep::{DtypeFamily, Span};
+use chelis_deep::{BoundDtype, DtypeBound, DtypeFamily, Span};
 use chelis_unord::UnordSet;
 use thiserror::Error;
 
@@ -78,6 +78,7 @@ struct Parser {
     // Lookahead owns a cursor, but shares the immutable stream. Cloning every
     // token for each BlockBinding made generated scalar modules quadratic.
     tokens: std::sync::Arc<[Token]>,
+    closing_delimiters: std::sync::Arc<[usize]>,
     pos: usize,
     module_allowed: bool,
     mode: ParseMode,
@@ -87,6 +88,8 @@ struct Parser {
 enum ParseMode {
     Canonical,
     LegacyV018,
+    #[cfg(feature = "pre-020-pipe-migration")]
+    PipeMigration,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,9 +106,27 @@ pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
     parse_with_mode(tokens, ParseMode::LegacyV018)
 }
 
+fn closing_delimiters(tokens: &[Token]) -> std::sync::Arc<[usize]> {
+    let mut matching = vec![usize::MAX; tokens.len()];
+    let mut open = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => open.push(index),
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                if let Some(start) = open.pop() {
+                    matching[start] = index;
+                }
+            }
+            _ => {}
+        }
+    }
+    matching.into()
+}
+
 fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
         tokens: tokens.into(),
+        closing_delimiters: closing_delimiters(tokens),
         pos: 0,
         module_allowed: true,
         mode,
@@ -198,6 +219,15 @@ pub fn parse_canonical_source_tokens(
 ) -> Result<Vec<Decl>, ParseError> {
     validate_literal_spellings(source, tokens)?;
     parse(tokens)
+}
+
+/// Parse the previous canonical pipe grammar solely for explicit migration.
+/// All normal parser entry points enforce the new grouping contract.
+#[cfg(feature = "pre-020-pipe-migration")]
+pub(crate) fn parse_pipe_migration(source: &str) -> Result<Vec<Decl>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    validate_literal_spellings(source, &tokens)?;
+    parse_with_mode(&tokens, ParseMode::PipeMigration)
 }
 
 pub fn parse_str_legacy_v018(source: &str) -> Result<Vec<Decl>, ParseError> {
@@ -347,7 +377,7 @@ fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
 /// form per `spec/01-nomenclature.md` §3.6. Used by
 /// `synthesize_bare_unary_builtin_lambda` to η-expand `realize`/`copy`
 /// in non-call position (H1/H2 of the pipe-autofix-extras workstream;
-/// see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+/// see `docs/archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
 #[derive(Copy, Clone)]
 enum BareUnaryBuiltinKind {
     Realize,
@@ -400,6 +430,19 @@ impl Parser {
             .filter(|token| !matches!(token.kind, TokenKind::Newline))
             .nth(n)
             .map(|token| &token.kind)
+    }
+
+    /// The record-update operator and delimited device handler share `with`.
+    /// Use the actual update introducer in both parsing and the pipe guard.
+    fn starts_record_update(&self, start: usize) -> bool {
+        let mut kinds = self
+            .tokens
+            .iter()
+            .skip(start)
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .map(|token| &token.kind);
+        matches!(kinds.next(), Some(TokenKind::With))
+            && matches!(kinds.next(), Some(TokenKind::LBrace))
     }
 
     fn find_top_level_token(&self, wanted: TokenKind) -> Option<usize> {
@@ -513,7 +556,7 @@ impl Parser {
     /// `par` and `do` genuinely require `;` (spec/02-surf-syntax.md §P5) and
     /// parse through their own functions, so they never reach this.
     fn reject_canonical_semicolon_separator(&self) -> Result<(), ParseError> {
-        if self.mode == ParseMode::Canonical && matches!(self.raw_peek(), TokenKind::Semicolon) {
+        if self.mode != ParseMode::LegacyV018 && matches!(self.raw_peek(), TokenKind::Semicolon) {
             return Err(ParseError::SemicolonBlockSeparator {
                 offset: self.current_offset(),
             });
@@ -783,6 +826,7 @@ impl Parser {
             span: Span::new(self.current_offset(), 0),
         });
         let mut nested = Parser {
+            closing_delimiters: closing_delimiters(&expr_tokens),
             tokens: expr_tokens.into(),
             pos: 0,
             module_allowed: false,
@@ -957,7 +1001,7 @@ impl Parser {
         let start = self.expect(&TokenKind::LBracket)?.span;
         let names = self.parse_ident_list(TokenKind::RBracket)?;
         self.expect(&TokenKind::RBracket)?;
-        if names.is_empty() && self.mode == ParseMode::Canonical {
+        if names.is_empty() && self.mode != ParseMode::LegacyV018 {
             return Err(ParseError::Expected {
                 expected: "omit empty `[]`".into(),
                 found: "empty parameter list".into(),
@@ -987,7 +1031,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBracket)?;
-        if binders.is_empty() && self.mode == ParseMode::Canonical {
+        if binders.is_empty() && self.mode != ParseMode::LegacyV018 {
             return Err(ParseError::Expected {
                 expected: "omit empty `[]`".into(),
                 found: "empty parameter list".into(),
@@ -997,27 +1041,84 @@ impl Parser {
         Ok(binders)
     }
 
-    /// One binder: `name`, or `name: Family` for a dtype-family bound.
+    /// One binder: `name`, `name: Family`, or `name: {d1, d2}` for
+    /// `spec/02-surf-syntax.md` §P4c's two dtype-bound forms.
     ///
-    /// The bound position admits only the three closed family names, so an
-    /// ADT name written there is a parse error rather than a silently
-    /// accepted bound.
+    /// The bound position admits only the three closed family names and a
+    /// braced set of active dtype spellings, so an ADT name written there is
+    /// a parse error rather than a silently accepted bound. A bare dtype
+    /// without braces stays a parse error: §P4c makes a one-member bound
+    /// `{f64}`, not a type ascription.
     fn parse_type_binder(&mut self) -> Result<TypeBinder, ParseError> {
         let (name, _) = self.expect_ident_or_type_ident()?;
         if *self.peek() != TokenKind::Colon {
             return Ok(TypeBinder::unbounded(name));
         }
         self.advance();
+        if *self.peek() == TokenKind::LBrace {
+            return self.parse_dtype_set_bound(name);
+        }
         let offset = self.current_offset();
         let (family, _) = self.expect_ident_or_type_ident()?;
         match DtypeFamily::from_surf_name(&family) {
-            Some(family) => Ok(TypeBinder::bounded(name, family)),
+            Some(family) => Ok(TypeBinder::bounded(name, DtypeBound::Family(family))),
             None => Err(ParseError::Expected {
-                expected: "a dtype family `Float`, `Int`, or `Numeric`".into(),
+                expected: "a dtype family `Float`, `Int`, or `Numeric`, or a dtype set `{...}`"
+                    .into(),
                 found: family,
                 offset,
             }),
         }
+    }
+
+    /// §P4c's explicit dtype set: `{d1, d2}`, non-empty, no repeats, members
+    /// drawn from `spec/04-type-system.md` §1.1's active dtypes.
+    fn parse_dtype_set_bound(&mut self, name: String) -> Result<TypeBinder, ParseError> {
+        let open = self.current_offset();
+        self.advance();
+        let mut members = std::collections::BTreeSet::new();
+        loop {
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            let offset = self.current_offset();
+            let (spelling, _) = self.expect_ident_or_type_ident()?;
+            let Some(member) = BoundDtype::from_name(&spelling) else {
+                return Err(ParseError::Expected {
+                    expected: "an active dtype spelling in a dtype set".into(),
+                    found: spelling,
+                    offset,
+                });
+            };
+            if !members.insert(member) {
+                return Err(ParseError::Expected {
+                    expected: "a dtype set without a repeated member".into(),
+                    found: spelling,
+                    offset,
+                });
+            }
+            if *self.peek() == TokenKind::Comma {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        if *self.peek() != TokenKind::RBrace {
+            return Err(ParseError::Expected {
+                expected: "`}` closing a dtype set".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        self.advance();
+        if members.is_empty() {
+            return Err(ParseError::Expected {
+                expected: "a non-empty dtype set".into(),
+                found: "{}".into(),
+                offset: open,
+            });
+        }
+        Ok(TypeBinder::bounded(name, DtypeBound::Set(members)))
     }
 
     // ---------------------------------------------------------------------------
@@ -1146,7 +1247,7 @@ impl Parser {
         let end = options
             .last()
             .map(PropertyOption::span)
-            .unwrap_or_else(|| expr_span(&body));
+            .unwrap_or_else(|| expression_span(&body));
         Ok(Decl::Property {
             name,
             type_binders,
@@ -1234,7 +1335,7 @@ impl Parser {
         // The predicate body runs up to the `type` keyword at depth 0.
         let end = self.invariant_expr_end();
         let body = self.parse_expr_in_range(end, "`type` after @invariant predicate")?;
-        let span = at_span.merge(expr_span(&body)).merge(opaque_start);
+        let span = at_span.merge(expression_span(&body)).merge(opaque_start);
 
         // A second `@invariant` is an error (exactly one allowed).
         if *self.peek() == TokenKind::At {
@@ -1297,7 +1398,7 @@ impl Parser {
             let end = self.find_property_clause_end()?;
             let redundant_group_offset = self.redundant_property_group_offset(end);
             let expr = self.parse_expr_in_range(end, "`,` or `:` in property where clause")?;
-            if self.mode == ParseMode::Canonical
+            if self.mode != ParseMode::LegacyV018
                 && redundant_group_offset.is_some()
                 && !matches!(expr, Expr::Tuple(..))
             {
@@ -1394,7 +1495,7 @@ impl Parser {
         let (name, _) = self.expect_ident()?;
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr_until_block_separator()?;
-        let span = start.merge(expr_span(&value));
+        let span = start.merge(expression_span(&value));
         match name.as_str() {
             "tolerance" => Ok(PropertyOption::Tolerance(value, span)),
             "seed" => Ok(PropertyOption::Seed(value, span)),
@@ -1431,7 +1532,7 @@ impl Parser {
             let params = self.parse_params()?;
             self.expect(&TokenKind::RParen)?;
             params
-        } else if self.mode == ParseMode::Canonical {
+        } else if self.mode != ParseMode::LegacyV018 {
             return Err(ParseError::Expected {
                 expected: "function parameter list `()`".into(),
                 found: format!("{:?}", self.peek()),
@@ -1470,7 +1571,7 @@ impl Parser {
             }
             e
         })?;
-        let span = start.merge(expr_span(&body));
+        let span = start.merge(expression_span(&body));
 
         Ok(Decl::FunDef {
             name,
@@ -1591,7 +1692,7 @@ impl Parser {
         };
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr_until_decl_separator()?;
-        let span = start.merge(expr_span(&value));
+        let span = start.merge(expression_span(&value));
         Ok(Decl::LetDef {
             name,
             ty,
@@ -1608,7 +1709,7 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr_until_decl_separator()?;
-        let span = start.merge(expr_span(&body));
+        let span = start.merge(expression_span(&body));
         Ok(Decl::MacroDef {
             name,
             params,
@@ -1684,7 +1785,7 @@ impl Parser {
                 }
             }
             let end = self.expect(&TokenKind::RBrace)?;
-            if fields.is_empty() && self.mode == ParseMode::Canonical {
+            if fields.is_empty() && self.mode != ParseMode::LegacyV018 {
                 return Err(ParseError::Expected {
                     expected: format!("bare zero-field variant `{name}`"),
                     found: format!("`{name} {{}}`"),
@@ -1710,7 +1811,7 @@ impl Parser {
                 }
             }
             let end = self.expect(&TokenKind::RParen)?;
-            if self.mode == ParseMode::Canonical && fields.is_empty() {
+            if self.mode != ParseMode::LegacyV018 && fields.is_empty() {
                 return Err(ParseError::Expected {
                     expected: format!("bare zero-argument constructor `{name}`"),
                     found: format!("`{name}()`"),
@@ -1770,7 +1871,7 @@ impl Parser {
             } else {
                 let names = self.parse_ident_list(TokenKind::RParen)?;
                 if names.is_empty() {
-                    if self.mode == ParseMode::Canonical {
+                    if self.mode != ParseMode::LegacyV018 {
                         return Err(ParseError::Expected {
                             expected: "qualified import without empty `()`".into(),
                             found: "empty import list".into(),
@@ -1818,7 +1919,7 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
-        if self.mode == ParseMode::Canonical
+        if self.mode != ParseMode::LegacyV018
             && min_bp > 0
             && matches!(
                 self.peek(),
@@ -1831,6 +1932,7 @@ impl Parser {
                 offset: self.current_offset(),
             });
         }
+        let expression_start = self.pos;
         let mut lhs = self.parse_prefix()?;
 
         loop {
@@ -1847,7 +1949,7 @@ impl Parser {
                 match self.peek().clone() {
                     TokenKind::Ident(field) => {
                         let tok = self.advance();
-                        let start = expr_span(&lhs);
+                        let start = expression_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), field, start.merge(tok.span));
                     }
                     // A PascalCase segment after `.` is a module/type path
@@ -1863,12 +1965,12 @@ impl Parser {
                     // did not parse.
                     TokenKind::TypeIdent(segment) => {
                         let tok = self.advance();
-                        let start = expr_span(&lhs);
+                        let start = expression_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), segment, start.merge(tok.span));
                     }
                     TokenKind::Int(index) => {
                         let tok = self.advance();
-                        let start = expr_span(&lhs);
+                        let start = expression_span(&lhs);
                         lhs = Expr::TupleGet(Box::new(lhs), index, start.merge(tok.span));
                         continue;
                     }
@@ -1889,27 +1991,24 @@ impl Parser {
                 // previously failed with "expected end of declaration
                 // expression, found LParen".
                 while *self.peek() == TokenKind::LParen {
-                    let start = expr_span(&lhs);
+                    let start = expression_span(&lhs);
                     self.advance();
-                    let args = self.parse_expr_list(TokenKind::RParen)?;
-                    let end = self.expect(&TokenKind::RParen)?;
-                    lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
-                    if self.mode == ParseMode::Canonical {
+                    let (args, accumulator, end) = self.parse_call_args()?;
+                    lhs = call_expr(lhs, args, accumulator, start.merge(end));
+                    if self.mode != ParseMode::LegacyV018 {
                         break;
                     }
                 }
                 continue;
             }
 
-            if *self.peek() == TokenKind::With
-                && self.peek_significant_after(1) == Some(&TokenKind::LBrace)
-            {
-                let start = expr_span(&lhs);
+            if self.starts_record_update(self.pos) {
+                let start = expression_span(&lhs);
                 self.advance();
                 let fields = self.parse_record_fields()?;
                 let end = self.tokens[self.pos - 1].span;
                 if fields.is_empty() {
-                    if self.mode == ParseMode::Canonical {
+                    if self.mode != ParseMode::LegacyV018 {
                         return Err(ParseError::Expected {
                             expected: "at least one record-update field".into(),
                             found: "empty record update".into(),
@@ -1928,14 +2027,14 @@ impl Parser {
                 if l_bp < min_bp {
                     break;
                 }
-                let start = expr_span(&lhs);
+                let start = expression_span(&lhs);
                 let mut stages = Vec::new();
                 while *self.peek() == TokenKind::Pipe {
                     self.advance();
                     let stage = self.parse_pipe_stage()?;
                     stages.push(stage);
                 }
-                let end = expr_span(stages.last().unwrap());
+                let end = expression_span(stages.last().unwrap());
                 lhs = Expr::Pipe(Box::new(lhs), stages, start.merge(end));
                 continue;
             }
@@ -1948,7 +2047,7 @@ impl Parser {
                 }
                 self.advance();
                 let ty = self.parse_type()?;
-                let start = expr_span(&lhs);
+                let start = expression_span(&lhs);
                 let end = type_span(&ty);
                 lhs = Expr::Annotate(Box::new(lhs), ty, start.merge(end));
                 continue;
@@ -1979,8 +2078,8 @@ impl Parser {
                     });
                 }
 
-                let start = expr_span(&lhs);
-                let end = expr_span(&rhs);
+                let start = expression_span(&lhs);
+                let end = expression_span(&rhs);
                 lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), start.merge(end));
                 continue;
             }
@@ -1988,7 +2087,58 @@ impl Parser {
             break;
         }
 
+        if self.mode == ParseMode::Canonical {
+            self.check_pipe_grouping(expression_start, self.pos)?;
+        }
         Ok(lhs)
+    }
+
+    fn check_pipe_grouping(&self, start: usize, end: usize) -> Result<(), ParseError> {
+        let mut index = start;
+        let mut pipe = None;
+        let mut mixed = false;
+        while index < end {
+            let token = &self.tokens[index];
+            if self.closing_delimiters[index] < end {
+                index = self.closing_delimiters[index] + 1;
+                continue;
+            }
+            index += 1;
+            match token.kind {
+                TokenKind::Pipe => {
+                    pipe = Some(token.span.offset);
+                }
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::EqEq
+                | TokenKind::BangEq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::LtEq
+                | TokenKind::GtEq
+                | TokenKind::AmpAmp
+                | TokenKind::PipePipe
+                | TokenKind::Bang
+                | TokenKind::Amp
+                | TokenKind::Colon
+                | TokenKind::Dot
+                | TokenKind::If
+                | TokenKind::Match
+                | TokenKind::Fn => mixed = true,
+                TokenKind::With if self.starts_record_update(index - 1) => mixed = true,
+                _ => {}
+            }
+        }
+        if mixed && let Some(offset) = pipe {
+            return Err(ParseError::Expected {
+                expected: "explicit grouping around pipe operands mixed with operators or open-ended forms; write `(a + b) |> f` or `a + (b |> f)`".into(),
+                found: "ungrouped pipe combination".into(), offset,
+            });
+        }
+        Ok(())
     }
 
     fn infix_bp(&self) -> Option<(BinOp, u8, u8)> {
@@ -2010,85 +2160,51 @@ impl Parser {
         }
     }
 
-    /// Parse a single pipe stage.
-    ///
-    /// Wraps `parse_prefix` for ordinary stages. Adds first-argument-
-    /// insertion support for two cases that `parse_prefix` alone cannot
-    /// handle, per spec `01-nomenclature.md` §3.6:
-    ///
-    /// 1. Bare unary-builtin keyword references (`x |> realize` ≡
-    ///    `realize(x)`, `x |> copy` ≡ `copy(x)`). `parse_realize` and
-    ///    `parse_copy` themselves accept the bare form (H1/H2 of the
-    ///    pipe-autofix-extras workstream), so the pipe-stage path falls
-    ///    through to them.
-    /// 2. One-arg `cast(type)` pipe-stage form (H3): `x |> cast(f32)` ≡
-    ///    `cast(x, f32)`. The piped value fills the first slot; the
-    ///    type argument fills the second. The synthesized lambda
-    ///    `fn (v) -> cast(v, f32)` is returned so the desugarer's
-    ///    existing pipe-stage path produces the canonical Deep shape.
-    ///
-    /// Other reserved keywords (`grad`, `vmap`, `jit`, `with`, `par`,
-    /// `if`, `match`, `fn`) have no spec-meaningful bare-pipe-stage
-    /// form — see
-    /// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
-    fn parse_pipe_stage(&mut self) -> Result<Expr, ParseError> {
-        if self.at_eof() {
-            return Err(ParseError::UnexpectedEof);
-        }
-
-        // H3: one-arg `cast(type)` pipe-stage form. Look-ahead for
-        // `Cast LParen Ident RParen`; if matched, synthesize an explicit
-        // lambda over a fresh `__chelis_pipe` parameter so the
-        // desugarer's existing pipe-stage handling produces the
-        // canonical Deep shape. Anything else (including the two-arg
-        // form `cast(value, type)`) falls through to `parse_prefix`.
-        if let Some(mode) = match self.peek() {
+    /// Parse Surf-only stage syntax without synthesizing a lambda or binder.
+    fn parse_pipe_stage(&mut self) -> Result<PipeStage, ParseError> {
+        let start = self.tokens[self.pos].span;
+        let mode = match self.peek() {
             TokenKind::Cast => Some(CastMode::Checked),
-            TokenKind::CastTrunc => Some(CastMode::Trunc),
+            TokenKind::NamedCast(named) => Some(CastMode::Named(*named)),
             _ => None,
-        } && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
+        };
+        if let Some(mode) = mode
+            && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
         {
             self.reject_retired_integer_dtype_name(&precision, precision_span)?;
-            let cast_tok = self.advance(); // consume Cast / CastTrunc
-            let span = cast_tok.span;
-            self.advance(); // consume LParen
-            self.advance(); // consume Ident
+            self.advance();
+            self.advance();
+            self.advance();
             let close = self.expect(&TokenKind::RParen)?;
-            let pipe_param = self.fresh_pipe_param_name();
-            let body = Expr::Cast(
-                Box::new(Expr::Var(pipe_param.clone(), span)),
-                precision,
-                mode,
-                span.merge(close.span),
-            );
-            return Ok(Expr::Lambda(
-                vec![Param {
-                    name: pipe_param,
-                    ty: None,
-                    span,
-                }],
-                Box::new(body),
-                span.merge(close.span),
-            ));
-        }
-
-        // Bare `realize` / `copy` pipe stages are handled by
-        // `parse_realize` / `parse_copy` themselves (H1/H2 of the
-        // pipe-autofix-extras workstream), so the pipe-stage path falls
-        // through to `parse_prefix`.
-        let explicit_lambda = matches!(self.peek(), TokenKind::Fn);
-        let stage = self.parse_prefix()?;
-        if self.mode == ParseMode::Canonical
-            && explicit_lambda
-            && is_first_argument_pipe_lambda(&stage)
-        {
-            return Err(ParseError::Expected {
-                expected: "canonical call-stage sugar (`f(args)`, `realize`, `copy`, or `cast(type)`); explicit first-argument lambdas are a v0.18 alias".into(),
-                found: "first-argument pipe lambda".into(),
-                offset: expr_span(&stage).offset,
+            return Ok(PipeStage {
+                expression: Expr::Apply(
+                    Box::new(Expr::Var(mode.keyword().into(), start)),
+                    vec![Expr::Var(precision, precision_span)],
+                    start.merge(close.span),
+                ),
+                syntax: PipeStageSyntax::Cast(mode),
             });
         }
-        Ok(stage)
+        if matches!(self.peek(), TokenKind::Copy | TokenKind::Realize)
+            && !matches!(self.peek_significant_after(1), Some(TokenKind::LParen))
+        {
+            let syntax = if *self.peek() == TokenKind::Copy {
+                PipeStageSyntax::Copy
+            } else {
+                PipeStageSyntax::Realize
+            };
+            let name = if syntax == PipeStageSyntax::Copy {
+                "copy"
+            } else {
+                "realize"
+            };
+            self.advance();
+            return Ok(PipeStage {
+                expression: Expr::Var(name.into(), start),
+                syntax,
+            });
+        }
+        Ok(self.parse_prefix()?.into())
     }
 
     /// If the next four tokens are `Cast LParen Ident RParen`, return
@@ -2108,10 +2224,10 @@ impl Parser {
         ) {
             pos += 1;
         }
-        // Step over `Cast` / `CastTrunc`.
+        // Step over `Cast` / `NamedCast`.
         if !matches!(
             self.tokens.get(pos).map(|t| &t.kind),
-            Some(TokenKind::Cast | TokenKind::CastTrunc)
+            Some(TokenKind::Cast | TokenKind::NamedCast(_))
         ) {
             return None;
         }
@@ -2247,19 +2363,19 @@ impl Parser {
                     ));
                 }
                 let operand = self.parse_expr(13)?;
-                let span = tok.span.merge(expr_span(&operand));
+                let span = tok.span.merge(expression_span(&operand));
                 return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), span));
             }
             TokenKind::Bang => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
-                let span = tok.span.merge(expr_span(&operand));
+                let span = tok.span.merge(expression_span(&operand));
                 return Ok(Expr::Unary(UnaryOp::Not, Box::new(operand), span));
             }
             TokenKind::Amp => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
-                let span = tok.span.merge(expr_span(&operand));
+                let span = tok.span.merge(expression_span(&operand));
                 return Ok(Expr::Borrow(Box::new(operand), span));
             }
             TokenKind::LParen => {
@@ -2298,7 +2414,7 @@ impl Parser {
             TokenKind::Match => self.parse_match()?,
             TokenKind::Fn => self.parse_lambda()?,
             TokenKind::Cast => self.parse_cast(CastMode::Checked)?,
-            TokenKind::CastTrunc => self.parse_cast(CastMode::Trunc)?,
+            TokenKind::NamedCast(named) => self.parse_cast(CastMode::Named(named))?,
             TokenKind::Grad => self.parse_grad()?,
             TokenKind::Vmap => self.parse_vmap()?,
             TokenKind::Jit => self.parse_jit()?,
@@ -2343,24 +2459,26 @@ impl Parser {
     }
 
     fn parse_juxtaposition_args(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
-        if self.mode == ParseMode::Canonical {
+        if self.mode != ParseMode::LegacyV018 {
             if *self.peek() == TokenKind::LParen {
-                let start = expr_span(&expr);
+                let start = expression_span(&expr);
                 self.advance();
-                let args = self.parse_expr_list(TokenKind::RParen)?;
-                let end = self.expect(&TokenKind::RParen)?;
-                expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+                let (args, accumulator, end) = self.parse_call_args()?;
+                expr = call_expr(expr, args, accumulator, start.merge(end));
             }
             return Ok(expr);
         }
 
         loop {
             if *self.peek() == TokenKind::LParen {
-                let start = expr_span(&expr);
+                let start = expression_span(&expr);
                 self.advance();
-                let args = self.parse_expr_list(TokenKind::RParen)?;
-                let end = self.expect(&TokenKind::RParen)?;
-                expr = extend_legacy_application(expr, args, start.merge(end.span));
+                let (args, accumulator, end) = self.parse_call_args()?;
+                let span = start.merge(end);
+                expr = extend_legacy_application(expr, args, span);
+                if let Some(precision) = accumulator {
+                    expr = Expr::Accumulate(Box::new(expr), precision, span);
+                }
                 continue;
             }
 
@@ -2369,8 +2487,8 @@ impl Parser {
                 && *self.peek() != TokenKind::Pipe
             {
                 let arg = self.parse_primary_atom()?;
-                let start = expr_span(&expr);
-                let end = expr_span(&arg);
+                let start = expression_span(&expr);
+                let end = expression_span(&arg);
                 expr = extend_legacy_application(expr, vec![arg], start.merge(end));
                 continue;
             }
@@ -2419,10 +2537,8 @@ impl Parser {
                 // Allow parenthesized call as postfix
                 if *self.peek() == TokenKind::LParen {
                     self.advance();
-                    let args = self.parse_expr_list(TokenKind::RParen)?;
-                    let end = self.expect(&TokenKind::RParen)?;
-                    let span = tok.span.merge(end.span);
-                    expr = Expr::Apply(Box::new(expr), args, span);
+                    let (args, accumulator, end) = self.parse_call_args()?;
+                    expr = call_expr(expr, args, accumulator, tok.span.merge(end));
                 }
                 Ok(expr)
             }
@@ -2467,7 +2583,7 @@ impl Parser {
             TokenKind::Amp => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
-                let span = tok.span.merge(expr_span(&operand));
+                let span = tok.span.merge(expression_span(&operand));
                 Ok(Expr::Borrow(Box::new(operand), span))
             }
             TokenKind::Fn => self.parse_lambda(),
@@ -2495,6 +2611,43 @@ impl Parser {
         Ok(exprs)
     }
 
+    /// A call's arguments after its `(`, through the closing `)`: the
+    /// positional arguments, then an optional final `accumulator = <dtype>`
+    /// (spec/02 `CallArgs`). Returns the closing parenthesis's span.
+    fn parse_call_args(&mut self) -> Result<(Vec<Expr>, Option<String>, Span), ParseError> {
+        let mut args = Vec::new();
+        let mut accumulator = None;
+        while *self.peek() != TokenKind::RParen {
+            if matches!(self.peek(), TokenKind::Ident(name) if name == "accumulator")
+                && self.peek_significant_after(1) == Some(&TokenKind::Eq)
+            {
+                self.advance();
+                self.advance();
+                let (precision, precision_span) = self.expect_ident()?;
+                self.reject_retired_integer_dtype_name(&precision, precision_span)?;
+                if crate::dtype_name::canonical_primitive_name(&precision).is_none()
+                    && !crate::dtype_name::is_reserved_dtype_name(&precision)
+                {
+                    return Err(ParseError::Expected {
+                        expected: "a dtype after `accumulator=`".into(),
+                        found: precision,
+                        offset: precision_span.offset,
+                    });
+                }
+                self.consume_trailing_comma_before(&TokenKind::RParen);
+                accumulator = Some(precision);
+                break;
+            }
+            args.push(self.parse_expr(0)?);
+            if *self.peek() != TokenKind::Comma {
+                break;
+            }
+            self.advance();
+        }
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok((args, accumulator, end.span))
+    }
+
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume If
         let cond = self.parse_expr(0)?;
@@ -2502,7 +2655,7 @@ impl Parser {
         let then_br = self.parse_expr(0)?;
         self.expect(&TokenKind::Else)?;
         let else_br = self.parse_expr(0)?;
-        let span = start.merge(expr_span(&else_br));
+        let span = start.merge(expression_span(&else_br));
         Ok(Expr::If(
             Box::new(cond),
             Box::new(then_br),
@@ -2553,7 +2706,7 @@ impl Parser {
             };
             self.expect(&TokenKind::FatArrow)?;
             let body = self.parse_expr(0)?;
-            let arm_span = pattern_span(&pattern).merge(expr_span(&body));
+            let arm_span = pattern_span(&pattern).merge(expression_span(&body));
             arms.push(MatchArm {
                 pattern,
                 guard,
@@ -2577,12 +2730,12 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
         self.expect(&TokenKind::Arrow)?;
         let body = self.parse_expr(0)?;
-        let span = start.merge(expr_span(&body));
+        let span = start.merge(expression_span(&body));
         Ok(Expr::Lambda(params, Box::new(body), span))
     }
 
     fn parse_cast(&mut self, mode: CastMode) -> Result<Expr, ParseError> {
-        let start = self.advance().span; // consume Cast / CastTrunc
+        let start = self.advance().span; // consume Cast / NamedCast
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
@@ -2642,7 +2795,7 @@ impl Parser {
                 break;
             }
             self.expect(&TokenKind::RParen)?;
-            if self.mode == ParseMode::Canonical && names.len() == 1 {
+            if self.mode != ParseMode::LegacyV018 && names.len() == 1 {
                 return Err(ParseError::Expected {
                     expected: "bare singleton `wrt=name`".into(),
                     found: "parenthesized singleton".into(),
@@ -2670,7 +2823,7 @@ impl Parser {
                     self.expect(&TokenKind::Eq)?;
                     match self.peek().clone() {
                         TokenKind::Int(n) => {
-                            if self.mode == ParseMode::Canonical && n == 0 {
+                            if self.mode != ParseMode::LegacyV018 && n == 0 {
                                 return Err(ParseError::Expected {
                                     expected: "`vmap(f)` for the default zero axis".into(),
                                     found: "redundant `axis=0`".into(),
@@ -2690,7 +2843,7 @@ impl Parser {
                     }
                 }
                 TokenKind::Int(n) => {
-                    if self.mode == ParseMode::Canonical {
+                    if self.mode != ParseMode::LegacyV018 {
                         return Err(ParseError::Expected {
                             expected: "named axis argument `axis=<integer>`".into(),
                             found: n.to_string(),
@@ -2789,7 +2942,7 @@ impl Parser {
         self.consume_trailing_comma_before(&TokenKind::RParen);
         self.expect(&TokenKind::RParen)?;
         let body = self.parse_block_inner(true)?;
-        let span = start.merge(expr_span(&body));
+        let span = start.merge(expression_span(&body));
         match handler_name.as_str() {
             "device" => Ok(Expr::WithDevice(Box::new(arg), Box::new(body), span)),
             _ => Err(ParseError::Expected {
@@ -2923,7 +3076,7 @@ impl Parser {
                     // keep the generic shape and list only what this mode's
                     // grammar actually accepts (spec/02 §P5: canonical
                     // binding blocks separate on newlines alone).
-                    expected: if self.mode == ParseMode::Canonical {
+                    expected: if self.mode != ParseMode::LegacyV018 {
                         "separator (newline)".into()
                     } else {
                         "separator (`;` or newline)".into()
@@ -2967,7 +3120,7 @@ impl Parser {
             });
         }
         let end = self.expect(&TokenKind::RBrace)?;
-        if self.mode == ParseMode::Canonical && bindings.is_empty() && !allow_unbound_tail {
+        if self.mode != ParseMode::LegacyV018 && bindings.is_empty() && !allow_unbound_tail {
             return Err(ParseError::Expected {
                 expected: "binding before the tail expression; use `do` for sequencing".into(),
                 found: "one-expression block".into(),
@@ -2980,6 +3133,7 @@ impl Parser {
     fn is_short_block_binding_start(&self) -> bool {
         let mut probe = Parser {
             tokens: self.tokens.clone(),
+            closing_delimiters: self.closing_delimiters.clone(),
             pos: self.pos,
             module_allowed: false,
             mode: self.mode,
@@ -3086,7 +3240,7 @@ impl Parser {
                 } else {
                     Expr::Var(field.clone(), field_span)
                 };
-                if self.mode == ParseMode::Canonical
+                if self.mode != ParseMode::LegacyV018
                     && explicit
                     && matches!(&value, Expr::Var(name, _) if name == &field)
                 {
@@ -3197,7 +3351,7 @@ impl Parser {
                     let end = self.expect(&TokenKind::RBracket)?;
                     let span = tok_span.merge(end.span);
                     if args.is_empty() {
-                        if self.mode == ParseMode::Canonical {
+                        if self.mode != ParseMode::LegacyV018 {
                             return Err(ParseError::Expected {
                                 expected: format!("bare unapplied type `{name}`"),
                                 found: format!("`{name}[]`"),
@@ -3291,7 +3445,7 @@ impl Parser {
                 let start = self.advance().span;
                 if *self.peek() == TokenKind::RParen {
                     let end = self.advance().span;
-                    if self.mode == ParseMode::Canonical {
+                    if self.mode != ParseMode::LegacyV018 {
                         return Err(ParseError::Expected {
                             expected: "unit type `unit`".into(),
                             found: "()".into(),
@@ -3399,7 +3553,7 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3410,7 +3564,7 @@ impl Parser {
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3481,7 +3635,7 @@ impl Parser {
                         } else {
                             Pattern::Var(field_name.clone(), field_span)
                         };
-                        if self.mode == ParseMode::Canonical
+                        if self.mode != ParseMode::LegacyV018
                             && explicit
                             && matches!(&field_pat, Pattern::Var(name, _) if name == &field_name)
                         {
@@ -3525,7 +3679,7 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RParen)?;
-                    if self.mode == ParseMode::Canonical && sub_pats.is_empty() {
+                    if self.mode != ParseMode::LegacyV018 && sub_pats.is_empty() {
                         return Err(ParseError::Expected {
                             expected: format!("bare zero-argument constructor `{name}`"),
                             found: format!("`{name}()`"),
@@ -3538,7 +3692,7 @@ impl Parser {
                         tok_span.merge(end.span),
                     ))
                 } else {
-                    if self.mode == ParseMode::Canonical {
+                    if self.mode != ParseMode::LegacyV018 {
                         return Ok(Pattern::Constructor(name, vec![], tok_span));
                     }
                     let mut sub_pats = Vec::new();
@@ -3605,7 +3759,7 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3616,7 +3770,7 @@ impl Parser {
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3673,7 +3827,7 @@ impl Parser {
         let minus = self.advance().span;
         let token = self.advance();
         let literal = match token.kind {
-            TokenKind::Int(0) if self.mode == ParseMode::Canonical => {
+            TokenKind::Int(0) if self.mode != ParseMode::LegacyV018 => {
                 return Err(ParseError::Expected {
                     expected: "integer zero pattern `0`".into(),
                     found: "negative integer zero pattern `-0`".into(),
@@ -3683,7 +3837,7 @@ impl Parser {
             TokenKind::Int(value) => Literal::Int(-value),
             TokenKind::IntMinMagnitude(None) => Literal::Int(i64::MIN),
             TokenKind::IntMinMagnitude(Some(suffix)) => {
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3694,7 +3848,7 @@ impl Parser {
             }
             TokenKind::Float(value) => Literal::Float(-value),
             TokenKind::TypedInt(value, suffix) => {
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3704,7 +3858,7 @@ impl Parser {
                 Literal::Int(-value)
             }
             TokenKind::TypedFloat(value, suffix) => {
-                if self.mode == ParseMode::Canonical {
+                if self.mode != ParseMode::LegacyV018 {
                     return Err(ParseError::Expected {
                         expected: "unsuffixed numeric literal pattern".into(),
                         found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
@@ -3763,7 +3917,7 @@ impl Parser {
     }
 
     fn reject_retired_integer_dtype_name(&self, name: &str, span: Span) -> Result<(), ParseError> {
-        if self.mode == ParseMode::Canonical
+        if self.mode != ParseMode::LegacyV018
             && let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name)
         {
             return Err(ParseError::Expected {
@@ -3871,32 +4025,23 @@ fn is_single_letter_upper(name: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
 }
 
-fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
-    let Expr::Lambda(params, body, _) = expr else {
-        return false;
-    };
-    let [param] = params.as_slice() else {
-        return false;
-    };
-    if param.ty.is_some() {
-        return false;
-    }
-    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
-    match body.as_ref() {
-        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
-        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _, _) => {
-            is_param(argument)
-        }
-        _ => false,
+/// A call of `callee`, wrapped in [`Expr::Accumulate`] when it names an
+/// explicit accumulator dtype.
+fn call_expr(callee: Expr, args: Vec<Expr>, accumulator: Option<String>, span: Span) -> Expr {
+    let call = Expr::Apply(Box::new(callee), args, span);
+    match accumulator {
+        Some(precision) => Expr::Accumulate(Box::new(call), precision, span),
+        None => call,
     }
 }
 
-fn expr_span(e: &Expr) -> Span {
+pub(crate) fn expression_span(e: &Expr) -> Span {
     match e {
         Expr::Lit(_, s) => *s,
         Expr::Var(_, s) => *s,
         Expr::Constructor(_, s) => *s,
         Expr::Apply(_, _, s) => *s,
+        Expr::Accumulate(_, _, s) => *s,
         Expr::List(_, s) => *s,
         Expr::Record(_, _, s) => *s,
         Expr::RecordUpdate(_, _, s) => *s,

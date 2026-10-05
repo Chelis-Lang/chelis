@@ -2,8 +2,8 @@
 """Core-fragment eval/C parity receipt for chelis#2102.
 
 The authoritative completion oracle for chelis#1362 guarantee 2 -- "`eval` and
-`build --target c` agree on observations and traps" -- over the pinned C Note,
-Sonar, and Voyage corpus. The owning design document is
+`build --target c` agree on observations and traps" -- over the pinned downstream
+corpora. The owning design document is
 `spec/design/core_fragment_parity_corpus.md`; every rule this script enforces is
 cited there against its normative authority in `spec/05-risc-primitives.md` §8.
 
@@ -919,7 +919,7 @@ def execute_case(
         commands.append(" ".join(eval_argv))
         eval_result = runner.run(eval_argv, workdir)
 
-        build_argv = [chelis, "build", "--target", "c", "-o", "out", program.name]
+        build_argv = [chelis, "build", "--emit-c", "--target", "c", "-o", "out", program.name]
         commands.append(" ".join(build_argv))
         build_result = runner.run(build_argv, workdir)
 
@@ -1024,7 +1024,7 @@ def probe_staging_receipt(chelis: Path, runner: Runner) -> dict | None:
         work = Path(tmp)
         (work / "k.ch").write_text("probe = 1\n", encoding="utf-8")
         result = runner.run(
-            [str(chelis), "build", "--target", "c", "-o", "out", "k.ch"], work
+            [str(chelis), "build", "--emit-c", "--target", "c", "-o", "out", "k.ch"], work
         )
         if result.trapped:
             return None
@@ -1157,8 +1157,8 @@ def pin_failures(pins: dict) -> list[str]:
 
 
 # Both Chelis source extensions `chelis eval --file` accepts. Globbing `.ch`
-# alone made §5.3's "every file discovered in a pinned corpus" false: Sonar
-# carries `.dp` programs the eval lane reads.
+# alone made §5.3's "every file discovered in a pinned corpus" false: a pinned
+# corpus carries `.dp` programs the eval lane reads.
 DISCOVERED_SUFFIXES = (".ch", ".dp")
 
 
@@ -1343,7 +1343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="a pinned corpus checkout, e.g. --corpus c-note=/path/to/c-note",
+        help="a pinned corpus checkout, as --corpus <corpus>=/path/to/checkout",
     )
     parser.add_argument(
         "--compile-profile",

@@ -58,17 +58,40 @@ fn messages(json: &Value) -> Vec<String> {
 /// The route's own diagnostic reaches the machine-facing JSON, and the score
 /// is no longer perfect. A clean `chelis check` is what every downstream
 /// consumer reads, so an acceptance hole here is invisible everywhere.
-fn assert_check_rejects(source: &str, prefix: &str, diagnostic: &str) {
+fn assert_check_rejects(
+    source: &str,
+    prefix: &str,
+    kind: &str,
+    callee: &str,
+    expected: Option<&str>,
+    got: Option<&str>,
+) {
     let (code, json) = check_json(source, prefix);
     assert_eq!(
         code,
         Some(CHECK_ERRORS_EXIT_CODE),
         "{prefix}: a rejected program must exit {CHECK_ERRORS_EXIT_CODE}; json={json}"
     );
-    let found = messages(&json);
     assert!(
-        found.iter().any(|m| m.contains(diagnostic)),
-        "{prefix}: expected {diagnostic:?} in the errors array, got {found:?}"
+        json["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == kind
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(callee))
+                    && expected.is_none_or(|value| {
+                        error["expected"]
+                            .as_str()
+                            .is_some_and(|actual| actual.contains(value))
+                    })
+                    && got.is_none_or(|value| {
+                        error["got"]
+                            .as_str()
+                            .is_some_and(|actual| actual.contains(value))
+                    })
+            })),
+        "{prefix}: missing {kind} rejection for {callee}, expected {expected:?}, got {got:?}: {json}"
     );
     let score = json.get("score").and_then(Value::as_f64);
     assert!(
@@ -127,13 +150,19 @@ fn check_rejects_a_window_route_over_a_late_bound_operand() {
     assert_check_rejects(
         PERMUTE_BAD,
         "issue1512-permute-bad-",
-        "permute expects 2 axis indices for rank 2 tensor, got 3",
+        "ArityMismatch",
+        "permute",
+        Some("2"),
+        Some("3"),
     );
     assert_check_accepts(PERMUTE_GOOD, "issue1512-permute-good-");
     assert_check_rejects(
         SHRINK_BAD,
         "issue1512-shrink-bad-",
-        "shrink expects 2 bounds pairs for rank 2 tensor, got 1",
+        "ArityMismatch",
+        "shrink",
+        Some("2"),
+        Some("1"),
     );
 }
 
@@ -142,7 +171,10 @@ fn check_rejects_a_collection_route_over_a_late_bound_operand() {
     assert_check_rejects(
         LEN_BAD,
         "issue1512-len-bad-",
-        "len expects List or Dict input",
+        "TypeMismatch",
+        "len",
+        None,
+        None,
     );
     assert_check_accepts(LEN_GOOD, "issue1512-len-good-");
 }
@@ -166,8 +198,11 @@ fn eval_refuses_a_late_bound_operand_before_evaluating() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("permute expects 2 axis indices for rank 2 tensor, got 3"),
-        "the refusal must carry the route's own diagnostic, got:\n{stderr}"
+        stderr.contains("ArityMismatch")
+            && stderr.contains("permute")
+            && stderr.contains("2")
+            && stderr.contains("3"),
+        "the refusal must carry the route's own typed rejection, got:\n{stderr}"
     );
 
     // CONTROL: the correct twin evaluates.

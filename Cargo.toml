@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/chelis-axis-core",
     "crates/chelis-unord",
+    "crates/chelis-crmath",
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
     "crates/chelis-abi",
@@ -42,7 +43,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.18.12"
+version = "0.18.13"
 license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
@@ -59,6 +60,7 @@ unexpected_cfgs = "deny"
 [workspace.dependencies]
 chelis-axis-core = { path = "crates/chelis-axis-core" }
 chelis-unord = { path = "crates/chelis-unord" }
+chelis-crmath = { path = "crates/chelis-crmath" }
 chelis-vocab = { path = "crates/chelis-vocab" }
 chelis-abi = { path = "crates/chelis-abi" }
 chelis-image-id = { path = "crates/chelis-image-id" }

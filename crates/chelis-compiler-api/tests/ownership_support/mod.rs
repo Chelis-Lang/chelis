@@ -109,13 +109,23 @@ impl fmt::Display for GeneratedProgram {
     }
 }
 
+/// Keeps otherwise DAG-only constant functions in an authored host module.
+/// These functions are emitted, never invoked by the C driver.
+pub const HOST_ANCHOR: &str = "\ndef host_loss(t: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(t, 0))\ndef host_grad(t: tensor[1, f32]) -> tensor[1, f32] = grad(host_loss)(t)\n";
+
 pub fn emit(source: &str, entry: &str) -> GeneratedProgram {
-    // Keep otherwise DAG-only constant functions in an authored host module.
-    // This additional function is emitted, never invoked by the C driver.
-    let host_anchor = "\ndef host_loss(t: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(t, 0))\ndef host_grad(t: tensor[1, f32]) -> tensor[1, f32] = grad(host_loss)(t)\n";
+    emit_source(SourceKind::Surf, format!("{source}{HOST_ANCHOR}"), entry)
+}
+
+/// [`emit`] for Deep text, which carries [`HOST_ANCHOR`]'s functions itself.
+pub fn emit_deep(source: &str, entry: &str) -> GeneratedProgram {
+    emit_source(SourceKind::Deep, source.to_string(), entry)
+}
+
+fn emit_source(source_kind: SourceKind, source: String, entry: &str) -> GeneratedProgram {
     let artifact = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: format!("{source}{host_anchor}"),
+        source_kind,
+        source,
         target: CompileTarget::C,
         entry_name: Some("fixture".into()),
     })
@@ -224,6 +234,19 @@ pub fn run_failure_stderr(source: &GeneratedProgram, driver: &str) -> String {
         String::from_utf8_lossy(&output.stdout)
     );
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The stdout and stderr of a program that must fail, for a test that also
+/// checks which effects ran before the failure.
+pub fn run_failure_output(source: &GeneratedProgram, driver: &str) -> (String, String) {
+    let (_dir, binary) = compile_program(source, &[], driver);
+    let output = Command::new(binary).output().expect("execute failing C");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        !output.status.success(),
+        "expected a failing program: stdout={stdout}"
+    );
+    (stdout, String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) -> (Value, String) {

@@ -20,11 +20,11 @@ pub enum Tier {
     Must,
     /// SHOULD (recommended, not gating).
     Should,
-    /// MUST once the shell has at least one expressible upstream blocker (row 12).
+    /// MUST once the shell has at least one expressible upstream blocker (row 11).
     MustIfBlocker,
-    /// MUST if the shell validates against external oracles (row 15).
+    /// MUST if the shell validates against external oracles (row 14).
     MustIfExternalOracles,
-    /// MUST if the shell links chelis crates as Cargo path deps (row 18).
+    /// MUST if the shell links chelis crates as Cargo path deps (row 17).
     MustIfCrateLinking,
 }
 
@@ -129,7 +129,7 @@ pub const MANIFEST: &[ContractRow] = &[
     ContractRow {
         row: 7,
         key: "chelis-surface",
-        artifact: "docs/CHELIS_SURFACE.md (domain-relevant subset, @pin/@upstream)",
+        artifact: "docs/CHELIS_SURFACE.md carrying the pinned surface guide in a managed block",
         tier: Tier::Must,
         section: "§3",
         since_version: CONTRACT_BASELINE_VERSION,
@@ -152,14 +152,6 @@ pub const MANIFEST: &[ContractRow] = &[
     },
     ContractRow {
         row: 10,
-        key: "issue-drafts",
-        artifact: "docs/issue_drafts/ convention for parked filings",
-        tier: Tier::Should,
-        section: "§4",
-        since_version: CONTRACT_BASELINE_VERSION,
-    },
-    ContractRow {
-        row: 11,
         key: "tests-neg",
         artifact: "tests_neg/ + runner, in CI",
         tier: Tier::Must,
@@ -167,7 +159,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 12,
+        row: 11,
         key: "tests-blocked",
         artifact: "tests_blocked/ + runner, in CI",
         tier: Tier::MustIfBlocker,
@@ -175,7 +167,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 13,
+        row: 12,
         key: "pin-bump-checklist",
         artifact: "Pin Bump Checklist in AGENTS.md",
         tier: Tier::Must,
@@ -183,7 +175,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 14,
+        row: 13,
         // Narrowed to what the audit actually enforces (chelis#739): §8 also
         // requires *mirrored* `.claude/commands` + `.codex/commands` wrappers with
         // the `red-team` alias wired to `redteam-exec`, but neither `conform init`
@@ -202,7 +194,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 15,
+        row: 14,
         key: "parity-harness",
         artifact: "Parity harness (own uv project, checked-in goldens, oracle guards)",
         tier: Tier::MustIfExternalOracles,
@@ -210,7 +202,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 16,
+        row: 15,
         key: "two-config-acceptance",
         artifact: "≥2-config acceptance for new public surface",
         tier: Tier::Must,
@@ -218,7 +210,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 17,
+        row: 16,
         key: "scaffolding-drift-rule",
         artifact: "Scaffolding Drift Rule in AGENTS.md",
         tier: Tier::Must,
@@ -226,7 +218,7 @@ pub const MANIFEST: &[ContractRow] = &[
         since_version: CONTRACT_BASELINE_VERSION,
     },
     ContractRow {
-        row: 18,
+        row: 17,
         key: "chelis-src",
         artifact: "[chelis-src] + chelis reef src store/symlink + local drift guard",
         tier: Tier::MustIfCrateLinking,

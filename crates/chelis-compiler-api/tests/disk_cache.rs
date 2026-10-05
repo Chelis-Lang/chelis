@@ -174,12 +174,18 @@ fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
         )
         .unwrap();
         let home = root.join("reef-home");
-        let original = compile_reef_context(&home, &root).unwrap();
+        let original =
+            compile_reef_context(&home, &root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
         let path = root.join("claims.ctx");
         original.save(&path).unwrap();
-        let disk = CompiledContext::load_if_fresh(&path, &home, &root)
-            .unwrap()
-            .expect("current disk hit");
+        let disk = CompiledContext::load_if_fresh(
+            &path,
+            &home,
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .unwrap()
+        .expect("current disk hit");
         let worker =
             CompiledContext::decode(&original.encode().unwrap()).expect("current worker hit");
         for cached in [&original, &disk, &worker] {
@@ -229,7 +235,12 @@ fn cold_build_then_load_round_trips_eval_result() {
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/test-a.ctx");
 
-    let ctx_before = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx_before");
+    let ctx_before = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx_before");
     let pre = eval_in_context(&ctx_before, SNIPPET).expect("pre-save eval");
     let pre_named = collect_named_roots_json(&pre.roots, &["main_value"]);
 
@@ -241,9 +252,14 @@ fn cold_build_then_load_round_trips_eval_result() {
     let saved_meta = fs::metadata(&cache_path).expect("stat cache");
     assert!(saved_meta.len() > 0, "saved cache must be non-empty");
 
-    let loaded = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load result")
-        .expect("cache must be a fresh hit on unchanged sources");
+    let loaded = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load result")
+    .expect("cache must be a fresh hit on unchanged sources");
     assert_eq!(
         loaded.source_hash, ctx_before.source_hash,
         "loaded context's source_hash must match the pre-save value"
@@ -278,12 +294,22 @@ fn modifying_path_dep_source_invalidates_cache() {
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/test-b.ctx");
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     ctx.save(&cache_path).expect("save");
 
     // Sanity: matched-hash hit before the edit.
-    let hit = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load_if_fresh ok");
+    let hit = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh ok");
     assert!(hit.is_some(), "before edit, cache must be a fresh hit");
 
     // Edit a path-dep source byte. This is a real semantic change (an
@@ -294,8 +320,13 @@ fn modifying_path_dep_source_invalidates_cache() {
     math_src.push_str("-- a comment that changes file content\n");
     fs::write(&math_path, math_src).expect("rewrite math.ch");
 
-    let miss = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load_if_fresh ok");
+    let miss = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh ok");
     assert!(
         miss.is_none(),
         "after editing a path-dep source byte, load_if_fresh must return None"
@@ -335,6 +366,7 @@ fn _phase_i_child_mode() {
         Path::new(&cache_path),
         Path::new("/tmp/x"),
         Path::new(&package_dir),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect("child load_if_fresh err")
     .expect("child cache must be fresh hit");
@@ -352,7 +384,12 @@ fn cross_process_load_succeeds() {
     let cache_path = root.join(".cache/compiled/test-c.ctx");
 
     // Parent: build + save.
-    let parent_ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("parent ctx");
+    let parent_ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("parent ctx");
     parent_ctx.save(&cache_path).expect("parent save");
     let parent = eval_in_context(&parent_ctx, SNIPPET).expect("parent eval");
     let parent_named = collect_named_roots_json(&parent.roots, &["main_value"]);
@@ -413,7 +450,12 @@ fn truncated_file_is_rejected_not_silently_loaded() {
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/test-d.ctx");
 
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     ctx.save(&cache_path).expect("save");
 
     // Truncate the file to half its length to simulate a torn write.
@@ -421,7 +463,12 @@ fn truncated_file_is_rejected_not_silently_loaded() {
     let half = bytes.len() / 2;
     fs::write(&cache_path, &bytes[..half]).expect("rewrite truncated");
 
-    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Err(CacheError::Corrupt(_))
         | Err(CacheError::Decode(_))
@@ -446,7 +493,12 @@ fn empty_file_is_rejected_as_corrupt() {
     fs::create_dir_all(cache_path.parent().unwrap()).expect("mkdir");
     fs::write(&cache_path, b"").expect("write empty file");
 
-    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Err(CacheError::Corrupt(_)) => { /* expected */ }
         Ok(None) => panic!("empty file must NOT be reported as a clean miss. Torn-write hazard"),
@@ -465,7 +517,12 @@ fn random_bytes_are_rejected_as_corrupt() {
     let trash: Vec<u8> = (0..1024).map(|i| ((i * 31) ^ 0xa5) as u8).collect();
     fs::write(&cache_path, &trash).expect("write trash");
 
-    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Err(CacheError::Corrupt(_)) => { /* expected */ }
         Ok(None) => panic!("random bytes must NOT be reported as a clean miss"),
@@ -478,8 +535,13 @@ fn random_bytes_are_rejected_as_corrupt() {
 fn missing_cache_file_is_clean_miss() {
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/never-written.ctx");
-    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load_if_fresh on a nonexistent file is Ok");
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh on a nonexistent file is Ok");
     assert!(
         outcome.is_none(),
         "a nonexistent cache file must be Ok(None), not an error"
@@ -504,18 +566,33 @@ fn cache_under_wrong_package_dir_returns_none_or_err_never_silent_hit() {
 
     let cache_path = root_a.join(".cache/compiled/cross-hash.ctx");
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx a");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
     ctx_a.save(&cache_path).expect("save a");
 
     // Under root_a (the fixture the cache was built from), fresh hit.
-    let hit_a = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root_a)
-        .expect("load a")
-        .expect("a must hit");
+    let hit_a = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load a")
+    .expect("a must hit");
     assert_eq!(hit_a.source_hash, ctx_a.source_hash);
 
     // Under root_b (a different fixture with a different math.ch), miss.
-    let outcome_b = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root_b)
-        .expect("load b should not error");
+    let outcome_b = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load b should not error");
     assert!(
         outcome_b.is_none(),
         "loading fixture A's cache against fixture B's source set must be Ok(None)"
@@ -615,7 +692,12 @@ fn save_is_atomic_no_partial_file_at_canonical_path() {
     // and the canonical file is the full, decodable artifact.
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/test-atomic.ctx");
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     ctx.save(&cache_path).expect("save");
     assert!(cache_path.exists(), "canonical path must exist after save");
 
@@ -644,11 +726,21 @@ fn save_is_atomic_no_partial_file_at_canonical_path() {
 fn repeated_save_overwrites_cleanly() {
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/test-overwrite.ctx");
-    let ctx1 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx1");
+    let ctx1 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx1");
     ctx1.save(&cache_path).expect("save1");
     let size1 = fs::metadata(&cache_path).expect("stat1").len();
 
-    let ctx2 = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx2");
+    let ctx2 = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx2");
     ctx2.save(&cache_path).expect("save2");
     let size2 = fs::metadata(&cache_path).expect("stat2").len();
 
@@ -658,9 +750,14 @@ fn repeated_save_overwrites_cleanly() {
     );
 
     // And the loaded value must equal one we'd compute fresh.
-    let loaded = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load")
-        .expect("hit");
+    let loaded = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load")
+    .expect("hit");
     assert_eq!(loaded.source_hash, ctx2.source_hash);
 }
 
@@ -691,8 +788,18 @@ fn two_packages_same_name_version_source_but_different_root_do_not_collide() {
         "test setup: the two checkouts must live at different roots"
     );
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx a");
-    let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx b");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx b");
 
     // Same name+version+source bytes: the content hash is identical.
     assert_eq!(
@@ -723,13 +830,23 @@ fn two_packages_same_name_version_source_but_different_root_do_not_collide() {
     let shared_path = root_a.join(".cache/compiled/shared-identity-collision.ctx");
     ctx_a.save(&shared_path).expect("save a");
 
-    let hit_a = CompiledContext::load_if_fresh(&shared_path, Path::new("/tmp/x"), &root_a)
-        .expect("load a should not error")
-        .expect("A must hit its own entry");
+    let hit_a = CompiledContext::load_if_fresh(
+        &shared_path,
+        Path::new("/tmp/x"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load a should not error")
+    .expect("A must hit its own entry");
     assert_eq!(hit_a.identity, ctx_a.identity);
 
-    let outcome_b = CompiledContext::load_if_fresh(&shared_path, Path::new("/tmp/x"), &root_b)
-        .expect("load b should not error");
+    let outcome_b = CompiledContext::load_if_fresh(
+        &shared_path,
+        Path::new("/tmp/x"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load b should not error");
     assert!(
         outcome_b.is_none(),
         "B must NOT silently load A's CompiledContext from a shared cache path; \
@@ -765,7 +882,12 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
     let cache_path = root.join(".cache/compiled/compiler-skew.ctx");
 
     // A real, valid context for this package.
-    let mut ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let mut ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let live_identity = ctx.identity.clone();
     assert_eq!(
         live_identity.compiler_version,
@@ -789,8 +911,13 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
 
     // load_if_fresh recomputes the identity from the running binary; the
     // stored compiler version does not match, so this is a clean miss.
-    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
-        .expect("load_if_fresh must not error on a compiler-version-skewed entry");
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh must not error on a compiler-version-skewed entry");
     assert!(
         outcome.is_none(),
         "a cache entry written by a differently-built compiler must be a clean miss, \

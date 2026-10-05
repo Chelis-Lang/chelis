@@ -504,6 +504,14 @@ fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExp
     crate::nesting::on_parse_segment(|| RawParser::with_source(tokens, source).parse_exprs())
 }
 
+/// Quarantined previous-pipe reader for explicit, baseline-checked migration.
+/// The caller removes retired forms and metadata before current stamping.
+#[cfg(feature = "pre-020-pipe-migration")]
+pub fn parse_pipe_migration_raw(source: &str) -> Result<Vec<RawExpr>, ParseError> {
+    let tokens = crate::lexer::lex(source)?;
+    parse_raw_syntax(&tokens, Some(source))
+}
+
 pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
     parse_raw_with_source(tokens, None)
 }
@@ -513,6 +521,7 @@ fn parse_raw_with_source(
     source: Option<&str>,
 ) -> Result<Vec<RawExpr>, ParseError> {
     let exprs = parse_raw_syntax(tokens, source)?;
+    reject_retired_pipes(&exprs)?;
     crate::metadata::validate_raw(&exprs).map_err(|error| {
         if let Some((byte_in_value, code_point)) = error.forbidden_span_char {
             ParseError::ForbiddenSpanChar {
@@ -529,6 +538,47 @@ fn parse_raw_with_source(
 }
 
 /// Parse a source string into raw expressions (lex + parse_raw).
+fn reject_retired_pipes(exprs: &[RawExpr]) -> Result<(), ParseError> {
+    let mut pending: Vec<_> = exprs.iter().collect();
+    while let Some(expr) = pending.pop() {
+        match expr {
+            RawExpr::List(items, _) => {
+                if let Some(RawExpr::Atom(crate::RawAtom::Symbol(head), span)) = items.first()
+                    && head == "pipe"
+                    && matches!(items.get(1), Some(RawExpr::Map(..)))
+                {
+                    return Err(ParseError::Expected {
+                        expected: format!(
+                            "Deep format {}: `pipe` was removed; regenerate stored Deep as applications (Surf `|>` remains supported)",
+                            crate::DEEP_FORMAT_VERSION
+                        ),
+                        found: "retired Deep pipe node".into(),
+                        offset: span.offset,
+                    });
+                }
+                pending.extend(items);
+            }
+            RawExpr::Map(entries, _) => pending.extend(
+                entries
+                    .iter()
+                    .filter(|(key, _)| key != "source")
+                    .map(|(_, value)| value),
+            ),
+            RawExpr::MetaExpr { entries, expr, .. } => {
+                pending.extend(
+                    entries
+                        .iter()
+                        .filter(|(key, _)| key != "source")
+                        .map(|(_, value)| value),
+                );
+                pending.push(expr);
+            }
+            RawExpr::Atom(..) | RawExpr::ExtensionData(_) => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = lexer::lex(source)?;
     parse_raw_with_source(&tokens, Some(source))
@@ -586,6 +636,7 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw_syntax(&tokens, Some(source))?;
+    reject_retired_pipes(&raw_exprs)?;
     crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
         // [03-PROG-3] puts the zero-form rejection at the position where a

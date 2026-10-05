@@ -622,21 +622,47 @@ fn unary_func_elementwise_emits_typed_pointer_access() {
     );
 }
 
+/// chelis#2734: a host elementwise loop over a dtype none of its arms covers
+/// is refused before emission with a typed diagnostic, never emitted with a
+/// default arm that aborts when the program runs. Host lowering runs these
+/// operations in the tensor lane, which covers every admitted dtype.
 #[test]
-fn unary_func_int32_arm_aborts_without_binary32_conversion() {
-    let program = make_unary_program("exp", Prim::Int32);
-    let src = emit_host_program(&program, "unfunc_i32_reject").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_I32");
+fn an_elementwise_loop_outside_its_arms_is_refused_before_emission() {
+    for (program, name) in [
+        (make_unary_program("exp", Prim::Int32), "exp"),
+        (make_unary_program("exp", Prim::F64), "exp"),
+        (make_unary_program("sin", Prim::F16), "sin"),
+        (make_unary_program("sqrt", Prim::Bf16), "sqrt"),
+        (make_binary_program("add", Prim::F16), "add"),
+        (make_binary_program("mul", Prim::Bf16), "mul"),
+        (make_binary_program("sub", Prim::Int8), "sub"),
+        (make_binary_program("add", Prim::Int16), "add"),
+    ] {
+        let error = emit_host_program(&program, &format!("{name}_refused"))
+            .expect_err("a dtype outside the loop's arms must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("`{name}` over a"))
+                && message.contains("has no arm for this dtype"),
+            "{name}: {message}"
+        );
+    }
+}
 
+/// The negative twin: every dtype an arm covers still emits its loop, with
+/// no run-time abort arm for a named dtype.
+#[test]
+fn an_elementwise_loop_inside_its_arms_still_emits() {
+    for prim in [Prim::F32, Prim::F64, Prim::Int32, Prim::Int64] {
+        let program = make_binary_program("add", prim);
+        let source = emit_host_program(&program, "add_admitted").unwrap();
+        assert!(source.contains("switch ("), "{prim:?}: {source}");
+    }
+    let program = make_unary_program("exp", Prim::F32);
+    let source = emit_host_program(&program, "exp_admitted").unwrap();
     assert!(
-        arm.contains("abort();"),
-        "the i32 arm must abort; arm:\n{arm}"
-    );
-    assert!(
-        !arm.contains("__target_data")
-            && !arm.contains("(float*)")
-            && !arm.contains("(const float*)"),
-        "the i32 arm must not convert through binary32; arm:\n{arm}"
+        source.contains("chelis_cr_expf") && !source.contains("unsupported for dtype"),
+        "{source}"
     );
 }
 
@@ -803,5 +829,79 @@ fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
     assert!(
         !src.contains("chelis_host_f64_bits(__tensor_scalar0_0)"),
         "i64 helper input must not round-trip through f64:\n{src}"
+    );
+}
+
+// ---- logical operators over tensor operands ----------------------------
+
+/// `op(a, b)` where `a` is a bool tensor and `b` is a bool scalar.
+fn make_mixed_logical_program(op_name: &str) -> HostProgram {
+    let mut program = make_binary_program(op_name, Prim::Bool);
+    let function = &mut program.functions[0];
+    function.params[1].ty = HostType::Bool;
+    let tt = vec_ty(4, Prim::Bool);
+    function.body = HostExpr::new(HostExprKind::Builtin {
+        name: op_name.to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(tt.clone()),
+            )),
+            HostExpr::new(HostExprKind::Var("b".to_string(), HostType::Bool)),
+        ],
+        ty: HostType::Tensor(tt),
+    });
+    program
+}
+
+// A logical operation over two tensors computed on the host combines them
+// element by element through typed bool storage, after the operand agreement
+// check, rather than combining the two `chelis_tensor *` with C's scalar
+// `&&` or `||`.
+#[test]
+fn logical_binary_over_tensor_operands_is_elementwise_in_host_emission() {
+    for (op, c_op) in [("and", "&&"), ("or", "||")] {
+        let program = make_binary_program(op, Prim::Bool);
+        let src = emit_host_program(&program, "logical_tensor").unwrap();
+        assert!(
+            src.contains("chelis_host_require_elementwise_agreement(")
+                && src.contains("(uint8_t*)")
+                && src.contains(&format!("__lhs_data[idx_lhs] {c_op} __rhs_data[idx_rhs]")),
+            "{op}: tensor operands must combine element by element; got:\n{src}"
+        );
+        assert!(
+            !src.lines()
+                .any(|line| line.contains(c_op) && line.contains("__arg")),
+            "{op}: tensor pointers must never meet a scalar `{c_op}`; got:\n{src}"
+        );
+    }
+}
+
+// The negative twin: an operand pair the tensor arm does not take reaches the
+// scalar arm, which refuses any tensor operand with a typed unsupported
+// ([04-TOT-2]) rather than writing the pointer combination.
+#[test]
+fn logical_binary_with_one_tensor_operand_is_refused_in_host_emission() {
+    for op in ["and", "or"] {
+        let error = emit_host_program(&make_mixed_logical_program(op), "logical_mixed")
+            .expect_err("a tensor operand must not reach scalar `&&`/`||`");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains(&format!("builtin `{op}`"))
+                && rendered.contains("tensor operands in `chelis build` host emission"),
+            "{op}: {rendered}"
+        );
+    }
+}
+
+// `not` keeps its elementwise tensor arm, which reads and writes the bool
+// storage through typed pointers.
+#[test]
+fn logical_not_over_a_tensor_operand_keeps_its_elementwise_arm() {
+    let program = make_unary_program("not", Prim::Bool);
+    let src = emit_host_program(&program, "not_tensor").unwrap();
+    assert!(
+        src.contains("(uint8_t*)") && src.contains("= !__"),
+        "tensor `not` must negate each element through typed bool storage; got:\n{src}"
     );
 }

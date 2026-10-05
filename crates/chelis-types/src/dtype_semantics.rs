@@ -44,26 +44,29 @@
 //! kernel raised the trap after lowering; composed evaluation forwards the
 //! message unchanged.
 
+use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_abi::failure::{NumericTrapKind, NumericTrapLine};
+use chelis_deep::NamedCastMode;
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
-pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+pub const NUMERIC_TRAP_PREFIX: &str = NumericTrapLine::PREFIX;
 
 /// Why a key buffer or key scalar refuses every numeric read: a key has no
 /// arithmetic, comparison, or cast (spec/04 §1.1), and the IR verifier keeps
 /// keys out of every numeric operation, so reaching one is a compiler defect.
 const KEY_HAS_NO_NUMERIC_READING: &str = "a random key has no numeric reading; the IR verifier keeps keys out of every numeric operation";
 /// Frozen spelling of the [04-NUM-9] overflow kind.
-pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
+pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = NumericTrapKind::Overflow.as_str();
 /// Frozen spelling of the [04-NUM-9] domain kind.
-pub const NUMERIC_TRAP_DOMAIN_KIND: &str = "domain";
+pub const NUMERIC_TRAP_DOMAIN_KIND: &str = NumericTrapKind::Domain.as_str();
 /// Frozen spelling of the [04-NUM-9] division-by-zero kind.
-pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = "division by zero";
+pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = NumericTrapKind::DivZero.as_str();
 /// Frozen separator before the canonical raising primitive name.
-pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = " in ";
+pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = NumericTrapLine::OPERATION_SEPARATOR;
 /// Frozen separator before the finalized dtype name.
-pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = " at ";
+pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = NumericTrapLine::DTYPE_SEPARATOR;
 
 /// The one numeric error type, identical in every lane
 /// (`spec/design/dtype_semantics.md` section C2).
@@ -78,34 +81,26 @@ pub enum NumericTrap {
     DivZero { op: &'static str, prim: Prim },
 }
 
+impl NumericTrap {
+    /// The kind, raising primitive, and dtype, as the shared [04-NUM-9]
+    /// line formatter takes them.
+    pub fn line(&self) -> NumericTrapLine<'static> {
+        let (kind, op, prim) = match *self {
+            NumericTrap::Overflow { op, prim } => (NumericTrapKind::Overflow, op, prim),
+            NumericTrap::Domain { op, prim } => (NumericTrapKind::Domain, op, prim),
+            NumericTrap::DivZero { op, prim } => (NumericTrapKind::DivZero, op, prim),
+        };
+        NumericTrapLine {
+            kind,
+            op,
+            dtype: prim.name(),
+        }
+    }
+}
+
 impl std::fmt::Display for NumericTrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NumericTrap::Overflow { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_OVERFLOW_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-            NumericTrap::Domain { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DOMAIN_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-            NumericTrap::DivZero { op, prim } => {
-                write!(
-                    f,
-                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DIV_ZERO_KIND}\
-                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
-                    prim.name()
-                )
-            }
-        }
+        self.line().fmt(f)
     }
 }
 
@@ -350,7 +345,20 @@ impl CheckedCastPlan {
             Some(i) => RawScalar::Int(i),
             None => RawScalar::Float(value.as_f64_lossy()),
         };
-        finalize_scalar(op, self.target, raw)
+        finalize_scalar(op, self.target, self.conversion_raw(raw))
+    }
+
+    /// [04-NUM-2]: a float-to-float conversion that produces a NaN finalizes
+    /// to the target's canonical quiet NaN. The f16 and bf16 targets already
+    /// round every NaN to it; the f32 and f64 targets would keep the source
+    /// payload and sign through the exact f64 widening.
+    fn conversion_raw(self, raw: RawScalar) -> RawScalar {
+        match (self.kind, raw) {
+            (CheckedCastKind::FloatToFloat, RawScalar::Float(value)) => {
+                RawScalar::Float(canonical_nan_f64(value))
+            }
+            _ => raw,
+        }
     }
 
     fn cast_raw(self, op: &'static str, raw: RawScalar) -> Result<ScalarValue, NumericTrap> {
@@ -377,7 +385,7 @@ impl CheckedCastPlan {
             }
         };
         assert!(family_matches, "checked-cast raw source family mismatch");
-        finalize_scalar(op, self.target, raw)
+        finalize_scalar(op, self.target, self.conversion_raw(raw))
     }
 }
 
@@ -576,6 +584,9 @@ pub enum FloatBinOp {
     Mul,
     Div,
     FloorDiv,
+    /// [05-OP-64] float `mod`: C `fmod`, the exact remainder with the
+    /// quotient truncated toward zero (Rust's float `%`).
+    Rem,
     Max,
     Min,
 }
@@ -602,6 +613,7 @@ impl FloatBinOp {
             Self::Mul => "mul",
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
+            Self::Rem => "mod",
             Self::Max => "max_elem",
             Self::Min => "min_elem",
         }
@@ -627,8 +639,12 @@ pub enum FloatUnOp {
     Relu,
     Sigmoid,
     Tanh,
+    Erf,
+    Erfc,
     Silu,
     Gelu,
+    GeluTanh,
+    StandardNormalCdf,
 }
 
 impl FloatUnOp {
@@ -650,15 +666,24 @@ impl FloatUnOp {
             Self::Relu => "relu",
             Self::Sigmoid => "sigmoid",
             Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Silu => "silu",
             Self::Gelu => "gelu",
+            Self::GeluTanh => "gelu_tanh",
+            Self::StandardNormalCdf => "standard_normal_cdf",
         }
     }
 
     const fn is_activation(self) -> bool {
         matches!(
             self,
-            Self::Relu | Self::Sigmoid | Self::Tanh | Self::Silu | Self::Gelu
+            Self::Relu
+                | Self::Sigmoid
+                | Self::Silu
+                | Self::Gelu
+                | Self::GeluTanh
+                | Self::StandardNormalCdf
         )
     }
 }
@@ -1045,7 +1070,14 @@ fn extrema_selects_left<T: Copy + PartialOrd>(
     }
 }
 
-fn canonicalize_subtraction_f32(value: f32) -> f32 {
+/// [04-NUM-2]: floating arithmetic and numeric conversion finalize every NaN
+/// they produce to the dtype's canonical quiet NaN, dropping the input
+/// payload and sign, so NaN bits never depend on the host ISA (arm64 yields
+/// `0x7fc00000` for an invalid operation, x86 `0xffc00000`, and both
+/// propagate input payloads). Only selection, which [05-OP-40] declares
+/// bit-preserving, bypasses this. The f16 and bf16 lanes compute at f32 and
+/// narrow the canonical f32 NaN to their own canonical encoding.
+fn canonical_nan_f32(value: f32) -> f32 {
     if value.is_nan() {
         f32::from_bits(0x7fc0_0000)
     } else {
@@ -1053,7 +1085,7 @@ fn canonicalize_subtraction_f32(value: f32) -> f32 {
     }
 }
 
-fn canonicalize_subtraction_f64(value: f64) -> f64 {
+fn canonical_nan_f64(value: f64) -> f64 {
     if value.is_nan() {
         f64::from_bits(0x7ff8_0000_0000_0000)
     } else {
@@ -1068,12 +1100,13 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     };
     match op {
-        FloatBinOp::Sub => canonicalize_subtraction_f32(value),
-        _ => value,
+        FloatBinOp::Max | FloatBinOp::Min => value,
+        _ => canonical_nan_f32(value),
     }
 }
 
@@ -1084,12 +1117,13 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     };
     match op {
-        FloatBinOp::Sub => canonicalize_subtraction_f64(value),
-        _ => value,
+        FloatBinOp::Max | FloatBinOp::Min => value,
+        _ => canonical_nan_f64(value),
     }
 }
 
@@ -1122,53 +1156,61 @@ pub fn float_binop(
 }
 
 fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
-    match op {
+    canonical_nan_f32(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
-        FloatUnOp::Exp => value.exp(),
-        FloatUnOp::Log => value.ln(),
-        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Exp => chelis_crmath::exp_f32(value),
+        FloatUnOp::Log => chelis_crmath::log_f32(value),
+        FloatUnOp::Sin => chelis_crmath::sin_f32(value),
         FloatUnOp::Sqrt => value.sqrt(),
-        FloatUnOp::Cos => value.cos(),
-        FloatUnOp::Tan => value.tan(),
-        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Cos => chelis_crmath::cos_f32(value),
+        FloatUnOp::Tan => chelis_crmath::tan_f32(value),
+        FloatUnOp::Atan => chelis_crmath::atan_f32(value),
+        FloatUnOp::Tanh => chelis_crmath::tanh_f32(value),
+        FloatUnOp::Erf => chelis_crmath::erf_f32(value),
+        FloatUnOp::Erfc => chelis_crmath::erfc_f32(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
-        | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
-    }
+    })
 }
 
 fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
-    match op {
+    canonical_nan_f64(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
-        FloatUnOp::Exp => value.exp(),
-        FloatUnOp::Log => value.ln(),
-        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Exp => chelis_crmath::exp_f64(value),
+        FloatUnOp::Log => chelis_crmath::log_f64(value),
+        FloatUnOp::Sin => chelis_crmath::sin_f64(value),
         FloatUnOp::Sqrt => value.sqrt(),
-        FloatUnOp::Cos => value.cos(),
-        FloatUnOp::Tan => value.tan(),
-        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Cos => chelis_crmath::cos_f64(value),
+        FloatUnOp::Tan => chelis_crmath::tan_f64(value),
+        FloatUnOp::Atan => chelis_crmath::atan_f64(value),
+        FloatUnOp::Tanh => chelis_crmath::tanh_f64(value),
+        FloatUnOp::Erf => chelis_crmath::erf_f64(value),
+        FloatUnOp::Erfc => chelis_crmath::erfc_f64(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
-        | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
-    }
+    })
 }
 
 fn activation_constant(
@@ -1191,60 +1233,65 @@ fn float_activation(op: FloatUnOp, value: ScalarValue) -> Result<ScalarValue, Nu
     SCALAR_ACTIVATION_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
     let prim = value.prim();
-    match op {
-        FloatUnOp::Relu => float_binop(FloatBinOp::Max, value, activation_constant(op, prim, 0.0)?),
-        FloatUnOp::Sigmoid => {
-            let neg_x = float_unop(FloatUnOp::Neg, value)?;
-            let exp_neg_x = float_unop(FloatUnOp::Exp, neg_x)?;
-            let denominator = float_binop(
-                FloatBinOp::Add,
-                activation_constant(op, prim, 1.0)?,
-                exp_neg_x,
-            )?;
-            float_unop(FloatUnOp::Recip, denominator)
-        }
-        FloatUnOp::Tanh => {
-            let two_x = float_binop(FloatBinOp::Mul, activation_constant(op, prim, 2.0)?, value)?;
-            let sigmoid = float_activation(FloatUnOp::Sigmoid, two_x)?;
-            let twice_sigmoid = float_binop(
-                FloatBinOp::Mul,
-                activation_constant(op, prim, 2.0)?,
-                sigmoid,
-            )?;
-            float_binop(
-                FloatBinOp::Add,
-                twice_sigmoid,
-                activation_constant(op, prim, -1.0)?,
-            )
-        }
-        FloatUnOp::Silu => {
-            let sigmoid = float_activation(FloatUnOp::Sigmoid, value)?;
-            float_binop(FloatBinOp::Mul, value, sigmoid)
-        }
-        FloatUnOp::Gelu => {
-            let x_squared = float_binop(FloatBinOp::Mul, value, value)?;
-            let x_cubed = float_binop(FloatBinOp::Mul, x_squared, value)?;
-            let scaled_cube = float_binop(
-                FloatBinOp::Mul,
-                activation_constant(op, prim, 0.044715)?,
-                x_cubed,
-            )?;
-            let sum_inner = float_binop(FloatBinOp::Add, value, scaled_cube)?;
-            let inner = float_binop(
-                FloatBinOp::Mul,
-                activation_constant(op, prim, 0.7978845608028654)?,
-                sum_inner,
-            )?;
-            let tanh_inner = float_activation(FloatUnOp::Tanh, inner)?;
-            let one_plus_tanh = float_binop(
-                FloatBinOp::Add,
-                activation_constant(op, prim, 1.0)?,
-                tanh_inner,
-            )?;
-            let x_mul = float_binop(FloatBinOp::Mul, value, one_plus_tanh)?;
-            float_binop(FloatBinOp::Mul, activation_constant(op, prim, 0.5)?, x_mul)
-        }
-        _ => unreachable!("float_activation requires an activation selector"),
+    if op == FloatUnOp::Relu {
+        return float_binop(FloatBinOp::Max, value, activation_constant(op, prim, 0.0)?);
+    }
+    let activation = DerivedActivation::from_float_unop(op)
+        .expect("float_activation requires an activation selector");
+    lower_activation(&mut ScalarActivationGraph { op, prim }, activation, value)
+}
+
+/// Evaluates each section 3.3 primitive on finalized scalars as it is reached.
+struct ScalarActivationGraph {
+    op: FloatUnOp,
+    prim: Prim,
+}
+
+impl ActivationGraph for ScalarActivationGraph {
+    type Value = ScalarValue;
+    type Predicate = bool;
+    type Error = NumericKernelError;
+
+    fn operand_prim(&self) -> Prim {
+        self.prim
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<ScalarValue, NumericKernelError> {
+        activation_constant(self.op, prim, value)
+    }
+
+    fn unary(&mut self, op: FloatUnOp, x: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
+        float_unop(op, x)
+    }
+
+    fn binary(
+        &mut self,
+        op: FloatBinOp,
+        lhs: ScalarValue,
+        rhs: ScalarValue,
+    ) -> Result<ScalarValue, NumericKernelError> {
+        float_binop(op, lhs, rhs)
+    }
+
+    fn less_than(
+        &mut self,
+        lhs: ScalarValue,
+        rhs: ScalarValue,
+    ) -> Result<bool, NumericKernelError> {
+        compare_scalars(CompareOp::Lt, lhs, rhs)
+    }
+
+    fn select(
+        &mut self,
+        condition: bool,
+        then: ScalarValue,
+        otherwise: ScalarValue,
+    ) -> Result<ScalarValue, NumericKernelError> {
+        Ok(if condition { then } else { otherwise })
+    }
+
+    fn convert(&mut self, x: ScalarValue, prim: Prim) -> Result<ScalarValue, NumericKernelError> {
+        cast_scalar(self.op.name(), x, prim).map_err(Into::into)
     }
 }
 
@@ -1647,9 +1694,9 @@ fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: 
         if source_mantissa == 0 {
             return sign | target_exponent_bits;
         }
-        // Every NaN remains a NaN. A canonical quiet payload also avoids
-        // architecture-dependent signaling-NaN behavior at this boundary.
-        return sign | target_exponent_bits | (1_u16 << (mantissa_bits - 1));
+        // [04-NUM-2]: every NaN becomes the canonical quiet NaN, whatever its
+        // sign and payload.
+        return target_exponent_bits | (1_u16 << (mantissa_bits - 1));
     }
     if source_exponent == 0 {
         // Every finite binary64 subnormal is below half of the least f16 or
@@ -1932,7 +1979,8 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| {
             from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
         }),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
@@ -1950,7 +1998,8 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
-        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
+        | FloatBinOp::FloorDiv
+        | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, f64::is_nan)
         }),
@@ -2158,29 +2207,33 @@ fn float_vec_unop_f32<T: Copy>(
             values
                 .iter()
                 .copied()
-                .map(|value| from_f32($body(to_f32(value))))
+                .map(|value| from_f32(canonical_nan_f32($body(to_f32(value)))))
                 .collect()
         };
     }
     match op {
         FloatUnOp::Neg => map!(|x: f32| -x),
         FloatUnOp::Recip => map!(f32::recip),
-        FloatUnOp::Exp => map!(f32::exp),
-        FloatUnOp::Log => map!(f32::ln),
-        FloatUnOp::Sin => map!(f32::sin),
+        FloatUnOp::Exp => map!(chelis_crmath::exp_f32),
+        FloatUnOp::Log => map!(chelis_crmath::log_f32),
+        FloatUnOp::Sin => map!(chelis_crmath::sin_f32),
         FloatUnOp::Sqrt => map!(f32::sqrt),
-        FloatUnOp::Cos => map!(f32::cos),
-        FloatUnOp::Tan => map!(f32::tan),
-        FloatUnOp::Atan => map!(f32::atan),
+        FloatUnOp::Cos => map!(chelis_crmath::cos_f32),
+        FloatUnOp::Tan => map!(chelis_crmath::tan_f32),
+        FloatUnOp::Atan => map!(chelis_crmath::atan_f32),
+        FloatUnOp::Tanh => map!(chelis_crmath::tanh_f32),
+        FloatUnOp::Erf => map!(chelis_crmath::erf_f32),
+        FloatUnOp::Erfc => map!(chelis_crmath::erfc_f32),
         FloatUnOp::Abs => map!(f32::abs),
         FloatUnOp::Floor => map!(f32::floor),
         FloatUnOp::Ceil => map!(f32::ceil),
         FloatUnOp::Round => map!(f32::round_ties_even),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
-        | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
@@ -2189,168 +2242,153 @@ fn float_vec_unop_f32<T: Copy>(
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {
-            values.iter().copied().map($body).collect()
+            values
+                .iter()
+                .copied()
+                .map(|value| canonical_nan_f64($body(value)))
+                .collect()
         };
     }
     match op {
         FloatUnOp::Neg => map!(|x: f64| -x),
         FloatUnOp::Recip => map!(f64::recip),
-        FloatUnOp::Exp => map!(f64::exp),
-        FloatUnOp::Log => map!(f64::ln),
-        FloatUnOp::Sin => map!(f64::sin),
+        FloatUnOp::Exp => map!(chelis_crmath::exp_f64),
+        FloatUnOp::Log => map!(chelis_crmath::log_f64),
+        FloatUnOp::Sin => map!(chelis_crmath::sin_f64),
         FloatUnOp::Sqrt => map!(f64::sqrt),
-        FloatUnOp::Cos => map!(f64::cos),
-        FloatUnOp::Tan => map!(f64::tan),
-        FloatUnOp::Atan => map!(f64::atan),
+        FloatUnOp::Cos => map!(chelis_crmath::cos_f64),
+        FloatUnOp::Tan => map!(chelis_crmath::tan_f64),
+        FloatUnOp::Atan => map!(chelis_crmath::atan_f64),
+        FloatUnOp::Tanh => map!(chelis_crmath::tanh_f64),
+        FloatUnOp::Erf => map!(chelis_crmath::erf_f64),
+        FloatUnOp::Erfc => map!(chelis_crmath::erfc_f64),
         FloatUnOp::Abs => map!(f64::abs),
         FloatUnOp::Floor => map!(f64::floor),
         FloatUnOp::Ceil => map!(f64::ceil),
         FloatUnOp::Round => map!(f64::round_ties_even),
         FloatUnOp::Relu
         | FloatUnOp::Sigmoid
-        | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        | FloatUnOp::Gelu
+        | FloatUnOp::GeluTanh
+        | FloatUnOp::StandardNormalCdf => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
 }
 
 trait ActivationElement: Copy {
+    const PRIM: Prim;
     fn constant(value: f64) -> Self;
-    fn neg(self) -> Self;
-    fn exp(self) -> Self;
-    fn recip(self) -> Self;
-    fn add(self, rhs: Self) -> Self;
-    fn mul(self, rhs: Self) -> Self;
+    fn unary(self, op: FloatUnOp) -> Self;
+    fn binary(self, op: FloatBinOp, rhs: Self) -> Self;
+    fn less_than(self, rhs: Self) -> bool;
 }
 
+// Each activation step is the same primitive kernel the scalar lane uses, so
+// the tensor lane cannot drift from it, including [04-NUM-2]'s NaN
+// finalization. Only f32 and f64 elements run natively: a section 3.3 graph
+// never changes their dtype, while `Phi` at f16 and bf16 widens to f32, so
+// those elements run the scalar lane's graph.
 macro_rules! impl_native_activation_element {
-    ($ty:ty) => {
+    ($ty:ty, $prim:expr, $unop:ident, $binop:ident) => {
         impl ActivationElement for $ty {
+            const PRIM: Prim = $prim;
+
             fn constant(value: f64) -> Self {
                 value as Self
             }
 
-            fn neg(self) -> Self {
-                -self
+            fn unary(self, op: FloatUnOp) -> Self {
+                $unop(op, self)
             }
 
-            fn exp(self) -> Self {
-                self.exp()
+            fn binary(self, op: FloatBinOp, rhs: Self) -> Self {
+                $binop(op, self, rhs)
             }
 
-            fn recip(self) -> Self {
-                self.recip()
-            }
-
-            fn add(self, rhs: Self) -> Self {
-                self + rhs
-            }
-
-            fn mul(self, rhs: Self) -> Self {
-                self * rhs
+            fn less_than(self, rhs: Self) -> bool {
+                self < rhs
             }
         }
     };
 }
 
-impl_native_activation_element!(f32);
-impl_native_activation_element!(f64);
+impl_native_activation_element!(f32, Prim::F32, apply_float_unop_f32, apply_float_binop_f32);
+impl_native_activation_element!(f64, Prim::F64, apply_float_unop_f64, apply_float_binop_f64);
 
-macro_rules! impl_reduced_activation_element {
-    ($ty:ty) => {
-        impl ActivationElement for $ty {
-            fn constant(value: f64) -> Self {
-                Self::from_f64(value)
-            }
+/// Evaluates each section 3.3 primitive on one f32 or f64 tensor element as
+/// it is reached.
+struct ElementActivationGraph<T>(std::marker::PhantomData<T>);
 
-            fn neg(self) -> Self {
-                Self::from_f32(-self.to_f32())
-            }
+impl<T: ActivationElement> ActivationGraph for ElementActivationGraph<T> {
+    type Value = T;
+    type Predicate = bool;
+    type Error = std::convert::Infallible;
 
-            fn exp(self) -> Self {
-                Self::from_f32(self.to_f32().exp())
-            }
+    fn operand_prim(&self) -> Prim {
+        T::PRIM
+    }
 
-            fn recip(self) -> Self {
-                Self::from_f32(self.to_f32().recip())
-            }
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<T, Self::Error> {
+        assert_eq!(
+            prim,
+            T::PRIM,
+            "an f32 or f64 activation graph keeps its dtype"
+        );
+        Ok(T::constant(value))
+    }
 
-            fn add(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32() + rhs.to_f32())
-            }
+    fn unary(&mut self, op: FloatUnOp, x: T) -> Result<T, Self::Error> {
+        Ok(x.unary(op))
+    }
 
-            fn mul(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32() * rhs.to_f32())
-            }
-        }
-    };
-}
+    fn binary(&mut self, op: FloatBinOp, lhs: T, rhs: T) -> Result<T, Self::Error> {
+        Ok(lhs.binary(op, rhs))
+    }
 
-impl_reduced_activation_element!(half::f16);
-impl_reduced_activation_element!(half::bf16);
+    fn less_than(&mut self, lhs: T, rhs: T) -> Result<bool, Self::Error> {
+        Ok(lhs.less_than(rhs))
+    }
 
-fn activation_sigmoid<T: ActivationElement>(value: T, one: T) -> T {
-    one.add(value.neg().exp()).recip()
-}
+    fn select(&mut self, condition: bool, then: T, otherwise: T) -> Result<T, Self::Error> {
+        Ok(if condition { then } else { otherwise })
+    }
 
-fn activation_tanh<T: ActivationElement>(value: T, one: T, two: T, neg_one: T) -> T {
-    two.mul(activation_sigmoid(two.mul(value), one))
-        .add(neg_one)
+    fn convert(&mut self, _x: T, prim: Prim) -> Result<T, Self::Error> {
+        unreachable!(
+            "an f32 or f64 activation graph never converts, here to {}",
+            prim.name()
+        )
+    }
 }
 
 fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
-    match op {
-        FloatUnOp::Relu => unreachable!("ReLU routes through the stored-bit selector"),
-        FloatUnOp::Sigmoid => {
-            let one = T::constant(1.0);
-            values
-                .iter()
-                .copied()
-                .map(|value| activation_sigmoid(value, one))
-                .collect()
-        }
-        FloatUnOp::Tanh => {
-            let one = T::constant(1.0);
-            let two = T::constant(2.0);
-            let neg_one = T::constant(-1.0);
-            values
-                .iter()
-                .copied()
-                .map(|value| activation_tanh(value, one, two, neg_one))
-                .collect()
-        }
-        FloatUnOp::Silu => {
-            let one = T::constant(1.0);
-            values
-                .iter()
-                .copied()
-                .map(|value| value.mul(activation_sigmoid(value, one)))
-                .collect()
-        }
-        FloatUnOp::Gelu => {
-            let one = T::constant(1.0);
-            let two = T::constant(2.0);
-            let neg_one = T::constant(-1.0);
-            let cubic_scale = T::constant(0.044715);
-            let tanh_scale = T::constant(0.7978845608028654);
-            let half = T::constant(0.5);
-            values
-                .iter()
-                .copied()
-                .map(|value| {
-                    let squared = value.mul(value);
-                    let cubed = squared.mul(value);
-                    let scaled_cube = cubic_scale.mul(cubed);
-                    let inner = tanh_scale.mul(value.add(scaled_cube));
-                    let tanh_inner = activation_tanh(inner, one, two, neg_one);
-                    half.mul(value.mul(one.add(tanh_inner)))
-                })
-                .collect()
-        }
-        _ => unreachable!("float_vec_activation requires an activation selector"),
-    }
+    let activation = DerivedActivation::from_float_unop(op)
+        .expect("float_vec_activation requires a section 3.3 activation selector");
+    let mut graph = ElementActivationGraph(std::marker::PhantomData);
+    values
+        .iter()
+        .map(
+            |&value| match lower_activation(&mut graph, activation, value) {
+                Ok(result) => result,
+                Err(never) => match never {},
+            },
+        )
+        .collect()
+}
+
+/// An f16 or bf16 activation, one element at a time through the scalar lane.
+fn half_vec_activation<T: Copy>(
+    op: FloatUnOp,
+    values: &[T],
+    to_scalar: impl Fn(T) -> ScalarValue,
+    from_scalar: impl Fn(ScalarValue) -> T,
+) -> Result<Vec<T>, NumericKernelError> {
+    values
+        .iter()
+        .map(|&value| float_activation(op, to_scalar(value)).map(&from_scalar))
+        .collect()
 }
 
 /// Bulk float unary kernel with one operation dispatch per buffer.
@@ -2372,8 +2410,28 @@ pub fn float_tensor_unop(
         let buf = match &value.buf {
             Buf::F64(values) => Buf::F64(float_vec_activation(op, values)),
             Buf::F32(values) => Buf::F32(float_vec_activation(op, values)),
-            Buf::F16(values) => Buf::F16(float_vec_activation(op, values)),
-            Buf::Bf16(values) => Buf::Bf16(float_vec_activation(op, values)),
+            Buf::F16(values) => Buf::F16(half_vec_activation(
+                op,
+                values,
+                |value| ScalarValue {
+                    bits: Bits::F16(value),
+                },
+                |value| match value.bits {
+                    Bits::F16(value) => value,
+                    _ => unreachable!("an f16 activation finalizes to f16"),
+                },
+            )?),
+            Buf::Bf16(values) => Buf::Bf16(half_vec_activation(
+                op,
+                values,
+                |value| ScalarValue {
+                    bits: Bits::Bf16(value),
+                },
+                |value| match value.bits {
+                    Bits::Bf16(value) => value,
+                    _ => unreachable!("a bf16 activation finalizes to bf16"),
+                },
+            )?),
             _ => unreachable!("family check makes the float buffer exhaustive"),
         };
         return Ok(TensorStorage { buf });
@@ -2670,7 +2728,50 @@ fn reduce_sum_group(
     }
 }
 
+/// [04-NUM-2]: the NaN an arithmetic reduction yields (a sum, product, or
+/// mean, including a one-leaf group that no operation touched) finalizes to
+/// the accumulator's canonical quiet NaN; extrema select and keep their bits.
+/// Public so a reduction assembled outside this module (the host lane's
+/// `trace`) finalizes its tree's value at the same point.
+pub fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
+    match value.bits {
+        Bits::F32(value) => ScalarValue {
+            bits: Bits::F32(canonical_nan_f32(value)),
+        },
+        Bits::F64(value) => ScalarValue {
+            bits: Bits::F64(canonical_nan_f64(value)),
+        },
+        Bits::F16(value) if value.is_nan() => ScalarValue {
+            bits: Bits::F16(half::f16::from_bits(0x7e00)),
+        },
+        Bits::Bf16(value) if value.is_nan() => ScalarValue {
+            bits: Bits::Bf16(half::bf16::from_bits(0x7fc0)),
+        },
+        _ => value,
+    }
+}
+
 fn reduce_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+    accumulator: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    match op {
+        TensorReduceOp::Sum { .. }
+        | TensorReduceOp::ReduceWindowSum
+        | TensorReduceOp::ReduceWindowMean
+        | TensorReduceOp::ProdReduce => {
+            reduce_arithmetic_group(op, input, group, accumulator).map(canonical_nan_scalar)
+        }
+        TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => reduce_extreme_group(op, input, group),
+    }
+}
+
+fn reduce_arithmetic_group(
     op: TensorReduceOp,
     input: &TensorStorage,
     group: &[usize],
@@ -2705,6 +2806,19 @@ fn reduce_group(
         TensorReduceOp::MaxReduce
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => unreachable!("extrema reduce in reduce_extreme_group"),
+    }
+}
+
+fn reduce_extreme_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+) -> Result<ScalarValue, NumericKernelError> {
+    match op {
+        TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
             let Some((&first_index, remaining)) = group.split_first() else {
                 return Err(NumericTrap::Domain {
@@ -2729,6 +2843,12 @@ fn reduce_group(
                 acc = reduction_extreme(op, acc, value, take_max)?;
             }
             Ok(acc)
+        }
+        TensorReduceOp::Sum { .. }
+        | TensorReduceOp::ReduceWindowSum
+        | TensorReduceOp::ReduceWindowMean
+        | TensorReduceOp::ProdReduce => {
+            unreachable!("arithmetic reduces in reduce_arithmetic_group")
         }
     }
 }
@@ -2853,21 +2973,153 @@ pub fn reduce_tensor_groups(
                 .and_then(|value| reduction_result_scalar(op, value, result))
         })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
-    let raw = if result.is_integer() {
-        RawTensor::Int(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_i64_exact()
-                        .expect("integer reduction results read exactly")
-                })
-                .collect(),
-        )
+    // Each group's value is already final at `result`: an arithmetic group
+    // finalized its NaN canonically and rounded once into `result`, and an
+    // extremum selected a stored element whose bits [05-OP-12] keeps. Storing
+    // them is insertion, so no f64 image or second finalization can change a
+    // selected NaN's payload, sign or signaling bit.
+    Ok(tensor_from_scalars(result, &values))
+}
+
+/// One [05-OP-33] addition at the operands' arithmetic width: integers
+/// exactly, trapping on overflow under `op`'s name; f32 and f64 natively; f16
+/// and bf16 through f32, rounded once into storage.
+fn width_add(
+    op: &'static str,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    let sum = if lhs.prim().is_integer() {
+        int_binop(IntBinOp::Add, lhs, rhs)
     } else {
-        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect())
+        float_binop(FloatBinOp::Add, lhs, rhs)
     };
-    finalize_tensor(op.name(), result, raw).map_err(Into::into)
+    sum.map_err(|err| match err {
+        NumericKernelError::Trap(NumericTrap::Overflow { prim, .. }) => {
+            NumericTrap::Overflow { op, prim }.into()
+        }
+        other => other,
+    })
+}
+
+/// Convert within one numeric family where the value set of `value` is a
+/// subset of `prim`'s (an accumulator widening), or round a float once into
+/// a narrower storage dtype.
+fn within_family(
+    op: &'static str,
+    value: ScalarValue,
+    prim: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    if value.prim() == prim {
+        Ok(value)
+    } else if value.prim().is_integer() && prim.is_integer() {
+        let exact = value.as_i64_exact().expect("integer elements read exactly");
+        scalar_from_i64(op, prim, exact).map_err(Into::into)
+    } else if value.prim().is_float() && prim.is_float() {
+        scalar_from_f64(op, prim, value.as_f64_lossy()).map_err(Into::into)
+    } else {
+        Err(NumericKernelError::WrongFamily {
+            op,
+            expected: if prim.is_integer() {
+                NumericFamily::Int
+            } else {
+                NumericFamily::Float
+            },
+            actual: value.prim(),
+        })
+    }
+}
+
+/// [05-OP-33] `cumsum` over explicitly ordered lanes. In lane order an
+/// exact-zero accumulator at §5.7.1's default sum-accumulator dtype adds each
+/// input, and each prefix is stored at `sum_result(p, default(p))`. Every
+/// input index belongs to exactly one lane; callers own the axis planning.
+pub fn cumsum_tensor_lanes(
+    input: &TensorStorage,
+    lanes: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    const OP: &str = "cumsum";
+    let prim = input.prim();
+    let signature = prim
+        .default_reduce_sum_accumulator()
+        .and_then(|accumulator| {
+            prim.default_reduce_sum_result_precision()
+                .map(|result| (accumulator, result))
+        });
+    let (accumulator, result) = match (prim.is_integer() || prim.is_float(), signature) {
+        (true, Ok(signature)) => signature,
+        _ => {
+            return Err(NumericKernelError::InvalidReductionSignature {
+                op: OP,
+                input: prim,
+                accumulator: prim,
+                result: prim,
+            });
+        }
+    };
+    let zero = if accumulator.is_integer() {
+        scalar_from_i64(OP, accumulator, 0)?
+    } else {
+        scalar_from_f64(OP, accumulator, 0.0)?
+    };
+    let mut values = vec![within_family(OP, zero, result)?; input.len()];
+    for lane in lanes {
+        let mut running = zero;
+        for &index in lane {
+            let leaf = within_family(OP, input.scalar_at(index), accumulator)?;
+            running = width_add(OP, running, leaf)?;
+            values[index] = within_family(OP, running, result)?;
+        }
+    }
+    Ok(tensor_from_scalars(result, &values))
+}
+
+/// [05-OP-33] add-mode `scatter`. `leaves[d]` lists, in row-major update
+/// order, the update indices that target destination `d`. A targeted
+/// destination's leaf sequence is its base value followed by those updates,
+/// combined by the canonical adjacent-pair balanced tree at the operand
+/// arithmetic width; an untargeted destination keeps its base value.
+pub fn scatter_add_tensor_groups(
+    base: &TensorStorage,
+    updates: &TensorStorage,
+    leaves: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    const OP: &str = "scatter";
+    let prim = base.prim();
+    if !(prim.is_integer() || prim.is_float()) {
+        return Err(NumericKernelError::InvalidReductionSignature {
+            op: OP,
+            input: prim,
+            accumulator: prim,
+            result: prim,
+        });
+    }
+    if updates.prim() != prim {
+        return Err(NumericKernelError::DtypeMismatch {
+            op: OP,
+            lhs: prim,
+            rhs: updates.prim(),
+        });
+    }
+    if leaves.len() != base.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op: OP,
+            lhs: base.len(),
+            rhs: leaves.len(),
+        });
+    }
+    let values = leaves
+        .iter()
+        .enumerate()
+        .map(|(destination, targeting)| {
+            let level = std::iter::once(base.scalar_at(destination))
+                .chain(targeting.iter().map(|&index| updates.scalar_at(index)))
+                .collect();
+            checked_adjacent_pair_fold(level, |left, right| width_add(OP, left, right))
+                .map(|value| value.expect("every leaf sequence starts with its base value"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tensor_from_scalars(prim, &values))
 }
 
 /// Reduce explicitly ordered groups to exact i64 winner indices. Values
@@ -3019,7 +3271,7 @@ pub fn reduce_window_grad_tensor_groups(
                 Some(value) => value,
                 None => reduction_seed(forward_op, accumulator, 0, 0.0)?,
             };
-            reduction_result_scalar(forward_op, value, prim)
+            reduction_result_scalar(forward_op, canonical_nan_scalar(value), prim)
         })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
     Ok(tensor_from_scalars(prim, &values))
@@ -3610,11 +3862,9 @@ impl<'a> PreparedDropout<'a> {
 /// Validated `[05-OP-8]` controls: the output dtype `p` and its two bounds.
 ///
 /// Construction performs the atom's checks before any draw: `p` is an active
-/// float dtype, both bounds share one dtype that widens exactly into `p`'s
-/// arithmetic width (f64 for `p = f64`, f32 otherwise), both are finite,
-/// `low <= high`, and `high - low` is finite at that width. The bounds'
-/// dtype is `p` or f32; f32 is the checker's current bound signature for
-/// every `p` (chelis#1295), which the atom's `p`-dtype bounds replace.
+/// float dtype, both bounds have dtype `p`, both are finite, `low <= high`,
+/// and `high - low` is finite at `p`'s arithmetic width (f64 for `p = f64`,
+/// f32 otherwise, into which an f16 or bf16 bound widens exactly).
 #[derive(Debug, Clone, Copy)]
 pub struct UniformLikeParameters {
     prim: Prim,
@@ -3642,7 +3892,7 @@ impl UniformLikeParameters {
                 rhs: high.prim(),
             });
         }
-        if low.prim() != prim && low.prim() != Prim::F32 {
+        if low.prim() != prim {
             return Err(NumericKernelError::DtypeMismatch {
                 op: "uniform_like",
                 lhs: prim,
@@ -4006,6 +4256,147 @@ pub fn cast_trunc_tensor(
     finalize_tensor(op, dst, RawTensor::Int(wides))
 }
 
+/// A named lossy cast of the chelis#759 ladder over a raw scalar, one
+/// kernel per rung. The rung's Surf keyword is the operation a trap names.
+pub fn named_cast_raw(
+    mode: NamedCastMode,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_raw(mode.keyword(), raw, dst),
+        NamedCastMode::Saturate => cast_saturate_raw(mode.keyword(), raw, dst),
+        NamedCastMode::Wrap => cast_wrap_raw(mode.keyword(), raw, dst),
+    }
+}
+
+/// [`named_cast_raw`] over a sealed scalar.
+pub fn named_cast_scalar(
+    mode: NamedCastMode,
+    value: ScalarValue,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_scalar(mode.keyword(), value, dst),
+        NamedCastMode::Saturate | NamedCastMode::Wrap => {
+            named_cast_raw(mode, exact_named_cast_source(mode, value), dst)
+        }
+    }
+}
+
+/// [`named_cast_raw`] over a tensor buffer. Every rung traps on the first
+/// offending element in order, identically to the scalar surface.
+pub fn named_cast_tensor(
+    mode: NamedCastMode,
+    raw: RawTensor,
+    dst: Prim,
+) -> Result<TensorStorage, NumericTrap> {
+    match mode {
+        NamedCastMode::Trunc => cast_trunc_tensor(mode.keyword(), raw, dst),
+        NamedCastMode::Saturate | NamedCastMode::Wrap => {
+            // In order, element by element through the scalar kernel, so the
+            // first NaN under `cast_saturate` is the one that traps, as the
+            // compiled lane's per-element loop reports it.
+            let elements: Vec<RawScalar> = match raw {
+                RawTensor::Int(values) => values.into_iter().map(RawScalar::Int).collect(),
+                RawTensor::Float(values) => values.into_iter().map(RawScalar::Float).collect(),
+            };
+            let mut wides = Vec::with_capacity(elements.len());
+            for element in elements {
+                let value = named_cast_raw(mode, element, dst)?;
+                wides.push(
+                    value
+                        .as_i64_exact()
+                        .expect("an integer target stores an exact i64"),
+                );
+            }
+            finalize_tensor(mode.keyword(), dst, RawTensor::Int(wides))
+        }
+    }
+}
+
+/// A sealed source read exactly at its stored dtype for [05-OP-23] and
+/// [05-OP-24]: a signed integer through its exact i64, a float through its
+/// exact f64 image (every active float width embeds in f64 exactly).
+fn exact_named_cast_source(mode: NamedCastMode, value: ScalarValue) -> RawScalar {
+    let source = value.prim();
+    match source {
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => RawScalar::Int(
+            value
+                .as_i64_exact()
+                .expect("a signed integer stores an exact i64"),
+        ),
+        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => RawScalar::Float(value.as_f64_lossy()),
+        Prim::Bool | Prim::F8e4m3 | Prim::String | Prim::Key => panic!(
+            "{}: `{}` is not an admitted source; the checker rejects it (op {})",
+            mode.atom(),
+            source.name(),
+            mode.keyword()
+        ),
+    }
+}
+
+/// [05-OP-23] `cast_saturate`: a finite float is truncated toward zero and
+/// the resulting integer clamped to the target's inclusive range; an integer
+/// is clamped directly. `-inf` gives the minimum and `+inf` the maximum. NaN
+/// traps `Domain` at the target dtype; nothing traps `Overflow`.
+pub fn cast_saturate_raw(
+    op: &'static str,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    let (min, max) = named_cast_target_range(op, dst);
+    let clamped = match raw {
+        RawScalar::Int(value) => value.clamp(min, max),
+        RawScalar::Float(value) if value.is_nan() => {
+            return Err(NumericTrap::Domain { op, prim: dst });
+        }
+        // Each bound is exact in f64 except i64::MAX, whose f64 image is
+        // 2^63. A value at or beyond a bound is that bound; strictly
+        // inside both, the truncated value is an exact i64.
+        RawScalar::Float(value) if value <= min as f64 => min,
+        RawScalar::Float(value) if value >= max as f64 => max,
+        RawScalar::Float(value) => value.trunc() as i64,
+    };
+    finalize_scalar(op, dst, RawScalar::Int(clamped))
+}
+
+/// [05-OP-24] `cast_wrap`: the unique signed target-width value congruent to
+/// the source modulo `2^width`. Signed integer sources only; never traps.
+pub fn cast_wrap_raw(
+    op: &'static str,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    named_cast_target_range(op, dst);
+    let value = match raw {
+        RawScalar::Int(value) => value,
+        RawScalar::Float(_) => panic!(
+            "cast_wrap_raw: a float source has no wrapping cast ([05-OP-24] is \
+             integer-to-integer only); the checker rejects it (op {op})"
+        ),
+    };
+    let wrapped = match dst {
+        Prim::Int8 => i64::from(value as i8),
+        Prim::Int16 => i64::from(value as i16),
+        Prim::Int32 => i64::from(value as i32),
+        _ => value,
+    };
+    finalize_scalar(op, dst, RawScalar::Int(wrapped))
+}
+
+/// The inclusive range of a named cast's integer target. Every rung's
+/// target is a signed integer by the checker's contract.
+fn named_cast_target_range(op: &'static str, dst: Prim) -> (i64, i64) {
+    dst.integer_range().unwrap_or_else(|| {
+        panic!(
+            "{op}: `{}` is not an integer target; the checker rejects every \
+             other target",
+            dst.name()
+        )
+    })
+}
+
 /// [05-OP-6] target contract: integer widths only. `bool` is excluded by
 /// [04-NUM-4] and a float target would be a widening, not a truncation.
 fn assert_integer_trunc_target(op: &'static str, dst: Prim) {
@@ -4050,6 +4441,14 @@ pub use wire_codec::{KeyBits, execution_storage};
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
 /// first offending element.
+///
+/// This is the tensor constructor for a value PRODUCED by arithmetic or
+/// numeric conversion from wide images, so [04-NUM-2] applies: every float
+/// NaN it stores is the dtype's canonical quiet NaN, at every width (f16 and
+/// bf16 through their one-step narrowing, f32 and f64 here). Selection and
+/// data movement never come through it: they move stored bits with
+/// [`tensor_from_scalars`] or the `reuse_*` family, which keep a NaN's
+/// payload, sign and signaling bit ([05-OP-40], [04-NUM-11]).
 pub fn finalize_tensor(
     op: &'static str,
     prim: Prim,
@@ -4057,11 +4456,11 @@ pub fn finalize_tensor(
 ) -> Result<TensorStorage, NumericTrap> {
     let buf = match prim {
         Prim::F64 => Buf::F64(match raw {
-            RawTensor::Float(v) => v,
+            RawTensor::Float(v) => v.into_iter().map(canonical_nan_f64).collect(),
             RawTensor::Int(v) => v.into_iter().map(|i| i as f64).collect(),
         }),
         Prim::F32 => Buf::F32(match raw {
-            RawTensor::Float(v) => v.into_iter().map(|x| x as f32).collect(),
+            RawTensor::Float(v) => v.into_iter().map(|x| canonical_nan_f32(x as f32)).collect(),
             RawTensor::Int(v) => v.into_iter().map(|i| i as f32).collect(),
         }),
         Prim::F16 => Buf::F16(match raw {
@@ -4327,6 +4726,10 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
 }
 
 #[cfg(test)]
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -4578,12 +4981,14 @@ mod tests {
         }
     }
 
-    fn f32_scalar(value: f32) -> ScalarValue {
-        scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+    /// A `[05-OP-8]` bound at the draw's dtype `prim`; every value these
+    /// tests use is exact at every float dtype.
+    fn bound(prim: Prim, value: f32) -> ScalarValue {
+        scalar_from_f64("test", prim, f64::from(value)).unwrap()
     }
 
     fn uniform_element(prim: Prim, low: f32, high: f32, key: RandomKey, index: usize) -> f64 {
-        PreparedUniformLike::new(prim, index + 1, f32_scalar(low), f32_scalar(high))
+        PreparedUniformLike::new(prim, index + 1, bound(prim, low), bound(prim, high))
             .unwrap()
             .apply(key)
             .unwrap()
@@ -4632,7 +5037,7 @@ mod tests {
             "the two widths must not share a post-hoc f32 sampler"
         );
         for prim in [Prim::F16, Prim::Bf16] {
-            let storage = PreparedUniformLike::new(prim, 5, f32_scalar(low), f32_scalar(high))
+            let storage = PreparedUniformLike::new(prim, 5, bound(prim, low), bound(prim, high))
                 .unwrap()
                 .apply(key)
                 .unwrap();
@@ -4640,7 +5045,12 @@ mod tests {
             assert!((low as f64..high as f64).contains(&storage.scalar_at(index).as_f64_lossy()));
         }
         assert!(matches!(
-            PreparedUniformLike::new(Prim::Int32, 1, f32_scalar(low), f32_scalar(high)),
+            PreparedUniformLike::new(
+                Prim::Int32,
+                1,
+                bound(Prim::F32, low),
+                bound(Prim::F32, high)
+            ),
             Err(NumericKernelError::WrongFamily { .. })
         ));
     }
@@ -4696,7 +5106,7 @@ mod tests {
                     }
                     let (low, high) = (-1.5f32, 2.25f32);
                     let sampled =
-                        PreparedUniformLike::new(prim, 24, f32_scalar(low), f32_scalar(high))
+                        PreparedUniformLike::new(prim, 24, bound(prim, low), bound(prim, high))
                             .unwrap()
                             .apply(key)
                             .unwrap();
@@ -4803,8 +5213,7 @@ mod tests {
     }
 
     // [05-OP-8]: the bounds are validated before any draw, at the arithmetic
-    // width, with equal bounds admitted; the bounds carry `p` or the checker's
-    // current f32 signature (chelis#1295) and nothing else.
+    // width, with equal bounds admitted; the bounds carry `p` and nothing else.
     #[test]
     fn uniform_parameters_validate_the_bounds_at_the_arithmetic_width() {
         let domain = |prim| {
@@ -4821,12 +5230,13 @@ mod tests {
                 (f32::NEG_INFINITY, 0.0),
             ] {
                 assert_eq!(
-                    UniformLikeParameters::new(prim, f32_scalar(low), f32_scalar(high)).map(|_| ()),
+                    UniformLikeParameters::new(prim, bound(prim, low), bound(prim, high))
+                        .map(|_| ()),
                     domain(prim),
                     "{prim:?} [{low}, {high})"
                 );
             }
-            let equal = PreparedUniformLike::new(prim, 3, f32_scalar(0.5), f32_scalar(0.5))
+            let equal = PreparedUniformLike::new(prim, 3, bound(prim, 0.5), bound(prim, 0.5))
                 .unwrap()
                 .apply(seed_key(42))
                 .unwrap();
@@ -4834,25 +5244,30 @@ mod tests {
                 assert_eq!(equal.scalar_at(index).as_f64_lossy(), 0.5);
             }
         }
-        // Finite f32 bounds whose difference overflows f32 but not f64: the
-        // f64 draw computes in f64 and is valid; every narrower `p` computes
-        // in f32 and traps.
-        let (low, high) = (f32_scalar(-3.0e38), f32_scalar(3.0e38));
-        assert!(UniformLikeParameters::new(Prim::F64, low, high).is_ok());
-        for prim in [Prim::F16, Prim::Bf16, Prim::F32] {
+        // Finite bounds whose difference overflows f32 but not f64: the f64
+        // draw computes in f64 and is valid; f32 and bf16 compute in f32 and
+        // trap.
+        for prim in [Prim::F64, Prim::F32, Prim::Bf16] {
+            let (low, high) = (bound(prim, -3.0e38), bound(prim, 3.0e38));
+            let expected = if prim == Prim::F64 {
+                Ok(())
+            } else {
+                domain(prim)
+            };
             assert_eq!(
                 UniformLikeParameters::new(prim, low, high).map(|_| ()),
-                domain(prim)
+                expected,
+                "{prim:?}"
             );
         }
-        let f64_bound = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
-        let f16_bound = scalar_from_f64("test", Prim::F16, 0.5).unwrap();
-        assert!(UniformLikeParameters::new(Prim::F64, f64_bound, f64_bound).is_ok());
-        assert!(UniformLikeParameters::new(Prim::F16, f16_bound, f16_bound).is_ok());
+        // A bound of any dtype but `p`, the f32 bounds of the retired
+        // signature included, is refused.
         for (prim, low, high) in [
-            (Prim::F32, f64_bound, f64_bound),
-            (Prim::Bf16, f16_bound, f16_bound),
-            (Prim::F64, f32_scalar(0.5), f64_bound),
+            (Prim::F32, bound(Prim::F64, 0.5), bound(Prim::F64, 0.5)),
+            (Prim::Bf16, bound(Prim::F16, 0.5), bound(Prim::F16, 0.5)),
+            (Prim::F64, bound(Prim::F32, 0.5), bound(Prim::F32, 0.5)),
+            (Prim::F16, bound(Prim::F32, 0.5), bound(Prim::F32, 0.5)),
+            (Prim::F64, bound(Prim::F32, 0.5), bound(Prim::F64, 0.5)),
         ] {
             assert!(
                 matches!(
@@ -4935,7 +5350,7 @@ mod tests {
     fn int_ingest_into_bf16_single_rounds_not_via_f64() {
         let x: i64 = 18_084_767_253_659_649;
         let single = fin_i(Prim::Bf16, x).unwrap().as_f64_lossy();
-        let double = f64::from(half::bf16::from_f64(x as f64));
+        let double = f64::from(bf16_from_f64_rne(x as f64));
         assert_ne!(
             single, double,
             "bf16 integer ingest must not round through f64"
@@ -5695,13 +6110,13 @@ mod tests {
 
     #[test]
     fn float_kernels_compute_at_declared_arithmetic_width() {
-        // This f32 input is a one-ulp witness on macOS: native expf and
-        // f64-exp-then-narrow differ. The contract assertion is against the
-        // platform f32 operation itself, not a hard-coded libm result.
+        // [05-OP-46]: f32 `exp` is the correctly rounded f32 operation, which
+        // chelis-crmath computes, not an f64 exp narrowed afterwards. (This
+        // input was a one-ulp witness where macOS libm expf misrounds.)
         let x = f32::from_bits(1_040_209_326);
         let input = scalar_from_f64("test", Prim::F32, f64::from(x)).unwrap();
         let got = float_unop(FloatUnOp::Exp, input).unwrap();
-        assert_eq!(got.as_f64_lossy(), f64::from(x.exp()));
+        assert_eq!(got.as_f64_lossy(), f64::from(chelis_crmath::exp_f32(x)));
 
         let lhs = scalar_from_f64("test", Prim::F32, f64::from(0.1_f32)).unwrap();
         let rhs = scalar_from_f64("test", Prim::F32, f64::from(0.2_f32)).unwrap();
@@ -5810,7 +6225,7 @@ mod tests {
             float_tensor_unop(FloatUnOp::Exp, &input)
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![f64::from(x.exp())]
+            vec![f64::from(chelis_crmath::exp_f32(x))]
         );
 
         let lo = finalize_tensor(
@@ -6818,6 +7233,189 @@ mod tests {
                 assert_eq!(actual[0].to_bits(), 0x7ff8_0000_0000_0000)
             }
             _ => panic!("f64 subtraction must retain f64 storage"),
+        }
+    }
+
+    /// chelis#2964 (C8): [04-NUM-2] finalizes every NaN that floating
+    /// arithmetic or numeric conversion produces to the dtype's canonical
+    /// quiet NaN, dropping input payload and sign. Selection (`max`/`min`)
+    /// is bit-preserving by [05-OP-40] and is not covered here.
+    #[test]
+    fn every_nan_producing_float_op_finalizes_canonical_nan_at_every_storage_width() {
+        fn scalar(prim: Prim, bits: u64) -> ScalarValue {
+            let bits = match prim {
+                Prim::F16 => Bits::F16(half::f16::from_bits(bits as u16)),
+                Prim::Bf16 => Bits::Bf16(half::bf16::from_bits(bits as u16)),
+                Prim::F32 => Bits::F32(f32::from_bits(bits as u32)),
+                Prim::F64 => Bits::F64(f64::from_bits(bits)),
+                _ => unreachable!("float widths only"),
+            };
+            ScalarValue { bits }
+        }
+        fn raw_bits(value: ScalarValue) -> u64 {
+            match value.bits {
+                Bits::F16(value) => u64::from(value.to_bits()),
+                Bits::Bf16(value) => u64::from(value.to_bits()),
+                Bits::F32(value) => u64::from(value.to_bits()),
+                Bits::F64(value) => value.to_bits(),
+                _ => unreachable!("float widths only"),
+            }
+        }
+        // (prim, canonical, [negative quiet payload NaN, signaling NaN],
+        // one, +inf, -inf, zero, minus one)
+        let widths = [
+            (
+                Prim::F16,
+                0x7e00,
+                [0xfe55, 0x7c01],
+                0x3c00,
+                0x7c00,
+                0xfc00,
+                0,
+                0xbc00,
+            ),
+            (
+                Prim::Bf16,
+                0x7fc0,
+                [0xffe5, 0x7f81],
+                0x3f80,
+                0x7f80,
+                0xff80,
+                0,
+                0xbf80,
+            ),
+            (
+                Prim::F32,
+                0x7fc0_0000,
+                [0xffc5_4321, 0x7f81_2345],
+                0x3f80_0000,
+                0x7f80_0000,
+                0xff80_0000,
+                0,
+                0xbf80_0000,
+            ),
+            (
+                Prim::F64,
+                0x7ff8_0000_0000_0000,
+                [0xfff8_abcd_1234_5678, 0x7ff0_1234_5678_9abc],
+                0x3ff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0,
+                0xbff0_0000_0000_0000,
+            ),
+        ];
+        let arithmetic = [
+            FloatBinOp::Add,
+            FloatBinOp::Sub,
+            FloatBinOp::Mul,
+            FloatBinOp::Div,
+            FloatBinOp::FloorDiv,
+        ];
+        let unary = [
+            FloatUnOp::Neg,
+            FloatUnOp::Recip,
+            FloatUnOp::Exp,
+            FloatUnOp::Log,
+            FloatUnOp::Sin,
+            FloatUnOp::Sqrt,
+            FloatUnOp::Cos,
+            FloatUnOp::Tan,
+            FloatUnOp::Atan,
+            FloatUnOp::Abs,
+            FloatUnOp::Floor,
+            FloatUnOp::Ceil,
+            FloatUnOp::Round,
+            FloatUnOp::Sigmoid,
+            FloatUnOp::Tanh,
+            FloatUnOp::Erf,
+            FloatUnOp::Erfc,
+            FloatUnOp::Silu,
+            FloatUnOp::Gelu,
+            FloatUnOp::GeluTanh,
+            FloatUnOp::StandardNormalCdf,
+        ];
+        for (prim, canonical, nans, one, inf, neg_inf, zero, minus_one) in widths {
+            let name = prim.name();
+            let mut binary_cases = Vec::new();
+            for op in arithmetic {
+                for nan in nans {
+                    binary_cases.push((op, nan, one));
+                    binary_cases.push((op, one, nan));
+                }
+            }
+            // Invalid operations on non-NaN operands: x86 produces the
+            // negative default NaN for these, arm64 the positive one.
+            binary_cases.extend([
+                (FloatBinOp::Add, inf, neg_inf),
+                (FloatBinOp::Sub, inf, inf),
+                (FloatBinOp::Mul, zero, inf),
+                (FloatBinOp::Mul, neg_inf, zero),
+                (FloatBinOp::Div, zero, zero),
+                (FloatBinOp::Div, inf, neg_inf),
+                (FloatBinOp::FloorDiv, zero, zero),
+            ]);
+            for (op, lhs, rhs) in binary_cases {
+                let got = raw_bits(float_binop(op, scalar(prim, lhs), scalar(prim, rhs)).unwrap());
+                assert_eq!(
+                    got, canonical,
+                    "{name} {op:?}({lhs:#x}, {rhs:#x}) gave {got:#x}"
+                );
+                let tensor = float_tensor_binop(
+                    op,
+                    &tensor_from_scalars(prim, &[scalar(prim, lhs)]),
+                    &tensor_from_scalars(prim, &[scalar(prim, rhs)]),
+                )
+                .unwrap();
+                let got = raw_bits(tensor.scalar_at(0));
+                assert_eq!(
+                    got, canonical,
+                    "{name} tensor {op:?}({lhs:#x}, {rhs:#x}) gave {got:#x}"
+                );
+            }
+            let mut unary_cases = Vec::new();
+            for op in unary {
+                for nan in nans {
+                    unary_cases.push((op, nan));
+                }
+            }
+            unary_cases.extend([
+                (FloatUnOp::Sqrt, minus_one),
+                (FloatUnOp::Log, minus_one),
+                (FloatUnOp::Sin, inf),
+                (FloatUnOp::Cos, neg_inf),
+                (FloatUnOp::Tan, inf),
+            ]);
+            for (op, input) in unary_cases {
+                let got = raw_bits(float_unop(op, scalar(prim, input)).unwrap());
+                assert_eq!(got, canonical, "{name} {op:?}({input:#x}) gave {got:#x}");
+                let tensor =
+                    float_tensor_unop(op, &tensor_from_scalars(prim, &[scalar(prim, input)]))
+                        .unwrap();
+                let got = raw_bits(tensor.scalar_at(0));
+                assert_eq!(
+                    got, canonical,
+                    "{name} tensor {op:?}({input:#x}) gave {got:#x}"
+                );
+            }
+        }
+        // Every float-to-float conversion of a payload or signaling NaN.
+        for (source, _, nans, ..) in widths {
+            for (target, canonical, ..) in widths {
+                if source == target {
+                    continue;
+                }
+                for nan in nans {
+                    let got = raw_bits(cast_scalar("cast", scalar(source, nan), target).unwrap());
+                    assert_eq!(
+                        got,
+                        canonical,
+                        "cast {}->{}({nan:#x}) gave {got:#x}",
+                        source.name(),
+                        target.name()
+                    );
+                }
+            }
         }
     }
 

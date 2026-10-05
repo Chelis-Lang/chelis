@@ -25,12 +25,35 @@ fn assert_clean(source: &str) {
 fn assert_rejects(source: &str, needle: &str) {
     let found = errors(source);
     assert!(
-        !found.is_empty(),
-        "expected type error, but program checked"
-    );
-    assert!(
-        found.iter().any(|error| error.message.contains(needle)),
-        "expected diagnostic containing {needle:?}, got {found:#?}"
+        found.iter().any(|error| match needle {
+            "arity" => {
+                error.kind.diagnostic_name() == "ArityMismatch"
+                    && error.expected.as_deref() == Some("2 arguments")
+                    && error.got.as_deref() == Some("1 argument")
+                    && error.message.contains("count")
+            }
+            "axis dtype" => {
+                error.kind.diagnostic_name() == "TypeMismatch"
+                    && error.expected.as_deref() == Some("i32")
+                    && error.got.as_deref() == Some("i64")
+                    && error.message.contains("count")
+                    && error.message.contains("axis")
+            }
+            "out of bounds" => {
+                error.kind.diagnostic_name() == "DimensionMismatch"
+                    && error.expected.as_deref() == Some("axis in -2..2")
+                    && error.got.as_deref() == Some("2")
+                    && error.span_offset == source.find("count(")
+            }
+            "concrete-rank operand requires" => {
+                error.kind.diagnostic_name() == "DimensionMismatch"
+                    && error.expected.as_deref() == Some("positional i32 axis")
+                    && error.got.as_deref() == Some("named axis `col`")
+                    && error.span_offset == source.find("count(")
+            }
+            _ => error.message.contains(needle),
+        }),
+        "count: missing rejection for {needle:?}, got {found:#?}"
     );
 }
 
@@ -72,7 +95,7 @@ def bad(x: tensor[4, i64]) -> tensor[i64] = count_any(x)
 fn axes_are_required_unique_static_int32_and_in_range() {
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[2, 3, i64] = count(&x)",
-        "expected 2 args, got 1",
+        "arity",
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 0)",
@@ -80,7 +103,7 @@ fn axes_are_required_unique_static_int32_and_in_range() {
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[2, i64] = count(&x, 1i64)",
-        "i32 axis",
+        "axis dtype",
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool], axis: i32) -> tensor[2, i64] = count(&x, axis)",
@@ -103,19 +126,19 @@ def later_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i32)
 
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0i64, 1)",
-        "i32 axis",
+        "axis dtype",
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 1i64)",
-        "i32 axis",
+        "axis dtype",
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, cast(0, i64), 1)",
-        "i32 axis",
+        "axis dtype",
     );
     assert_rejects(
         "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i64))",
-        "i32 axis",
+        "axis dtype",
     );
 }
 

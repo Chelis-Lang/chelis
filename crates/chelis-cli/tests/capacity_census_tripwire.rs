@@ -147,6 +147,24 @@ const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
 /// derived flags are necessary but never sufficient: the complete family,
 /// kind, canonical identity, and flag vector must match one of these rows.
 const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_elementwise_shape_trap ( const char * op , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_matmul_product_trap ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
+        &[],
+    ),
     // A closed diagnostic identity; no extent, width, dtype, or payload is encoded.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -732,6 +750,139 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
+        &[],
+        "[05-OP-38]",
+        "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
+        &[],
+        "[05-OP-38]",
+        "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_close_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_scalar tolerance , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_monotonic_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_process_run ( chelis_string program , const chelis_list * args ) ;",
+        &[],
+        "[05-OP-38]",
+        "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
+        &[],
+        "[05-OP-1]",
+        "performs decimal rounding at"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_parse_csv ( chelis_string text ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_to_csv ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-5]",
+        "`to_csv(table: List[Dict[string,string]]) -> string` returns the serialized"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_cols ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_nrows ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_strs ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_f64s ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_ints ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_csv_str ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_f64 ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_int ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
         &["numeric-op"],
         "[05-OP-32]",
@@ -1032,30 +1183,165 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "[05-OP-32]",
         "shape_index(container, parameters...) -> result"
     ),
+    // [05-OP-36]'s recursive equality: each entry reads the numeric leaves
+    // of two borrowed values and compares them at their own dtype.
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_list_eq ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Lists and tuples compare length and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_tuple_eq ( const chelis_tuple * lhs , const chelis_tuple * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Lists and tuples compare length and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_dict_eq ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Dictionaries compare key/value sets"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_adt_eq ( const chelis_adt * lhs , const chelis_adt * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "`Option` and ADT values compare exact"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_option_eq ( const chelis_option * lhs , const chelis_option * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "`Option` and ADT values compare exact"
+    ),
     final_numeric_row!(
         "std-adt-numeric",
-        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
+        "decimal::Decimal: () (variant {} Decimal (field {} negative (t-prim {} bool)) (field {} limb0 (t-prim {} i64)) (field {} limb1 (t-prim {} i64)) (field {} limb2 (t-prim {} i64)) (field {} limb3 (t-prim {} i64)) (field {} limb4 (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64) (t-prim {} string)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
         &["float-carrier", "numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Date: () (variant {} Date (field {} year (t-prim {} i64)) (field {} month (t-prim {} i64)) (field {} day (t-prim {} i64)))",
+        "datetime/business::BusinessCalendar: () (variant {} BusinessCalendar (field {} weekmask (t-adt {} Weekmask)) (field {} holidays (t-adt {} List (t-prim {} i64))) (field {} valid_from (t-prim {} i64)) (field {} valid_until (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Duration: () (variant {} Duration (field {} days (t-prim {} i64)) (field {} hours (t-prim {} i64)) (field {} minutes (t-prim {} i64)) (field {} seconds (t-prim {} i64)))",
+        "datetime/clock::MonotonicInstant: () (variant {} MonotonicInstant (field {} second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/columns::Durations: (n) (variant {} Durations (field {} seconds (t-tensor {} (d-var {} n) (t-prim {} i64))) (field {} nanoseconds (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Time: () (variant {} Time (field {} nanosecond_of_day (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::DateTime: () (variant {} DateTime (field {} epoch_day (t-prim {} i64)) (field {} nanosecond_of_day (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Instant: () (variant {} Instant (field {} unix_second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Offset: () (variant {} Offset (field {} seconds (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::OffsetDateTime: () (variant {} OffsetDateTime (field {} instant (t-adt {} Instant)) (field {} offset (t-adt {} Offset)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Duration: () (variant {} Duration (field {} second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Period: () (variant {} Period (field {} months (t-prim {} i64)) (field {} days (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Dates: (n) (variant {} Dates (field {} epoch_days (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime::Instants: (n) (variant {} Instants (field {} unix_seconds (t-tensor {} (d-var {} n) (t-prim {} i64))) (field {} nanoseconds (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::TimeZone: () (variant {} TimeZone (field {} name (t-prim {} string)) (field {} initial_offset (t-prim {} i64)) (field {} transitions (t-adt {} List (t-tuple {} (t-prim {} i64) (t-prim {} i64)))) (field {} footer (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64)) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))))))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::Zoned: () (variant {} Zoned (field {} instant (t-adt {} Instant)) (field {} zone (t-adt {} TimeZone)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::ZonedText: () (variant {} ZonedText (field {} written (t-adt {} DateTime)) (field {} offset (t-adt {} Option (t-adt {} Offset))) (field {} zone_name (t-prim {} string)) (field {} critical (t-prim {} bool)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
@@ -1104,21 +1390,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-        &[],
+        "decimal::decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+        &["float-carrier", "numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
+        "decimal::decimal_from_i64: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1160,6 +1446,20 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
+        "decimal::decimal_round: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_scale: (t-fn {} (t-adt {} Decimal) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
         "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
         &[],
         "[05-OP-35]",
@@ -1167,8 +1467,43 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        "decimal::decimal_to_bf16: (t-fn {} (t-adt {} Decimal) (t-prim {} bf16))",
         &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_f16: (t-fn {} (t-adt {} Decimal) (t-prim {} f16))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_f32: (t-fn {} (t-adt {} Decimal) (t-prim {} f32))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_f64: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_fixed_string: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-prim {} string))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-prim {} i64))",
+        &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1182,6 +1517,27 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+        &["float-carrier", "numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1461,113 +1817,1513 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        "datetime/business::business_calendar: (t-fn {} (t-adt {} Weekmask) (t-adt {} List (t-adt {} Date)) (t-adt {} Date) (t-adt {} Date) (t-adt {} BusinessCalendar))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        "datetime/business::business_calendar_holidays: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} List (t-adt {} Date)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        "datetime/business::business_calendar_valid_from: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        "datetime/business::business_calendar_valid_until: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        "datetime/business::business_calendar_weekmask: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Weekmask))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        "datetime/business::business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
+        "datetime/business::business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} i64) (t-adt {} NonBusinessStart) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+        "datetime/business::business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} BusinessDayRoll) (t-adt {} Date))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
+        "datetime/business::business_in_all: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_in_any: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+        "datetime/business::dates_business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} NonBusinessStart) (t-adt {} Dates (t-var {} n)))",
         &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-adt {} BusinessDayRoll) (t-adt {} Dates (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_calendar: (t-fn {} (t-adt {} Weekmask) (t-adt {} List (t-adt {} Date)) (t-adt {} Date) (t-adt {} Date) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Date) (t-adt {} Option (t-prim {} i64)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} i64) (t-adt {} NonBusinessStart) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} BusinessDayRoll) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_in_all: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_in_any: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Option (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::clock_now: (t-fn {eff: (effects {} io)} (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::monotonic_now: (t-fn {eff: (effects {} io)} (t-adt {} MonotonicInstant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::monotonic_until: (t-fn {} (t-adt {} MonotonicInstant) (t-adt {} MonotonicInstant) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_add_days: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Dates (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_add_months: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} DayOverflow) (t-adt {} Dates (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_day: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_day_of_year: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_days_until: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_from_ymd: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Dates (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_gt: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_gte: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_lt: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_lte: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_month: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_to_strings: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} List (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_weekday_iso_number: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::dates_year: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::durations: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Durations (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::durations_nanoseconds: (t-fn {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::durations_seconds: (t-fn {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_add_duration: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Durations (t-var {} n)) (t-adt {} Instants (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_from_unix_count: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} TimeUnit) (t-adt {} Instants (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_gt: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_gte: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_lt: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_lte: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_round_to: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Duration) (t-adt {} Rounding) (t-adt {} Instants (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_seconds_since_f64: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instant) (t-tensor {} (d-var {} n) (t-prim {} f64)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_to_dates_at: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Offset) (t-adt {} Dates (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_to_unix_count: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::instants_until: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-adt {} Durations (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::try_dates_from_ymd: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::try_durations: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-tuple {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/columns::try_parse_dates: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_add_months: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} DayOverflow) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_add_period: (t-fn {} (t-adt {} Date) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_day: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_days_until: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_epoch_day: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_from_epoch_day: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_from_iso_week: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_iso_week: (t-fn {} (t-adt {} Date) (t-tuple {} (t-prim {} i64) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_month: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_period_until: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-adt {} Period))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_weekday: (t-fn {} (t-adt {} Date) (t-adt {} Weekday))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::date_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::dates_epoch_days: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::dates_from_epoch_days: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-adt {} Dates (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime: (t-fn {} (t-adt {} Date) (t-adt {} Time) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_add_duration: (t-fn {} (t-adt {} DateTime) (t-adt {} Duration) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_add_period: (t-fn {} (t-adt {} DateTime) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_date: (t-fn {} (t-adt {} DateTime) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_gt: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_gte: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_lt: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_lte: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_time: (t-fn {} (t-adt {} DateTime) (t-adt {} Time))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_to_instant_at: (t-fn {} (t-adt {} DateTime) (t-adt {} Offset) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_to_string: (t-fn {} (t-adt {} DateTime) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::datetime_until: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::days_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::days_in_year: (t-fn {} (t-prim {} i64) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_add: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_from_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Duration))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_gt: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_gte: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_lt: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_lte: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_mul: (t-fn {} (t-adt {} Duration) (t-prim {} i64) (t-adt {} Duration))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_nanosecond: (t-fn {} (t-adt {} Duration) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_negate: (t-fn {} (t-adt {} Duration) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_second: (t-fn {} (t-adt {} Duration) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_sub: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_to_count: (t-fn {} (t-adt {} Duration) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_to_seconds_f64: (t-fn {} (t-adt {} Duration) (t-prim {} f64))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::duration_to_string: (t-fn {} (t-adt {} Duration) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::easter_sunday_gregorian: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::easter_sunday_orthodox: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_add_duration: (t-fn {} (t-adt {} Instant) (t-adt {} Duration) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_from_unix: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Instant))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_from_unix_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Instant))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_gt: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_gte: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_lt: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_lte: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_nanosecond: (t-fn {} (t-adt {} Instant) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_round_to: (t-fn {} (t-adt {} Instant) (t-adt {} Duration) (t-adt {} Rounding) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_to_datetime_at: (t-fn {} (t-adt {} Instant) (t-adt {} Offset) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_to_string: (t-fn {} (t-adt {} Instant) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_to_unix_count: (t-fn {} (t-adt {} Instant) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_unix_second: (t-fn {} (t-adt {} Instant) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instant_until: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instants_from_unix: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-adt {} Instants (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instants_nanoseconds: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::instants_unix_seconds: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::last_weekday_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::nth_weekday_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_datetime: (t-fn {} (t-adt {} Instant) (t-adt {} Offset) (t-adt {} OffsetDateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_datetime_instant: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_datetime_local: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_datetime_offset: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_datetime_to_string: (t-fn {} (t-adt {} OffsetDateTime) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_from_seconds: (t-fn {} (t-prim {} i64) (t-adt {} Offset))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_seconds: (t-fn {} (t-adt {} Offset) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::offset_to_string: (t-fn {} (t-adt {} Offset) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_datetime: (t-fn {} (t-prim {} string) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_duration: (t-fn {} (t-prim {} string) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_instant: (t-fn {} (t-prim {} string) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_offset: (t-fn {} (t-prim {} string) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_offset_datetime: (t-fn {} (t-prim {} string) (t-adt {} OffsetDateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_period: (t-fn {} (t-prim {} string) (t-adt {} Period))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::parse_time: (t-fn {} (t-prim {} string) (t-adt {} Time))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Period))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period_days: (t-fn {} (t-adt {} Period) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period_months: (t-fn {} (t-adt {} Period) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period_mul: (t-fn {} (t-adt {} Period) (t-prim {} i64) (t-adt {} Period))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period_negate: (t-fn {} (t-adt {} Period) (t-adt {} Period))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::period_to_string: (t-fn {} (t-adt {} Period) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Time))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_add_duration: (t-fn {} (t-adt {} Time) (t-adt {} Duration) (t-tuple {} (t-prim {} i64) (t-adt {} Time)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_from_nanosecond_of_day: (t-fn {} (t-prim {} i64) (t-adt {} Time))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_gt: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_gte: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_hour: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_lt: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_lte: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_minute: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_nanosecond: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_nanosecond_of_day: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_second: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_to_string: (t-fn {} (t-adt {} Time) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::time_until: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-adt {} Duration))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_date_add_months: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_date_add_period: (t-fn {} (t-adt {} Date) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_date_from_epoch_day: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_date_from_iso_week: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_dates_from_epoch_days: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_datetime_add_period: (t-fn {} (t-adt {} DateTime) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} DateTime)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_duration_to_count: (t-fn {} (t-adt {} Duration) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_instant_from_unix: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Instant)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_instant_from_unix_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Option (t-adt {} Instant)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_instant_to_unix_count: (t-fn {} (t-adt {} Instant) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_instants_from_unix: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tuple {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_offset_from_seconds: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Offset)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_datetime: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} DateTime)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_duration: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Duration)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_instant: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Instant)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_offset: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Offset)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_offset_datetime: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} OffsetDateTime)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_period: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Period)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_parse_time: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Time)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_period: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Period)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_time: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Time)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_time_from_nanosecond_of_day: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Time)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::try_weekday_from_iso_number: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Weekday)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::weekday_from_iso_number: (t-fn {} (t-prim {} i64) (t-adt {} Weekday))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::weekday_iso_number: (t-fn {} (t-adt {} Weekday) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::weekday_on_or_after: (t-fn {} (t-adt {} Date) (t-adt {} Weekday) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime::weekday_on_or_before: (t-fn {} (t-adt {} Date) (t-adt {} Weekday) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} ZonedText))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_fixed: (t-fn {} (t-adt {} Offset) (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_name: (t-fn {} (t-adt {} TimeZone) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_utc: (t-fn {} (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} ZonedText)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} Option (t-adt {} TimeZone)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Option (t-adt {} Offset)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_add_duration: (t-fn {} (t-adt {} Zoned) (t-adt {} Duration) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_add_period: (t-fn {} (t-adt {} Zoned) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_instant: (t-fn {} (t-adt {} Zoned) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_local: (t-fn {} (t-adt {} Zoned) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_offset: (t-fn {} (t-adt {} Zoned) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_to_string: (t-fn {} (t-adt {} Zoned) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_zone: (t-fn {} (t-adt {} Zoned) (t-adt {} TimeZone))",
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1630,6 +3386,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-31]",
         authority_anchor: "parsing accepts a strict\n> decimal superset",
+    },
+    // The language parsers, distinct from the scalar-carrier parse above: each
+    // returns an owned option whose Some child is a tagged i64 or f64 scalar.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option * chelis_to_int ( chelis_string text ) ;",
+            &[],
+        ),
+        atom: "[05-OP-59]",
+        authority_anchor: "`to_int(text: string)->Option[i64]`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option * chelis_to_float ( chelis_string text ) ;",
+            &[],
+        ),
+        atom: "[05-OP-59]",
+        authority_anchor: "`to_float(text:\n> string)->Option[f64]`",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -1753,6 +3531,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-33]",
         authority_anchor: "Padding follows [05-OP-9..10] exactly",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_pad_sequences_to_require_width ( int64_t width ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-10]",
+        authority_anchor: "`width` SHALL be non-negative",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

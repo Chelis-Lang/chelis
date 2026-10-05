@@ -27,7 +27,7 @@
 //! correct by accident).  This file pins the print routine
 //! directly.
 //!
-//! Diagnosis: `docs/investigations/cbackend_print_tensor_f64_diagnosis.md`.
+//! Diagnosis: `docs/archive/investigations/cbackend_print_tensor_f64_diagnosis.md`.
 //!
 //! Each fixture:
 //!   1. Writes a `.ch` program that produces a top-level result tensor
@@ -94,6 +94,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> (tempfile::TempDir, PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

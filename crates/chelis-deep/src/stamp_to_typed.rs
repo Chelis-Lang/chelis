@@ -116,6 +116,8 @@ impl std::fmt::Display for FormIdentity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StampErrorKind {
+    /// Deep 0.20 has no pipe node; stored programs must be regenerated.
+    RetiredPipe,
     /// A bare name appeared at a RuntimeExpr position.
     NameAtExprSlot { name: String },
     /// A list at a Type position had an undecodable head.
@@ -145,6 +147,11 @@ pub enum StampErrorKind {
 impl std::fmt::Display for StampError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
+            StampErrorKind::RetiredPipe => write!(
+                f,
+                "Deep format {} removes pipe nodes; regenerate stored Deep as applications",
+                crate::DEEP_FORMAT_VERSION
+            ),
             StampErrorKind::NameAtExprSlot { name } => {
                 write!(
                     f,
@@ -785,6 +792,12 @@ fn stamp_list_as_node_or_unknown(elements: Vec<RawExpr>, span: Span) -> Result<E
         Some(RawExpr::Atom(RawAtom::Symbol(symbol), _)) => (symbol.clone(), DeepTag::parse(symbol)),
         _ => (UNKNOWN_FORM_NON_SYMBOL_HEAD.to_string(), None),
     };
+    if head == "pipe" {
+        return Err(StampError {
+            kind: StampErrorKind::RetiredPipe,
+            span,
+        });
+    }
     match tag_opt {
         Some(tag) => build_node(tag, elements, span),
         None => build_unknown_form(head, elements, span),

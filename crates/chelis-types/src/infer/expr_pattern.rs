@@ -376,23 +376,43 @@ pub(super) fn pattern_bindings(
                     // for a pattern head (chelis#1076).
                     let (arg_types, ret) = instantiate_variant_of(adt_def, variant_info, vg);
                     let _ = unify(&ret, scrutinee_ty, subst);
+                    let supplied = kids.len() - 1;
+                    if supplied != arg_types.len() {
+                        let expected = arg_types.len();
+                        errors.push(at_check_site(
+                            pat,
+                            CheckError::with_types(
+                                CheckErrorKind::ArityMismatch,
+                                with_macro_provenance(
+                                    pat,
+                                    format!(
+                                        "constructor pattern '{ctor_name}': expected {expected} \
+                                         field(s), got {supplied} sub-pattern(s)"
+                                    ),
+                                ),
+                                format!("{expected} field(s)"),
+                                format!("{supplied} sub-pattern(s)"),
+                                vec![],
+                            ),
+                        ));
+                    }
                     for (i, sub_pat) in kids[1..].iter().enumerate() {
-                        if i < arg_types.len() {
-                            let resolved = subst.apply(&arg_types[i]);
-                            pattern_bindings(
-                                sub_pat,
-                                PatternSite::Other,
-                                &resolved,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
-                                errors,
-                                product,
-                                covered_variants,
-                                has_wildcard,
-                            );
-                        }
+                        let resolved = arg_types
+                            .get(i)
+                            .map_or_else(|| vg.fresh_type(), |arg_ty| subst.apply(arg_ty));
+                        pattern_bindings(
+                            sub_pat,
+                            PatternSite::Other,
+                            &resolved,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            product,
+                            covered_variants,
+                            has_wildcard,
+                        );
                     }
                 }
             }
@@ -1096,7 +1116,7 @@ fn check_literal_pattern_at_binder(
              (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
             atom.family(),
             atom.rendered(),
-            family.family_name(),
+            family.bound_spelling(),
             member.name(),
         ),
         vec![binder_pattern_repair(atom, site, binder, family)],
@@ -1123,7 +1143,9 @@ fn unbounded_binder_pattern_repair(
     };
     let declare = format!(
         "Declare `{binder}: {}`, the family {} literal patterns denote",
-        family.family_name(),
+        family
+            .family_name()
+            .expect("a literal-pattern repair names a family bound"),
         atom.family(),
     );
     if family_members(family).any(|member| literal_pattern_failure_at(member, atom).is_some()) {
@@ -1240,7 +1262,7 @@ fn binder_pattern_repair(
     binder: &str,
     family: TypeVarRestriction,
 ) -> String {
-    let family_name = family.family_name();
+    let family_name = family.bound_spelling();
     let Some(value) = PatternValue::of(atom) else {
         return format!(
             "No member of `{family_name}` is {}, so this arm matches no value at any \
@@ -1257,57 +1279,61 @@ fn binder_pattern_repair(
         );
     }
     let held_everywhere = members.iter().all(|member| value.held_exactly_at(*member));
+    let every_member_is_integer = members.iter().all(|member| member.is_integer());
+    let every_member_is_float = members.iter().all(|member| member.is_float());
+    let mixes_integer_and_float = !every_member_is_integer && !every_member_is_float;
     let no_suffix = "a literal pattern itself carries no suffix and no cast \
                      (spec/02-surf-syntax.md section P10a)";
-    match (family, value.as_integer()) {
-        (TypeVarRestriction::ActiveInt, Some(integer)) if held_everywhere => {
+    if held_everywhere {
+        if every_member_is_integer && let Some(integer) = value.as_integer() {
             return format!(
                 "Write the literal as an integer, `{integer}`, which denotes the same value \
-                 exactly at every member of `Int`; {no_suffix}"
+                 exactly at every member of `{family_name}`; {no_suffix}"
             );
         }
-        (TypeVarRestriction::ActiveFloat, _) if held_everywhere => {
+        if every_member_is_float {
             return format!(
                 "Write the literal as a float, `{}`, which denotes the same value exactly at \
-                 every member of `Float`; {no_suffix}",
+                 every member of `{family_name}`; {no_suffix}",
                 value.float_body(),
             );
         }
-        (TypeVarRestriction::ActiveNumeric, Some(integer)) if held_everywhere => {
+        if let Some(integer) = value.as_integer() {
             return format!(
                 "Compare instead of matching: {}. `cast({integer}, {binder})` binds {integer} \
-                 exactly at every member of `Numeric`; {no_suffix}",
+                 exactly at every member of `{family_name}`; {no_suffix}",
                 comparison_repair(site, |subject| {
                     format!("eq({subject}, cast({integer}, {binder}))")
                 }),
             );
         }
-        _ => {}
     }
-    let (widest, spelled) = match family {
-        TypeVarRestriction::ActiveInt => (
+    let (widest, spelled) = if every_member_is_integer {
+        (
             Prim::Int64,
             value
                 .as_integer()
                 .map(|integer| format!("{integer}i64"))
-                .expect("a value some Int member holds is an i64"),
-        ),
-        _ => {
-            let magnitude = value.as_f64().abs();
-            if !value.held_exactly_at(Prim::F64)
-                || (family == TypeVarRestriction::ActiveNumeric
-                    && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
-            {
-                return format!(
-                    "No comparison that cannot trap is exact at every member of \
-                     `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
-                     onto the same value. Declare `{binder}` with the family this arm is \
-                     meant for, `Int` or `Float`, and compare at that family's widest member",
-                    atom.rendered(),
-                );
-            }
-            (Prim::F64, format!("{}f64", value.float_body()))
+                .expect("a value some integer member holds is an i64"),
+        )
+    } else {
+        let magnitude = value.as_f64().abs();
+        // A bound admitting both an integer and a float member cannot offer an
+        // exact non-trapping comparison in f64's collision range, whether it
+        // is spelled `Numeric` or as a mixed set.
+        if !value.held_exactly_at(Prim::F64)
+            || (mixes_integer_and_float
+                && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
+        {
+            return format!(
+                "No comparison that cannot trap is exact at every member of \
+                 `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
+                 onto the same value. Declare `{binder}` with the family this arm is \
+                 meant for, `Int` or `Float`, and compare at that family's widest member",
+                atom.rendered(),
+            );
         }
+        (Prim::F64, format!("{}f64", value.float_body()))
     };
     let widest = widest.name();
     format!(
@@ -1365,37 +1391,4 @@ fn report_literal_pattern_error(
         error.span_offset = Some(pat.span().offset);
     }
     errors.push(error);
-}
-
-/// A `pipe` node reached inference.
-///
-/// It cannot, from any checker entry: `chelis_deep::pipe::fold_pipe` states
-/// `spec/02-surf-syntax.md` section 0.1's sentence -- `x |> f(y)` MEANS
-/// `f(x, y)` -- once, over every entry's input, so inference only ever sees
-/// the application. The rule that used to live here typed a stage from the
-/// callee's FUNCTION type instead of as that application, which lost every
-/// rule keyed on an application's arguments: `to_tensor`'s literal shape,
-/// `sum`'s axis, `expand`'s size (chelis#1923, chelis#1791).
-///
-/// So this arm exists to make the class impossible to reintroduce quietly
-/// rather than to handle a case. A pipe arriving here means an entry was
-/// added that does not fold, and saying so is worth more than typing it a
-/// second way.
-pub(super) fn pipe_reached_inference_unfolded(
-    node: &DeepNode,
-    errors: &mut DiagnosticSink<'_>,
-) -> Type {
-    let stages = node.children_slice().len().saturating_sub(1);
-    report(
-        errors,
-        CheckError::new(
-            CheckErrorKind::MalformedForm,
-            format!(
-                "a pipe reached inference unfolded ({stages} stage(s)): every checker entry \
-                 folds a pipe into the application it denotes before inference \
-                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
-            ),
-            vec![],
-        ),
-    )
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 7,
-  "freeze_sha256": "a90d2e9c1e42b01cdcd2338444f5c982e6f0163bb57c9ec38d326e6cef3aefa2",
+  "freeze_sha256": "7a24b73e809011eb0511e3584045f656333b57e04ef0d7e28b70a7e49f23e306",
   "source_inventory": {
     "mutations": [
       {
@@ -2053,6 +2053,14 @@
     {
       "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::Key",
       "deletion_phase": 1
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::scalar_step_raw_expr",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=activation_body",
+      "deletion_phase": 4
     }
   ],
   "active_debt": [
@@ -2074,7 +2082,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_reduced_f",
-      "sample": "reduced-float emitter requires f16 or bf16"
+      "sample": "uint16_t* restrict __out_{id} = (uint16_t*)t{id}_data;"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
@@ -2098,7 +2106,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div",
-      "sample": "({et})(({av} / chelis_int_div_guard((int64_t)({bv}))) - ((((({av}) % chelis_int_div_guard((int64_..."
+      "sample": "({et})chelis_int_checked_floor_div((int64_t)({av}), (int64_t)({bv}), {bits}, {zero:?}, {overflow:?})"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div_reduced_f",
@@ -2146,7 +2154,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_simple",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
+      "sample": "{fn_name}((const float*)t{a}_data, t{a}_size)"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
@@ -2203,10 +2211,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::reject_fused_integer_abs",
       "sample": "direct integer abs is implemented with an exact trapping kernel; general fused integer emission r..."
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::scalar_step_expr",
-      "sample": "trunc_div is integer-only (chelis#178); the fused-elem path is float-only (f32/f64) and cannot ca..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::scalar_zero_literal",
@@ -2294,7 +2298,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_activation_helpers",
-      "sample": "{c_type} half = {};"
+      "sample": "double"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_checked_cast_conversion_helpers",
@@ -2601,10 +2605,6 @@
       "sample": "float __av = {load}(__in_a_{id}[i]);"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
-      "sample": "[05-OP-6] C emission is float-to-integer only"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
       "sample": "uint8_t __bit_{id} = __count_in_{id}[__src_{id}];"
     },
@@ -2634,11 +2634,11 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_simple",
-      "sample": "((float*)t{id}_data)[0] = {fn_name}((const float*)t{a}_data, t{a}_size);"
+      "sample": "((float*)t{id}_data)[0] = {reduced};"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
-      "sample": "({arithmetic_et})chelis_int_checked_add((int64_t)level[left], (int64_t)level[right], {bits}, {tra..."
+      "sample": "((uint16_t*)t{id}_data)[outer] = {}(result);"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
@@ -2987,6 +2987,14 @@
     {
       "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::Key",
       "sample": "# [doc = \" A random key ([05-RNG-2]): structurally non-numeric, with no\"] # [doc = \" arithmetic r..."
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::scalar_step_raw_expr",
+      "sample": "trunc_div is integer-only (chelis#178); the fused-elem path is float-only (f32/f64) and cannot ca..."
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=activation_body",
+      "sample": "double"
     }
   ]
 }

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
     ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
-    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
+    LogicalKind, NamedCastMode, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
@@ -1531,6 +1531,17 @@ impl HipEmitter {
                     ),
                 ));
             }
+            RiscOp::Softmax { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("softmax".into()),
+                    "undecomposed softmax reached HIP emission",
+                    Stage::Codegen("hip"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-48]",
+                        "prepare the retained softmax identity after AD and before ownership/codegen"
+                    ),
+                ));
+            }
             RiscOp::Iota => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("Iota".into()),
@@ -1624,6 +1635,9 @@ impl HipEmitter {
             RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node)?.suffix())),
             RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node)?.suffix())),
             RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Tanh => Some(format!("kernel_tanh_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Erf => Some(format!("kernel_erf_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Erfc => Some(format!("kernel_erfc_{}", kind_for_node(node)?.suffix())),
             RiscOp::Abs => Some(format!(
                 "kernel_abs{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1764,7 +1778,7 @@ impl HipEmitter {
             // chelis-compiler-api) gate this out before codegen; the
             // emitter arms below are the backstop if a future caller
             // reaches the backend without passing a gate.
-            RiscOp::CastTrunc { .. } => None,
+            RiscOp::NamedCast { .. } => None,
             RiscOp::Count { .. } => Some(format!("kernel_count_{}", node.id.0)),
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
@@ -2082,6 +2096,9 @@ impl HipEmitter {
             RiscOp::Cos => kernels::unary_func(self.kernel_rank, name, "cosf", elem_for_unary()?),
             RiscOp::Tan => kernels::unary_func(self.kernel_rank, name, "tanf", elem_for_unary()?),
             RiscOp::Atan => kernels::unary_func(self.kernel_rank, name, "atanf", elem_for_unary()?),
+            RiscOp::Tanh => kernels::unary_func(self.kernel_rank, name, "tanhf", elem_for_unary()?),
+            RiscOp::Erf => kernels::unary_func(self.kernel_rank, name, "erff", elem_for_unary()?),
+            RiscOp::Erfc => kernels::unary_func(self.kernel_rank, name, "erfcf", elem_for_unary()?),
             RiscOp::Abs if operand_prec().is_integer() => kernels::unary_checked_abs_integer(
                 self.kernel_rank,
                 name,
@@ -2190,8 +2207,8 @@ impl HipEmitter {
                     .byte_width(),
             ),
             RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag, take_gate())?,
-            RiscOp::CastTrunc { .. } => {
-                return Err(Self::cast_trunc_unsupported(node));
+            RiscOp::NamedCast { mode, .. } => {
+                return Err(Self::named_cast_unsupported(node, *mode));
             }
             RiscOp::Count { axes } => {
                 let input = dag
@@ -2410,6 +2427,17 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::Softmax { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("softmax".into()),
+                    "undecomposed softmax reached HIP emission",
+                    Stage::Codegen("hip"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-48]",
+                        "prepare the retained softmax identity after AD and before ownership/codegen"
+                    ),
+                ));
+            }
             RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(format!("{:?}", node.op)),
@@ -2594,6 +2622,24 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Atan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Tanh => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Erf => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Erfc => self.emit_unary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -2816,7 +2862,9 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
+            RiscOp::NamedCast { mode, .. } => {
+                return Err(Self::named_cast_unsupported(node, *mode));
+            }
             RiscOp::Count { axes } => {
                 self.emit_count_launch(id, axes, &node.inputs, &node.output_type, dag)
             }
@@ -3505,7 +3553,7 @@ impl HipEmitter {
         Ok(())
     }
 
-    /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
+    /// The literal bounds and emission-time key of a keyed `UniformLike`
     /// whose key [`Self::record_derived_key`] computed.
     fn keyed_uniform_like_parameters(
         &self,
@@ -3572,9 +3620,9 @@ impl HipEmitter {
         let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
-        // [05-OP-8]: bounds have f32 dtype. The f32 kernel consumes those
-        // exact images; the f64 kernel widens the same images exactly and
-        // executes the affine at f64 width.
+        // [05-OP-8]: the bounds have the draw's dtype, so `low` and `high`
+        // are the exact images of f32 or f64 constants. Each kernel consumes
+        // them at its own width and executes the affine there.
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
         match elem {
@@ -3587,8 +3635,8 @@ impl HipEmitter {
                 ));
             }
             kernels::ElemKind::F64 => {
-                let low_wide_bits = (low as f32 as f64).to_bits();
-                let high_wide_bits = (high as f32 as f64).to_bits();
+                let low_wide_bits = low.to_bits();
+                let high_wide_bits = high.to_bits();
                 self.line(&format!(
                     "double t{id}_low = chelis_f64_from_bits(0x{low_wide_bits:016x}uLL);"
                 ));
@@ -3803,6 +3851,16 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter", target_ty);
+        self.emit_scatter_update_shape_check(
+            id,
+            axis,
+            batch_rank,
+            indices,
+            updates,
+            target_ty.dims.len(),
+            indices_ty.dims.len(),
+            "scatter",
+        );
         self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
@@ -3823,6 +3881,55 @@ impl HipEmitter {
         self.indent -= 1;
         self.line("}");
         Ok(())
+    }
+
+    /// Trap unless a scatter's run-time update shape is the gathered shape
+    /// `target[..axis] ++ indices[batch_rank..] ++ target[axis + 1..]`.
+    ///
+    /// The verifier refuses only a static contradiction and leaves an update
+    /// shape it cannot prove to the run time (runtime_extents.md C2.3). The
+    /// host lane checks it in `chelis_tensor_sparse_plan`; the device kernels
+    /// walk the update count, so without this check fewer updates would
+    /// write a partial scatter silently (chelis#3045). The output slot holds
+    /// the target's shape.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_scatter_update_shape_check(
+        &mut self,
+        id: usize,
+        axis: usize,
+        batch_rank: usize,
+        indices: usize,
+        updates: usize,
+        target_rank: usize,
+        indices_rank: usize,
+        op: &str,
+    ) {
+        let expected = (0..axis)
+            .map(|target_axis| format!("d_t{id}->shape[{target_axis}]"))
+            .chain(
+                (batch_rank..indices_rank)
+                    .map(|index_axis| format!("d_t{indices}->shape[{index_axis}]")),
+            )
+            .chain(
+                (axis + 1..target_rank).map(|target_axis| format!("d_t{id}->shape[{target_axis}]")),
+            )
+            .collect::<Vec<_>>();
+        self.emit_update_shape_check(updates, &expected, op);
+    }
+
+    /// Trap unless `updates` has exactly the `expected` extents, the rank
+    /// first so no extent read leaves the descriptor's shape.
+    fn emit_update_shape_check(&mut self, updates: usize, expected: &[String], op: &str) {
+        let trap = format!("chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");");
+        self.line(&format!(
+            "if (d_t{updates}->rank != {}) {trap}",
+            expected.len()
+        ));
+        for (axis, extent) in expected.iter().enumerate() {
+            self.line(&format!(
+                "if (d_t{updates}->shape[{axis}] != {extent}) {trap}"
+            ));
+        }
     }
 
     /// Launch the sparse replace-scatter (last-write-wins) kernel.
@@ -3875,6 +3982,16 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter_replace", target_ty);
+        self.emit_scatter_update_shape_check(
+            id,
+            axis,
+            batch_rank,
+            indices,
+            updates,
+            target_ty.dims.len(),
+            indices_ty.dims.len(),
+            "scatter_replace",
+        );
         self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
@@ -3941,6 +4058,13 @@ impl HipEmitter {
         // Initialize the output from `data`; the kernel overwrites only
         // the scattered cells, so the remainder must equal `data`.
         self.emit_materialize_into_slot(id, data);
+        // The updates share the indices' shape (§3.5.1), and the kernel
+        // walks the update count, so a run-time mismatch traps here
+        // (chelis#3045).
+        let expected = (0..indices_ty.dims.len())
+            .map(|axis| format!("d_t{indices}->shape[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_update_shape_check(updates, &expected, "scatter_elements");
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
         self.line(&format!(
@@ -5217,16 +5341,16 @@ impl HipEmitter {
     /// These arms exist so a future HIP implementation has to remove
     /// this rejection deliberately rather than inherit `cast`'s
     /// unguarded conversion by accident.
-    fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
+    fn named_cast_unsupported(node: &DagNode, mode: NamedCastMode) -> Unsupported {
         Unsupported::new(
-            UnsupportedKind::Op("cast_trunc".to_string()),
+            UnsupportedKind::Op(mode.keyword().to_string()),
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
             chelis_types::unimplemented_rejection!(
                 759,
                 "the HIP cast kernels emit an unguarded device-side conversion, \
-                 so the [05-OP-6] Domain/Overflow traps have no device \
-                 implementation; the C target is canonical for the named cast ladder"
+                 so the named cast traps have no device implementation; the C \
+                 target is canonical for the named cast ladder"
             ),
         )
     }
@@ -5254,6 +5378,7 @@ impl HipEmitter {
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Neg
             | RiscOp::Recip
@@ -5264,6 +5389,9 @@ impl HipEmitter {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -5291,7 +5419,7 @@ impl HipEmitter {
             | RiscOp::Realize
             | RiscOp::Reshape { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }
@@ -6108,6 +6236,175 @@ mod tests {
         assert!(hip.contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);"));
     }
 
+    /// A scatter DAG over a `(3, 2)` f32 target, `indices` of the given
+    /// shape, and `updates` of the given shape. Node ids are target 0,
+    /// indices 1, updates 2, output 3.
+    fn scatter_dag(op: RiscOp, indices: Vec<usize>, updates: Vec<usize>) -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let mut load = |name: &str, dims: Vec<usize>, precision: Prim| {
+            dag.add_node(
+                decl,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: dims.into_iter().map(DimInfo::Lit).collect(),
+                    precision,
+                },
+                None,
+            )
+        };
+        let target = load("target", vec![3, 2], Prim::F32);
+        let indices = load("indices", indices, Prim::Int64);
+        let updates = load("updates", updates, Prim::F32);
+        let out = dag.add_node(
+            decl,
+            op,
+            vec![target, indices, updates],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(out);
+        dag
+    }
+
+    /// The emitted host lines that trap on a run-time update shape, in
+    /// order, up to the kernel's argument array.
+    fn update_shape_checks(hip: &str, op: &str) -> Vec<String> {
+        let trap = format!("chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");");
+        let launch = hip
+            .find("void *args[] = { &p_t1, &p_t2, &p_t3")
+            .unwrap_or_else(|| panic!("no {op} launch in:\n{hip}"));
+        hip[..launch]
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("if (d_t2->") && line.ends_with(&trap))
+            .map(|line| line.trim_end_matches(&trap).trim().to_string())
+            .collect()
+    }
+
+    /// chelis#3045: the verifier leaves an update shape it cannot prove to
+    /// the run time (runtime_extents.md C2.3), and the device scatter
+    /// kernels loop over the update count. Each launch therefore compares
+    /// the update shape with the gathered shape the host sparse plan
+    /// requires, `target[..axis] ++ indices[batch_rank..] ++
+    /// target[axis + 1..]`, before the kernel runs.
+    #[test]
+    fn scatter_launches_check_the_update_shape_before_the_kernel() {
+        for (op, name) in [
+            (
+                RiscOp::ScatterAdd {
+                    axis: 1,
+                    batch_rank: 0,
+                },
+                "scatter",
+            ),
+            (
+                RiscOp::Scatter {
+                    axis: 1,
+                    batch_rank: 0,
+                },
+                "scatter_replace",
+            ),
+        ] {
+            let dag = scatter_dag(op, vec![4], vec![3, 4]);
+            let (hip, _) = emit_test_dag(&dag, "test_scatter").unwrap();
+            assert_eq!(
+                update_shape_checks(&hip, name),
+                [
+                    "if (d_t2->rank != 2)",
+                    "if (d_t2->shape[0] != d_t3->shape[0])",
+                    "if (d_t2->shape[1] != d_t1->shape[0])",
+                ],
+                "{name}:\n{hip}"
+            );
+        }
+    }
+
+    /// chelis#3045: an element-wise scatter's updates share the indices'
+    /// shape (`spec/05-risc-primitives.md` §3.5.1), never the target's.
+    #[test]
+    fn scatter_elements_launch_checks_updates_against_indices() {
+        let dag = scatter_dag(RiscOp::ScatterElements { axis: 0 }, vec![2, 2], vec![2, 2]);
+        let (hip, _) = emit_test_dag(&dag, "test_scatter_elements").unwrap();
+        assert_eq!(
+            update_shape_checks(&hip, "scatter_elements"),
+            [
+                "if (d_t2->rank != 2)",
+                "if (d_t2->shape[0] != d_t1->shape[0])",
+                "if (d_t2->shape[1] != d_t1->shape[1])",
+            ],
+            "{hip}"
+        );
+    }
+
+    /// chelis#3045's negative twin: the scattered axis selects target rows
+    /// by index, so its update extent is the index count and is never
+    /// compared with the target's extent on that axis, and a gather, which
+    /// has no updates, emits no update check.
+    #[test]
+    fn scatter_never_compares_the_scattered_axis_with_the_target() {
+        let dag = scatter_dag(
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+            vec![4],
+            vec![4, 2],
+        );
+        let (hip, _) = emit_test_dag(&dag, "test_scatter").unwrap();
+        let checks = update_shape_checks(&hip, "scatter");
+        assert!(
+            !checks.iter().any(|line| line.contains("!= d_t3->shape[0]")),
+            "{checks:?}"
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|line| line == "if (d_t2->shape[0] != d_t1->shape[0])"),
+            "{checks:?}"
+        );
+
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let values = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat_f32(3, 2),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i64(4),
+            None,
+        );
+        let out = dag.add_node(
+            decl,
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
+            vec![values, indices],
+            mat_f32(4, 2),
+            None,
+        );
+        dag.add_root(out);
+        let (hip, _) = emit_test_dag(&dag, "test_gather").unwrap();
+        assert!(
+            !hip.lines().any(|line| {
+                line.trim_start().starts_with("if (d_t") && line.contains("domain in gather at i64")
+            }),
+            "{hip}"
+        );
+    }
+
     /// A program-owned `Copy` with a terminal fused use receives the shared
     /// reuse token. The kernel ships
     /// the in-place shape — `__restrict__` only on non-aliased
@@ -6321,18 +6618,19 @@ mod tests {
             dims: vec![],
             precision,
         };
+        // [05-OP-8]: the bounds have the template's dtype.
         let low = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, low),
+            RiscOp::synth_const(ty.precision, low),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let high = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, high),
+            RiscOp::synth_const(ty.precision, high),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let seed = dag.add_node(
@@ -6609,18 +6907,19 @@ mod tests {
             rank0(Prim::Key),
             None,
         );
+        // [05-OP-8]: the bounds have the template's dtype.
         let low = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, 0.0),
+            RiscOp::synth_const(ty.precision, 0.0),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let high = dag.add_node(
             decl,
-            RiscOp::synth_const(Prim::F32, 1.0),
+            RiscOp::synth_const(ty.precision, 1.0),
             vec![],
-            rank0(Prim::F32),
+            rank0(ty.precision),
             None,
         );
         let draw = dag.add_node(
@@ -6859,8 +7158,17 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains(&format!("double t{}_low = chelis_f64_from_bits(", u.0)));
-        assert!(hip.contains(&format!("double t{}_high = chelis_f64_from_bits(", u.0)));
+        // [05-OP-8]: f64 bounds reach the draw exactly, not through f32.
+        assert!(hip.contains(&format!(
+            "double t{}_low = chelis_f64_from_bits(0x{:016x}uLL);",
+            u.0,
+            low.to_bits()
+        )));
+        assert!(hip.contains(&format!(
+            "double t{}_high = chelis_f64_from_bits(0x{:016x}uLL);",
+            u.0,
+            high.to_bits()
+        )));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

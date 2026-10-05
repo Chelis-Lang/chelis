@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from scripts import check_agent_skills as check
-from scripts.regenerate_conformance_assets import SHARED_SKILLS
+from scripts.regenerate_conformance_assets import PACKAGE_SKILLS, REPO_SKILLS, SHARED_SKILLS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,14 +18,16 @@ class SkillContractTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in SHARED_SKILLS:
-            for prefix in (
-                "agent-skills",
-                "crates/chelis-conformance/assets/skills",
-            ):
-                path = self.root / prefix / name / "SKILL.md"
-                path.parent.mkdir(parents=True)
-                path.write_text(f"---\nname: {name}\ndescription: Review the named contract.\n---\n\n# Instructions\n")
+        sources = [self.root / "agent-skills" / name / "SKILL.md" for name in REPO_SKILLS]
+        sources += [self.root / rel for _, rel in PACKAGE_SKILLS]
+        sources += [
+            self.root / "crates/chelis-conformance/assets/skills" / name / "SKILL.md"
+            for name in SHARED_SKILLS
+        ]
+        for path in sources:
+            name = path.parent.name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"---\nname: {name}\ndescription: Review the named contract.\n---\n\n# Instructions\n")
         for platform in (".claude", ".codex"):
             directory = self.root / platform
             directory.mkdir()

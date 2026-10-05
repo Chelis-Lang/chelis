@@ -684,7 +684,7 @@ where
 /// `dlopen` a compiled artifact so that dropping it does not unmap it.
 ///
 /// chelis#963: a compiled kernel's elementwise loops carry
-/// `#pragma omp parallel for simd`, and on Linux `-fopenmp` is live
+/// OpenMP parallel regions, and on Linux `-fopenmp` is live
 /// (`chelis-backend-c/src/toolchain.rs`: OpenMP is gated on
 /// `is_real_gcc`, true for the `gcc` Linux resolves to and false for the
 /// Apple clang macOS resolves to). Executing such a kernel spawns
@@ -916,9 +916,15 @@ fn load_reef_context(
     // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
     // `prepare_eval` instead — a divergence to watch if the CLI paths are
     // later unified).
-    load_or_compile_with_local_registry_fallback(&reef_home, root, entries, false)
-        .map(|(context, _path)| context)
-        .map_err(CompileAndLoadError::Compiler)
+    load_or_compile_with_local_registry_fallback(
+        &reef_home,
+        root,
+        entries,
+        false,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .map(|(context, _path)| context)
+    .map_err(CompileAndLoadError::Compiler)
 }
 
 /// Resolve the reef package root for a `compile_and_load` job (issue #816).
@@ -1306,9 +1312,25 @@ fn compile_shared_library_inner(
         .filter(openmp_dropped)
         .collect();
 
-    let mut command = Command::new(&compiler);
+    // The C compiler runs with the allowlisted environment and the pinned
+    // profile's own optimisation level, as `chelis build` does, and the same
+    // check refuses one whose wrapper or configuration changes the profile;
+    // hipcc keeps its environment, which ROCm uses to locate its installation.
+    if artifact.compile_result.target == CompileTarget::C {
+        let profile: Vec<String> = compile_flags.iter().map(|flag| flag.to_string()).collect();
+        let links: Vec<String> = link_flags.iter().map(|flag| flag.to_string()).collect();
+        chelis_backend_c::toolchain::verify_compiler(&compiler.to_string_lossy(), &profile, &links)
+            .map_err(|error| format!("native compile: {error}"))?;
+    }
+    let mut command = match artifact.compile_result.target {
+        CompileTarget::C => chelis_backend_c::toolchain::tool_command(&compiler),
+        CompileTarget::Hip => {
+            let mut command = Command::new(&compiler);
+            command.arg("-O3");
+            command
+        }
+    };
     command.current_dir(root);
-    command.arg("-O3");
     command.arg("-shared");
     command.arg("-fPIC");
     // Silence the now-unrecognized `#pragma omp ...` lines the serial build
@@ -2025,6 +2047,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod native_dlpack_owner_tests;
 
 #[cfg(test)]
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};
@@ -2521,6 +2547,72 @@ loss = (mean(x, 0) : tensor[f32])
         drop(library);
     }
 
+    /// spec/08-backends.md: a selected compiler whose wrapper changes the
+    /// pinned profile fails the build. Contraction shows in no predefined
+    /// macro, so this is the floating-point canary's refusal. The compiler is
+    /// chosen through `CHELIS_CC`, so the job runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn compile_and_load_job_refuses_a_contracting_compiler_wrapper() {
+        const TEST: &str = "tests::compile_and_load_job_refuses_a_contracting_compiler_wrapper";
+        let dir = tempdir().expect("tempdir");
+        if std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+            let real = chelis_backend_c::toolchain::verify_compiler(
+                &toolchain.compiler,
+                &toolchain.compile_flags,
+                &toolchain.link_flags,
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+            .path;
+            // The x86-64 baseline has no fused multiply-add; `-mfma` is what a
+            // `-march=native` wrapper would add there.
+            let contract = if cfg!(target_arch = "x86_64") {
+                "-mfma -ffp-contract=fast"
+            } else {
+                "-ffp-contract=fast"
+            };
+            let wrapper = dir.path().join("contract-cc");
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nexec '{}' \"$@\" {contract}\n", real.display()),
+            )
+            .expect("write wrapper");
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+                .expect("chmod wrapper");
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", TEST])
+                .env("CHELIS_PYTHON_WRAPPER_CHILD", "1")
+                .env("CHELIS_CC", &wrapper)
+                .status()
+                .expect("run child");
+            assert!(status.success(), "{TEST} failed in the child");
+            return;
+        }
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, RELU4_SOURCE).expect("write source");
+        let error = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .err()
+        .expect("a contracting wrapper is refused");
+        let CompileAndLoadError::Message(message) = error else {
+            panic!("expected a refusal message");
+        };
+        assert!(
+            message.contains("contract-cc") && message.contains("floating-point canary disagrees"),
+            "{message}"
+        );
+        assert!(!dir.path().join("model.so").exists(), "no library is built");
+    }
+
     const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";
 
     /// Compile `source` as `model.ch` into a retained artifact directory, so
@@ -2716,7 +2808,7 @@ loss = (mean(x, 0) : tensor[f32])
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
         // An elementwise chain, so the emitted C carries
-        // `#pragma omp parallel for simd` and executing it starts
+        // OpenMP parallel regions and executing it starts
         // libgomp's pool -- the precondition for the crash.
         fs::write(
             &source_path,
@@ -2970,24 +3062,27 @@ loss = (mean(x, 0) : tensor[f32])
             f32_lane_value(f32::tanh, x),
         );
 
-        // `gelu` lowers through the tanh approximation in
-        // `chelis_ir::tier2::lower_gelu`; mirror that exact formula so
-        // the assertion tests precision, not a different definition of
-        // gelu. Its `Const` operands (sqrt(2/pi), 0.044715) also
-        // exercise the f64 const-fill path.
+        // spec/05 section 3.3 pins `gelu_tanh` as `x*sigmoid(2u)` with
+        // `u = sqrt(2/pi)*(x + 0.044715*x^3)`; the tanh spelling below is the
+        // same function, `0.5*(1+tanh(u)) = sigmoid(2u)`, and agrees with it
+        // well inside `TOL` at this input. Its `Const` operands (sqrt(2/pi),
+        // 0.044715) also exercise the f64 const-fill path.
         let gelu_ref = {
             let c = 0.7978845608028654_f64;
             let k = 0.044715_f64;
             0.5 * x * (1.0 + (c * (x + k * x * x * x)).tanh())
         };
         let (dtype, values) = run_f64_kernel(
-            "def g(x: tensor[1, f64]) -> tensor[1, f64] = gelu(x)\n",
+            "def g(x: tensor[1, f64]) -> tensor[1, f64] = gelu_tanh(x)\n",
             &[x],
         );
-        assert_eq!(dtype, CHELIS_DTYPE_F64, "gelu output must be tagged f64");
+        assert_eq!(
+            dtype, CHELIS_DTYPE_F64,
+            "gelu_tanh output must be tagged f64"
+        );
         assert!(
             (values[0] - gelu_ref).abs() < TOL,
-            "f64 gelu({x}) = {:?}, expected within {TOL} of {gelu_ref:?}",
+            "f64 gelu_tanh({x}) = {:?}, expected within {TOL} of {gelu_ref:?}",
             values[0],
         );
     }

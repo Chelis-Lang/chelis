@@ -64,7 +64,7 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     let std_root = manifest.join("../../packages/chelis-std");
     let mut paths: Vec<PathBuf> = [
         "src/decimal.ch",
-        "src/time.ch",
+        "src/datetime.ch",
         "src/process.ch",
         "src/tensor/construct.ch",
         "src/test.ch",
@@ -81,84 +81,10 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// The `build`-oracle corpus excludes Std.Test and Std.Process. Their
-/// `test_*` and `process_run` builtins are host-only, so `chelis build`
-/// loudly rejects those modules (chelis#796; spec/05-risc-primitives.md
-/// §§2.6, 3.6.1, 3.7). Both remain in [`stdlib_corpus`] for the check
-/// oracles. Exclude exact canonical paths so an unrelated future module
-/// with the same filename is never silently dropped.
+/// The `build`-oracle corpus is the whole stdlib corpus: every module,
+/// Std.Test and Std.Process included, builds for C (chelis#1297).
 fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
-    let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
-    let host_only_modules: Vec<PathBuf> = ["src/test.ch", "src/process.ch"]
-        .iter()
-        .map(|rel| {
-            std_root
-                .join(rel)
-                .canonicalize()
-                .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
-        })
-        .collect();
     stdlib_corpus(scratch)
-        .into_iter()
-        .filter(|p| !host_only_modules.contains(p))
-        .collect()
-}
-
-/// Locks the contract that justifies excluding `src/test.ch` from
-/// [`stdlib_build_corpus`]: `chelis build` of the Std.Test module must fail
-/// loudly because the `test_*` builtins it wraps are host-only (chelis#796;
-/// spec/05-risc-primitives.md §3.6.1). The C host emitter returns on the
-/// first unsupported builtin, so this is a module-level guard (representative
-/// via `test_assert`, the first wrapper) rather than per-builtin coverage of
-/// all seven. Before the loud-unsupported sweep that emitter compiled such
-/// calls to a silently-inert `0` stub, so a compiled test asserted nothing;
-/// dropping `test.ch` from the build oracles above would otherwise leave
-/// nothing on the build lane asserting that the stub stays gone.
-#[test]
-fn std_test_module_build_is_host_only_rejected() {
-    assert_std_module_build_is_host_only_rejected("test.ch", "test_assert", "host emission");
-}
-
-/// `Std.Process` stays in the check corpus but cannot be built because
-/// `process_run` is host-only under [05-HOST-2].
-#[test]
-fn std_process_module_build_is_host_only_rejected() {
-    assert_std_module_build_is_host_only_rejected("process.ch", "process_run", "compiled targets");
-}
-
-fn assert_std_module_build_is_host_only_rejected(
-    module: &str,
-    builtin: &str,
-    rejection_detail: &str,
-) {
-    let (_guard, cache_home) = fresh_cache_home();
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std/src")
-        .join(module)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("canonicalize {module}: {e}"));
-    let out_dir = tempdir().expect("out dir");
-    let output = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &cache_home)
-        .arg("build")
-        .arg(source)
-        .arg("-o")
-        .arg(out_dir.path())
-        .output()
-        .expect("run chelis build");
-    assert!(
-        !output.status.success(),
-        "`chelis build` of {module} must reject host-only builtin {builtin}"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(builtin)
-            && stderr.contains("unsupported")
-            && stderr.contains(rejection_detail),
-        "expected the host-only rejection for {builtin}; got stderr:\n{stderr}"
-    );
 }
 
 /// Copy the pseudo_nautilus fixture into `scratch` and return the path
@@ -197,6 +123,9 @@ fn run_capture(
         cmd.env(k, v);
     }
     cmd.arg(subcommand).arg(file);
+    if subcommand == "build" {
+        cmd.arg("--emit-c");
+    }
     if let Some(dir) = out_dir {
         cmd.arg("-o").arg(dir);
     }

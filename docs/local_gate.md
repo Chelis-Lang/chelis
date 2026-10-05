@@ -54,13 +54,16 @@ the one `python3` entry point that self-heals. Without an explicit
 `PYO3_PYTHON`, it runs on this checkout's own interpreter whenever one exists:
 the activated Devenv state venv under this checkout, else `.venv`. A launch
 under any other interpreter re-executes through it, including another
-checkout's venv that comes first on `PATH` (chelis#2511); the capacity census
+checkout's venv that comes first on `PATH`; the capacity census
 accepts only this checkout's interpreter and would otherwise refuse it at the
 end of the runtime-representation stage. With no owned interpreter, a runtime
 that is not already uv- or Devenv-managed re-executes through
 `uv run --managed-python --python 3.11 --no-project` before running gate logic,
 so `python3 scripts/gate.py` starts correctly in every environment. It exports
-its selected interpreter as `PYO3_PYTHON` to every child command. Its `--fast`
+its selected interpreter as `PYO3_PYTHON` to every child command and computes
+`PYO3_ENVIRONMENT_SIGNATURE` from that interpreter's build metadata. The
+signature makes PyO3 refresh restored Cargo configuration when the interpreter
+changes behind the same venv path. Its `--fast`
 and `--validation` preflight warns when the worktree has no `.venv/bin/python`
 (create it with `uv venv --python 3.11`): the census legs need it, and direct
 cargo and nextest runs outside the gate fall back to it when `PYO3_PYTHON` is
@@ -91,9 +94,25 @@ Rust test and gate code resolves an interpreter through
 the checkout's `.venv/bin/python` is the fallback. Outside Devenv,
 `.cargo/config.toml` points `PYO3_PYTHON` at `.venv/bin/python`; Devenv
 overrides it with `.devenv/state/venv/bin/python`. For direct Cargo commands in
-a dedicated worktree, export `PYO3_PYTHON="$(uv python find 3.11)"`. An
+a dedicated worktree, use that worktree's owned `.venv/bin/python`. An
 explicit `PYO3_PYTHON` is authoritative: an invalid path must fail loudly
 rather than fall back.
+
+Hosted CI setup, hosted command publication, Devenv environment capture and
+the gate compute the same `PYO3_ENVIRONMENT_SIGNATURE` from the selected
+interpreter: executable and prefix paths, full version, ABI, library directory,
+library name, pointer width and build flags. They reject `PYO3_CONFIG_FILE`,
+`PYO3_NO_PYTHON` and `PYO3_CROSS*` overrides because those bypass native
+interpreter discovery. CI supplies libpython only from that interpreter's
+`LIBDIR`; a sibling installation is not a substitute.
+
+Direct Cargo invocations bypass these entry points. After creating or replacing
+the worktree venv, export its signature before reusing a Cargo target:
+
+```sh
+export PYO3_PYTHON="$PWD/.venv/bin/python"
+export PYO3_ENVIRONMENT_SIGNATURE="$(.venv/bin/python -c 'from pathlib import Path; from scripts.ci_setup_uv_python import pyo3_environment_signature; print(pyo3_environment_signature(Path(".venv/bin/python")))')"
+```
 
 Two invocation forms follow, and the repository uses them consistently: every
 script is `.venv/bin/python scripts/<name>.py`, and the gate is always
@@ -111,7 +130,7 @@ the primary path.
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do
 not route PyO3 to it.
 
-**C front end.** The chelis#893 Phase 0 oracle and the `chelis-repr-inventory`
+**C front end.** The runtime-representation oracle and the `chelis-repr-inventory`
 tests read the registered C and Objective-C headers through a `clang` binary on
 PATH (any clang that prints `-ast-dump=json`), in addition to the `cc` the
 capacity census already requires; a missing `clang` fails the scan loudly
@@ -124,44 +143,36 @@ rather than skipping it.
 conformance skill assets, and the opaque-invariants corpus) and
 `cargo fmt --all`, then `ci_change_owned.py classify-paths` over the changed
 set, `chelis lint --check .`, `scripts/eval_system_guard.py` over the evaluator
-source, `cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
+source, `scripts/check_std_bundle_untracked.py` over the index,
+`cargo clippy -p <crate> --all-targets -- -D warnings` for each changed crate
+(the targets CI's workspace clippy lints, so a lint that fires only in a
+non-test library or binary build fails locally too),
 one `cargo nextest run` over the drift tripwires (atom
 partition, generated dtype header, compiler pins, opaque corpus,
 loud-unsupported, payload census, bundled std loader, conformance manifest,
 asset drift, skill-set uniformity, phase-3 gate inventory, stack-guard
 coverage, runtime-extent target manifest), and, when a `packages/chelis-std/`
-or `crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right
-after tier 0 (so every check sees the regenerated bundle) and
+or `crates/chelis-std-bundle/` path changed,
 `cargo nextest run -p chelis-std-bundle --lib` after the tripwires.
 
-One further conditional leg runs last: when a std path, **any `reef.lock`**, or
-the **root `Cargo.toml`** changed, `cargo nextest run -p chelis-reef --lib` over
-`bundled_chelis_std_lock_hashes_match_embedded_artifacts` and
-`embedded_bundle_rlib_matches_disk`. Those two are the halves of the
-bundled-lock invariant: every committed bundled `reef.lock` must pin the
-embedded bundle's hashes, and the compiled `chelis-std-bundle` rlib must embed
-the bytes that are on disk. They are lib unit tests in `chelis-reef`, and the
-changed-crate stage never selects that crate, because the paths that invalidate
-them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or
-to no crate at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose
-workspace version `chelis-reef` inherits and feeds into the comparison). Before
-chelis#2309 no local invocation reached either one, so chelis#2305 got PASS from
-`--fast` in 202.3 s on a head that CI then rejected on this exact test. A fourth
-class was added in review: `crates/chelis-reef/` itself, because `--fast` runs
-clippy rather than nextest per changed crate, so editing the discovery walk never
-ran the guard either. The trigger is
-a **superset** of the std one and matches locks by basename rather than by a path
-prefix, because the guard discovers its lock set by walking the tree: a lock
-committed at a new path is in scope the moment it exists. The guard reports
-**every** drifted lock in one run, not the first — chelis#2305 had three, and the
-sorted walk meant a fix-the-named-row loop would have spent one CI round per
-lock.
+The chelis-std runtime each binary embeds is packed from `packages/chelis-std`
+by `crates/chelis-std-bundle/build.rs` while the compiler builds, so a std edit
+needs no regeneration step: the next build carries it. The bundled std loader
+tripwire builds a fresh copy of the std sources with `chelis reef build` and
+requires the embedded pair and the locks it writes to agree with those bytes,
+and the bundle crate's tests check the input selection and the pinned archive
+mtime. `scripts/check_std_bundle_untracked.py` refuses a tracked file under
+`packages/chelis-std/dist/` or `crates/chelis-std-bundle/dist/`, and a tracked
+`reef.lock` that records the bundled runtime: every lock reef writes names the
+running binary's runtime, so a committed one goes stale with the first std
+edit. The pre-commit hook runs it with `--tree` on a copy of the staged files
+when a commit stages a path under either `dist/` directory or
+`packages/chelis-std/reef.lock`; the gate and CI check every tracked lock.
 
 Every writer runs before every check, and the path classification is the first
 check because it is the cheapest row that can reject a push: it is the
 planner's own rule lookup, and a new tracked file that no `[[path_rule]]`
-routes fails `Plan Changed Integration Tests` in CI, which nothing local could
-see before chelis#2250. It reports every unrouted path rather than the first
+routes fails `Plan Changed Integration Tests` in CI. It reports every unrouted path rather than the first
 and prints the same sentence CI prints. It needs cargo on PATH, because it
 reads the workspace package roots from `cargo metadata --no-deps --locked`,
 and it costs a fraction of a second (see the measured figures in
@@ -186,9 +197,9 @@ only the working tree, so an in-place crate rename can be ambiguous to the
 planner and clean here.
 
 `--fast` exits non-zero for any failing stage (fmt, regeneration, path
-classification, lint, evaluator source guard, per-crate clippy, the tripwire
-run, the std-bundle self-test, or the bundled-lock guard) and never for a file
-it fixed; a regenerated `dist/` or `reef.lock` is reported as a changed file to
+classification, lint, evaluator source guard, std-bundle tracking guard,
+per-crate clippy, the tripwire run, or the bundle crate's tests) and never for
+a file it fixed; a regenerated artifact is reported as a changed file to
 commit, never as a failure. Changed files are reported from content hashes of
 the porcelain set before and after the run, so a file that was already dirty
 and that fmt changed further is still listed. It never runs a workspace clippy
@@ -197,7 +208,7 @@ takes the lease.
 
 ## What `--validation` runs
 
-`--validation` (chelis#360) is an optional extra validation command, not the
+`--validation` is an optional extra validation command, not the
 pre-push gate; `--fast` is. It runs two of
 the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row
@@ -206,11 +217,14 @@ is CI-owned through `gate.py lint-and-unit`, because
 the dep-info in the worktree's target, `crates/chelis-prove/src/clarabel_sos.rs`
 is compiled per pull request only by the solver-free row, and the no-default
 row compiles a strict subset of the default row. It then runs
-`cargo fmt --check`, `chelis lint --check .`, the deterministic std-bundle
-regeneration check, the explicit rustdoc commands, the checkpoint and
+`cargo fmt --check`, `chelis lint --check .`, the std-bundle reproducibility
+check (`scripts/check_std_bundle_reproducible.py`, which runs the bundle build
+script twice in one fresh target directory, each time in its own output
+directory, and compares the packed bytes), the
+explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both
 pipeline-core guards, the chelis#908 unrepresentable-domain oracle, the
-runtime-representation Phase 2 oracle, and
+runtime-representation oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each crate changed vs
 `origin/main` (committed diff plus uncommitted work; owning packages are
 resolved from each member's `Cargo.toml`, not the directory name). The derived
@@ -264,10 +278,10 @@ with a final `ORACLE: PASS` line.
 ## Regeneration
 
 `scripts/regen_all.py` is the regeneration entry point on its own as well.
-Default tiers 0 and 1 write (tier 1 is the std bundle and needs cargo);
-`--check` reports every stale artifact; `--full` adds tier 2, the capacity
-census and the runtime-representation inventory. The Python-binding baseline
-stores only stable reviewed rows, flags, authorities, and contracts; current
+Tier 0 writes by default; `--check` reports every stale artifact; `--full`
+adds tier 1, the capacity census and the runtime-representation inventory.
+The chelis-std runtime has no leg: the compiler build packs it. The
+Python-binding baseline stores only stable reviewed rows, flags, authorities, and contracts; current
 graph identities are execution evidence from the dedicated binding acceptance
 test and are never persisted or regenerated. Full regeneration exits 2 naming
 the manual action when a census row lands with citation `TODO` or the
@@ -341,8 +355,8 @@ Markdown parsed, embedded, mirrored, or used as agent instructions is a
 control artifact, not inert prose. Its focused validators must run even when
 CI reports `docs_only=true`. The always-run Docs job owns shared-agent-skill
 validation: `scripts/check_agent_skills.py` validates metadata, the registered
-shared set, source/embedded byte agreement, and Claude/Codex red-team wrapper
-agreement; the validator and CI-routing tests exercise failure cases; and
+shared set, source/embedded byte agreement, and Claude/Codex review-command
+wrapper agreement; the validator and CI-routing tests exercise failure cases; and
 `chelis-conformance`'s `asset_drift_tripwire` and `skill_set_uniformity` tests
 exercise compiled assets and downstream distribution. Local reruns of these
 checks are optional. Docs also builds mdBook and validates the package
@@ -393,7 +407,7 @@ skill/examples.
   children stopped; use the scoped `reap_orphans.py` dry run and kill only
   confirmed task-owned stragglers.
 - macOS workstation only: first-exec assessment can degrade under mass
-  fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
+  fresh-binary bursts and stall multi-binary test runs at ~0 CPU.
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
   slow), or `chelis-exec-preflight` inside Devenv, before a local workspace
   nextest stage. If the probe reports degradation, use the manually dispatched

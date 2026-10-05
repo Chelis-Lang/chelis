@@ -31,23 +31,31 @@ fn surf_errors(source: &str) -> Vec<CheckError> {
 
 #[test]
 fn einsum_with_only_equation_and_one_operand_reports_one_arity_root() {
-    let errors = deep_errors(
-        r#"(def {} bad
+    let source = r#"(def {} bad
               (app {}
                 (var {} einsum)
                 (lit {type: (t-prim {} string)} "i->i")
-                (lit {type: (t-prim {} f32)} 1.0)))"#,
-    );
+                (lit {type: (t-prim {} f32)} 1.0)))"#;
+    let errors = deep_errors(source);
     assert_eq!(
         errors.len(),
         1,
         "einsum arity must have one root: {errors:?}"
     );
     assert!(matches!(errors[0].kind, CheckErrorKind::ArityMismatch));
-    assert!(
-        errors[0].message.contains("expected 3 args, got 2"),
+    assert_eq!(
+        errors[0].expected.as_deref(),
+        Some("3 arguments"),
         "{errors:?}"
     );
+    assert_eq!(errors[0].got.as_deref(), Some("2 arguments"), "{errors:?}");
+    assert_eq!(
+        errors[0].span_offset,
+        source.find("(app"),
+        "native Deep has a measured application coordinate even without an external identity"
+    );
+    assert_eq!(errors[0].span_id, None);
+    assert!(errors[0].message.contains("einsum"), "{errors:?}");
 }
 
 #[test]
@@ -98,12 +106,11 @@ fn tuple_projection_of_failed_cast_keeps_one_root_without_a_cascade() {
 
 #[test]
 fn surf_unknown_alias_target_has_a_complete_source_location() {
-    let errors = surf_errors(
-        r#"
+    let source = r#"
 type Broken = Missing
 def keep(x: Broken) -> Broken = x
-"#,
-    );
+"#;
+    let errors = surf_errors(source);
     assert_eq!(
         errors.len(),
         1,
@@ -111,8 +118,9 @@ def keep(x: Broken) -> Broken = x
     );
     let error = &errors[0];
     assert!(error.message.contains("Missing"), "{errors:?}");
-    assert!(
-        error.span_offset.is_some() && error.span_id.is_some(),
-        "Surf desugaring preserves both byte offset and synthesized span id: {error:?}"
+    assert_eq!(error.span_offset, source.find("Missing"), "{error:?}");
+    assert_eq!(
+        error.span_id, None,
+        "the alias has an authored coordinate but no external identity: {error:?}"
     );
 }

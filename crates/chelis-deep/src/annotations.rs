@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 pub use crate::ExtensionData;
 pub use crate::annotations_transform::MetadataName;
-use crate::{Atom, DtypeFamily, Expr, RawExpr, Span, metadata::MetadataError};
+use crate::{Atom, DtypeBound, Expr, RawExpr, Span, metadata::MetadataError};
 
 /// A value and its original syntax span.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +85,7 @@ macro_rules! expression_payload {
     };
 }
 expression_payload!(TypeSyntax, "type");
+expression_payload!(AccumulatorSyntax, "accumulator");
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeExpression(Expr);
 impl RuntimeExpression {
@@ -197,7 +198,6 @@ choices!(PropertySourceKind { User => "user", CEarchin => "bridge:c-earchin" });
 choices!(Amenability { Linear => "linear", Polynomial => "polynomial", Transcendental => "transcendental", Opaque => "opaque" });
 choices!(LiteralStyle { Unsuffixed => "unsuffixed", Explicit => "explicit" });
 choices!(BindingTypeOrigin { Inferred => "inferred", Explicit => "explicit" });
-choices!(PipeStageOrigin { CallFirst => "call-first" });
 choices!(LiteralOrigin { Integer => "integer" });
 
 /// A presence marker, with no representable false payload.
@@ -459,12 +459,12 @@ impl InvariantPredicate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtypeBounds {
-    pub(crate) bounds: BTreeMap<String, Spanned<DtypeFamily>>,
+    pub(crate) bounds: BTreeMap<String, Spanned<DtypeBound>>,
     pub(crate) span: Span,
 }
 impl DtypeBounds {
     pub fn try_new(
-        bounds: impl IntoIterator<Item = (String, Spanned<DtypeFamily>)>,
+        bounds: impl IntoIterator<Item = (String, Spanned<DtypeBound>)>,
         span: Span,
     ) -> Result<Self, MetadataError> {
         let mut result = Self {
@@ -483,7 +483,7 @@ impl DtypeBounds {
         }
         Ok(result)
     }
-    pub fn bounds(&self) -> impl Iterator<Item = (&str, &Spanned<DtypeFamily>)> {
+    pub fn bounds(&self) -> impl Iterator<Item = (&str, &Spanned<DtypeBound>)> {
         self.bounds.iter().map(|(k, v)| (k.as_str(), v))
     }
     pub fn span(&self) -> Span {
@@ -561,7 +561,6 @@ core_inventory! {
     InvariantAmenability, invariant_amenability, Spanned<Amenability>, "invariant_amenability";
     SurfPath, surf_path, Spanned<String>, "surf_path";
     SurfDimGroupSize, surf_dim_group_size, PositiveInteger, "surf_dim_group_size";
-    SurfPipeStage, surf_pipe_stage, Spanned<PipeStageOrigin>, "surf_pipe_stage";
     SurfLiteralStyle, surf_literal_style, Spanned<LiteralStyle>, "surf_literal_style";
     SurfBindingType, surf_binding_type, Spanned<BindingTypeOrigin>, "surf_binding_type";
     Lin, lin, Spanned<Linearity>, "lin";
@@ -569,11 +568,12 @@ core_inventory! {
     Effect, effect, Spanned<chelis_vocab::EffectKind>, "effect";
     LiteralSource, literal_source, Spanned<LiteralOrigin>, "literal_source";
     Destructure, destructure, Present, "destructure";
+    Accumulator, accumulator, AccumulatorSyntax, "accumulator";
 }
 
 /// Core annotations, held as a key-sorted vector rather than a map.
 ///
-/// The core inventory has thirty keys and a real node carries a handful: the
+/// The core inventory has thirty-one keys and a real node carries a handful: the
 /// chelis#1604 metadata fixture has 72 maps, 41 of them empty and none above
 /// three entries. `MetadataValue` is 184 bytes wide on a 64-bit target, and a
 /// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, so
@@ -589,7 +589,7 @@ core_inventory! {
 ///
 /// Iteration keeps the key order every consumer already relies on, which
 /// `core_key_order_lock` pins, and lookup is a binary search over at most
-/// thirty elements.
+/// thirty-one elements.
 #[derive(Debug, PartialEq, Default)]
 struct Storage {
     core: Vec<MetadataValue>,
@@ -787,6 +787,7 @@ impl Metadata {
         for value in self.values() {
             match value {
                 MetadataValue::Type(v) => visit(v.expression(), R::Type),
+                MetadataValue::Accumulator(v) => visit(v.expression(), R::Type),
                 MetadataValue::PropertyTolerance(v)
                 | MetadataValue::PropertySeed(v)
                 | MetadataValue::PropertySamples(v) => visit(v.expression(), R::Expression),
@@ -836,7 +837,6 @@ impl Metadata {
                 | MetadataValue::InvariantAmenability(_)
                 | MetadataValue::SurfPath(_)
                 | MetadataValue::SurfDimGroupSize(_)
-                | MetadataValue::SurfPipeStage(_)
                 | MetadataValue::SurfLiteralStyle(_)
                 | MetadataValue::SurfBindingType(_)
                 | MetadataValue::Lin(_)

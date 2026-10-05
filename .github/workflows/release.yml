@@ -76,9 +76,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
       # `--features smt` links cvc5 so the shipped `chelis prove` uses
       # the SMT solver instead of degrading to the solver-free fuzz path
       # (chelis#422). WI-11: the cvc5-sys build forces GMP and disables
@@ -211,24 +208,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
         run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
-
-      # WS-B (chelis#164): the bootstrap installer
-      # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
-      # asset `chelisup-<slug>` (no version in the name, no tarball) from
-      # the latest release. The linux chelisup ships from THIS glibc-2.31
-      # job, not the ubuntu-latest one: chelisup is the first binary a bare
-      # machine runs, so it must load on the oldest supported glibc (#330).
-      # (The bootstrap also knows a darwin-x86_64 slug; no release job
-      # builds it, matching the toolchain tarballs.)
-      - name: Build chelisup (release)
-        run: cargo build --release -p chelisup
 
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
@@ -298,20 +281,6 @@ jobs:
           python3 .github/scripts/verify_release_smt.py \
             --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31.tar.gz"
 
-      - name: Stage chelisup asset (bare executable + sha256 + bootstrap script)
-        run: |
-          set -euo pipefail
-          strip target/release/chelisup
-          max_req="$(objdump -T target/release/chelisup | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-          echo "chelisup max glibc requirement: ${max_req}"
-          test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
-          ./target/release/chelisup --help >/dev/null
-          cp target/release/chelisup chelisup-linux-x86_64
-          sha256sum chelisup-linux-x86_64 > chelisup-linux-x86_64.sha256
-          # Publishing the bootstrap script as an asset gives the one-liner
-          # a canonical URL: <repo>/releases/latest/download/chelisup.sh
-          cp crates/chelisup/bootstrap/chelisup.sh chelisup.sh
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -319,6 +288,145 @@ jobs:
           path: |
             chelis-*-linux-x86_64-glibc2.31.tar.gz
             chelis-*-linux-x86_64-glibc2.31.tar.gz.sha256
+          retention-days: 7
+
+  build-linux-x86_64-static:
+    name: Build chelis (linux-x86_64, static)
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    # This job's chelis and chelisup are static-pie executables: they carry
+    # their C and C++ runtimes and name no program interpreter, so they start
+    # on any x86-64 Linux, including musl systems and NixOS without nix-ld.
+    # The build stays on the glibc target, so the runtime archive this
+    # compiler carries and ships is the glibc static library users link
+    # (spec/08-backends.md §2.1). glibc 2.34 and later build the files and dns
+    # NSS modules into the C library, and chelis and chelisup restrict their
+    # host, user, and group lookups to those two (chelisup::nss): a static
+    # process cannot host the plugins a distribution's nsswitch.conf may name,
+    # which the host-lookup step below checks. The explicit --target keeps
+    # RUSTFLAGS off build scripts and proc-macros, which must stay dynamic.
+    # chelis#1004: see the linux-x86_64 job for the wall-clock ceiling.
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The linux-x86_64 job's cvc5 source-build prerequisites.
+      - name: Install SMT build dependencies (cvc5)
+        run: python3 scripts/ci_apt_get.py g++ cmake libclang-dev git libgmp-dev libmpfr-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
+      # chelis#1004 fetch-retry rationale.
+      - name: Build chelis-cli (release, smt, static)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime --target x86_64-unknown-linux-gnu
+
+      # WS-B (chelis#164): the bootstrap installer
+      # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
+      # asset `chelisup-<slug>` (no version in the name, no tarball) from
+      # the latest release. The Linux chelisup ships from this job because it
+      # is the first binary a bare machine runs. (The bootstrap also knows a
+      # darwin-x86_64 slug; no release job builds it, matching the toolchain
+      # tarballs.)
+      - name: Build chelisup (release, static)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release -p chelisup --target x86_64-unknown-linux-gnu
+
+      - name: Require static executables
+        run: |
+          set -euo pipefail
+          for binary in target/x86_64-unknown-linux-gnu/release/chelis target/x86_64-unknown-linux-gnu/release/chelisup; do
+            if readelf -lW "$binary" | grep -q 'INTERP'; then
+              echo "::error::$binary names a program interpreter"
+              exit 1
+            fi
+            if readelf -dW "$binary" | grep -q '(NEEDED)'; then
+              echo "::error::$binary needs shared libraries"
+              exit 1
+            fi
+          done
+
+      # Run before strip so the prove path exercises a functional
+      # binary; the strip below only removes symbols.
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: python3 .github/scripts/verify_release_smt.py ./target/x86_64-unknown-linux-gnu/release/chelis
+
+      - name: Release binary test fixture
+        run: |
+          set -euo pipefail
+          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/x86_64-unknown-linux-gnu/release/chelis test tests)
+
+      - name: Strip binary
+        run: strip target/x86_64-unknown-linux-gnu/release/chelis
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stage tarball contents
+        run: |
+          set -euo pipefail
+          staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-static"
+          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
+          cp target/x86_64-unknown-linux-gnu/release/chelis "$staging/bin/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/x86_64-unknown-linux-gnu/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
+          python3 scripts/verify_runtime_package.py "$runtime_export" "$staging"
+          cp README.md "$staging/"
+          cp LICENSE "$staging/"
+          tar czf "${staging}.tar.gz" "$staging"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          ls -la "${staging}.tar.gz"*
+
+      # Verify the SHIPPED artifact: the stripped binary inside the tarball
+      # still discharges via cvc5 (chelis#422).
+      - name: Verify shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_release_smt.py \
+            --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-static.tar.gz"
+
+      - name: Stage chelisup asset (bare executable + sha256 + bootstrap script)
+        run: |
+          set -euo pipefail
+          strip target/x86_64-unknown-linux-gnu/release/chelisup
+          ./target/x86_64-unknown-linux-gnu/release/chelisup --help >/dev/null
+          cp target/x86_64-unknown-linux-gnu/release/chelisup chelisup-linux-x86_64
+          sha256sum chelisup-linux-x86_64 > chelisup-linux-x86_64.sha256
+          # Publishing the bootstrap script as an asset gives the one-liner
+          # a canonical URL: <repo>/releases/latest/download/chelisup.sh
+          cp crates/chelisup/bootstrap/chelisup.sh chelisup.sh
+
+      # The shipped binaries: chelis was stripped above and chelisup in the
+      # staging step.
+      - name: Look up hosts where nsswitch.conf names NSS plugins
+        run: python3 scripts/verify_static_nss.py --chelis target/x86_64-unknown-linux-gnu/release/chelis --chelisup chelisup-linux-x86_64
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chelis-linux-x86_64-static
+          path: |
+            chelis-*-linux-x86_64-static.tar.gz
+            chelis-*-linux-x86_64-static.tar.gz.sha256
             chelisup-linux-x86_64
             chelisup-linux-x86_64.sha256
             chelisup.sh
@@ -330,7 +438,7 @@ jobs:
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
-    # cvc5 compile on a cache miss. Raised from 30 for chelis#1004: a
+    # cvc5 compile (release builds keep no Rust cache). Raised from 30 for chelis#1004: a
     # measured cold build is ~14m here, and a fetch failure aborts in ~3m,
     # so three attempts fit in ~21m -- but 30 left no margin for a slow
     # runner on top of that.
@@ -352,16 +460,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
         run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
-      # bootstrap asset — see the glibc-2.31 job for the convention.
+      # bootstrap asset — see the static Linux job for the convention.
       - name: Build chelisup (release)
         run: cargo build --release -p chelisup
 
@@ -454,17 +559,16 @@ jobs:
 
   installed-artifact-canary:
     name: Installed C callable (${{ matrix.slug }})
-    needs: [preflight, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [preflight, build-linux-x86_64-static, build-darwin-arm64]
     strategy:
       fail-fast: false
       matrix:
         include:
           # Each artifact holds the toolchain build chelisup installs and the
-          # chelisup built beside it. On Linux that is the glibc-2.31 build
-          # (chelis#2686).
+          # chelisup built beside it. On Linux that is the static build.
           - runner: ubuntu-latest
             slug: linux-x86_64
-            artifact: chelis-linux-x86_64-glibc2.31
+            artifact: chelis-linux-x86_64-static
           - runner: macos-latest
             slug: darwin-arm64
             artifact: chelis-darwin-arm64
@@ -505,7 +609,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64, installed-artifact-canary]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-linux-x86_64-static, build-darwin-arm64, installed-artifact-canary]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tagged release notes

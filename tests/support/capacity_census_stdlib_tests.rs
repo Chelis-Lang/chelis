@@ -146,14 +146,42 @@ fn import_failures_and_ambiguity_do_not_erase_numeric_capacity() {
 
 #[test]
 fn local_nominal_names_shadow_imported_names() {
+    // Retain the Phase 1 frozen executable identity. Its historical name is
+    // not an import-precedence rule: spec/02 §P2 now distinguishes qualified
+    // imports from rejected unqualified collisions. Exercise both contracts.
+    local_nominal_names_beside_a_qualified_import_stay_local();
+    local_nominal_name_colliding_with_an_import_fails_closed();
+}
+
+#[test]
+fn local_nominal_names_beside_a_qualified_import_stay_local() {
+    // A qualified-only import keeps `Std.A.Value` out of unqualified scope,
+    // so the bare `Value` is the module's own non-numeric type.
     let rows = sources(&[
         ("a", "module Std.A\ntype Value = | Value(f64)"),
         (
             "use",
-            "module Std.Use\nimport Std.A (Value)\nexport (read)\ntype Value = | Local(bool)\ndef read(x: Value) -> Value = x",
+            "module Std.Use\nimport Std.A\nexport (read)\ntype Value = | Local(bool)\ndef read(x: Value) -> Value = x",
         ),
     ]);
     assert!(!numeric(&rows, "use::read"));
+}
+
+#[test]
+fn local_nominal_name_colliding_with_an_import_fails_closed() {
+    // spec/02 §P2 (chelis#2885): a module that imports `Value` unqualified
+    // and also declares it has no single meaning for `Value`, so discovery
+    // fails closed rather than picking either type's capacity.
+    rejects(
+        &[
+            ("a", "module Std.A\ntype Value = | Value(f64)"),
+            (
+                "use",
+                "module Std.Use\nimport Std.A (Value)\nexport (read)\ntype Value = | Local(bool)\ndef read(x: Value) -> Value = x",
+            ),
+        ],
+        "`Value` is both imported and declared locally",
+    );
 }
 
 #[test]
@@ -244,14 +272,14 @@ fn stdlib_closure_preserves_all_final_registered_source_identities() {
             .iter()
             .filter(|(kind, _)| kind == "std-def-numeric")
             .count(),
-        73
+        283
     );
     assert_eq!(
         expected
             .iter()
             .filter(|(kind, _)| kind == "std-adt-numeric")
             .count(),
-        4
+        18
     );
     let actual = stdlib_rows(&repo_root())
         .into_iter()

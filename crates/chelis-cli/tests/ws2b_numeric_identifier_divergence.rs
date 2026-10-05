@@ -53,6 +53,7 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -78,13 +79,8 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
 
     // Resolve the host toolchain the way `chelis build` and the other CLI test
     // harnesses (rank_poly_tier3.rs, parity.rs) do, so the link command carries
-    // every platform-required flag. On macOS the transcendental kernels route
-    // through Accelerate's vForce (`vvexpf`/`vvlogf`/...), so
-    // `toolchain.link_flags` includes `-framework Accelerate`; a hand-rolled
-    // `-lm -lpthread -ldl` link omits it and `ld` fails with
-    // `Undefined symbols ... _vvexpf` on arm64 (the softmax-backward program
-    // emits `vvexpf`). `needs_blas` is read from the emitted C so a BLAS kernel
-    // links cblas too.
+    // every platform-required flag. `needs_blas` is read from the emitted C
+    // so a BLAS kernel links cblas (Accelerate on macOS) too.
     let needs_blas = fs::read_to_string(kernel_c)
         .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
         .unwrap_or(false);
@@ -284,6 +280,84 @@ out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
         tensor_ints(&eval_out, "out"),
         "eval and C backend must agree on the VALUES of integer floor_div (the byte-form assertions above are chelis#732 Phase 2's)",
     );
+}
+
+/// The `numeric trap:` line each lane stops with: `chelis eval --file` and
+/// the executable compiled from the emitted C. Both must fail; a lane that
+/// completes returns its stdout so the assertion shows the wrong value.
+fn eval_and_c_trap_lines(source: &str, stem: &str) -> (String, String) {
+    fn trap_line(output: &std::process::Output) -> String {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            return format!(
+                "completed: {}",
+                String::from_utf8_lossy(&output.stdout).trim_end()
+            );
+        }
+        stderr
+            .lines()
+            .map(|line| line.strip_prefix("error: ").unwrap_or(line))
+            .find(|line| line.starts_with("numeric trap:"))
+            .unwrap_or_else(|| panic!("failed without a numeric trap line: {stderr:?}"))
+            .to_string()
+    }
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join(format!("{stem}.ch"));
+    fs::write(&src_path, source).expect("write .ch source");
+    let eval = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", src_path.to_str().unwrap()])
+        .output()
+        .expect("invoke chelis eval");
+
+    let build = chelis_build_c(source, stem);
+    let (compile, bin) = compile_emitted(build.path(), &build.path().join(format!("{stem}.c")));
+    assert!(
+        compile.status.success(),
+        "emitted C must compile; compiler stderr=\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+    );
+    let run = StdCommand::new(&bin).output().expect("run emitted binary");
+    (trap_line(&eval), trap_line(&run))
+}
+
+/// chelis#3062 NEGATIVE parity: integer `floor_div` of the dtype's minimum
+/// by `-1` has no representable quotient, so [05-OP-64] makes it an
+/// `Overflow` trap. The compiled tensor kernel used to evaluate C's
+/// undefined `MIN / -1` and print MIN; the scalar host lane is covered by
+/// the i16 row. A zero divisor must render the same [04-NUM-9] line in both
+/// lanes (the tensor kernel used to print an unbranded message). The
+/// operands arrive as parameters, so no lane can fold the division.
+#[test]
+fn issue_3062_integer_floor_div_traps_identically_at_every_width() {
+    let tensor = |dtype: &str, max: &str, divisor: &str| {
+        format!(
+            "def d(x: tensor[1, {dtype}], y: tensor[1, {dtype}]) -> tensor[1, {dtype}] = floor_div(x, y)\n\
+out = d(sub(to_tensor([-{max}{dtype}]), to_tensor([1{dtype}])), to_tensor([{divisor}{dtype}]))\n"
+        )
+    };
+    let cases = [
+        (tensor("i8", "127", "-1"), "numeric trap: overflow in floor_div at i8"),
+        (tensor("i16", "32767", "-1"), "numeric trap: overflow in floor_div at i16"),
+        (tensor("i32", "2147483647", "-1"), "numeric trap: overflow in floor_div at i32"),
+        (
+            tensor("i64", "9223372036854775807", "-1"),
+            "numeric trap: overflow in floor_div at i64",
+        ),
+        (tensor("i32", "2147483647", "0"), "numeric trap: division by zero in floor_div at i32"),
+        (
+            "def d(x: i16, y: i16) -> i16 = floor_div(x, y)\nout = d(sub(-32767i16, 1i16), -1i16)\n"
+                .to_string(),
+            "numeric trap: overflow in floor_div at i16",
+        ),
+    ];
+    for (index, (source, expected)) in cases.iter().enumerate() {
+        let (eval, compiled) = eval_and_c_trap_lines(source, &format!("floordivtrap{index}"));
+        assert_eq!(eval, *expected, "eval lane for:\n{source}");
+        assert_eq!(compiled, *expected, "compiled C lane for:\n{source}");
+    }
 }
 
 /// POSITIVE: float division keeps IEEE-754 semantics — `1.0 / 0.0 == inf`,

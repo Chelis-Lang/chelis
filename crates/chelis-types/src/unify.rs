@@ -302,6 +302,14 @@ pub struct Subst {
     /// by the inference driver, and never part of a persisted context.
     #[serde(skip)]
     deferred_borrow_vars: Mutex<Vec<TypeVar>>,
+    /// chelis#3180, mirroring `deferred_borrow_vars`: `drop` sites whose
+    /// operand type was still an unresolved `Type::Var` when the call was
+    /// inferred (an unannotated lambda parameter pinned only by a later
+    /// call). The driver drains these per declaration and refuses any that
+    /// resolved to a borrow, since [05-OP-67] makes the operand owned. Not
+    /// serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    deferred_drop_operands: Mutex<Vec<(TypeVar, Option<crate::deep_type::TypeDiagnosticLocation>)>>,
     /// RFC D-CHECK deferred-access ledger, mirroring
     /// `deferred_borrow_vars`: `access`/`record-update` sites whose
     /// target type was still an unresolved `Type::Var` when inference
@@ -440,15 +448,25 @@ pub(crate) enum DeferredOperandGate {
     /// `copy` with an unresolved operand. Carries the result variable the call
     /// returned: `copy(&t)` yields `t`, not `&t`, so discharge must unify the
     /// eager arm's own answer into it rather than let the operand's type stand.
-    Copy { result: Box<Type> },
+    Copy {
+        result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
+    },
     /// `cast`/`cast_trunc` whose SOURCE was unresolved. Carries the target
     /// precision, the mode, and the result variable the call returned, which
     /// discharge unifies against once `cast`'s own decision function is called
     /// with the settled source type.
+    ///
+    /// `borrowed` records that the source was `&v` over the unresolved `v`
+    /// (chelis#3101). Discharge then decides the type the eager `borrow` arm
+    /// gives `&settled` ([`crate::infer::expr::settled_borrow_type`]), as the
+    /// eager cast would see it.
     Cast {
         target: crate::types::Prim,
         mode: chelis_deep::CastMode,
+        borrowed: bool,
         result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
     /// chelis#2534: a checked `cast` whose TARGET is a declaration's dtype
     /// binder and whose SOURCE was unresolved. Carries the target binder and
@@ -457,6 +475,7 @@ pub(crate) enum DeferredOperandGate {
     CastToBinder {
         target: crate::types::TypeVar,
         result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
     /// A host-lane slot that unifies against a fixed expected type:
     /// the ten csv routes, which funnel through `unify_host_slot`. Carries
@@ -486,6 +505,20 @@ pub(crate) enum DeferredOperandGate {
         route: ShapeRoute,
         result: Box<Type>,
     },
+    /// A `sum`-family result (`sum`, `cumsum`, `trace`, `einsum`) over a
+    /// tensor whose precision is still an inference variable whose dtypes
+    /// have no single `sum_result(p, default(p))` (spec/04 §5.7.1). Keyed on
+    /// that precision variable. When it binds, discharge decides the result
+    /// precision with the same function the eager arm calls and unifies the
+    /// result tensor, at `dims`, into the type the call published. A variable
+    /// still unbound at the declaration boundary is decided over its bound
+    /// there ([`Subst::decide_pending_sum_results`]).
+    SumResult {
+        op: String,
+        dims: Vec<crate::types::Dim>,
+        result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
+    },
 }
 
 pub(crate) type CollectionContractId = u64;
@@ -502,7 +535,7 @@ struct CollectionContractInstance {
 enum CollectionContractState {
     Transport,
     Consumed {
-        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+        evidence: Option<crate::infer::CollectionCallEvidence>,
     },
 }
 
@@ -590,11 +623,39 @@ impl DeferredOperandGate {
     /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result }
+            Self::Copy { result, .. }
             | Self::Cast { result, .. }
             | Self::CastToBinder { result, .. }
-            | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
+            | Self::ShapeRoute { result, .. }
+            | Self::SumResult { result, .. } => Some(result.as_ref()),
             Self::HostSlot { .. } => None,
+        }
+    }
+
+    pub(crate) fn location(&self) -> Option<&crate::deep_type::TypeDiagnosticLocation> {
+        match self {
+            Self::Copy { location, .. }
+            | Self::Cast { location, .. }
+            | Self::CastToBinder { location, .. }
+            | Self::SumResult { location, .. } => location.as_ref(),
+            Self::HostSlot { .. } | Self::ShapeRoute { .. } => None,
+        }
+    }
+
+    fn attach_location(&self, error: crate::errors::CheckError) -> crate::errors::CheckError {
+        match self.location() {
+            Some(location) => location.attach(error),
+            None => error,
+        }
+    }
+
+    pub(crate) fn expected_operand(&self) -> String {
+        match self {
+            Self::Copy { .. } | Self::ShapeRoute { .. } => "tensor".to_string(),
+            Self::Cast { .. } => "tensor or numeric/bool scalar".to_string(),
+            Self::CastToBinder { .. } => "numeric or bool scalar".to_string(),
+            Self::HostSlot { description, .. } => description.clone(),
+            Self::SumResult { .. } => "a dtype with a default sum accumulator".to_string(),
         }
     }
 
@@ -632,7 +693,7 @@ impl DeferredOperandGate {
     /// variable, and re-aliases instead when a variable was bound to another.
     fn discharge(self, resolved: &Type, subst: &mut Subst) {
         match self {
-            Self::Copy { ref result } => {
+            Self::Copy { ref result, .. } => {
                 match crate::infer::expr::copy_result_from_source(resolved) {
                     Some(settled) => {
                         self.reconcile_result(result, settled, subst);
@@ -646,23 +707,37 @@ impl DeferredOperandGate {
             Self::Cast {
                 target,
                 mode,
+                borrowed,
                 ref result,
+                ..
             } => {
+                let source = if borrowed {
+                    match crate::infer::expr::settled_borrow_type(resolved.clone()) {
+                        Some(source) => source,
+                        // The eager `borrow` arm refuses this operand and the
+                        // eager cast then sees an error type and adds nothing.
+                        // The deferred borrow's own recheck
+                        // (`validate_deferred_borrow_vars`) reports that
+                        // refusal here, so the cast adds nothing either.
+                        None => return,
+                    }
+                } else {
+                    resolved.clone()
+                };
                 match crate::infer::expr_record::cast_result_from_settled_source(
-                    resolved.clone(),
-                    target,
-                    mode,
-                    subst,
+                    source, target, mode, subst,
                 ) {
                     Ok(settled) => {
                         self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                        error: *error,
+                        error: self.attach_location(*error),
                     }),
                 }
             }
-            Self::CastToBinder { target, ref result } => {
+            Self::CastToBinder {
+                target, ref result, ..
+            } => {
                 match crate::infer::expr_record::binder_cast_result_from_settled_source(
                     resolved.clone(),
                     target,
@@ -672,7 +747,7 @@ impl DeferredOperandGate {
                         self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                        error: *error,
+                        error: self.attach_location(*error),
                     }),
                 }
             }
@@ -688,7 +763,13 @@ impl DeferredOperandGate {
                 ref route,
                 ref result,
             } => {
-                match crate::infer::shape_route_result(route, resolved) {
+                match crate::infer::shape_route_result(
+                    route,
+                    resolved,
+                    crate::infer::SumResultSlot::Existing(result),
+                    None,
+                    subst,
+                ) {
                     Ok((settled, updates)) => {
                         // The updates equation `scatter` imposes is part of the
                         // arm, not of the helper. Replaying only the helper
@@ -724,6 +805,27 @@ impl DeferredOperandGate {
                     }
                 }
             }
+            Self::SumResult {
+                ref op,
+                ref dims,
+                ref result,
+                ..
+            } => match crate::infer::settled_sum_result_precision(op, resolved) {
+                Ok(precision) => {
+                    self.reconcile_result(
+                        result,
+                        Type::Tensor(dims.clone(), TensorPrec::Concrete(precision)),
+                        subst,
+                    );
+                }
+                Err(message) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: self.attach_location(crate::errors::CheckError::new(
+                        crate::errors::CheckErrorKind::TypeMismatch,
+                        message,
+                        Vec::new(),
+                    )),
+                }),
+            },
         }
     }
 
@@ -750,6 +852,10 @@ impl DeferredOperandGate {
             Self::ShapeRoute { route, .. } => {
                 format!("{} expects tensor input, got {subject}", route.op())
             }
+            Self::SumResult { op, .. } => format!(
+                "{op} has no single sum_result(p, default(p)) (spec/04-type-system.md \
+                 section 5.7.1) for precision {subject}"
+            ),
         }
     }
 
@@ -760,6 +866,7 @@ impl DeferredOperandGate {
             Self::Cast { .. } | Self::CastToBinder { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
             Self::ShapeRoute { route, .. } => route.op(),
+            Self::SumResult { op, .. } => op,
         }
     }
 
@@ -773,9 +880,10 @@ impl DeferredOperandGate {
         use crate::errors::CheckErrorKind as Kind;
         match self {
             Self::Cast { .. } | Self::CastToBinder { .. } => Kind::CastNonTensor,
-            Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
-                Kind::TypeMismatch
-            }
+            Self::Copy { .. }
+            | Self::HostSlot { .. }
+            | Self::ShapeRoute { .. }
+            | Self::SumResult { .. } => Kind::TypeMismatch,
         }
     }
 
@@ -801,10 +909,10 @@ enum CollectionDischarge {
 
 fn discharge_collection_constraint(
     constraint: &crate::types::CollectionConstraint,
-    tensor_concat: Option<&crate::infer::TensorConcatCallEvidence>,
+    evidence: Option<&crate::infer::CollectionCallEvidence>,
     subst: &mut Subst,
 ) -> CollectionDischarge {
-    match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
+    match crate::infer::decide_collection_constraint(constraint, evidence, subst) {
         Ok(None) => CollectionDischarge::Unresolved,
         Ok(Some(decision)) => {
             let produced = decision.produced_result();
@@ -975,6 +1083,12 @@ impl Clone for Subst {
                 self.deferred_borrow_vars
                     .lock()
                     .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
+            deferred_drop_operands: Mutex::new(
+                self.deferred_drop_operands
+                    .lock()
+                    .expect("subst.deferred_drop_operands poisoned")
                     .clone(),
             ),
             deferred_tensor_operands: Mutex::new(
@@ -1728,6 +1842,7 @@ impl Subst {
         ids: &[CollectionContractId],
         callees: &[Type],
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+        split_keys_count: Option<i64>,
     ) {
         let callees = callees.iter().map(|ty| self.apply(ty)).collect::<Vec<_>>();
         let mut contracts = self
@@ -1742,12 +1857,16 @@ impl Subst {
             if !callees.contains(&collection_contract_callable_type(&normalized)) {
                 continue;
             }
-            let evidence = matches!(instance.constraint, CollectionConstraint::Concat { .. })
-                .then(|| tensor_concat.clone())
-                .flatten();
-            instance.state = CollectionContractState::Consumed {
-                tensor_concat: evidence,
+            let evidence = match instance.constraint {
+                CollectionConstraint::Concat { .. } => tensor_concat
+                    .clone()
+                    .map(crate::infer::CollectionCallEvidence::TensorConcat),
+                CollectionConstraint::SplitKeys { .. } => Some(
+                    crate::infer::CollectionCallEvidence::SplitKeysCount(split_keys_count),
+                ),
+                _ => None,
             };
+            instance.state = CollectionContractState::Consumed { evidence };
         }
     }
 
@@ -1774,10 +1893,10 @@ impl Subst {
                 continue;
             };
             match instance.state.clone() {
-                CollectionContractState::Consumed { tensor_concat } => {
+                CollectionContractState::Consumed { evidence } => {
                     match discharge_collection_constraint(
                         &instance.constraint,
-                        tensor_concat.as_ref(),
+                        evidence.as_ref(),
                         self,
                     ) {
                         CollectionDischarge::Unresolved => {
@@ -1809,9 +1928,8 @@ impl Subst {
                         match discharge_collection_constraint(&instance.constraint, None, self) {
                             CollectionDischarge::Unresolved => {
                                 let mut consumed = instance;
-                                consumed.state = CollectionContractState::Consumed {
-                                    tensor_concat: None,
-                                };
+                                consumed.state =
+                                    CollectionContractState::Consumed { evidence: None };
                                 self.restore_collection_contract_instance(consumed);
                             }
                             CollectionDischarge::Settled(_) => {}
@@ -1977,15 +2095,20 @@ impl Subst {
             let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
                 return true;
             };
-            let Some(
-                bound @ (TypeVarRestriction::ActiveFloat
-                | TypeVarRestriction::ActiveInt
-                | TypeVarRestriction::ActiveNumeric),
-            ) = self.tvar_restriction(operand)
+            // Any §5.9 declaration bound discharges this gate, including the
+            // explicit set form. Listing the three families rejected a
+            // set-bounded scalar `cast` that every equivalent family accepted
+            // (chelis#2443 round 2).
+            let Some(bound) = self
+                .tvar_restriction(operand)
+                .filter(|restriction| restriction.is_declaration_bound())
             else {
                 return true;
             };
             let decision = match gate {
+                // A borrowed source is decided only once it binds, as the
+                // eager `borrow` arm decides it (chelis#3101).
+                DeferredOperandGate::Cast { borrowed: true, .. } => None,
                 DeferredOperandGate::Cast { target, mode, .. } => {
                     crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode)
                 }
@@ -2014,6 +2137,75 @@ impl Subst {
 
     /// Drain the deferred tensor-operand ledger. Called once per def body's
     /// inference so one def's deferrals cannot leak into the next.
+    /// Decide every `sum`-family result still waiting on an unbound precision
+    /// variable at the declaration boundary (spec/04 §5.7.1, [04-INF-6]).
+    ///
+    /// The variable never binds after this point, so the result must be one
+    /// type at every dtype it admits: the variable itself when sum_result
+    /// keeps each one, one concrete dtype when sum_result maps them all
+    /// there, and otherwise a type error naming the operation and
+    /// sum_result. Returns whether any gate was decided, so the caller can
+    /// replay shape checks that waited on these results.
+    ///
+    /// `only` limits the decision to gates whose variable resolves to one of
+    /// those roots: the authored binders, which never bind, can be decided
+    /// before the boundary's own derivations run, while an inference variable
+    /// waits until they have had the chance to bind it.
+    pub(crate) fn decide_pending_sum_results(&mut self, only: Option<&[TypeVar]>) -> bool {
+        let pending = {
+            let mut ledger = self
+                .deferred_tensor_operands
+                .lock()
+                .expect("subst.deferred_tensor_operands poisoned");
+            let mut pending = Vec::new();
+            let selected = |tv: TypeVar| {
+                only.is_none_or(|roots| match self.apply(&Type::Var(tv)) {
+                    Type::Var(root) => roots.contains(&root),
+                    _ => true,
+                })
+            };
+            ledger.retain(|(tv, gate)| {
+                if matches!(gate, DeferredOperandGate::SumResult { .. }) && selected(*tv) {
+                    pending.push((*tv, gate.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            pending
+        };
+        let decided = !pending.is_empty();
+        for (variable, gate) in pending {
+            let DeferredOperandGate::SumResult {
+                ref op,
+                ref dims,
+                ref result,
+                ..
+            } = gate
+            else {
+                unreachable!("only sum-result gates were taken");
+            };
+            match self.apply(&Type::Var(variable)) {
+                Type::Var(root) => match crate::infer::bound_sum_result_precision(op, root, self) {
+                    Ok(precision) => {
+                        gate.reconcile_result(result, Type::Tensor(dims.clone(), precision), self)
+                    }
+                    Err(message) => {
+                        self.record_operand_gate_failure(OperandGateFailure::Decision {
+                            error: gate.attach_location(crate::errors::CheckError::new(
+                                crate::errors::CheckErrorKind::TypeMismatch,
+                                message,
+                                Vec::new(),
+                            )),
+                        })
+                    }
+                },
+                resolved => gate.clone().discharge(&resolved, self),
+            }
+        }
+        decided
+    }
+
     pub(crate) fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
         std::mem::take(
             &mut *self
@@ -2044,6 +2236,32 @@ impl Subst {
                 .deferred_borrow_vars
                 .lock()
                 .expect("subst.deferred_borrow_vars poisoned"),
+        )
+    }
+
+    /// chelis#3180: record a `drop` whose operand type was still an
+    /// unresolved `Type::Var`. See the `deferred_drop_operands` field doc.
+    pub(crate) fn record_deferred_drop_operand(
+        &self,
+        v: TypeVar,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
+    ) {
+        self.deferred_drop_operands
+            .lock()
+            .expect("subst.deferred_drop_operands poisoned")
+            .push((v, location));
+    }
+
+    /// Drain the deferred-drop ledger; called once per declaration by the
+    /// driver, mirroring `take_deferred_borrow_vars`.
+    pub(crate) fn take_deferred_drop_operands(
+        &self,
+    ) -> Vec<(TypeVar, Option<crate::deep_type::TypeDiagnosticLocation>)> {
+        std::mem::take(
+            &mut *self
+                .deferred_drop_operands
+                .lock()
+                .expect("subst.deferred_drop_operands poisoned"),
         )
     }
 
@@ -3117,6 +3335,29 @@ impl Subst {
 /// one, and the result admits only floats. Only `Float` against `Int` is
 /// empty, and an empty intersection is a `PrecisionMismatch` naming both
 /// families.
+/// How a clash between two bounds is named.
+///
+/// The all-families form is byte-identical to the wording that predates
+/// §5.9's set form, which a per-operand `bound_description()` would not be:
+/// the original sentence hoists "dtype families" as a shared plural, so
+/// describing each side separately doubles the phrase. Nothing pinned that
+/// text, so it churned silently until red-team round 3 measured it
+/// differentially against the base.
+fn describe_bound_clash(left: TypeVarRestriction, right: TypeVarRestriction) -> String {
+    if left.is_family() && right.is_family() {
+        return format!(
+            "dtype families `{}` and `{}`",
+            left.bound_spelling(),
+            right.bound_spelling()
+        );
+    }
+    format!(
+        "{} and {}",
+        left.bound_description(),
+        right.bound_description()
+    )
+}
+
 fn merge_tvar_restrictions(
     existing: TypeVarRestriction,
     incoming: TypeVarRestriction,
@@ -3124,9 +3365,8 @@ fn merge_tvar_restrictions(
     existing.intersect(incoming).ok_or_else(|| TypeError {
         kind: TypeErrorKind::DtypeFamilyMismatch,
         message: format!(
-            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
-            existing.family_name(),
-            incoming.family_name()
+            "{} share no active dtype, so the type variables they bound cannot be the same type",
+            describe_bound_clash(existing, incoming)
         ),
     })
 }
@@ -3213,11 +3453,7 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
         (Type::Prim(p1), Type::Prim(p2)) if p1 == p2 => Ok(()),
         (Type::Prim(p1), Type::Prim(p2)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!(
-                "precision mismatch: expected {}, got {}",
-                p1.name(),
-                p2.name()
-            ),
+            message: format!("precision mismatch: {} vs {}", p1.name(), p2.name()),
         }),
 
         (Type::Unit, Type::Unit) => Ok(()),
@@ -3234,7 +3470,7 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
                 return Err(TypeError {
                     kind: TypeErrorKind::ArityMismatch,
                     message: format!(
-                        "function arity mismatch: expected {} args, got {}",
+                        "function arity mismatch: {} args vs {} args",
                         args1.len(),
                         args2.len()
                     ),
@@ -3375,8 +3611,8 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
         // the mismatch explicitly (e.g. the def-body vs declared-sig
         // unify in `infer.rs` does this for WS-A5 RT-3a F1: when the
         // body collapses to Error but the declared type is concrete, we
-        // still emit a "body has type `<error>`, declared type is `T`"
-        // diagnostic so the user sees the unresolved declared shape).
+        // still emit a declared-versus-inferred mismatch so the user sees
+        // the unresolved declared shape).
         (Type::Error(_), _) | (_, Type::Error(_)) => Ok(()),
 
         // Everything else is a mismatch
@@ -3408,7 +3644,20 @@ pub fn unify_tensor_prec(
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            message: match crate::infer::sum_result_widening_note(
+                None,
+                &Type::Prim(*a),
+                &Type::Prim(*b),
+            ) {
+                Some(note) => {
+                    format!(
+                        "tensor precision mismatch: {} vs {}; {note}",
+                        a.name(),
+                        b.name()
+                    )
+                }
+                None => format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            },
         }),
         (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
         (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),
@@ -3533,9 +3782,9 @@ fn discharge_bounded_scalar_casts(subst: &mut Subst) {
         };
         match decision {
             Ok(settled) => gate.reconcile_result(result, settled, subst),
-            Err(error) => {
-                subst.record_operand_gate_failure(OperandGateFailure::Decision { error: *error })
-            }
+            Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                error: gate.attach_location(*error),
+            }),
         }
     }
 }
@@ -3691,7 +3940,7 @@ fn ensure_tvar_restriction(
     ty: &Type,
     subst: &Subst,
 ) -> Result<(), TypeError> {
-    let family = restriction.family_name();
+    let family = restriction.bound_description();
     let gloss = restriction.membership_gloss();
     match ty {
         Type::Ref(inner) if restriction.is_value_constraint() => {
@@ -3717,15 +3966,23 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
-            message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
-                prim.name()
-            ),
+            message: {
+                let message = format!(
+                    "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
+                    prim.name()
+                );
+                let small_integer =
+                    restriction.admits(Prim::Int8) || restriction.admits(Prim::Int16);
+                match crate::infer::sum_result_bound_note(small_integer, *prim) {
+                    Some(note) => format!("{message}; {note}"),
+                    None => message,
+                }
+            },
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
+                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{other}`"
             ),
         }),
     }
@@ -4602,6 +4859,7 @@ mod tests {
             operand,
             DeferredOperandGate::Copy {
                 result: Box::new(result.clone()),
+                location: None,
             },
         );
         subst.leave_level(level, &vg);

@@ -2,7 +2,7 @@
 
 **Status:** Implemented verified ownership lowering over the `copy-drop` foundation.
 Its conservative scope-end lifetime strategy is superseded as a target contract by
-`compiled_value_ownership.md`; that plan retains last-use release as successor work.
+`compiled_value_ownership.md`, whose Phase 3 owns last-use reclamation.
 **Owning specs:** `spec/03-deep-syntax.md`, `spec/04-type-system.md`,
 `spec/05-risc-primitives.md`, and `spec/design/borrow_typed_primitives.md`.
 
@@ -20,6 +20,22 @@ ownership operations: every lowered linear value has exactly one terminal path,
 and every backend receives the borrow/move/clone disposition before emission.
 Slot planners treat terminal consumes and `Drop` as authoritative live-range
 closes.
+
+## Read-only numeric families
+
+The controlling borrow rule is spec/05 §1.3.1. Comparisons, elementwise
+extrema, and unary activations leave their tensor inputs live. The checker
+uses the comparison identity enumeration for every member; host coarse typing
+returns an operand-shaped bool tensor for every direct tensor comparison,
+and a scalar bool for scalar or recursive equality. A comparison containing a
+host-evaluated operand stays on the host lane so runtime operand agreement is
+checked before comparison. The C emitter supplies that family through its
+existing runtime or typed elementwise comparison arms.
+
+The regression oracle is `cargo test -p chelis-cli --test
+issue_1248_read_only_families`: family and operator reuse succeeds, reuse after
+`realize` fails, and host-produced tensor comparisons execute with eval/C parity
+while incompatible shape or dtype inputs fail checking.
 
 ## Drop Insertion
 
@@ -49,6 +65,14 @@ owned terminal operation.
 The compiler inserts `Copy` for source-level consuming fan-out: a value used in more
 than one non-borrow consuming position. Copies are inserted for all consume sites before
 the final consume site; the final consume site takes the original.
+
+A `drop` is a terminal consume site ([04-LIN-11]). When it follows earlier ordinary
+consumes (spec/04 section 8.3 defines the term), the copies go to those earlier sites
+and the `drop` takes the original, so such a `drop` is ordinary fan-out, and no use
+after a `drop` can be repaired by a copy. A tuple projection or field access outside a destructuring `let` moves its
+component out of the parent: an ordinary consume of that component is fan-out the
+same way, while a `drop` of it ends the component, so the parent is unusable as a
+whole afterwards and only the disjoint components remain usable.
 
 Borrows do not count as fan-out. Multiple `&T` uses share the same source. A value
 passed once to a consuming function after any number of borrows is not fan-out and does
@@ -197,6 +221,10 @@ The following remain errors:
 - invalid borrow syntax, including borrowing non-variables where a direct variable
   borrow is required
 - storing, returning, or capturing borrows where borrow escape is disallowed
+- any use of an owner after its `drop`, and any use of a parent, or of a projection
+  overlapping the dropped component, after a `drop` of a projection ([04-LIN-11])
+- a `drop` of an owner that a closure created earlier borrows, whether or not the
+  closure is called again ([04-LIN-2]); capturing a `copy` is the repair
 - passing `&T` to an owned `T` parameter without an explicit or inserted copy
 - impossible branch or loop ownership states where a single terminal path cannot be
   established
@@ -250,10 +278,7 @@ available.
 
 ## Migration And Linting
 
-Existing source with explicit `copy()` and `drop()` remains valid. The
-`redundant-linearity-call` lint flags removable explicit calls as warnings for
-user-facing `chelis lint` and `chelis check`. The lint is advisory in this release and
-does not fail style gates or fixture/test compilation paths unless explicitly invoked.
+Existing source with explicit `copy()` and `drop()` remains valid.
 
 Executable examples should move toward the implicit style. Fixture baseline updates
 must record before/after fitness data in machine-readable CSV or JSON. Expected deltas

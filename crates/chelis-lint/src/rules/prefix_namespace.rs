@@ -157,10 +157,11 @@ const COMMON_VERB_PREFIXES: &[&str] = &[
     // are domain-shorthand sub-namespaces.
     "nan", "sqrt", "two", // Domain verbs (shared meaning, not shorthand)
     "put", "call",
-    // Time/date accessor verbs in Std.Time — `date_*`/`day_*`/`days_*`
-    // are coherent date-handling helpers parallel to `hour_*`/`year_*`
-    // patterns elsewhere.
-    "date", "day", "days", "year", "month", "hour", "min", "sec",
+    // Date and time operation families in Std.Datetime — `date_*` and
+    // `time_*` name the operations on its `Date` and `Time` values, and
+    // `day_*`/`days_*` are date-handling helpers parallel to
+    // `hour_*`/`year_*` patterns elsewhere.
+    "date", "time", "day", "days", "year", "month", "hour", "min", "sec",
     // Aggregation verbs in dataframe code (Coral.Frame, Coral.GroupBy):
     // `sum_*`, `mean_*`, `max_*`, `min_*`, `count_*` (already), `mask_*`.
     "mean", "max", "mask", "sum",
@@ -413,6 +414,22 @@ mod tests {
         let src = "module Shoals.Stochastic\ndef mc_step(s: f32) = todo\ndef mc_solve(s: f32) = todo\ndef gbm_terminal(s: f32) = todo\ndef gbm_path(s: f32) = todo\n";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_value_type_operation_families_in_std_datetime() {
+        // `date_*` and `time_*` name the public operations on Std.Datetime's
+        // `Date` and `Time` values, like the longer `instant_*` and
+        // `duration_*` families the 2-4 letter heuristic never sees. An
+        // unlisted short prefix in the same module still fires.
+        let src = "module Std.Datetime\ndef date_year(d: i64) = todo\ndef date_month(d: i64) = todo\ndef time_hour(t: i64) = todo\ndef time_minute(t: i64) = todo\ndef tm_hour(t: i64) = todo\ndef tm_minute(t: i64) = todo\n";
+        let v = run(src);
+        assert_eq!(v.len(), 2, "only the tm_ helpers fire; got: {v:?}");
+        assert!(
+            v.iter()
+                .all(|violation| violation.message.contains("`tm_`")),
+            "got: {v:?}"
+        );
     }
 
     #[test]

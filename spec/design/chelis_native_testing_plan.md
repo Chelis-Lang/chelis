@@ -422,14 +422,34 @@ with `cargo test` and `pytest` ergonomics.
 ### Suite batching, isolation, and `--jobs`
 
 Directory runs use `--batch-mode auto` by default. The parent builds the shared package
-context once, groups batch-eligible test files into a suite batch, compiles that batch
-once, and evaluates every selected test root from the shared handle. Sharing the package
+context once, partitions batch-eligible test files into bounded shards of at most
+`MAX_BATCH_FILES` files, compiles each shard once in its own worker, and evaluates every
+selected test root in that shard from its shared handle. Sharing the package
 and evaluator does not merge source scope: before combination, each test file and its
 synthetic roots are rewritten as an independent module under a deterministic reserved
 identity, and the combined unit contains only exact internal names. A declaration in one
 test file is therefore invisible to another unless the language's ordinary import rule
 made it visible. Files with top-level module-init bindings or conservatively detected
 top-level name collisions may still use the per-file worker path instead.
+
+The shard bound is required, not an optimization. One unbounded batch runs in a single
+subprocess, so the suite's whole compile and evaluation sits on one thread while worker
+concurrency applies only to demoted files. At shell-suite scale that inverts the point of
+batching: chelis#1391 measured `Chelis-Lang/shoals`' 49-file suite under its own pin at
+17.68m wall / 19.56m CPU for `auto` against 5.74m / 21.42m for `file`, so the shared unit
+cost 3.1x the wall to save 9% of the CPU, and a hosted 2-vCPU runner could not fit it in
+a 2400s suite budget at all.
+
+The bound is a constant and deliberately not a function of the worker count. Batch
+admission judges name collisions per batch, so a core-count-dependent partition would
+make *which* files demote -- and therefore the `CHELIS_TEST_EXPLAIN_BATCHING` output and
+any abandoned-batch warning -- differ between two machines running the same suite, which
+the determinism requirement below forbids. Narrower scopes also collide less often, so
+sharding admits at least as many files to batching as one shared scope did. A suite with
+no more files than the bound forms exactly one shard and behaves exactly as before.
+
+Each shard succeeds or is abandoned on its own, so one unusable shard costs only its own
+files their batching rather than the whole suite's.
 
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
@@ -485,8 +505,8 @@ the parent falls back to the existing per-file subprocess workers for that batch
 runner is also total against a worker that returns rows it cannot attribute, though no
 current worker path reaches that state; the `status` table below marks which triggers are
 reachable. Plain text and NDJSON output remain deterministic in discovery order. Use
-`--batch-mode file` to force per-file workers while debugging. `--jobs auto` still caps
-worker concurrency on paths that use file workers.
+`--batch-mode file` to force per-file workers while debugging. `--jobs auto` caps worker
+concurrency on both paths: file workers, and the batch shards themselves.
 
 An abandoned batch is a degraded execution mode and must be reported on every channel a
 reader might be capturing, naming the reason and every file the batch had claimed. The
@@ -565,7 +585,7 @@ CLI test that cannot construct the unreachable cases.
 `chelis test <path> --expect neg|blocked` classifies each `.ch` file against
 its same-stem `.expect` sidecar. Line 1 pins the required diagnostic
 substring. `blocked` additionally requires an auditable citation
-(`chelis#NNN`, `docs/issue_drafts/`, or `docs/UPSTREAM_BUGS.md`). Each file is
+(`chelis#NNN` or `docs/UPSTREAM_BUGS.md`). Each file is
 isolated and yields one verdict record plus the final mode-specific summary.
 
 The expected-failure adapter consumes both ordinary failing `test_*` rows and
@@ -598,7 +618,11 @@ expires, the supervisor terminates the suite worker and every descendant,
 exits `1`, and reports an explicit incomplete-suite failure. It must not retry
 the same work through another execution mode after the suite deadline. Zero is
 not a valid suite timeout. Any cooperative termination grace is part of, rather
-than additional to, the advertised wall-clock deadline.
+than additional to, the advertised wall-clock deadline. The one bounded
+exception is on macOS, which refuses a signal to a process group while members
+of it are exiting. There the supervisor reaps an exited suite leader at once,
+and waits at most two seconds for the group's other exiting members before
+treating the refusal as a supervision failure.
 
 In `--json` mode, every stdout line remains valid JSON. Completed test rows and
 completed `--expect` verdict records are retained, any child-produced summary

@@ -4,18 +4,19 @@
 //! - `spec/02-surf-syntax.md` §P10b
 //! - `spec/04-type-system.md` §5.6
 //!
-//! When a tensor literal `[e1, e2, ...]` appears in a position with a
-//! known element type, the unsuffixed numeric literals in the body
-//! adopt that element type instead of the §5.3 / §P10 literal default
-//! (i32 for integer literals, f32 for float literals).
-//!
-//! The closed set of "known-element-type" positions is exactly four:
+//! A bracket literal is a List. A bare bracket literal whose own declaration
+//! states a tensor type is a tensor literal, and its unsuffixed numeric
+//! literals adopt the declared element type instead of the §5.3 / §P10
+//! literal default (i32 for integer literals, f32 for float literals):
 //!   1. RHS of a let-binding whose declared type is a tensor type
-//!   2. Argument position of a call whose callee has a declared signature
-//!      with a tensor parameter at that position
 //!   3. Body expression of a function with a declared return type that is
-//!      a tensor type, when the body is itself a tensor literal
-//!   4. First argument of an explicit `cast(literal, p)`
+//!      a tensor type, when the body is itself a bare bracket literal
+//!
+//! A callee's parameter type or a cast never makes a bracket literal a
+//! tensor, so a bare bracket literal passed as an argument or cast is a List,
+//! and the argument of a `to_tensor` call is an ordinary List whose literals
+//! keep their own dtypes. Position 4 adopts only a bare scalar,
+//! `cast(1.1, f64)`.
 //!
 //! Outside the closed set, numeric literals fall back to the WS-0 / D1
 //! default: integer literals → i32, float literals → f32.
@@ -180,31 +181,37 @@ fn position_1_no_annotation_int_default_is_int32() {
 // ── Position 4: cast(literal, p) ──
 
 #[test]
-fn position_4_cast_int_list_to_int8() {
-    let (printed, result) = pipeline("xs = cast([1, 2, 3], i8)");
-    assert!(
-        result.errors.is_empty(),
-        "expected no errors, got:\n{}",
-        errors_summary(&result)
-    );
-    assert!(
-        contains_lit_with_prim(&printed, "i8"),
-        "expected i8-typed literals, got:\n{}",
-        printed.join("\n")
-    );
-}
-
-#[test]
-fn position_4_cast_float_list_to_f64() {
-    let (printed, result) = pipeline("xs = cast([1.0, 2.0, 3.0], f64)");
-    assert!(
-        result.errors.is_empty(),
-        "expected no errors, got:\n{}",
-        errors_summary(&result)
-    );
+fn position_4_to_tensor_elements_keep_their_defaults_under_a_cast() {
+    // The cast converts the tensor's values; it never retypes the List
+    // argument of `to_tensor`.
+    for (src, element, target) in [
+        ("xs = cast(to_tensor([1, 2, 3]), i8)", "i32", "i8"),
+        ("xs = cast(to_tensor([1.0, 2.0, 3.0]), f64)", "f32", "f64"),
+        ("xs = cast(to_tensor([1.5, 2.5]), i32)", "f32", "i32"),
+    ] {
+        let (printed, result) = pipeline(src);
+        assert!(
+            result.errors.is_empty(),
+            "{src}: expected no errors, got:\n{}",
+            errors_summary(&result)
+        );
+        assert!(
+            contains_lit_with_prim(&printed, element),
+            "{src}: expected {element}-typed literals, got:\n{}",
+            printed.join("\n")
+        );
+        assert!(
+            !contains_lit_with_prim(&printed, target),
+            "{src}: no literal may adopt the cast target {target}, got:\n{}",
+            printed.join("\n")
+        );
+    }
+    // A suffix states the element dtype at the construction site.
+    let (printed, result) = pipeline("xs = cast(to_tensor([1.0f64, 2.0f64]), f64)");
+    assert!(result.errors.is_empty(), "{}", errors_summary(&result));
     assert!(
         contains_lit_with_prim(&printed, "f64"),
-        "expected f64-typed literals, got:\n{}",
+        "{}",
         printed.join("\n")
     );
 }
@@ -232,48 +239,36 @@ fn position_3_fn_return_tensor_f64_narrows_body_literals() {
     );
 }
 
-// ── Position 2: call with declared-signature tensor parameter ──
+// ── A call with a declared tensor parameter ──
 
 #[test]
-fn position_2_call_with_tensor_f64_param_narrows_arg_literals() {
-    let src = "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f([1.0, 2.0, 3.0])";
-    let (printed, result) = pipeline(src);
-    assert!(
-        result.errors.is_empty(),
-        "expected no errors, got:\n{}",
-        errors_summary(&result)
-    );
-    // The `ys = f([1.0, 2.0, 3.0])` form must narrow argument
-    // literals to f64 because f's declared signature is
-    // `tensor[3, f64] -> tensor[3, f64]`.
-    assert!(
-        contains_lit_with_prim(&printed, "f64"),
-        "expected f64-typed literals for the call-arg position, \
-         got:\n{}",
-        printed.join("\n")
-    );
-}
-
-#[test]
-fn position_2_call_with_sig_decl_tensor_f64_param_narrows_arg_literals() {
-    // Position 2 must also fire when the callee has a separate `sig`
-    // declaration (no `def` ascription). The desugarer collects
-    // tensor-param prims from `Decl::Sig` Arrow types, so this exercises
-    // the Decl::Sig branch of `collect_top_level_fn_tensor_param_prec`.
-    let src = "sig f: tensor[3, f64] -> tensor[3, f64]\n\
-               def f(xs) = xs\n\
-               ys = f([1.0, 2.0, 3.0])";
-    let (printed, result) = pipeline(src);
-    assert!(
-        result.errors.is_empty(),
-        "expected no errors, got:\n{}",
-        errors_summary(&result)
-    );
-    assert!(
-        contains_lit_with_prim(&printed, "f64"),
-        "expected f64-typed literals via sig declaration, got:\n{}",
-        printed.join("\n")
-    );
+fn a_to_tensor_argument_at_a_tensor_parameter_keeps_its_literal_defaults() {
+    // A callee's declared tensor parameter, inline or in its `sig`, never
+    // retypes the List argument of `to_tensor`: the f32 tensor does not match
+    // the f64 parameter, and suffixed elements do.
+    for declaration in [
+        "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\n",
+        "sig f: tensor[3, f64] -> tensor[3, f64]\ndef f(xs) = xs\n",
+    ] {
+        let src = format!("{declaration}ys = f(to_tensor([1.0, 2.0, 3.0]))");
+        let (printed, result) = pipeline(&src);
+        assert!(
+            !contains_lit_with_prim(&printed, "f64"),
+            "{src}: no literal may adopt the parameter dtype, got:\n{}",
+            printed.join("\n")
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "{src}: an f32 tensor is not an f64 tensor, got (no errors)"
+        );
+        let src = format!("{declaration}ys = f(to_tensor([1.0f64, 2.0f64, 3.0f64]))");
+        let (_, result) = pipeline(&src);
+        assert!(
+            result.errors.is_empty(),
+            "{src}: {}",
+            errors_summary(&result)
+        );
+    }
 }
 
 // ── Negative coverage ──
@@ -410,4 +405,110 @@ fn position_1_block_level_let_with_tensor_type_narrows_literals() {
         "expected f64-typed literals at block-let position, got:\n{}",
         printed.join("\n")
     );
+}
+
+#[test]
+fn negative_bare_brackets_at_a_tensor_parameter_or_cast_stay_lists() {
+    // A callee's tensor parameter or a `cast` never converts a bare bracket
+    // literal (§5.6).
+    for src in [
+        "xs = cast([1.0, 2.0, 3.0], f64)",
+        "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\nys = f([1.0, 2.0, 3.0])",
+        "sig f: tensor[3, f64] -> tensor[3, f64]\ndef f(xs) = xs\nys = f([1.0, 2.0, 3.0])",
+    ] {
+        let (printed, result) = pipeline(src);
+        let combined = printed.join("\n");
+        assert!(!combined.contains("to_tensor"), "{src}: {combined}");
+        assert!(
+            !contains_lit_with_prim(&printed, "f64"),
+            "a List element must not adopt the context dtype: {combined}"
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "{src}: a List is not a tensor, got (no errors)"
+        );
+    }
+}
+
+/// A `def`'s inline result type decides whether its bare bracket body is a
+/// tensor literal, and only a `def` without one takes its standalone `sig`'s
+/// result (spec/02-surf-syntax.md §P10b). An inline `List[...]` result keeps
+/// a `List` body, which the tensor `sig` then rejects loudly, and a lambda
+/// bound under a `sig` is not a `def`, so its bare bracket body stays a
+/// `List` too.
+#[test]
+fn an_inline_result_type_decides_over_a_standalone_sig() {
+    let (printed, result) = pipeline("sig f: i32 -> tensor[2, f64]\ndef f(n) = [1.1, 2.2]");
+    assert!(result.errors.is_empty(), "{}", errors_summary(&result));
+    assert!(
+        printed.join("\n").contains("to_tensor") && contains_lit_with_prim(&printed, "f64"),
+        "the sig's tensor result converts and types the body: {}",
+        printed.join("\n")
+    );
+    for src in [
+        "sig f: i32 -> tensor[2, f32]\ndef f(n: i32) -> List[f32] = [1.1, 2.2]",
+        "sig g: i32 -> tensor[2, f32]\ng = fn (n) -> [1.1, 2.2]",
+    ] {
+        let (printed, result) = pipeline(src);
+        assert!(
+            !printed.join("\n").contains("to_tensor"),
+            "{src}: the body must stay a List: {}",
+            printed.join("\n")
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "{src}: a List body under a tensor sig must be rejected, got (no errors)"
+        );
+    }
+}
+
+fn suggestions(result: &chelis_types::infer::InferResult) -> String {
+    result
+        .errors
+        .iter()
+        .flat_map(|error| error.suggestions.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The value-preserving List hint is decided from the checked expected and
+/// actual types, a tensor expected and a bracket literal's List given, at a
+/// checked cast or a callee's parameter; never from a mismatch message, which
+/// does not record which side was expected.
+#[test]
+fn only_a_bracket_literal_where_a_tensor_is_expected_gets_the_list_hint() {
+    for src in [
+        "xs = cast([1.1, 2.2], f64)",
+        "def g(x: tensor[2, f64]) -> tensor[2, f64] = x\nys = g([1.1, 2.2])",
+    ] {
+        let (_, result) = pipeline(src);
+        assert!(
+            suggestions(&result).contains("to_tensor([1.1f64, 2.2f64])"),
+            "{src}: {}",
+            errors_summary(&result)
+        );
+    }
+    for src in [
+        // A tensor where a List is expected.
+        "def g(l: List[f64]) -> i32 = 1\nr = g(to_tensor([1.5f64, 2.5f64]))",
+        "def g(l: List[f64]) -> i32 = 1\nt = to_tensor([1.5f64, 2.5f64])\nr = g(t)",
+        // A tensor against a tensor.
+        "def g(x: tensor[2, f64]) -> i32 = 1\nr = g(to_tensor([1.5f32, 2.5f32]))",
+        // A List against a List, whose elements mismatch.
+        "def g(l: List[tensor[2, f64]]) -> i32 = 1\nr = g([[1.1, 2.2]])",
+        // A List value that is not a bracket literal.
+        "def g(x: tensor[2, f64]) -> i32 = 1\ndef h(xs: List[f32]) -> i32 = g(xs)",
+        // A join, where neither side is expected.
+        "def h(c: bool) -> i32 = {\n  v = if c then to_tensor([1.0, 2.0]) else [1.0, 2.0]\n  1\n}",
+        // The truncating rung, which a suffixed spelling would not keep.
+        "xs = cast_trunc([1.9, 2.7], i32)",
+    ] {
+        let (_, result) = pipeline(src);
+        assert!(!result.errors.is_empty(), "{src}: expected a type error");
+        assert!(
+            !suggestions(&result).contains("a bracket literal is a List"),
+            "{src}: the List hint must not fire: {}",
+            errors_summary(&result)
+        );
+    }
 }

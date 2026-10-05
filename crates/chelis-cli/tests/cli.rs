@@ -1,3 +1,7 @@
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 mod common;
 
 use assert_cmd::Command;
@@ -682,8 +686,14 @@ fn fmt_check_accepts_canonical_executable_examples() {
     }
 }
 
+/// `examples/illustrative/README.md` promises that every file there passes
+/// both `chelis fmt --check` and `chelis check`. The check runs on a copy of
+/// the tree because checking a package source writes its `reef.lock`.
 #[test]
-fn fmt_check_accepts_canonical_illustrative_examples() {
+fn fmt_check_and_check_accept_illustrative_examples() {
+    let illustrative_root = example_path("../../examples/illustrative");
+    let dir = tempdir().expect("tempdir");
+    copy_dir_recursive(&illustrative_root, dir.path());
     for path in illustrative_examples() {
         Command::cargo_bin("chelis")
             .expect("binary")
@@ -691,6 +701,26 @@ fn fmt_check_accepts_canonical_illustrative_examples() {
             .args(["fmt", path.to_str().unwrap(), "--check"])
             .assert()
             .success();
+
+        let copy = dir.path().join(
+            path.strip_prefix(&illustrative_root)
+                .expect("illustrative example should stay under root"),
+        );
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", copy.to_str().unwrap()])
+            .output()
+            .expect("run chelis check");
+        assert!(output.status.success(), "{path:?}");
+        let json: Value = serde_json::from_slice(&output.stdout).expect("check output is json");
+        assert_eq!(json["score"].as_f64().unwrap(), 1.0, "{path:?}");
+        assert_eq!(json["errors"].as_array().unwrap().len(), 0, "{path:?}");
+        assert_eq!(
+            json["unresolved_names"].as_array().unwrap().len(),
+            0,
+            "{path:?}"
+        );
     }
 }
 
@@ -725,7 +755,7 @@ fn eval_rejects_unbound_runtime_names() {
 // `def` declarations with no top-level evaluable expression must
 // surface a stderr warning so humans don't get a silent "success".
 // Exit code stays 0 to preserve backward compat for scripted
-// consumers. See `docs/investigations/item2_sibling_sweep_findings.md`
+// consumers. See `docs/archive/investigations/item2_sibling_sweep_findings.md`
 // §G7 and `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
 #[test]
 fn eval_def_only_emits_warning_on_stderr() {
@@ -1240,6 +1270,7 @@ fn build_c_runs_key_builtin_aliases_and_matches_eval_output() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1286,6 +1317,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1330,6 +1362,7 @@ fn build_c_runs_dict_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1371,6 +1404,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1475,6 +1509,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1524,6 +1559,7 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1576,6 +1612,7 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1666,6 +1703,7 @@ fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1720,6 +1758,7 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1811,6 +1850,7 @@ fn build_c_multidef_tensor_entry_renames_source_main_for_driver_compatibility() 
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1972,6 +2012,7 @@ fn build_c_nested_float_builtins_do_not_emit_int_temps() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2027,6 +2068,7 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2069,6 +2111,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2132,6 +2175,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2187,6 +2231,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2242,6 +2287,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2376,6 +2422,7 @@ fn build_c_scalar_grad_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2451,6 +2498,7 @@ fn build_c_scalar_grad_multi_param_wrt_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2519,6 +2567,7 @@ fn build_c_scalar_grad_rejects_container_wrt() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2552,6 +2601,7 @@ fn build_run_scalar_grad(stem: &str, source: &str) -> f64 {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2613,6 +2663,7 @@ fn build_c_scalar_grad_recursive_callee_fails_closed() {
         .timeout(std::time::Duration::from_secs(60))
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2781,6 +2832,7 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2845,6 +2897,7 @@ fn build_c_grad_locally_bound_alias_form_lowers() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2898,6 +2951,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source_path.to_str().unwrap(),
                 "--target",
                 "c",
@@ -3005,6 +3059,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3047,7 +3102,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
 // backend. The pipe form is currently rejected by
 // `host_program_unresolved_call_sites` (`crates/chelis-ir/src/host.rs:1314`)
 // because the host-lane summarizer doesn't recognize pipe-lowered function
-// bodies as inlinable. See `docs/investigations/c_backend_grad_piped_body_diagnosis.md`.
+// bodies as inlinable. See `docs/archive/investigations/c_backend_grad_piped_body_diagnosis.md`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Control fixture: `grad(named_fn)(theta)` where `named_fn`'s body is
@@ -3070,6 +3125,7 @@ fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3129,6 +3185,7 @@ fn build_c_grad_over_named_fn_with_pipe_body_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3181,6 +3238,7 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3227,6 +3285,7 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3270,6 +3329,7 @@ fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3310,6 +3370,7 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3389,6 +3450,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3476,6 +3538,7 @@ def main(
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -3529,6 +3592,7 @@ fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3576,29 +3640,17 @@ fn phase3h_numeric_acceptance_oracle() {
     assert_reef_std_embedding_builds_to_valid_c();
 }
 
-/// Regression test for the macOS-only bug where `host_emit::emit_host_program`
-/// stripped `#include "chelis_math.h"` from the generated host code, causing
-/// `vvexpf`/`vvlogf` calls to reach the compiler with no declaration in
-/// scope. Direct guard on the include-emission invariant rather than only
-/// transitive coverage via the (slow) `phase3h_numeric_acceptance_oracle`.
-///
-/// The test builds a tiny program that uses a transcendental in a
-/// host-lane scalar context, emits it via `chelis build --target c`, and
-/// asserts the generated `main.c`:
-///   - On macOS: contains both `#include "chelis_math.h"` AND a `vvexpf`
-///     call. If either is missing, the regression is back.
-///   - On Linux without sleef: must NOT contain `chelis_math.h` (the
-///     inner CEmitter selects MathLib::None and the include should stay
-///     out — confirms the `needs_math_header` flag is platform-driven).
+/// A built program carries the correctly rounded kernels it calls
+/// (spec/design/correctly_rounded_math.md section 4.2): the emitted unit
+/// defines `chelis_cr_expf` with internal linkage, defines no kernel it does
+/// not call, and names no math library. The old route through
+/// `chelis_math.h` (Accelerate vForce on macOS, Sleef on Linux) gave
+/// different bits per host.
 #[test]
-fn build_c_host_emits_chelis_math_h_when_program_uses_transcendentals() {
+fn build_c_host_carries_the_correctly_rounded_kernel_it_calls() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("transcendental.ch");
     let out_dir = dir.path().join("c-output");
-    // The phase3h embedding helper exercises the same vForce/vvexpf
-    // path that triggered the original bug. Reusing it keeps the test
-    // shape simple: any `exp` in a host-lane helper must produce a
-    // generated `main.c` that #includes `chelis_math.h`.
     write_file(
         &path,
         r#"
@@ -3611,6 +3663,7 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3621,52 +3674,28 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
         .success();
 
     let main_c = fs::read_to_string(out_dir.join("transcendental.c")).expect("emitted .c");
-
-    #[cfg(target_os = "macos")]
-    {
+    assert_eq!(
+        main_c
+            .matches("static float chelis_cr_expf(float x)")
+            .count(),
+        1,
+        "the unit must define the exp kernel it calls exactly once:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("chelis_cr_logf(") && !main_c.contains("chelis_cr_exp("),
+        "the unit must not carry kernels it does not call:\n{main_c}"
+    );
+    for library in [
+        "chelis_math.h",
+        "vvexpf",
+        "Sleef_",
+        "CHELIS_EXPF8",
+        "Accelerate",
+    ] {
         assert!(
-            main_c.contains("#include \"chelis_math.h\""),
-            "macOS host_emit must include chelis_math.h when a helper uses \
-             a transcendental. Regression of the vForce header bug. Source:\n{main_c}"
+            !main_c.contains(library),
+            "generated C must name no math library (`{library}`):\n{main_c}"
         );
-        assert!(
-            main_c.contains("vvexpf"),
-            "macOS host_emit should route exp through Accelerate vForce \
-             (`vvexpf`); none found in generated main.c:\n{main_c}"
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        // The `sleef` feature in chelis-backend-c is auto-detected at build
-        // time by `build.rs` via pkg-config (`libsleef` available → feature
-        // on, `MathLib::detect` returns `MathLib::Sleef`). Because the chelis
-        // binary is what's spawned here, the relevant feature state is the
-        // binary's, not this test crate's. We read it back from the
-        // generated code's SLEEF guard marker and assert the include
-        // invariant in both directions.
-        let on_sleef_path = main_c.contains("#ifdef CHELIS_HAS_SLEEF");
-        if on_sleef_path {
-            // SLEEF macros (`CHELIS_EXPF8`, ...) are declared in
-            // `chelis_math.h`; the include must accompany the SLEEF SIMD
-            // body or the compiler sees undeclared identifiers under
-            // `-DCHELIS_HAS_SLEEF`.
-            assert!(
-                main_c.contains("#include \"chelis_math.h\""),
-                "Linux SLEEF host_emit must include chelis_math.h to \
-                 declare CHELIS_EXPF8 and friends. Source:\n{main_c}"
-            );
-        } else {
-            // Linux without the `sleef` feature selects MathLib::None and
-            // emits no `chelis_math.h` include. The include MUST NOT leak
-            // in unconditionally — that would force a useless dependency
-            // on platforms that don't need it.
-            assert!(
-                !main_c.contains("#include \"chelis_math.h\""),
-                "non-macOS host_emit should not include chelis_math.h \
-                 when the inner emitter selected MathLib::None. Source:\n{main_c}"
-            );
-        }
     }
 }
 
@@ -3745,6 +3774,7 @@ def apply(
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -3829,6 +3859,7 @@ fn build_hip_accepts_dict_foundation_host_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -3855,6 +3886,7 @@ fn build_hip_accepts_iter_foundation_host_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -3884,6 +3916,7 @@ fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -3932,6 +3965,7 @@ fn phase3m_rust_runtime_acceptance_oracle() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -4017,6 +4051,7 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4071,6 +4106,7 @@ result = match sample with {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4116,6 +4152,7 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -4174,6 +4211,7 @@ fn build_rejects_chelis_runtime_dir_before_writing_outputs() {
             .env("CHELIS_RUNTIME_DIR", &runtime_dir)
             .args([
                 "build",
+                "--emit-c",
                 mnist_example().to_str().unwrap(),
                 "--target",
                 target,
@@ -4213,6 +4251,7 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4250,6 +4289,7 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4283,6 +4323,7 @@ fn build_device_targets_reject_host_reduce_window_max_without_c_fallback() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 target,
@@ -4314,6 +4355,7 @@ fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -4355,6 +4397,7 @@ fn build_stages_the_carried_runtime_not_newer_archives_nearby() {
         .env_remove("CHELIS_RUNTIME_DIR")
         .args([
             "build",
+            "--emit-c",
             mnist_example().to_str().unwrap(),
             "--target",
             "c",
@@ -4459,6 +4502,7 @@ fn phase3m_rust_runtime_hip_manual_gate() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -5001,11 +5045,18 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.4.0"));
+        .stdout(predicate::str::contains(format!(
+            "Built chelis-std {}",
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
+        )));
 
+    let stem = format!(
+        "chelis-std-{}",
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
+    );
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.4.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.4.0.tar.zst").exists());
+    assert!(pkg.join(format!("dist/{stem}.chb")).exists());
+    assert!(pkg.join(format!("dist/{stem}.tar.zst")).exists());
 }
 
 #[test]
@@ -5074,6 +5125,7 @@ def main(
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -5344,6 +5396,7 @@ fn build_creates_missing_output_directory() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             mnist_example().to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -5373,6 +5426,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5405,6 +5459,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5422,6 +5477,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5475,6 +5531,7 @@ fn build_hip_accepts_symbolic_softmax() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5507,6 +5564,7 @@ fn build_hip_accepts_symbolic_row_sum() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5538,6 +5596,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5564,7 +5623,13 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+        ])
         .assert()
         .failure()
         // Inherited CI unblock: the PR base and current main still expected
@@ -5593,6 +5658,7 @@ fn build_hip_rejects_pad_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5607,6 +5673,7 @@ fn build_hip_rejects_pad_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5658,6 +5725,7 @@ fn build_hip_ignores_unselected_movement_helpers() {
                 .env("CHELIS_STYLE_GATE_DISABLE", "1")
                 .args([
                     "build",
+                    "--emit-c",
                     path.to_str().unwrap(),
                     "--target",
                     "hip",
@@ -5692,6 +5760,7 @@ fn build_hip_rejects_shrink_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5706,6 +5775,7 @@ fn build_hip_rejects_shrink_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5742,6 +5812,7 @@ fn build_hip_emits_pad_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5778,6 +5849,7 @@ fn build_hip_emits_shrink_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5809,6 +5881,7 @@ fn build_hip_emits_sparse_gather_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5838,6 +5911,7 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5873,7 +5947,13 @@ fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5900,6 +5980,7 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5937,6 +6018,7 @@ fn build_hip_admitted_sum_program_emits_fused_kernel_and_launch() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5973,6 +6055,7 @@ fn build_hip_multidef_tensor_entry_uses_single_entry_abi() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -6014,6 +6097,7 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -6043,6 +6127,7 @@ fn build_hip_unbound_observation_root_fails_before_writing_an_artifact() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -6115,6 +6200,57 @@ fn check_reports_linearity_errors() {
                 .as_str()
                 .is_some_and(|message| message.contains("realize"))
     }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+/// chelis#3177: `drop(x)` ends `x`'s lifetime, so returning `x` afterward is a
+/// use after consume, not consuming fan-out that copy insertion repairs.
+#[test]
+fn check_refuses_a_move_after_drop() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("drop_then_move.ch");
+    write_file(
+        &path,
+        "module M.Main\ndef f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  c = drop(x)\n  x\n}\ndef xs() -> List[f32] = [1.5, 2.5, 3.5]\nout = f(to_tensor(xs()))\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("UseAfterConsume")
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("variable `x`") && message.contains("call to `drop`")
+                })
+        }),
+        "expected UseAfterConsume for the move after drop; got {errors:?}"
+    );
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+/// chelis#3180: the operand of `drop` is owned ([05-OP-67]), so `drop(&x)` is a
+/// type error rather than an implicit consume of `x`.
+#[test]
+fn check_refuses_a_borrowed_drop_operand() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("drop_borrow.ch");
+    write_file(
+        &path,
+        "module M.Main\ndef f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  c = drop(&x)\n  x\n}\ndef xs() -> List[f32] = [1.5, 2.5, 3.5]\nout = f(to_tensor(xs()))\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("TypeMismatch")
+                && error["expected"].as_str() == Some("an owned value")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("drop argument 1"))
+        }),
+        "expected a TypeMismatch for the borrowed drop operand; got {errors:?}"
+    );
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }
 
@@ -6312,7 +6448,7 @@ fn build_rejects_gpu_device_region_for_c_target() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c"])
+        .args(["build", "--emit-c", path.to_str().unwrap(), "--target", "c"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot satisfy resource region"));
@@ -6802,6 +6938,7 @@ fn deep_build_rejects_selected_orphan_signature_before_pruning() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 valid.to_str().unwrap(),
                 "--target",
                 target,
@@ -6816,6 +6953,7 @@ fn deep_build_rejects_selected_orphan_signature_before_pruning() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 invalid.to_str().unwrap(),
                 "--target",
                 target,
@@ -6888,6 +7026,7 @@ fn target_metal_emits_mm_header_and_runtime_artifacts() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "metal",
@@ -6938,7 +7077,13 @@ fn target_metal_unknown_target_message_lists_metal() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "vulkan"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "vulkan",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -6964,6 +7109,7 @@ fn target_metal_emits_pad_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -6999,6 +7145,7 @@ fn target_metal_emits_shrink_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7027,7 +7174,7 @@ fn target_metal_rejects_f64_precision() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args(["build", "--emit-c", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -7054,6 +7201,7 @@ fn target_metal_admits_f16_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7084,6 +7232,7 @@ fn target_metal_admits_bf16_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7118,6 +7267,7 @@ fn target_metal_admits_i32_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7148,6 +7298,7 @@ fn target_metal_admits_i64_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7180,6 +7331,7 @@ fn target_metal_link_line_includes_metal_performance_shaders() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "metal",
@@ -7207,7 +7359,13 @@ fn target_metal_rejects_cpu_resource_region() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot satisfy resource region"));
@@ -7291,6 +7449,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             build_path.to_str().unwrap(),
             "--target",
             "c",
@@ -7413,8 +7572,24 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
 
 #[test]
 fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
-    // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
-    // Tanh approximation matches the host-runtime `activation_gelu_f32` helper.
+    // gelu_tanh(0) = 0; gelu_tanh(1) ≈ 0.84119; gelu_tanh(-1) ≈ -0.15881.
+    run_activation_parity(
+        "bucket3_gelu_tanh",
+        r#"
+def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu_tanh(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = gelu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu_tanh pointwise (tanh-approx)")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_gelu_exact_runs_in_eval_and_c_lanes() {
+    // gelu(x) = x * Phi(x): gelu(1) ≈ 0.8413447, gelu(-1) ≈ -0.1586553, which
+    // the tanh approximation misses by about 2.2e-4.
     run_activation_parity(
         "bucket3_gelu",
         r#"
@@ -7422,8 +7597,8 @@ def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu(x)
 
 input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
 actual = gelu_apply(input)
-expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-approx)")
+expected = to_tensor([cast(0.0, f32), cast(0.8413447, f32), cast(-0.1586553, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.00001, "gelu pointwise (exact)")
 "#,
     );
 }
@@ -7537,6 +7712,7 @@ fn target_metal_accepts_gpu_resource_region() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7609,28 +7785,6 @@ fn check_directory_walks_ch_files_and_aggregates_json() {
 }
 
 #[test]
-fn lint_reports_redundant_linearity_call_as_warning_only() {
-    let dir = tempdir().expect("tempdir");
-    write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = drop(keep(to_tensor([1.0, 2.0])))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("redundant-linearity-call"))
-                .and(predicate::str::contains("`copy()`"))
-                .and(predicate::str::contains("`drop()`")),
-        );
-}
-
-#[test]
 fn lint_list_reports_registered_rule_severities() {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -7638,20 +7792,89 @@ fn lint_list_reports_registered_rule_severities() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("redundant-linearity-call\twarning")
-                .and(predicate::str::contains("prefer-pipe-operator\twarning"))
-                .and(predicate::str::contains(
-                    "no-em-dash-in-public-strings\terror",
-                )),
+            predicate::str::contains("opaque-without-invariant\tadvisory").and(
+                predicate::str::contains("no-em-dash-in-public-strings\terror"),
+            ),
         );
+}
+
+/// chelis#3130: no lint rule converts between Surf spellings. A file that
+/// `prefer-pipe-operator`, `redundant-linearity-call` and
+/// `prefer-typed-literal` each reported, with a `[fix]`, draws none of them
+/// from `lint`, `lint --fix` or `check`, and none of the ids is selectable.
+#[test]
+fn lint_has_no_spelling_conversion_rules() {
+    const REMOVED: [&str; 3] = [
+        "prefer-pipe-operator",
+        "redundant-linearity-call",
+        "prefer-typed-literal",
+    ];
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("spellings.ch");
+    let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n\
+                    def g(x: tensor[2, f32]) -> tensor[2, f32] = realize(copy(x))\n\
+                    y = cast(1.0, f64)\n";
+    write_file(&path, original);
+
+    let listed = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--list"])
+        .output()
+        .expect("run lint --list");
+    assert!(listed.status.success(), "lint --list failed: {listed:?}");
+    let listed = String::from_utf8(listed.stdout).expect("utf-8 stdout");
+
+    let linted = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", path.to_str().unwrap()])
+        .output()
+        .expect("run lint --check");
+    assert!(linted.status.success(), "lint --check failed: {linted:?}");
+    let linted = String::from_utf8(linted.stdout).expect("utf-8 stdout");
+    assert!(!linted.contains("[fix]"), "no fix is offered: {linted}");
+
+    let fixed = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .output()
+        .expect("run lint --fix");
+    assert!(fixed.status.success(), "lint --fix failed: {fixed:?}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read fixture"),
+        original,
+        "lint --fix leaves every spelling as written"
+    );
+
+    let checked = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert!(checked.status.success(), "check failed: {checked:?}");
+    let checked = String::from_utf8(checked.stderr).expect("utf-8 stderr");
+
+    for id in REMOVED {
+        assert!(!listed.contains(id), "`{id}` is not registered: {listed}");
+        assert!(!linted.contains(id), "`{id}` reports nothing: {linted}");
+        assert!(
+            !checked.contains(id),
+            "`check` prints no `{id}` warning: {checked}"
+        );
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["lint", "--rule", id, path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!("no rule with id '{id}'")));
+    }
 }
 
 #[test]
 fn lint_rules_filter_runs_selected_rules_only() {
     let dir = tempdir().expect("tempdir");
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
 
     Command::cargo_bin("chelis")
@@ -7659,409 +7882,24 @@ fn lint_rules_filter_runs_selected_rules_only() {
         .args([
             "lint",
             "--rules",
-            "prefer-pipe-operator",
+            "recursive-list-cursor",
             dir.path().to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("redundant-linearity-call").not());
-}
-
-#[test]
-fn lint_fix_redundant_linearity_call_strips_when_typed_pipeline_accepts() {
-    // After Item 5 of the 0.7.6 toolchain hygiene workstream re-enabled
-    // the autofix, `chelis lint --fix` strips a redundant `copy()` from a
-    // valid program. The CLI fix driver verifies the post-strip candidate
-    // against the typed pipeline before writing (see
-    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rewrite_valid.ch");
-    write_file(
-        &path,
-        "def f(w: tensor[2, f32]) -> tensor[2, f32] = realize(copy(w))\n\n\
-         result = f(to_tensor([1.0, 2.0]))\n",
-    );
+        .stdout(predicate::str::contains("opaque-without-invariant").not());
 
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        !rewritten.contains("copy(w)"),
-        "autofix should have stripped `copy(w)`; got:\n{rewritten}",
-    );
-}
-
-#[test]
-fn lint_fix_redundant_linearity_call_keeps_when_typed_pipeline_rejects() {
-    // The typed-pipeline gate is the safety bar for the
-    // `redundant-linearity-call` autofix. Programs that don't type-check
-    // before the fix can't have their post-fix candidate verified, so the
-    // gate drops the strip and the source is left unchanged.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rewrite_invalid.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(copy(x)), scale)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(copy(x)), scale)"));
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
-    // The `prefer-pipe-operator` autofix is re-enabled (Agent 2 / F),
-    // gated on the typed-pipeline accepting the post-rewrite source
-    // (Path 1B per
-    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
-    // This program references undefined `outer`, `inner`, `scale`, so the
-    // pre-rewrite source already fails the typed pipeline. The candidate
-    // post-rewrite source fails for the same reason. The Path 1B gate
-    // therefore silently drops the rewrite and the source is preserved.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_warn.ch");
-    let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), scale)"));
-    assert!(!rewritten.contains("|>"));
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
-    // Positive case: a nested first-argument call chain over stdlib
-    // unary builtins `neg` and `relu`. Both nested and piped forms
-    // type-check (verified with `chelis check`), so the Path 1B gate
-    // accepts the rewrite.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_rewrite.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        rewritten.contains("|>"),
-        "expected autofix to introduce `|>`, got:\n{rewritten}"
-    );
-    assert!(
-        !rewritten.contains("relu(neg(x))"),
-        "expected the nested call to be rewritten, got:\n{rewritten}"
-    );
-    // The canonical first-argument-insertion rewrite of `relu(neg(x))`
-    // is `x |> neg |> relu` per spec §3.6.
-    assert!(
-        rewritten.contains("x |> neg |> relu"),
-        "expected `x |> neg |> relu`, got:\n{rewritten}"
-    );
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_rewrites_multi_arg_outer_stage() {
-    // Second positive case: outer call carries extra arguments that
-    // must survive the rewrite as `f(...)` call-stage form.
-    // `add(neg(x), bias)` ≡ `x |> neg |> add(bias)` per spec §3.6.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_rewrite_multi.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32], bias: tensor[2, f32]) -> tensor[2, f32] = add(neg(x), bias)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(&path).expect("read rewritten");
-    assert!(
-        rewritten.contains("x |> neg |> add(bias)"),
-        "expected `x |> neg |> add(bias)`, got:\n{rewritten}"
-    );
-}
-
-// --- Finding 3b (PR #51 red-team): the `prefer-pipe-operator` autofix
-// re-enabled in PR #42 emits replacement text that is not fmt-clean,
-// so `chelis lint --fix` followed by `chelis fmt --check` fails.
-//
-// The three fixtures below pin the invariant: for any input where the
-// autofix accepts the rewrite, the post-fix file must also pass
-// `chelis fmt --check`. Gated `#[ignore]` until the fix lands.
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_two_stage() {
-    // Two-stage pipe rewrite (`relu(neg(x))` -> `x |> neg |> relu`).
-    // Formatter emits the flat single-line form for total_stages <= 3,
-    // so the autofix text must match. This case is already fmt-clean
-    // today; it serves as a regression guard so the fix for the
-    // three-stage / mixed cases does not break the two-stage path.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_two.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_three_stage() {
-    // Three-stage pipe rewrite (`sigmoid(relu(neg(x)))` ->
-    // `x |> neg |> relu |> sigmoid`). The formatter emits a multi-line
-    // brace-wrapped form here because total_stages > 3. The autofix
-    // must either match that exact output OR skip the fix; either way,
-    // the post-fix file must pass `fmt --check`.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_three.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
-    // Pipe rewrite mixed with a non-rewritable outer-call argument:
-    // `add(sigmoid(relu(neg(x))), y)` rewrites to a four-stage pipe
-    // ending in `add(y)`, which the formatter again emits multi-line.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fmt_mixed.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = \
-         add(sigmoid(relu(neg(x))), y)\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--check", path.to_str().unwrap()])
-        .assert()
-        .success();
-}
-
-// --- V2-F3 (PR #58 red-team): the `prefer-pipe-operator` trigger
-// fires on shapes the autofix declines to rewrite. PR #55 added the
-// fmt-clean bail-out inside `fix()`; the typed-pipeline gate in
-// `apply_lint_fixes` adds a second bail-out. The trigger does not
-// mirror either bail-out, so `chelis lint --fix` produces an
-// infinite-warning loop: the warning fires, the autofix declines,
-// the file is unchanged, and the next `lint --check` fires the same
-// warning again.
-//
-// The invariant the three fixtures below pin is convergence of
-// `lint --fix` for this rule: after one pass of `--fix`, running
-// `--check` again on the resulting file must not re-fire the same
-// `prefer-pipe-operator` warning. The rewrite is allowed to happen
-// (warning is moot), or the trigger is allowed to be tightened so
-// the warning never fires; either path satisfies the invariant.
-//
-// Gated `#[ignore]` until the fix lands.
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_fanout_seed_reuse() {
-    // Minimal V2-F3 reproducer: `add(mul(x, x), x)`. The autofix's
-    // syntactic rewrite would be `x |> mul(x) |> add(x)`, which the
-    // typed-pipeline gate rejects because the pipe seed consumes `x`
-    // and the trailing `add(x)` reuses it (linearity violation).
-    // `apply_lint_fixes` therefore silently drops the rewrite, but
-    // `check()` keeps firing on every subsequent invocation.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_fanout_seed.ch");
-    let original = "def h(x: tensor[3, f32]) -> tensor[3, f32] = add(mul(x, x), x)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
+        .args([
+            "lint",
+            "--rules",
+            "opaque-without-invariant",
+            dir.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_multi_line_emit() {
-    // The PR #55 bail-out drops `fix()` when the rewrite would render
-    // multi-line (`total_stages > 3` or flat > 80 chars). `check()`
-    // keeps firing on the unchanged source, so repeat `--fix`
-    // invocations spin without progress. `sigmoid(relu(neg(x)))`
-    // rewrites to a four-part pipe that the formatter emits
-    // multi-line; the bail-out fires and the warning loops.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_multi_line.ch");
-    let original = "def s(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_fix_prefer_pipe_operator_converges_on_outer_arg_fanout() {
-    // V2-F3 secondary shape from the red-team report:
-    // `w = mul(relu(add(x, a)), a)`. The proposed rewrite is
-    // `x |> add(a) |> relu |> mul(a)`, which reuses `a` after it has
-    // been moved into the seed-consuming `add(a)` stage. The
-    // typed-pipeline gate rejects it the same way as the minimal
-    // fan-out case above. The warning still fires; `--fix` is
-    // non-convergent on this shape today.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_outer_arg_fanout.ch");
-    let original = "def w(x: tensor[3, f32], a: tensor[3, f32]) -> tensor[3, f32] = \
-                    mul(relu(add(x, a)), a)\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("prefer-pipe-operator").not())
-        .stderr(predicate::str::contains("prefer-pipe-operator").not());
-}
-
-#[test]
-fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("keep.ch");
-    write_file(
-        &path,
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x) // chelis-lint: keep redundant-linearity-call\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("redundant-linearity-call"))
-                .and(predicate::str::contains("[fix]").not()),
-        );
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("copy(x)"));
-}
-
-#[test]
-fn lint_fix_does_not_rewrite_sibling_argument_pipe_candidates() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("sibling_args.ch");
-    let original = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("[fix]").not());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_keep_preserves_pipe_fix_but_still_warns() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("keep_pipe.ch");
-    write_file(
-        &path,
-        "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale) // chelis-lint: keep prefer-pipe-operator\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("warning:")
-                .and(predicate::str::contains("prefer-pipe-operator"))
-                .and(predicate::str::contains("[fix]").not()),
-        );
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), scale)"));
-    assert!(!rewritten.contains("|>"));
+        .stdout(predicate::str::contains("opaque-without-invariant"));
 }
 
 #[test]
@@ -8089,31 +7927,29 @@ fn lint_keep_preserves_no_em_dash_fix_but_still_reports_error() {
 }
 
 #[test]
-fn lint_allow_suppresses_diagnostic_and_fix() {
+fn lint_allow_suppresses_surf_diagnostic() {
+    // `//` is not a Surf comment (#2853), so a directive makes the file
+    // unparseable; the lint still reads it and suppresses the named rule.
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("allow.ch");
+    let reported = dir.path().join("reported.ch");
+    let allowed = dir.path().join("allowed.ch");
+    write_file(&reported, "def bad_Name(x: f32) -> f32 = x\n");
     write_file(
-        &path,
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x) // chelis-lint: allow redundant-linearity-call\n",
+        &allowed,
+        "def bad_Name(x: f32) -> f32 = x // chelis-lint: allow surf-value-snake-case\n",
     );
 
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
+        .args([
+            "lint",
+            "--rule",
+            "surf-value-snake-case",
+            reported.to_str().unwrap(),
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("redundant-linearity-call").not());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("copy(x)"));
-}
-
-#[test]
-fn lint_fix_does_not_rewrite_list_drop_builtin() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("list_drop.ch");
-    let original = "def f(ys: list[i64]) -> list[i64] = skip(ys, cast(1, i64))\n";
-    write_file(&path, original);
+        .stdout(predicate::str::contains("surf-value-snake-case"));
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -8121,15 +7957,12 @@ fn lint_fix_does_not_rewrite_list_drop_builtin() {
             "lint",
             "--fix",
             "--rule",
-            "redundant-linearity-call",
-            path.to_str().unwrap(),
+            "surf-value-snake-case",
+            allowed.to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
+        .stdout(predicate::str::contains("surf-value-snake-case").not());
 }
 
 #[test]
@@ -8170,14 +8003,12 @@ fn lint_no_em_dash_blocks_check_and_can_fix_clause_case() {
 fn lint_check_surfaces_blocking_error_below_advisory_noise() {
     let dir = tempdir().expect("tempdir");
     let dash = '\u{2014}';
-    // A Surf file that triggers an advisory warning
-    // (`redundant-linearity-call` is a warning, but path-glob and
-    // unfixable suppression aside it still prints). Pair it with a
-    // Rust file carrying a blocking em-dash error.
+    // A Surf file that triggers a non-blocking advisory
+    // (`opaque-without-invariant`). Pair it with a Rust file carrying a
+    // blocking em-dash error.
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = drop(keep(to_tensor([1.0, 2.0])))\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
     write_file(
         &dir.path().join("message.rs"),
@@ -8211,15 +8042,16 @@ fn lint_check_surfaces_blocking_error_below_advisory_noise() {
         error_pos > header_pos,
         "the blocking em-dash error must print after the section header, got:\n{stdout}"
     );
-    // The warning line, if printed, must come before the header (the
-    // buckets print advisory/warning first, errors last).
-    if let Some(warning_pos) = stdout.find("warning:") {
-        assert!(
-            warning_pos < header_pos,
-            "advisory/warning lines must print before the blocking-error \
-             section, got:\n{stdout}"
-        );
-    }
+    // The advisory line must come before the header (the buckets print
+    // advisory/warning first, errors last).
+    let advisory_pos = stdout
+        .find("advisory:")
+        .expect("opaque-without-invariant advisory present");
+    assert!(
+        advisory_pos < header_pos,
+        "advisory/warning lines must print before the blocking-error \
+         section, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -8246,53 +8078,6 @@ fn lint_no_em_dash_does_not_corrupt_unspaced_dash() {
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
     assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_fix_ignores_surf_string_literals() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("strings.ch");
-    let original = "def message() -> string = \"copy(x) and outer(inner(x), scale)\"\n";
-    write_file(&path, original);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "lint",
-            "--fix",
-            "--rules",
-            "redundant-linearity-call,prefer-pipe-operator",
-            path.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty());
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert_eq!(rewritten, original);
-}
-
-#[test]
-fn lint_pipe_warning_does_not_rewrite_string_argument_contents() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("string_arg.ch");
-    write_file(&path, "def f(x: f32) -> f32 = outer(inner(x), \"a,b\")\n");
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "lint",
-            "--fix",
-            "--rule",
-            "prefer-pipe-operator",
-            path.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("outer(inner(x), \"a,b\")"));
-    assert!(!rewritten.contains("\"a, b\""));
 }
 
 #[test]
@@ -8420,18 +8205,17 @@ fn lint_no_em_dash_flags_python_single_quoted_strings() {
 fn check_relative_file_emits_non_blocking_lint_warning() {
     let dir = tempdir().expect("tempdir");
     write_file(
-        &dir.path().join("redundant.ch"),
-        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         result = keep(to_tensor([1.0, 2.0]))\n",
+        &dir.path().join("meters.ch"),
+        "module Units\n@opaque\ntype Meters =\n  | Meters { value: f64 }\ndef make(v: f64) -> Meters = Meters { value: v }\n",
     );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .current_dir(dir.path())
-        .args(["check", "redundant.ch"])
+        .args(["check", "meters.ch"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("redundant-linearity-call"));
+        .stderr(predicate::str::contains("opaque-without-invariant"));
 }
 
 /// chelis#1678 [04-FIT-24]: an empty corpus is an error, not the success
@@ -8628,6 +8412,7 @@ fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -9567,6 +9352,181 @@ fn check_classifies_generated_deep_tensor_holes_by_mapped_structure() {
     }
 }
 
+/// chelis#3009: a `sum`-family call over a generated-Deep precision hole
+/// waits for the hole to bind, then types its result as
+/// `sum_result(p, default(p))` of the bound dtype. An i8 or i16 hole bound
+/// after the call is checked therefore gets i32, exactly as when it binds
+/// first, and eval and the compiled program agree on the value. `ordA` and
+/// `ordB` differ only in whether `add` binds the hole before or after `sum`
+/// is checked; both check, and both trap the same `add` overflow.
+#[test]
+fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
+    let dir = tempdir().expect("tempdir");
+    let cases = [
+        (
+            "e_i16",
+            include_str!("fixtures/sum_result_holes/e_i16.dp"),
+            "out = 180000",
+        ),
+        (
+            "c1",
+            include_str!("fixtures/sum_result_holes/c1.dp"),
+            "out = 203.0",
+        ),
+        (
+            "c2",
+            include_str!("fixtures/sum_result_holes/c2.dp"),
+            "out = tensor(shape=[3], data=[100, 100, 3])",
+        ),
+        (
+            "ordA",
+            include_str!("fixtures/sum_result_holes/ordA.dp"),
+            "numeric trap: overflow in add at i8",
+        ),
+        (
+            "ordB",
+            include_str!("fixtures/sum_result_holes/ordB.dp"),
+            "numeric trap: overflow in add at i8",
+        ),
+    ];
+    let last_line = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.lines()
+            .last()
+            .unwrap_or_default()
+            .trim_start_matches("error: ")
+            .to_string()
+    };
+    for (stem, source, expected) in cases {
+        let path = dir.path().join(format!("{stem}.dp"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("run chelis eval");
+        assert_eq!(last_line(&eval), expected, "{stem}: eval");
+        let out_dir = dir.path().join(format!("{stem}_out"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = StdCommand::new(out_dir.join(stem))
+            .output()
+            .expect("compiled program should run");
+        assert_eq!(last_line(&run), expected, "{stem}: compiled C");
+    }
+}
+
+/// chelis#2985: every spec/04 §5.7.1 permitted accumulator pair of `sum`
+/// and `einsum`, and every float pair of `matmul`, written with Surf's
+/// `accumulator=` argument, prints the same values in eval and in a built
+/// executable. The f32-with-f64 rows and the i32-with-i64 rows print a total
+/// only the wider accumulator holds (16777218 and 2147483648). The named-axis
+/// form keeps the accumulator at every stage, and its default i8 total is the
+/// i32 sum_result rather than a trap; borrowed operands behave the same.
+#[test]
+fn explicit_accumulator_pairs_agree_in_eval_and_c() {
+    let dir = tempdir().expect("tempdir");
+    for (stem, source, expected) in [
+        (
+            "pairs",
+            include_str!("fixtures/explicit_accumulator/pairs.ch"),
+            include_str!("fixtures/explicit_accumulator/pairs.expected"),
+        ),
+        (
+            "named_axes",
+            include_str!("fixtures/explicit_accumulator/named_axes.ch"),
+            include_str!("fixtures/explicit_accumulator/named_axes.expected"),
+        ),
+        (
+            "borrowed",
+            include_str!("fixtures/explicit_accumulator/borrowed.ch"),
+            include_str!("fixtures/explicit_accumulator/borrowed.expected"),
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("run chelis eval");
+        assert!(eval.status.success(), "{stem} eval: {eval:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&eval.stdout),
+            expected,
+            "{stem} eval"
+        );
+        let out_dir = dir.path().join(format!("{stem}_out"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = StdCommand::new(out_dir.join(stem))
+            .output()
+            .expect("compiled program should run");
+        assert!(run.status.success(), "{stem} run: {run:?}");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "{stem} C");
+    }
+}
+
+/// chelis#3009: a `sum`-family rejection decided after the call was checked
+/// (at the declaration boundary, or when a hole binds) carries the call's
+/// span. `g1h` is an authored `Int` binder; `a4` is a hole bound to bool.
+#[test]
+fn deferred_sum_result_rejections_carry_the_call_span() {
+    let dir = tempdir().expect("tempdir");
+    for (stem, source, span_id) in [
+        (
+            "g1h",
+            include_str!("fixtures/sum_result_holes/g1h.dp"),
+            "surf:83..95",
+        ),
+        (
+            "a4",
+            include_str!("fixtures/sum_result_holes/a4.dp"),
+            "surf:82..94",
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.dp"));
+        write_file(&path, source);
+        let json = run_json_check(&path);
+        let errors = json["errors"].as_array().expect("errors array");
+        let sum_result = errors
+            .iter()
+            .find(|error| {
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("sum_result"))
+            })
+            .unwrap_or_else(|| panic!("{stem}: no sum_result rejection: {json}"));
+        assert_eq!(sum_result["span_id"], span_id, "{stem}: {sum_result}");
+        assert!(
+            sum_result["span"]["offset"].is_u64(),
+            "{stem}: {sum_result}"
+        );
+    }
+}
+
 /// Negative parity for `realize`: exercising it in the host lane with
 /// no inner expression must produce a clean error rather than a panic.
 /// Synthesized programs with bad shape are caught at type-check; this
@@ -9688,6 +9648,7 @@ fn build_link_run(src: &Path, out_dir: &Path, binary: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -9779,6 +9740,7 @@ fn build_c_keyed_draw_does_not_block_a_sibling_build() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             plain_path.to_str().unwrap(),
             "--target",
             "c",
@@ -9798,6 +9760,7 @@ fn build_c_keyed_draw_does_not_block_a_sibling_build() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             keyed_path.to_str().unwrap(),
             "--target",
             "c",
@@ -9909,6 +9872,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         Command::cargo_bin("chelis")
             .unwrap()
             .arg("build")
+            .arg("--emit-c")
             .arg(&source)
             .args(["--target", "c", "--output"])
             .arg(&out)
@@ -9997,6 +9961,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&out)
@@ -10024,6 +9989,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&runtime_rate)
@@ -10047,6 +10013,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&runtime_rate)
@@ -10075,6 +10042,7 @@ result = keep(key_from_seed(7i64), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -10117,6 +10085,7 @@ loss_value = loss_tail(logits, labels)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -10203,6 +10172,7 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10301,6 +10271,7 @@ fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10362,6 +10333,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10451,6 +10423,7 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10527,6 +10500,7 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10598,6 +10572,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10666,6 +10641,7 @@ fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10736,6 +10712,7 @@ fn build_c_grad_program_keeps_both_named_roots() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10850,6 +10827,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10994,6 +10972,7 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -11097,7 +11076,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
              import Std.Io.Json (Json, JsonFloat, JsonString, JsonInt, JsonObject, write_json)\n\
              rows = [dict_of([(\"k\", \"a,b\"), (\"price\", \"7773.015187\")]), dict_of([(\"k\", \"he said \\\"hi\\\"\"), (\"price\", \"0.15110743269565682\")])]\n\
              done_csv = write_csv(\"{csv}\", rows)\n\
-             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64)), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, i64)))]))\n\
+             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64, \"0.15110743269565682\")), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, i64)))]))\n\
              done_json = write_json(\"{json}\", doc)\n\
              back = read_csv(\"{csv}\")\n\
              n = len(back)\n",
@@ -11115,6 +11094,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
         .current_dir(&proj)
         .args([
             "build",
+            "--emit-c",
             "src/main.ch",
             "--output",
             out_dir.to_str().unwrap(),
@@ -11215,6 +11195,7 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

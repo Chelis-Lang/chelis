@@ -71,7 +71,7 @@ const PRODUCERS: &[Producer] = &[
     },
     Producer {
         name: "literal",
-        binding: "hs = [1.0f64, 2.0f64]\n",
+        binding: "hs: List[f64] = [1.0f64, 2.0f64]\n",
         loop_result: false,
     },
 ];

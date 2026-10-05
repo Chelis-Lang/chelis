@@ -19,8 +19,8 @@
 //! 5. reef package modules keep working: package decls are
 //!    internal-name-rewritten (`pkg__...`) before the checker runs, so a
 //!    package-scoped `def sum` is allowed and dispatches to the user def
-//!    (the stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on
-//!    exactly this).
+//!    (the stdlib's `Std.Test.fail`, which shares the builtin `fail`'s
+//!    name, relies on exactly this).
 //!
 //! Unit-level coverage (full BUILTIN_NAMES sweep, defsig classes, dedupe,
 //! params/locals scope pins) lives in
@@ -180,7 +180,7 @@ fn issue_353_lane_consistency_check_eval_build_all_reject() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", path])
+        .args(["build", "--emit-c", path])
         .output()
         .expect("run chelis build");
     let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
@@ -224,7 +224,7 @@ fn issue_353_bypass_flags_do_not_unlock_shadowing() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", "--allow-style-violations", path])
+        .args(["build", "--emit-c", "--allow-style-violations", path])
         .output()
         .expect("run chelis build");
     assert!(
@@ -283,7 +283,7 @@ fn issue_353_near_miss_names_check_eval_build_clean() {
             .expect("binary")
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .current_dir(outdir.path())
-            .args(["build", path])
+            .args(["build", "--emit-c", path])
             .output()
             .expect("run chelis build");
         assert!(
@@ -341,7 +341,7 @@ fn issue_353_cost_rejects_and_validate_is_syntax_only() {
 /// rewrites their call sites with them) before the checker runs, so a
 /// package def neither collides with the builtin table nor
 /// mis-dispatches — the user def genuinely wins inside a package. The
-/// stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this.
+/// stdlib's `Std.Test.fail` relies on this.
 #[test]
 fn issue_353_reef_package_def_sum_still_checks_clean() {
     let dir = tempdir().expect("tempdir");

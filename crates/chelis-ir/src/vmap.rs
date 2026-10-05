@@ -141,6 +141,7 @@ fn vectorize_axis0_impl(
             RiscOp::Count { axes } => RiscOp::Count {
                 axes: axes.iter().map(|axis| axis + 1).collect(),
             },
+            RiscOp::Softmax { axis } => RiscOp::Softmax { axis: axis + 1 },
             RiscOp::MaxReduce { axis } => RiscOp::MaxReduce { axis: axis + 1 },
             RiscOp::MinReduce { axis } => RiscOp::MinReduce { axis: axis + 1 },
             RiscOp::ProdReduce { axis } => RiscOp::ProdReduce { axis: axis + 1 },
@@ -309,6 +310,9 @@ fn vectorize_axis0_impl(
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -332,7 +336,7 @@ fn vectorize_axis0_impl(
             | RiscOp::Drop
             | RiscOp::Realize
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::FusedElem { .. } => node.op.clone(),
         };
 
@@ -764,7 +768,7 @@ fn shared_scalar_op(op: &RiscOp) -> bool {
         op,
         RiscOp::CheckedReshapeExtent { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. }
+            | RiscOp::NamedCast { .. }
             | RiscOp::Copy
             | RiscOp::Realize
             | RiscOp::Neg
@@ -805,7 +809,7 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
         | RiscOp::Const { .. }
         | RiscOp::Load { .. } => {}
         RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::Copy
         | RiscOp::Realize
         | RiscOp::Neg

@@ -3,8 +3,7 @@ use chelis_deep::parser::{parse_raw_str, parse_str};
 use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span, node::Node};
 
 use chelis_deep::annotations::{
-    MetadataValue as M, PipeStageOrigin, PositiveInteger, RuntimeExpression, SpanId, Spanned,
-    TypeSyntax,
+    MetadataValue as M, PositiveInteger, RuntimeExpression, SpanId, Spanned, TypeSyntax,
 };
 
 const ZERO: Span = Span { offset: 0, len: 0 };
@@ -76,10 +75,6 @@ const CASES: &[(&str, &str)] = &[
         "(defdim {surf_dim_group_size: 2} n) (defdim {} m)",
     ),
     (
-        "surf_pipe_stage",
-        "(pipe {} 1 (fn {surf_pipe_stage: \"call-first\"} (params {} x) (var {} x)))",
-    ),
-    (
         "surf_literal_style",
         "(lit {surf_literal_style: \"explicit\"} 1)",
     ),
@@ -95,6 +90,10 @@ const CASES: &[(&str, &str)] = &[
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),
+    (
+        "accumulator",
+        "(app {accumulator: (t-prim {} f64)} (var {} sum) (var {} x) (lit {} 0))",
+    ),
 ];
 
 fn metadata_value_span(expr: &chelis_deep::RawExpr, key: &str) -> Option<Span> {
@@ -264,31 +263,8 @@ fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
 }
 
 #[test]
-fn parent_placement_is_checked_without_rejecting_unattached_fragments() {
-    let marked = Node::try_new(
-        DeepTag::Fn,
-        Metadata::from(M::SurfPipeStage(Spanned::new(
-            PipeStageOrigin::CallFirst,
-            ZERO,
-        ))),
-        vec![
-            Expr::node(DeepTag::Params, Metadata::default(), vec![], ZERO),
-            Expr::Atom(Atom::Int(1), ZERO),
-        ],
-    )
-    .unwrap();
-    let marked = Expr::Node(Box::new(marked), ZERO);
-    assert!(chelis_deep::metadata::validate_metadata(std::slice::from_ref(&marked)).is_err());
-    let mut pipe = Node::try_new(
-        DeepTag::Pipe,
-        Metadata::default(),
-        vec![Expr::Atom(Atom::Int(1), ZERO), marked.clone()],
-    )
-    .unwrap();
-    let before = pipe.clone();
-    assert!(pipe.try_replace_child(0, marked).is_err());
-    assert_eq!(pipe, before);
-    chelis_deep::metadata::validate_metadata(&[Expr::Node(Box::new(pipe), ZERO)]).unwrap();
+fn retired_pipe_metadata_is_rejected() {
+    assert!(parse_str("(fn {surf_pipe_stage: \"call-first\"} (params {} x) (var {} x))").is_err());
 }
 
 #[test]
@@ -508,7 +484,6 @@ fn metadata_expressions_follow_runtime_roles_through_helpers() {
         "(let {} (bind {} x (app {} (var {} missing))) (var {} x))",
         "(match {} 1 (arm {} (pat-wild {}) () (app {} (var {} missing))))",
         "(record {} T (kv {} x (app {} (var {} missing))))",
-        "(pipe {} 1 (app {} (var {} missing)))",
         "(app {} (var {} missing))",
     ] {
         let valid = parse_str(payload).unwrap().remove(0);

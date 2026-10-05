@@ -34,8 +34,8 @@ multiply before anything runs. The error from its JSON report:
   gives an agent check, eval, prove, and structural edits as MCP tools.
 - **Properties you can review.** `chelis prove` checks `@property` declarations with
   type checking, an SMT solver, or seeded sampling, and each result names the
-  method behind it. Hull, a second checker written in Chelis, cross-checks the
-  compiler, and a core calculus of Chelis is mechanized in Lean 4.
+  method behind it. A second checker written in Chelis cross-checks the compiler,
+  and a core calculus of Chelis is mechanized in Lean 4.
 - **General-purpose numerics.** Surf (`.ch`) is the readable syntax; Deep (`.dp`) is
   the canonical form the compiler and agents use. Programs build to C. Shells,
   installed with Reef, cover numerical methods (Nautilus), dataframes (Coral), and
@@ -44,8 +44,10 @@ multiply before anything runs. The error from its JSON report:
 ## Install a release toolchain
 
 Chelis releases include `chelisup`, which installs toolchains and selects the
-version used by each project. Access to the private repository and an
-authenticated [GitHub CLI](https://cli.github.com) are currently required.
+version used by each project. `chelisup` downloads release assets through the
+authenticated GitHub REST API, so it needs a GitHub token even though the
+releases are public; an authenticated [GitHub CLI](https://cli.github.com)
+provides one.
 
 ```sh
 gh auth login
@@ -66,14 +68,29 @@ explains the project workflow.
 
 ## Start here
 
-- [User book](docs/book/src/README.md): first program, CLI, properties, and Reef.
+- [Chelis Guide](docs/book/src/README.md): first program, CLI, properties, and Reef.
 - [Examples](examples/): executable Chelis programs.
 - [Language spec](spec/00-context.md) and the
   [canonical project reference](spec/design/chelis_canonical_reference.md).
 - [Architecture](ARCHITECTURE.md): compiler, evaluator, and code generation.
 - [Contributor setup](docs/contributor_setup.md), the
-  [contribution guide](CONTRIBUTING.md), and the [agent contract](AGENTS.md).
+  [contribution policy](CONTRIBUTING.md), the
+  [maintainer guide](docs/maintainer_guide.md), and the [agent contract](AGENTS.md).
 
 ## License
 
 MIT
+
+### Build a native program
+
+```sh
+chelis build app.ch --output out/
+./out/app
+```
+
+`build` invokes the native compiler and links the runtime carried by this compiler.
+Definitions-only modules produce static libraries. Sources and headers remain
+available; `--emit-c` keeps source-only builds. CPU is the primary acceptance lane;
+HIP and Metal are prerelease targets with known imperfections. See the
+[backend guide](docs/book/src/backends.md) for tool requirements, artifact names,
+compiler overrides, and library linking.

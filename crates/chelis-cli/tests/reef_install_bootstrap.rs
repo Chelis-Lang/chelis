@@ -396,7 +396,11 @@ fn lib_install_bootstrap(
         .iter()
         .map(|s| chelis_reef::GitHubReleaseSpec::parse(s).expect("parse"))
         .collect();
-    let result = chelis_reef::install_bootstrap(&parsed, registry_root);
+    let result = chelis_reef::install_bootstrap(
+        &parsed,
+        registry_root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     unsafe {
         match prior_api_base {
             Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
@@ -1071,7 +1075,7 @@ fn phaseA_item7_empty_input_and_empty_default_errors_nothing_to_install() {
     // args; the lib call here bypasses that substitution.)
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let err = chelis_reef::install_bootstrap(&[], &registry)
+    let err = chelis_reef::install_bootstrap(&[], &registry, &chelis_std_bundle::EMBEDDED_RUNTIME)
         .expect_err("empty list must fail at lib level");
     match err {
         chelis_reef::BootstrapError::NothingToInstall => {}

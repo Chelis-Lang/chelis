@@ -15,6 +15,7 @@
 
 mod support;
 use chelis_backend_metal::dtype;
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use support::codegen_metal;
@@ -49,13 +50,13 @@ fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
 
 /// Non-edge f16 value: 0.123 is not a power of two and has a non-trivial
 /// IEEE 754 binary16 encoding. The emitted host code must contain the
-/// exact bit pattern produced by `half::f16::from_f64(0.123).to_bits()`
+/// exact bit pattern of 0.123 rounded once to f16 by the storage reference
 /// (which is 0x2FDF). Catches a regression that special-cased only
 /// edge values (zero, +/-1, +/-inf) in the bit-pattern path.
 #[test]
 fn rt_metal_emit_const_f16_non_edge_value_uses_correct_bit_pattern() {
     let value = 0.123_f64;
-    let expected_bits = half::f16::from_f64(value).to_bits();
+    let expected_bits = storage_reference(value.to_bits(), 64, Output::F16);
     let dag = build_const_root_dag(Prim::F16, value);
     let result = codegen_metal(&dag, "const_f16_0_123");
     let src = &result.mm_source;
@@ -63,7 +64,7 @@ fn rt_metal_emit_const_f16_non_edge_value_uses_correct_bit_pattern() {
     assert!(
         src.contains(&needle),
         "Metal f16({value}) emit must contain bit literal `{needle}` (computed via \
-         `half::f16::from_f64(...).to_bits()`); got source:\n{src}"
+         the storage reference); got source:\n{src}"
     );
     assert!(
         src.contains("(uint16_t*)"),
@@ -78,7 +79,7 @@ fn rt_metal_emit_const_f16_non_edge_value_uses_correct_bit_pattern() {
 #[test]
 fn rt_metal_emit_const_bf16_non_edge_value_uses_correct_bit_pattern() {
     let value = 0.123_f64;
-    let expected_bits = half::bf16::from_f64(value).to_bits();
+    let expected_bits = storage_reference(value.to_bits(), 64, Output::Bf16);
     let dag = build_const_root_dag(Prim::Bf16, value);
     let result = codegen_metal(&dag, "const_bf16_0_123");
     let src = &result.mm_source;

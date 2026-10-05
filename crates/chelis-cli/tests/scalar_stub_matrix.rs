@@ -71,6 +71,7 @@ fn c_lane(program: &str, name: &str) -> Result<(String, String), String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -292,25 +293,22 @@ fn tier2_sigmoid_expr(x: &str, dtype: &str) -> String {
     format!("recip(add(cast(1.0, {dtype}), exp(neg({x}))))")
 }
 
-fn tier2_tanh_expr(x: &str, dtype: &str) -> String {
-    let sigmoid = tier2_sigmoid_expr(&format!("mul(cast(2.0, {dtype}), {x})"), dtype);
-    format!("add(mul(cast(2.0, {dtype}), {sigmoid}), cast(-1.0, {dtype}))")
-}
-
+/// The spec/05 section 3.3 lowering of each activation. `tanh` is a primitive
+/// with no lowering; every witness below is small enough that its correctly
+/// rounded value is the input itself, so the expected expression is `x`.
 fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
     match op {
         "sigmoid" => tier2_sigmoid_expr(x, dtype),
-        "tanh" => tier2_tanh_expr(x, dtype),
+        "tanh" => x.to_string(),
         "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
-        "gelu" => {
+        "gelu_tanh" => {
             let x_sq = format!("mul({x}, {x})");
             let x_cu = format!("mul({x_sq}, {x})");
             let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
             let sum_inner = format!("add({x}, {k_x_cu})");
-            let inner = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
-            let tanh_inner = tier2_tanh_expr(&inner, dtype);
-            let one_plus_tanh = format!("add(cast(1.0, {dtype}), {tanh_inner})");
-            format!("mul(cast(0.5, {dtype}), mul({x}, {one_plus_tanh}))")
+            let u = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
+            let two_u = format!("mul(cast(2.0, {dtype}), {u})");
+            format!("mul({x}, {})", tier2_sigmoid_expr(&two_u, dtype))
         }
         _ => unreachable!("no Tier-2 activation expression for `{op}`"),
     }
@@ -322,11 +320,11 @@ fn reduced_float_scalar_activations_match_tier2_node_finalization() {
         ("f16", "sigmoid", "0.0007328987121582031"),
         ("f16", "tanh", "5.960464477539063e-8"),
         ("f16", "silu", "2.9802322387695313e-7"),
-        ("f16", "gelu", "2.9802322387695313e-7"),
+        ("f16", "gelu_tanh", "2.9802322387695313e-7"),
         ("bf16", "sigmoid", "0.005889892578125"),
         ("bf16", "tanh", "9.183549615799121e-41"),
         ("bf16", "silu", "0.00555419921875"),
-        ("bf16", "gelu", "0.0030975341796875"),
+        ("bf16", "gelu_tanh", "0.0030975341796875"),
     ] {
         let x = format!("cast({input}, {dtype})");
         let activation = format!("{op}({x})");
@@ -353,11 +351,11 @@ fn reduced_float_scalar_activations_match_tier2_node_finalization() {
     }
 }
 
-/// [05-OBS-3] parity for an f64 transcendental whose libm result may differ
-/// by one ULP across supported platforms.  The shared closed-op comparator is
-/// the only authority for the tolerance; the emitted-source assertion keeps
-/// a mutually wrong f32 implementation from passing by byte agreement.
-fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) {
+/// [05-OBS-3] parity for an f64 transcendental, correctly rounded in both
+/// lanes under [05-OP-46], so the shared comparator demands exact agreement;
+/// the emitted-source assertion keeps a mutually wrong f32 implementation
+/// from passing by byte agreement.
+fn assert_f64_transcendental_parity(op_expr: &str, op_name: &str, name: &str) {
     let program = scalar_program(op_expr, "f64");
     let eval_got = eval_first_line(&program).unwrap_or_else(|e| panic!("{name}: eval failed: {e}"));
     common::assert_elements_in_domain("f64", &eval_got, name);
@@ -367,11 +365,11 @@ fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) 
     let (emitted, c_got) = c_lane(&program, name).expect("C lane should build and run");
     common::assert_elements_in_domain("f64", &c_got, name);
     assert!(
-        !emitted.contains(&format!("{}f(", op.name())),
+        !emitted.contains(&format!("{op_name}f(")),
         "{name}: an f64 operation must not route through the f32 libm entry"
     );
     compare_rendered_elements(
-        op,
+        AgreementOp::Exact,
         Prim::F64,
         ArithmeticWidthStatus::StoredAtArithmeticWidth,
         &eval_got,
@@ -586,8 +584,8 @@ fn float_only_scalar_families_reject_integer_and_bool_at_check_time() {
 /// Before Phase 3, C printed 0 for all seven rows while eval was correct.
 #[test]
 fn f64_scalar_stub_family_agrees_across_lanes() {
-    assert_f64_transcendental_parity("tan(cast(1.0, f64))", AgreementOp::Tan, "f64_tan");
-    assert_f64_transcendental_parity("atan(cast(1.0, f64))", AgreementOp::Atan, "f64_atan");
+    assert_f64_transcendental_parity("tan(cast(1.0, f64))", "tan", "f64_tan");
+    assert_f64_transcendental_parity("atan(cast(1.0, f64))", "atan", "f64_atan");
     for (expr, eval_expected, c_expected, name) in [
         ("ceil(cast(1.5, f64))", "2.0", "2.0", "f64_ceil"),
         ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),

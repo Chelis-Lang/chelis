@@ -66,6 +66,7 @@ fn c_build(program: &str, name: &str) -> (bool, String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -103,6 +104,7 @@ fn c_run_first_line(program: &str, name: &str) -> Result<String, String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -157,36 +159,29 @@ fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
 }
 
 // ===========================================================================
-// Row 2 (chelis#704/#705/#715): the remaining host-only stub arm, branded.
+// Row 2 (chelis#704/#705/#715): the former host-only stub arm.
 // ===========================================================================
 
-/// The remaining host-only builtin that used to hit the stub fails the build
-/// with the branded diagnostic naming the builtin and leaves no stub marker
-/// behind. Scalar math moved to exact compiled support in chelis#729 Phase 3.
-///
-/// The former bitwise case was promoted to supported C lowering in
-/// chelis#682 and is covered by the positive precision matrix.
+/// `tensor_scan`, the last builtin that used to hit the stub arm, compiles
+/// (chelis#1297): the build succeeds, prints the recurrence, and leaves no
+/// stub marker behind.
 #[test]
-fn stubbed_builtins_are_rejected_with_the_branded_shape() {
-    let cases: &[(&str, &str, &str)] = &[(
-        "tensor_scan_705",
-        "def gen() -> tensor[5, f32] = \
-             tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
-             out = gen()\n",
-        "tensor_scan",
-    )];
-    for (name, program, builtin) in cases {
-        let (ok, stderr, emitted) = c_build(program, name);
-        assert!(
-            !ok,
-            "{name}: an unimplemented builtin must fail the build (census row 2)"
-        );
-        assert_branded_rejection(&stderr, builtin, name);
-        assert!(
-            !emitted.contains("unsupported builtin"),
-            "{name}: no stub marker may be left in any emitted artifact"
-        );
+fn former_stub_builtin_compiles_and_runs() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
     }
+    let program = "def gen() -> tensor[5, f32] = \
+         tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
+         out = print(gen())\n";
+    let (ok, stderr, emitted) = c_build(program, "tensor_scan_705");
+    assert!(ok, "tensor_scan must build: {stderr}");
+    assert!(
+        !emitted.contains("unsupported builtin"),
+        "no stub marker may be left in any emitted artifact"
+    );
+    let got = c_run_first_line(program, "tensor_scan_705_run").expect("tensor_scan runs");
+    assert_eq!(got, "tensor(shape=[5], data=[1.0, 2.0, 3.0, 4.0, 5.0])");
 }
 
 /// Control (B2.4): the supported neighbors still build and run - scalar

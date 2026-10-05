@@ -32,11 +32,11 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
     };
     let unsupported = Unsupported::new(
         UnsupportedKind::Construct("`par` expression".to_string()),
-        "the Chelis execution surface while cross-lane `par` effects are incomplete",
+        "every evaluation and build target",
         Stage::Checker,
         crate::unimplemented_rejection!(
             2503,
-            "`par` is not fully implemented across evaluation and compiled lanes; \
+            "`par` is not fully implemented in the evaluator or in compiled code; \
              use `do { ... }` when sequential evaluation is intended"
         ),
     )
@@ -53,7 +53,9 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
 ///
 /// Both `DeepTag::Copy` arms were byte-identical apart from how they spelled
 /// the list, so they were two chances to fix a bug once (chelis#1489).
+#[allow(clippy::too_many_arguments)]
 fn infer_copy(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -91,22 +93,45 @@ fn infer_copy(
                         tv,
                         DeferredOperandGate::Copy {
                             result: Box::new(result.clone()),
+                            location: TypeDiagnosticLocation::from_expr(expr),
                         },
                     );
                     result
                 }
                 _ => report(
                     errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!("copy requires tensor input, got {resolved}"),
-                        vec!["Wrap only tensor values in copy".to_string()],
+                    at_check_site(
+                        expr,
+                        CheckError::with_types(
+                            CheckErrorKind::TypeMismatch,
+                            format!("copy argument 1: expected tensor, got {resolved}"),
+                            "tensor".to_string(),
+                            resolved.to_string(),
+                            vec!["Wrap only tensor values in copy".to_string()],
+                        ),
                     ),
                 ),
             },
         }
     } else {
         malformed_form(node, "copy", "one wrapped expression", errors)
+    }
+}
+
+/// The type `&x` has once `x`'s type is settled: a reference stays itself,
+/// a tensor or tensor-carrying value (or an error) is borrowed, and anything
+/// else is no borrow (`None`), which the caller reports. The eager `borrow`
+/// arm and the discharge of a cast suspended on `&v` (chelis#3101) both
+/// decide through it, so the two cannot disagree.
+pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
+    match resolved {
+        Type::Ref(_) => Some(resolved),
+        Type::Tensor(_, _)
+        | Type::Adt(_, _)
+        | Type::KindedAdt(_, _)
+        | Type::Tuple(_)
+        | Type::Error(_) => Some(Type::Ref(Box::new(resolved))),
+        _ => None,
     }
 }
 
@@ -208,6 +233,32 @@ pub(super) fn infer_expr_with_expected(
     )
 }
 
+/// A Surf literal ascription keeps the literal intact inside a typed block.
+/// Retain the opaque-forgery diagnostic at that checking boundary as well as
+/// at the direct Deep literal-metadata boundary.
+pub(super) fn check_opaque_literal_ascription(
+    expr: &deep::Expr,
+    declared: &Type,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let Some((DeepTag::Block, _, [value])) = stamped_parts(expr) else {
+        return false;
+    };
+    if !matches!(stamped_parts(value), Some((DeepTag::Lit, _, _))) {
+        return false;
+    }
+    match declared {
+        Type::Adt(name, _) | Type::KindedAdt(name, _) => crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::LitForge,
+            name,
+            adt_reg,
+            errors,
+        ),
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expr_with_type_metadata_ownership(
     expr: &deep::Expr,
@@ -277,7 +328,6 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 DeepTag::Let => infer_let(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Match => infer_match(node, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Pipe => pipe_reached_inference_unfolded(node, errors),
                 DeepTag::Tuple => infer_tuple(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::TupleGet => {
                     infer_tuple_get(node, env, vg, subst, adt_reg, errors, product)
@@ -288,7 +338,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     infer_record_update(node, env, vg, subst, adt_reg, errors, product)
                 }
                 DeepTag::Cast => infer_cast(expr, node, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Grad => infer_grad(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Grad => infer_grad(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Vmap => infer_vmap(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Def => infer_def(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Defsig => {
@@ -365,19 +415,13 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         malformed_form(node, "realize", "one wrapped expression", errors)
                     }
                 }
-                DeepTag::Copy => infer_copy(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Copy => infer_copy(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Borrow => {
                     let kids = node.children_slice();
                     if let Some(inner) = kids.first() {
                         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
-                            Type::Ref(_) => resolved,
-                            Type::Tensor(_, _)
-                            | Type::Adt(_, _)
-                            | Type::KindedAdt(_, _)
-                            | Type::Tuple(_)
-                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
                             // unresolved type variable (e.g. the output of a
                             // polymorphic-return call whose dim variables
@@ -411,16 +455,19 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                                 subst.record_deferred_borrow_var(tv);
                                 Type::Ref(Box::new(Type::Var(tv)))
                             }
-                            _ => report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
+                            settled => match settled_borrow_type(settled.clone()) {
+                                Some(borrowed) => borrowed,
+                                None => report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        format!(
+                                            "borrow requires tensor or tensor-carrying input, got {settled}"
+                                        ),
+                                        vec!["Use `&x` only with tensor values".to_string()],
                                     ),
-                                    vec!["Use `&x` only with tensor values".to_string()],
                                 ),
-                            ),
+                            },
                         }
                     } else {
                         malformed_form(node, "borrow", "one wrapped expression", errors)
@@ -571,24 +618,31 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Ok(declared) => declared,
             Err(witness) => propagate(&witness),
         };
-        if product.defer_result_type_constraint(&result, &declared, subst) {
+        if check_opaque_literal_ascription(expr, &declared, adt_reg, errors) {
+            declared
+        } else if product.defer_result_type_constraint(&result, &declared, subst) {
             result
         } else {
             if let Err(error) = unify(&result, &declared, subst) {
-                let mut diagnostic = CheckError::new(
+                let expected = subst.apply(&declared);
+                let got = subst.apply(&result);
+                let mut diagnostic = CheckError::with_types(
                     check_error_kind_from_type_error_kind(&error.kind),
                     format!(
-                        "expression ascription does not match value: {}",
-                        error.message
+                        "expression ascription does not match value: expected {expected}, got {got}"
                     ),
+                    expected.to_string(),
+                    got.to_string(),
                     vec![format!(
                         "Declared expression type is {declared}; inferred value type is {result}"
                     )],
                 );
                 if let Some(location) =
                     TypeDiagnosticLocation::from_expr(authored_type.expression())
-                        .or_else(|| TypeDiagnosticLocation::from_expr(expr))
                 {
+                    diagnostic = location.attach(diagnostic);
+                }
+                if let Some(location) = TypeDiagnosticLocation::from_expr(expr) {
                     diagnostic = location.attach(diagnostic);
                 }
                 errors.push(diagnostic);
@@ -749,7 +803,7 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
 }
 
 /// [04-LIN-9] and spec/04 section 1.1: a builtin named as a value rather
-/// than called (`map(to_int, ks)`, a builtin in a tuple or an `if` arm) is
+/// than called (`map(len, xs)`, a key builtin in a tuple or an `if` arm) is
 /// judged by the key allow-list at the parameters of the function type it
 /// is instantiated at, as a call is judged operand by operand in linearity.
 /// Every type variable of a parameter the builtin does not admit a key at
@@ -785,6 +839,50 @@ fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Sub
             );
         }
     }
+}
+
+/// [04-INF-9]: a builtin named anywhere other than as the callee of an
+/// application must carry its whole operation contract on the value
+/// (`builtins::builtin_value_contract_carried`). One that does not is
+/// applicable only by name, whatever value position it reaches: a binding,
+/// an argument, a callback, an aggregate element, or a result.
+fn reject_builtin_applicable_only_by_name(
+    name: &str,
+    scheme: &Scheme,
+    node: &DeepNode,
+) -> Option<CheckError> {
+    if !crate::builtins::builtin_env_names().contains(name) {
+        return None;
+    }
+    // Fail closed: a bound builtin with no declaration has no reviewed
+    // contract, so it is not a value.
+    if let Some(decl) = crate::builtins::builtin_decl(name)
+        && crate::builtins::builtin_value_contract_carried(decl, scheme)
+    {
+        return None;
+    }
+    let mut error = CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        with_node_provenance(
+            node,
+            format!(
+                "builtin `{name}` is applicable only by name and is not a function value: \
+                 its type scheme does not state its whole operation contract (a static \
+                 argument, an operand restriction, or a result rule that only a direct call \
+                 checks), so the contract would not travel with a value \
+                 (spec/04-type-system.md [04-INF-9])"
+            ),
+        ),
+        vec![format!(
+            "Call `{name}` directly, or pass an explicitly typed lambda that calls it \
+             (for example `fn (x: tensor[3, f32]) -> sum(x, 0i32)` in place of `sum`)"
+        )],
+    );
+    if let Some(sid) = node_span_id(node) {
+        error.span_offset = parse_span_offset(sid);
+        error.span_id = Some(sid.to_string());
+    }
+    Some(error)
 }
 
 pub(super) fn infer_var(
@@ -850,6 +948,12 @@ pub(super) fn infer_var(
             // the scheme does not quantify, so it observes nothing a sibling's
             // body has determined ([04-INF-5]); the group's completion links
             // the copies (`group_link::sibling_instance`).
+            if !called
+                && !env.is_lexically_bound(name)
+                && let Some(rejected) = reject_builtin_applicable_only_by_name(name, &scheme, node)
+            {
+                return report(errors, rejected);
+            }
             let holed = env.is_holed_group_reference(name, &scheme);
             let unsigned = !holed && product.is_unsigned_group_reference(name, &scheme);
             let sibling = unsigned || (holed && product.references_a_sibling(name));
@@ -1172,12 +1276,9 @@ pub(super) fn infer_lit(
             );
         }
         // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
-        // metadata on a literal outside the defining module
-        // forges an opaque value. Reachable from BOTH
-        // surfaces: Surf expression ascription
-        // (`0.5 : Probability`) and block-binding ascription
-        // desugar to exactly this metadata (RT-0), so the
-        // gate is not scoped to `.dp` ingestion.
+        // metadata on a Deep literal outside the defining module
+        // forges an opaque value. Surf's separate checking boundary
+        // retains the same diagnostic via check_opaque_literal_ascription.
         // `resolve_deep_type` expands transparent
         // aliases, so `0.5 : P2` cannot launder the gate.
         if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {

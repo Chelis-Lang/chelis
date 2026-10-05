@@ -18,9 +18,6 @@
 //!    test focuses on `cmd_eval`) is irrelevant to the disk cache wire-
 //!    up; we keep the test surface scoped to `cmd_eval` to minimize
 //!    flake risk.
-//!
-//! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
-//! Phase K for the owning plan.
 
 use assert_cmd::Command;
 use std::fs;

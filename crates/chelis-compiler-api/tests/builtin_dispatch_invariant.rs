@@ -9,8 +9,11 @@
 //!
 //!   - `type-only` exists only for typing or signature lookups
 //!   - `target=<backend>-only` only emitted on a specific backend target
-//!   - `lowered-before-eval` IR lowering converts the call to a primitive
-//!     RISC op before host eval runs
+//!
+//! "Lowered before eval" is not a reason: `chelis eval --file` and
+//! `chelis test` run this host evaluator on the checked program without
+//! IR lowering, so a builtin the checker admits reaches `eval_builtin`
+//! (chelis#2892, where `scatter_replace` was allowlisted on that ground).
 //!
 //! Issue Chelis-Lang/chelis#185 closed the original 12-builtin gap plus a
 //! sibling-sweep handful; this invariant test catches future regressions
@@ -25,14 +28,7 @@ use chelis_types::BUILTIN_NAMES;
 
 /// Builtins that legitimately do not need a host-runtime arm. Document
 /// the reason per the closed vocabulary above.
-const HOST_RUNTIME_ALLOWLIST: &[&str] = &[
-    // `lowered-before-eval` — `scatter_replace` (Surf-facing sparse op)
-    // always lowers to `RiscOp::Scatter` in
-    // `crates/chelis-ir/src/lower.rs::lower_scatter_replace_uses_sparse_ir_node`.
-    // The host runtime never sees the symbolic builtin call; the DAG
-    // evaluator handles `RiscOp::Scatter` directly.
-    "scatter_replace",
-];
+const HOST_RUNTIME_ALLOWLIST: &[&str] = &[];
 
 fn runtime_source_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -47,12 +47,12 @@ runs:
     # private Nix cache and attaches the shared compiler cache.
     - name: Set up portable Devenv
       if: runner.environment == 'self-hosted'
-      uses: Chelis-Lang/ci/actions/setup-devenv@6afc09f65c178211a9d1bea994a4b39b62d23024
+      uses: ./.github/actions/vendor/ci/actions/setup-devenv
 
     - name: Restore signed Nix inputs
       id: build-cache
       if: runner.environment == 'self-hosted'
-      uses: Chelis-Lang/ci/actions/restore-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+      uses: ./.github/actions/vendor/ci/actions/restore-build-cache
       with:
         # Pull-request workers consume the shared caches; push and dispatch
         # workers publish. A dependency's build script running in a
@@ -69,7 +69,7 @@ runs:
 
     - name: Attach the realized compiler cache
       if: runner.environment == 'self-hosted'
-      uses: Chelis-Lang/ci/actions/restore-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+      uses: ./.github/actions/vendor/ci/actions/restore-build-cache
       with:
         state-path: ${{ steps.build-cache.outputs.state-path }}
         kache-binary: ${{ env.RUSTC_WRAPPER }}

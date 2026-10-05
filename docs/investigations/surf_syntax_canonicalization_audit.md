@@ -199,7 +199,7 @@ The prose decisions and executable grammar are not fully synchronized:
 - Spec/01's enforcement prose says `prefer-pipe-operator` has no autofix pending
   a semantic proof. The current lint has an autofix guarded by the typed-pipeline
   proof described in
-  [`pipe_autofix_and_bare_keyword_extras_diagnosis.md`](pipe_autofix_and_bare_keyword_extras_diagnosis.md).
+  [`pipe_autofix_and_bare_keyword_extras_diagnosis.md`](../archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md).
 - Spec/02's transform table illustrates `vmap(f, n)`, while the formatter and
   decompiler emit `vmap(f, axis=n)`.
 

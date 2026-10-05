@@ -1,6 +1,6 @@
 //! Host-lane JSON I/O acceptance (chelis#890).
 //!
-//! The QFBench-shaped end-to-end contract: a `.ch` program reads a JSON
+//! The benchmark-shaped end-to-end contract: a `.ch` program reads a JSON
 //! input file, computes with tensor builtins, rounds with `round_to`,
 //! assembles a nested output document, and writes it with `write_file` --
 //! no host-language glue anywhere in the loop. The output must be
@@ -17,7 +17,7 @@ use std::path::Path;
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{make_app, write_file};
+use common::{build_and_run_app, make_app, write_file};
 
 const INPUT_JSON: &str = r#"{
   "portfolio": {"base_currency": "GEN"},
@@ -38,6 +38,7 @@ fn solve_source(input_path: &Path, output_path: &Path) -> String {
     format!(
         r#"module Demo.Main
 import Std.Io.Json (Json, JsonFloat, JsonObject, JsonString, json_array, json_float, json_get, json_object, json_string, parse_json, to_json)
+def float_json(x: f64) -> Json = JsonFloat(x, to_string(x))
 def required_object(value: Json, key: string) -> Dict[string, Json] = match json_object(json_get(value, key)) with {{
   | Some(entries) => entries
   | None => fail(string_concat("required JSON object missing at key `", string_concat(key, "`")))
@@ -71,10 +72,10 @@ blended_rate = tensor_to_scalar(sum(mul(to_tensor(weights), to_tensor(rates)), 0
 out = JsonObject(dict_of([
   ("base_currency", JsonString(ccy)),
   ("results", JsonObject(dict_of([
-    ("total_exposure", JsonFloat(round_to(total_exposure, 2))),
-    ("blended_rate", JsonFloat(round_to(blended_rate, 6)))
+    ("total_exposure", float_json(round_to(total_exposure, 2))),
+    ("blended_rate", float_json(round_to(blended_rate, 6)))
   ]))),
-  ("meta", JsonObject(dict_of([("instrument_count", JsonFloat(cast(len(rows), f64)))])))
+  ("meta", JsonObject(dict_of([("instrument_count", float_json(cast(len(rows), f64)))])))
 ]))
 done = write_file("{output}", to_json(out))
 "#
@@ -175,7 +176,7 @@ value = match json_float(json_get(portfolio, "settlement_days")) with {{
   | Some(number) => number
   | None => fail("json_float: key `settlement_days` not found; available key: `base_currency`")
 }}
-done = write_file("{}", to_json(JsonFloat(value)))
+done = write_file("{}", to_json(JsonFloat(value, to_string(value))))
 "#,
         input_path.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -203,4 +204,194 @@ done = write_file("{}", to_json(JsonFloat(value)))
         !output_path.exists(),
         "a failed pipeline must not leave a partial output file"
     );
+}
+
+/// [05-OP-2] float tokens keep their exact text (chelis#2871) in BOTH lanes:
+/// ingestion stores the token beside its correctly rounded f64, so
+/// `decimal(text)` reaches the producer's value and serialization re-emits
+/// the spelling; non-RFC 8259 tokens are refused at parse time; and a
+/// constructed `JsonFloat` whose text is malformed, integer-form, or does not
+/// round to its stored f64 (signed zero included) refuses to serialize.
+#[test]
+fn json_float_token_text_round_trips_and_validates_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("json-float-token-text");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (Json, JsonFloat, parse_json, try_parse_json, to_json, try_to_json, json_float)
+import Std.Decimal (decimal, decimal_to_string)
+
+def float_text(value: Json) -> string =
+  match value with {
+    | JsonFloat(_, text) => text
+    | _ => "not a float"
+  }
+def accepted(text: string) -> string =
+  match try_parse_json(text) with {
+    | Some(value) => to_json(value)
+    | None => "rejected"
+  }
+def serialized(value: Json) -> string =
+  match try_to_json(value) with {
+    | Some(text) => text
+    | None => "refused"
+  }
+
+price = parse_json("19.95")
+price_text = float_text(price)
+price_decimal = decimal_to_string(decimal(float_text(price)))
+price_value = json_float(Some(price))
+document = to_json(parse_json("[1E5,{\"p\":19.950,\"z\":-0.0},2.5e-3,0e0]"))
+leading_zero = accepted("01.5")
+empty_fraction = accepted("1.")
+point_exponent = accepted("1.e5")
+bare_fraction = accepted("-.5")
+mismatched = serialized(JsonFloat(1.0f64, "2.0"))
+signed_zero = serialized(JsonFloat(0.0f64, "-0.0"))
+integer_text = serialized(JsonFloat(1.0f64, "1"))
+overflow_text = serialized(JsonFloat(div(1.0f64, 0.0f64), "1e400"))
+from_value = serialized(JsonFloat(0.1f64, to_string(0.1f64)))
+"#,
+    );
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("eval should run");
+    assert!(
+        eval.status.success(),
+        "eval failed: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval = String::from_utf8(eval.stdout).expect("utf-8 stdout");
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "price_text = 19.95",
+        "price_decimal = 19.95",
+        "price_value = Some(19.95)",
+        "document = [1E5,{\"p\":19.950,\"z\":-0.0},2.5e-3,0e0]",
+        "leading_zero = rejected",
+        "empty_fraction = rejected",
+        "point_exponent = rejected",
+        "bare_fraction = rejected",
+        "mismatched = refused",
+        "signed_zero = refused",
+        "integer_text = refused",
+        "overflow_text = refused",
+        "from_value = 0.1",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
+}
+
+/// Serializer validation of a constructed `JsonFloat` text does not grow the
+/// evaluation depth with the text's length (the chelis#2307 class): texts of a
+/// few thousand characters validate in eval and compiled C, whether they are
+/// valid, malformed, mismatched, or overflow to a non-finite value.
+#[test]
+fn long_json_float_texts_validate_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("json-float-long-text");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (Json, JsonFloat, try_to_json)
+
+def zeros(count: i64) -> string = fold(fn (acc: string, unused: i64) -> string_concat(acc, "0"), "", range(0i64, count))
+def serialized_length(value: Json) -> string =
+  match try_to_json(value) with {
+    | Some(text) => to_string(string_len(text))
+    | None => "refused"
+  }
+
+long_fraction = serialized_length(JsonFloat(1.0f64, string_concat("1.", zeros(3000i64))))
+long_malformed = serialized_length(JsonFloat(1.0f64, string_concat(string_concat("1.", zeros(3000i64)), "x")))
+long_mismatched = serialized_length(JsonFloat(2.0f64, string_concat("1.", zeros(3000i64))))
+long_overflow = serialized_length(JsonFloat(div(1.0f64, 0.0f64), string_concat(string_concat("1", zeros(3000i64)), ".0")))
+"#,
+    );
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("eval should run");
+    assert!(
+        eval.status.success(),
+        "eval failed: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval = String::from_utf8(eval.stdout).expect("utf-8 stdout");
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "long_fraction = 3002",
+        "long_malformed = refused",
+        "long_mismatched = refused",
+        "long_overflow = refused",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
+}
+
+/// The loud serializer's message names the invalid-`JsonFloat` cause
+/// ([05-OP-5], [05-OP-35]): `to_json` fails through `fail` rather than
+/// emitting either field.
+#[test]
+fn to_json_rejects_mismatched_constructed_json_float_loudly() {
+    let (_dir, reef_home, app_pkg) = make_app("json-float-mismatch");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (JsonFloat, to_json)
+
+bad = to_json(JsonFloat(1.0f64, "2.0"))
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "a JsonFloat whose text is malformed or does not round to its finite f64",
+        ));
 }

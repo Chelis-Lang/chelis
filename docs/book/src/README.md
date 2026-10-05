@@ -19,7 +19,7 @@ used by the compiler and tooling; you can inspect it with `chelis deep`.
 
 - [CLI Workflow](cli.md) covers formatting, checking, evaluation, and builds.
 - [Type System Basics](types.md) introduces tensor shapes and precision.
-- [Effects and Handlers](effects.md) explains host I/O, device regions, and random keys.
+- [Effects](effects.md) explains host I/O, device regions, and random keys.
 - [Checking Properties](proving.md) covers `chelis prove` and how to read its results.
 - [Reef and Packages](reef.md) covers package projects.
-- [Language Reference](reference.md) points to detailed syntax and semantics.
+- [Reference Map](reference.md) points to detailed syntax and semantics.

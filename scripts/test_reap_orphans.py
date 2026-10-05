@@ -11,7 +11,7 @@ real process is signalled, no real `ps`/`lsof` is spawned. Locked here:
   (b) repo scoping: build tools are matched by command line or working
       directory, repo `target/` test binaries are matched by command
       line, and unrelated processes (including an installed `chelis`
-      running elsewhere — the issue #348 flukeball case) are not;
+      running elsewhere — the issue #348 case) are not;
   (c) orphan classification: ppid 1, dead parent, transitive orphan
       children, and live-shell ownership;
   (d) the TERM-then-KILL escalation and grace period;
@@ -143,11 +143,11 @@ class MatchRepoProcessesTests(unittest.TestCase):
         self.assertEqual([p.pid for p in matched], [12])
 
     def test_installed_chelis_running_elsewhere_does_not_match(self):
-        # The issue #348 flukeball case: an installed chelis 0.7.20
+        # The issue #348 case: an installed chelis 0.7.20
         # spawned by an unrelated workload must not be listed or reaped.
         procs = [_proc(13, 5, "chelis eval --file season.ch")]
         matched = reap.match_repo_processes(
-            procs, reap.REPO_ROOT, lambda pid: "/Users/robertronan/flukeball"
+            procs, reap.REPO_ROOT, lambda pid: "/Users/x/other-project"
         )
         self.assertEqual(matched, [])
 

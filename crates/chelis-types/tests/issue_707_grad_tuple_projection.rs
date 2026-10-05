@@ -137,17 +137,21 @@ fn bare_tuple_literal_projection_carries_element_type() {
     // The root cause is NOT grad-specific: a bare tuple literal `(p0, s).0`
     // is `P`; ascribing it `V` must reject. This is the tightest witness
     // that the projection index now parses.
-    assert_rejects_naming(
-        &src("\
+    let deep = surf_to_deep(&src("\
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])
   a: V = (p0, s).0
   cast(0.0, f32)
 }
-"),
-        &["mismatch", "P", "V"],
-        "bare tuple literal projection",
+"));
+    let report = check_ir_program(&deep).expect_err("a projected P cannot be assigned to V");
+    assert!(
+        report.errors.iter().any(|error| {
+            error.expected.as_deref() == Some("V") && error.got.as_deref() == Some("P")
+        }),
+        "the projection must retain its P type and reject the V ascription: {:?}",
+        report.errors
     );
 }
 

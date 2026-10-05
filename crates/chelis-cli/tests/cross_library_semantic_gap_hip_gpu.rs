@@ -202,6 +202,7 @@ fn build_run_user_def_matmul_hip(source: &str, name: &str, a: &[f32], b: &[f32])
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",

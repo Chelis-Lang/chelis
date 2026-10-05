@@ -31,7 +31,12 @@ fn prepare_with_library(library: &str, client: &str) -> PreparedEvalInContext {
         format!("module Probe.Values\nexport (total)\n{library}"),
     )
     .unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let client = format!("module Probe.Client\n{client}");
     let checked = check_in_context(&context, &client).unwrap();
     assert_eq!(checked.score.get(), 1.0);

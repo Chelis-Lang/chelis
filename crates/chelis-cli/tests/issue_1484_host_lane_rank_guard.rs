@@ -12,8 +12,9 @@
 //!
 //! The three programs below are the exact instances recorded in chelis#1484.
 //! Each one is asserted in both lanes: `chelis eval` must reject with the
-//! shape-mismatch diagnostic, and the compiled C must abort with the guard
-//! text rather than exit 0 with values or die on a signal. The fourth test
+//! shape-mismatch diagnostic, and the compiled C must exit with status 1 and
+//! the guard's `Domain` trap (spec/04-type-system.md section 4.7) rather than
+//! exit 0 with values or die on a signal. The fourth test
 //! is the matching-rank control that must keep running.
 //!
 //! Spec authority. `spec/05-risc-primitives.md` §1.2: "All operands must have
@@ -77,6 +78,14 @@ fn run_eval(source: &str, stem: &str) -> std::process::Output {
         .expect("run chelis eval")
 }
 
+fn rank_disagreement(text: &str) -> bool {
+    text.contains("operands disagree in rank")
+        || text.contains("tensor rank mismatch")
+        || (text.contains("DimensionMismatch")
+            && text.contains("rank-2 tensor")
+            && text.contains("rank-1 tensor"))
+}
+
 /// `chelis build --target c`, link the emitted translation unit with the
 /// host C compiler, run it, and return the process output. `None` when the
 /// machine has no host C compiler, so the build/run leg skips cleanly.
@@ -95,6 +104,7 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -110,8 +120,7 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
         // the call, that is where a provable rank disagreement is caught.
         let stderr = String::from_utf8_lossy(&built.stderr);
         assert!(
-            stderr.contains("tensor rank mismatch")
-                || stderr.contains("tensor shapes must match for elementwise op"),
+            rank_disagreement(&stderr),
             "`{stem}`: the build refused for a reason other than the rank \
              disagreement this row is about: {stderr}"
         );
@@ -147,30 +156,26 @@ fn assert_both_lanes_reject(source: &str, stem: &str, guard_needle: &str) {
     // prove is a check error, not a deferred one. The elementwise message is
     // still accepted for the operands whose rank is not fixed until then.
     assert!(
-        eval_err.contains("tensor shapes must match for elementwise op")
-            || eval_err.contains("tensor rank mismatch"),
+        rank_disagreement(&eval_err),
         "{stem}: eval must name the shape or rank mismatch; stderr={eval_err}"
     );
 
     let Some(run) = build_link_run(source, stem) else {
         return;
     };
-    assert!(
-        !run.status.success(),
-        "{stem}: the compiled binary must abort, never compute over rank-divergent \
-         operands; stdout={}",
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    // [04-NUM-10]: the guard ends the program as eval ends, with status 1, so
+    // neither an abort nor a segfault past the guard satisfies it.
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "{stem}: the compiled binary must fail before the out-of-bounds read, never \
+         compute over rank-divergent operands; stdout={} stderr={stderr}",
         String::from_utf8_lossy(&run.stdout)
     );
-    let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
         stderr.contains(guard_needle),
-        "{stem}: the abort must name the guard ({guard_needle}); stderr={stderr}"
-    );
-    assert_ne!(
-        run.status.code(),
-        Some(139),
-        "{stem}: the guard must stop the program before the out-of-bounds read, \
-         not let it segfault; stderr={stderr}"
+        "{stem}: the failure must name the guard ({guard_needle}); stderr={stderr}"
     );
 }
 
@@ -183,7 +188,7 @@ fn issue_1484_add_host_lane_rank_mismatch_aborts() {
     assert_both_lanes_reject(
         &program("add(debug(e), s)"),
         "hostrank_add",
-        "elementwise operand rank mismatch",
+        "operands disagree in rank",
     );
 }
 
@@ -195,7 +200,7 @@ fn issue_1484_max_elem_host_lane_rank_mismatch_aborts() {
     assert_both_lanes_reject(
         &program("max_elem(debug(e), s)"),
         "hostrank_max_elem",
-        "elementwise operand rank mismatch",
+        "operands disagree in rank",
     );
 }
 
@@ -209,7 +214,7 @@ fn issue_1484_reversed_operand_order_host_lane_rank_mismatch_aborts() {
     assert_both_lanes_reject(
         &program("add(s, debug(e))"),
         "hostrank_add_reversed",
-        "elementwise operand rank mismatch",
+        "operands disagree in rank",
     );
 }
 

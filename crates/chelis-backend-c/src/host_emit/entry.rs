@@ -306,7 +306,7 @@ impl<'a> Walker<'a> {
             HostExprKind::ResultClaimScope { body, .. } => {
                 self.walk(body, env, facts);
             }
-            HostExprKind::FormalIngress { value, .. } => {
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
                 self.walk(value, env, facts);
             }
             HostExprKind::SignatureEntry {
@@ -641,7 +641,6 @@ mod tests {
         let function = function();
         let options = crate::CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(crate::MathLib::None),
             static_entry: false,
         };
         let dag = crate::testing::verified_dag(&function.tensor_helpers[0].dag, options).unwrap();

@@ -170,7 +170,7 @@ def main() -> tensor[3, i64] = {
     assert!(
         dag.nodes().iter().all(|node| !matches!(
             node.op,
-            RiscOp::Sum { .. } | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            RiscOp::Sum { .. } | RiscOp::Cast { .. } | RiscOp::NamedCast { .. }
         )),
         "Count must not regress to cast-plus-sum or a cast compatibility alias"
     );

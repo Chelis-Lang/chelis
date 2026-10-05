@@ -5,7 +5,14 @@
 //! obligations, so a consumer proof can roll up through the weakest-link
 //! machinery instead of rendering an assumed invariant as pure proven.
 
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
+
+use chelis_reef::EmbeddedRuntime;
+use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
+
+mod generator;
 
 #[cfg(test)]
 use crate::composition::CompositeVerdict;
@@ -43,117 +50,225 @@ pub struct ContractInvariant {
     pub record: AssumptionRecord,
 }
 
-pub fn standard_contracts() -> Vec<StandardContract> {
-    vec![
-        StandardContract {
-            id: "std.normal_cdf".to_string(),
-            function: NORMAL_CDF_IMPLEMENTATION.to_string(),
-            invariants: vec![
-                fuzz_invariant(
-                    NORMAL_CDF_RANGE,
-                    "normal CDF range",
-                    "forall x. 0 <= N(x) <= 1",
-                    NORMAL_CDF_IMPLEMENTATION,
-                    8192,
-                    0xC0DF_2026,
-                ),
-                fuzz_invariant(
-                    NORMAL_CDF_REFLECTION,
-                    "normal CDF reflection",
-                    "forall x. N(-x) = 1 - N(x)",
-                    NORMAL_CDF_IMPLEMENTATION,
-                    8192,
-                    0xC0DF_2026,
-                ),
-                fuzz_invariant(
-                    NORMAL_CDF_MONOTONICITY,
-                    "normal CDF monotonicity",
-                    "forall x y. x <= y => N(x) <= N(y)",
-                    NORMAL_CDF_IMPLEMENTATION,
-                    8192,
-                    0xC0DF_2026,
-                ),
-            ],
-        },
-        StandardContract {
-            id: "std.exp".to_string(),
-            function: "exp".to_string(),
-            invariants: vec![
-                smt_invariant(EXP_POSITIVITY, "exp positivity", "forall x. exp(x) > 0"),
-                fuzz_invariant(
-                    EXP_MONOTONICITY,
-                    "exp monotonicity",
-                    "forall x y. x <= y => exp(x) <= exp(y)",
-                    "chelis_intrinsic.exp",
-                    4096,
-                    0xE_2026,
-                ),
-                smt_invariant(EXP_ZERO, "exp zero", "exp(0) = 1"),
-            ],
-        },
-        StandardContract {
-            id: "std.log".to_string(),
-            function: "log".to_string(),
-            invariants: vec![
-                fuzz_invariant(
-                    LOG_MONOTONICITY,
-                    "log monotonicity on positives",
-                    "forall x y. 0 < x <= y => log(x) <= log(y)",
-                    "chelis_intrinsic.log",
-                    4096,
-                    0x10_2026,
-                ),
-                fuzz_invariant(
-                    LOG_ONE,
-                    "log one",
-                    "log(1) = 0",
-                    "chelis_intrinsic.log",
-                    64,
-                    0x10_2026,
-                ),
-            ],
-        },
-        StandardContract {
-            id: "std.quantile".to_string(),
-            function: QUANTILE_IMPLEMENTATION.to_string(),
-            invariants: vec![
-                fuzz_invariant(
-                    QUANTILE_RANGE,
-                    "quantile range boundedness",
-                    "forall xs q. 0 <= q <= 1 => min(xs) <= quantile(xs, q) <= max(xs)",
-                    QUANTILE_IMPLEMENTATION,
-                    8192,
-                    0xCA_2026,
-                ),
-                fuzz_invariant(
-                    QUANTILE_MONOTONICITY,
-                    "quantile monotonicity in q",
-                    "forall xs p q. 0 <= p <= q <= 1 => quantile(xs, p) <= quantile(xs, q)",
-                    QUANTILE_IMPLEMENTATION,
-                    8192,
-                    0xCB_2026,
-                ),
-                fuzz_invariant(
-                    QUANTILE_BOUNDARY,
-                    "quantile boundary values",
-                    "forall xs. quantile(xs, 0) = min(xs) and quantile(xs, 1) = max(xs)",
-                    QUANTILE_IMPLEMENTATION,
-                    4096,
-                    0xCC_2026,
-                ),
-            ],
-        },
-    ]
+/// Every float width a float standard contract admits. `normal_cdf` is generic
+/// over `Float`, and `exp` and `log` are primitives at every float dtype.
+pub const CONTRACT_FLOAT_WIDTHS: [Prim; 4] = [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64];
+
+/// How a standard invariant is discharged.
+enum DischargeSpec {
+    /// A fuzz discharge over `samples` samples drawn from `seed`, against
+    /// `implementation`.
+    Fuzz {
+        implementation: &'static str,
+        samples: usize,
+        seed: u64,
+    },
+    /// A cvc5 proof in the real model.
+    Smt,
 }
 
-pub fn standard_contract_registry() -> AssumptionRegistry {
-    let mut registry = AssumptionRegistry::new();
-    for contract in standard_contracts() {
-        for invariant in contract.invariants {
-            registry.insert(invariant.record);
-        }
+struct InvariantSpec {
+    id: &'static str,
+    description: &'static str,
+    assumption: &'static str,
+    discharge: DischargeSpec,
+}
+
+struct ContractSpec {
+    id: &'static str,
+    function: &'static str,
+    invariants: &'static [InvariantSpec],
+}
+
+const fn fuzz(
+    id: &'static str,
+    description: &'static str,
+    assumption: &'static str,
+    implementation: &'static str,
+    samples: usize,
+    seed: u64,
+) -> InvariantSpec {
+    InvariantSpec {
+        id,
+        description,
+        assumption,
+        discharge: DischargeSpec::Fuzz {
+            implementation,
+            samples,
+            seed,
+        },
     }
-    registry
+}
+
+/// The standard contracts and how each invariant is discharged.
+const STANDARD_CONTRACTS: &[ContractSpec] = &[
+    ContractSpec {
+        id: "std.normal_cdf",
+        function: NORMAL_CDF_IMPLEMENTATION,
+        invariants: &[
+            fuzz(
+                NORMAL_CDF_RANGE,
+                "normal CDF range",
+                "forall x. 0 <= N(x) <= 1",
+                NORMAL_CDF_IMPLEMENTATION,
+                8192,
+                0xC0DF_2026,
+            ),
+            fuzz(
+                NORMAL_CDF_REFLECTION,
+                "normal CDF reflection",
+                "forall x. N(-x) = 1 - N(x)",
+                NORMAL_CDF_IMPLEMENTATION,
+                8192,
+                0xC0DF_2026,
+            ),
+            fuzz(
+                NORMAL_CDF_MONOTONICITY,
+                "normal CDF monotonicity",
+                "forall x y. x <= y => N(x) <= N(y)",
+                NORMAL_CDF_IMPLEMENTATION,
+                8192,
+                0xC0DF_2026,
+            ),
+        ],
+    },
+    ContractSpec {
+        id: "std.exp",
+        function: "exp",
+        invariants: &[
+            // The float operation underflows to +0 (below about -103.97 at
+            // f32), so the strict real-model `exp(x) > 0` is false for it;
+            // the contract states the float property (chelis#2965).
+            fuzz(
+                EXP_POSITIVITY,
+                "exp non-negativity",
+                "forall x. exp(x) >= 0",
+                "chelis_intrinsic.exp",
+                4096,
+                0xE0_2026,
+            ),
+            fuzz(
+                EXP_MONOTONICITY,
+                "exp monotonicity",
+                "forall x y. x <= y => exp(x) <= exp(y)",
+                "chelis_intrinsic.exp",
+                4096,
+                0xE_2026,
+            ),
+            InvariantSpec {
+                id: EXP_ZERO,
+                description: "exp zero",
+                assumption: "exp(0) = 1",
+                discharge: DischargeSpec::Smt,
+            },
+        ],
+    },
+    ContractSpec {
+        id: "std.log",
+        function: "log",
+        invariants: &[
+            fuzz(
+                LOG_MONOTONICITY,
+                "log monotonicity on positives",
+                "forall x y. 0 < x <= y => log(x) <= log(y)",
+                "chelis_intrinsic.log",
+                4096,
+                0x10_2026,
+            ),
+            fuzz(
+                LOG_ONE,
+                "log one",
+                "log(1) = 0",
+                "chelis_intrinsic.log",
+                64,
+                0x10_2026,
+            ),
+        ],
+    },
+    ContractSpec {
+        id: "std.quantile",
+        function: QUANTILE_IMPLEMENTATION,
+        invariants: &[
+            fuzz(
+                QUANTILE_RANGE,
+                "quantile range boundedness",
+                "forall xs q. 0 <= q <= 1 => min(xs) <= quantile(xs, q) <= max(xs)",
+                QUANTILE_IMPLEMENTATION,
+                8192,
+                0xCA_2026,
+            ),
+            fuzz(
+                QUANTILE_MONOTONICITY,
+                "quantile monotonicity in q",
+                "forall xs p q. 0 <= p <= q <= 1 => quantile(xs, p) <= quantile(xs, q)",
+                QUANTILE_IMPLEMENTATION,
+                8192,
+                0xCB_2026,
+            ),
+            fuzz(
+                QUANTILE_BOUNDARY,
+                "quantile boundary values",
+                "forall xs. quantile(xs, 0) = min(xs) and quantile(xs, 1) = max(xs)",
+                QUANTILE_IMPLEMENTATION,
+                4096,
+                0xCC_2026,
+            ),
+        ],
+    },
+];
+
+/// The standard contracts, with each float contract's discharge resolved at
+/// every width in `widths` (chelis#2965). A float fuzz property is a
+/// statement about the function at one width, so the discharge is per width:
+/// the record fails when the property fails at any of the widths, and names
+/// that width. A consumer passes the widths its operands can have; an empty
+/// slice means every admitted width. The per-width outcomes come from the
+/// committed discharge table, never from a fuzz run in this process.
+pub fn standard_contracts_at(
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
+) -> Vec<StandardContract> {
+    standard_contracts_selected(widths, |_| true, runtime)
+}
+
+/// The standard contracts reduced to the invariants `select` accepts; a
+/// contract with no selected invariant is omitted.
+fn standard_contracts_selected(
+    widths: &[Prim],
+    select: impl Fn(&str) -> bool,
+    runtime: &'static EmbeddedRuntime,
+) -> Vec<StandardContract> {
+    let widths = consumer_widths(widths);
+    STANDARD_CONTRACTS
+        .iter()
+        .filter_map(|contract| {
+            let invariants = contract
+                .invariants
+                .iter()
+                .filter(|spec| select(spec.id))
+                .map(|spec| match spec.discharge {
+                    DischargeSpec::Fuzz {
+                        implementation,
+                        samples,
+                        seed,
+                    } => fuzz_invariant(spec, implementation, samples, seed, &widths, runtime),
+                    DischargeSpec::Smt => smt_invariant(spec.id, spec.description, spec.assumption),
+                })
+                .collect::<Vec<_>>();
+            (!invariants.is_empty()).then(|| StandardContract {
+                id: contract.id.to_string(),
+                function: contract.function.to_string(),
+                invariants,
+            })
+        })
+        .collect()
+}
+
+pub fn standard_contract_registry(
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
+) -> AssumptionRegistry {
+    standard_contract_registry_for(None, widths, None, runtime)
 }
 
 /// Construct the standard contract registry, attempting to upgrade fuzz-discharged
@@ -161,16 +276,33 @@ pub fn standard_contract_registry() -> AssumptionRegistry {
 /// Contracts the prover cannot prove stay fuzz-discharged (honest degradation).
 pub fn standard_contract_registry_with_prover(
     prover: &crate::beacon_contract_prover::BeaconContractProver,
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
+) -> AssumptionRegistry {
+    standard_contract_registry_for(None, widths, Some(prover), runtime)
+}
+
+/// The registry over the invariants in `contracts` (every invariant when
+/// `None`), so a consumer resolves only the contracts it reaches. With a
+/// prover, a fuzz-validated invariant is upgraded to a certified-envelope
+/// discharge when the prover proves it.
+pub fn standard_contract_registry_for(
+    contracts: Option<&BTreeSet<String>>,
+    widths: &[Prim],
+    prover: Option<&crate::beacon_contract_prover::BeaconContractProver>,
+    runtime: &'static EmbeddedRuntime,
 ) -> AssumptionRegistry {
     let mut registry = AssumptionRegistry::new();
-    for contract in standard_contracts() {
+    let selected = |id: &str| contracts.is_none_or(|contracts| contracts.contains(id));
+    for contract in standard_contracts_selected(widths, selected, runtime) {
         for invariant in contract.invariants {
-            // Try to upgrade fuzz-discharged contracts
-            if invariant
-                .record
-                .discharge
-                .as_ref()
-                .is_some_and(|d| d.method == DischargeMethod::Fuzz)
+            // Try to upgrade fuzz-validated contracts. A contract whose fuzz
+            // discharge failed at a consumer width stays failed: a proof about
+            // the real function does not make the float property true there.
+            if let Some(prover) = prover
+                && invariant.record.discharge.as_ref().is_some_and(|d| {
+                    d.method == DischargeMethod::Fuzz && d.evidence["status"] == "validated"
+                })
                 && let Some(discharge) = prover.prove_contract(&invariant.id)
             {
                 // Successfully proved by Beacon — use the certified discharge
@@ -229,13 +361,14 @@ fn smt_invariant(id: &str, description: &str, assumption: &str) -> ContractInvar
 }
 
 fn fuzz_invariant(
-    id: &str,
-    description: &str,
-    assumption: &str,
+    spec: &InvariantSpec,
     implementation: &str,
     samples: usize,
     seed: u64,
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
 ) -> ContractInvariant {
+    let (id, description, assumption) = (spec.id, spec.description, spec.assumption);
     ContractInvariant {
         id: id.to_string(),
         description: description.to_string(),
@@ -244,7 +377,15 @@ fn fuzz_invariant(
             id,
             Some(AssumptionDischarge::new(
                 DischargeMethod::Fuzz,
-                fuzz_discharge_evidence(id, assumption, implementation, samples, seed),
+                fuzz_discharge_evidence(
+                    id,
+                    assumption,
+                    implementation,
+                    samples,
+                    seed,
+                    widths,
+                    runtime,
+                ),
             )),
             Some(NonVacuityRecord::established(serde_json::json!({
                 "method": "fuzz",
@@ -305,381 +446,309 @@ fn fuzz_discharge_evidence(
     implementation: &str,
     samples: usize,
     seed: u64,
+    widths: &[Prim],
+    runtime: &'static EmbeddedRuntime,
 ) -> serde_json::Value {
-    let outcome = run_fuzz_discharge(id, samples, seed);
-    let status = if outcome.counterexample.is_some() {
-        "failed"
+    let outcomes = if is_float_contract(id) {
+        widths
+            .iter()
+            .map(|prim| run_fuzz_discharge(id, samples, seed, Some(*prim), runtime))
+            .collect::<Vec<_>>()
     } else {
-        "validated"
+        vec![run_fuzz_discharge(id, samples, seed, None, runtime)]
+    };
+    // The reported outcome is the first failing width, else the first width.
+    let reported = outcomes
+        .iter()
+        .find(|outcome| outcome.counterexample.is_some())
+        .unwrap_or(&outcomes[0]);
+    let status = |outcome: &FuzzOutcome| {
+        if outcome.counterexample.is_some() {
+            "failed"
+        } else {
+            "validated"
+        }
     };
     let mut evidence = serde_json::json!({
-        "status": status,
+        "status": status(reported),
         "implementation": implementation,
         "samples": samples,
         "seed": seed,
         "tolerance": FUZZ_TOLERANCE,
-        "domain": outcome.domain,
+        "domain": reported.domain,
         "assumption": assumption,
-        "checked_samples": outcome.checked_samples,
-        "max_error": outcome.max_error,
+        "checked_samples": reported.checked_samples,
+        "max_error": reported.max_error,
     });
-    if let Some(counterexample) = outcome.counterexample {
+    if let Some(prim) = reported.dtype {
+        evidence["dtype"] = serde_json::json!(prim.name());
+        evidence["widths"] = outcomes
+            .iter()
+            .filter_map(|outcome| {
+                outcome
+                    .dtype
+                    .map(|prim| (prim.name().to_string(), serde_json::json!(status(outcome))))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
+    if let Some(counterexample) = reported.counterexample.clone() {
         evidence["counterexample"] = counterexample;
     }
     evidence
 }
 
-#[derive(Debug, Clone)]
+/// The widths a discharge runs at: the consumer's, deduplicated in order, or
+/// every admitted width when the consumer names none.
+fn consumer_widths(widths: &[Prim]) -> Vec<Prim> {
+    let mut out = Vec::new();
+    for prim in widths {
+        if prim.is_float() && !out.contains(prim) {
+            out.push(*prim);
+        }
+    }
+    if out.is_empty() {
+        out.extend(CONTRACT_FLOAT_WIDTHS);
+    }
+    out
+}
+
+fn is_float_contract(id: &str) -> bool {
+    matches!(
+        id,
+        NORMAL_CDF_RANGE
+            | NORMAL_CDF_REFLECTION
+            | NORMAL_CDF_MONOTONICITY
+            | EXP_POSITIVITY
+            | EXP_MONOTONICITY
+            | LOG_MONOTONICITY
+            | LOG_ONE
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FuzzOutcome {
     checked_samples: usize,
-    max_error: f64,
+    /// The largest per-sample error, as the evidence renders it (a
+    /// non-finite error has no JSON number and renders as `null`).
+    max_error: serde_json::Value,
     counterexample: Option<serde_json::Value>,
-    domain: &'static str,
+    domain: String,
+    /// The dtype the property was evaluated at; `None` for the quantile
+    /// contracts, which bind an external library's f64 implementation.
+    #[serde(with = "dtype_name")]
+    dtype: Option<Prim>,
 }
 
-fn run_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcome {
-    match id {
-        NORMAL_CDF_RANGE => fuzz_unary(
-            samples,
-            seed,
-            "normal-cdf finite f32 domain [-10, 10]",
-            |x| {
-                let y = normal_cdf_erfc(x);
-                let low = 0.0_f64 - y;
-                let high = y - 1.0_f64;
-                low.max(high).max(0.0)
-            },
-        ),
-        NORMAL_CDF_REFLECTION => fuzz_unary(
-            samples,
-            seed,
-            "normal-cdf finite f32 domain [-10, 10]",
-            |x| (normal_cdf_erfc(-x) - (1.0 - normal_cdf_erfc(x))).abs(),
-        ),
-        NORMAL_CDF_MONOTONICITY => fuzz_ordered_pair(
-            samples,
-            seed,
-            "ordered normal-cdf finite f32 pairs in [-10, 10]",
-            |lo, hi| (normal_cdf_erfc(lo) - normal_cdf_erfc(hi)).max(0.0),
-        ),
-        EXP_MONOTONICITY => fuzz_ordered_pair(
-            samples,
-            seed,
-            "ordered exp finite f32 pairs in [-10, 10]",
-            |lo, hi| (lo.exp() - hi.exp()).max(0.0),
-        ),
-        LOG_MONOTONICITY => fuzz_ordered_positive_pair(
-            samples,
-            seed,
-            "ordered positive f32 pairs in [1e-6, 1e6]",
-            |lo, hi| (lo.ln() - hi.ln()).max(0.0),
-        ),
-        LOG_ONE => {
-            let error = 1.0_f64.ln().abs();
-            FuzzOutcome {
-                checked_samples: samples.max(1),
-                max_error: error,
-                counterexample: counterexample_if(error, serde_json::json!({"x": 1.0})),
-                domain: "log anchor x = 1",
+/// A contract dtype serialized by its Chelis spelling (`f32`).
+mod dtype_name {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+
+    use super::{CONTRACT_FLOAT_WIDTHS, Prim};
+
+    pub fn serialize<S: Serializer>(prim: &Option<Prim>, serializer: S) -> Result<S::Ok, S::Error> {
+        prim.map(|prim| prim.name()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Prim>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|name| {
+                CONTRACT_FLOAT_WIDTHS
+                    .into_iter()
+                    .find(|prim| prim.name() == name)
+                    .ok_or_else(|| {
+                        D::Error::custom(format!("`{name}` is not a contract float width"))
+                    })
+            })
+            .transpose()
+    }
+}
+
+impl FuzzOutcome {
+    fn new(
+        checked_samples: usize,
+        max_error: f64,
+        counterexample: Option<serde_json::Value>,
+        domain: &str,
+        dtype: Option<Prim>,
+    ) -> Self {
+        Self {
+            checked_samples,
+            max_error: serde_json::json!(max_error),
+            counterexample,
+            domain: domain.to_string(),
+            dtype,
+        }
+    }
+}
+
+/// The committed per-width fuzz discharge table (chelis#2957). Its rows are
+/// a function of the contract, the sample plan, the width, the shipped
+/// chelis-std graph and the compiler's kernels, all fixed per compiler build,
+/// so the prove lane reads them instead of fuzzing at startup. The nightly
+/// `standard_contract_discharge_table` test recomputes every row and compares
+/// the rendering byte for byte (`CHELIS_PROVE_DISCHARGE_TABLE_WRITE=1`
+/// rewrites the file); a per-pull-request canary recomputes one row.
+pub const STANDARD_CONTRACT_DISCHARGE_TABLE_PATH: &str = DISCHARGE_TABLE_PATH;
+const DISCHARGE_TABLE_PATH: &str = "data/standard_contract_discharges.json";
+const DISCHARGE_TABLE_JSON: &str = include_str!("../data/standard_contract_discharges.json");
+const DISCHARGE_TABLE_SCHEMA: &str = "chelis-prove-standard-contract-discharges-v1";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DischargeTable {
+    schema: String,
+    /// `std_graph::normal_cdf_graph_digest` of the graph the `normal_cdf`
+    /// rows were computed against.
+    std_graph_digest: String,
+    rows: Vec<DischargeRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DischargeRow {
+    contract: String,
+    samples: usize,
+    seed: u64,
+    #[serde(flatten)]
+    outcome: FuzzOutcome,
+}
+
+/// The committed table as the prove lane reads it.
+pub fn committed_standard_contract_discharge_table() -> &'static str {
+    DISCHARGE_TABLE_JSON
+}
+
+/// The table recomputed now against `runtime`'s chelis-std, rendered as the
+/// committed file is. This runs every fuzz discharge; nothing on the prove
+/// path calls it.
+pub fn recompute_standard_contract_discharge_table(
+    runtime: &'static EmbeddedRuntime,
+) -> Result<String, String> {
+    generator::compute_discharge_table(runtime)
+        .map(|table| generator::render_discharge_table(&table))
+}
+
+fn committed_discharge_table() -> Result<&'static DischargeTable, String> {
+    static TABLE: OnceLock<Result<DischargeTable, String>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let table: DischargeTable = serde_json::from_str(DISCHARGE_TABLE_JSON)
+                .map_err(|err| format!("{DISCHARGE_TABLE_PATH} does not parse: {err}"))?;
+            if table.schema != DISCHARGE_TABLE_SCHEMA {
+                return Err(format!(
+                    "{DISCHARGE_TABLE_PATH} has schema `{}`, expected `{DISCHARGE_TABLE_SCHEMA}`",
+                    table.schema
+                ));
             }
-        }
-        QUANTILE_RANGE => fuzz_quantile_range(samples, seed),
-        QUANTILE_MONOTONICITY => fuzz_quantile_monotonicity(samples, seed),
-        QUANTILE_BOUNDARY => fuzz_quantile_boundary(samples, seed),
-        _ => FuzzOutcome {
-            checked_samples: 0,
-            max_error: f64::INFINITY,
-            counterexample: Some(serde_json::json!({"unsupported_contract": id})),
-            domain: "unsupported standard contract",
-        },
-    }
+            Ok(table)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
-fn fuzz_unary(
+#[cfg(test)]
+thread_local! {
+    /// Table rows this thread resolved, so tests can tell which contracts a
+    /// consumer reached.
+    pub(crate) static RESOLVED_ROWS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Fuzz discharges this thread ran.
+    pub(crate) static RECOMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One contract's fuzz discharge at one width, read from the committed table.
+/// A `normal_cdf` row is served only when the table's recorded graph digest is
+/// the digest of `runtime`'s chelis-std.
+fn run_fuzz_discharge(
+    id: &str,
     samples: usize,
     seed: u64,
-    domain: &'static str,
-    error: impl Fn(f64) -> f64,
+    prim: Option<Prim>,
+    runtime: &'static EmbeddedRuntime,
 ) -> FuzzOutcome {
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let x = sample_signed_domain(i, samples, &mut rng, 10.0);
-        let err = error(x);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({"x": x, "error": err})),
-                domain,
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain,
-    }
+    #[cfg(test)]
+    RESOLVED_ROWS.with(|rows| {
+        rows.borrow_mut().push(format!(
+            "{id}@{}",
+            prim.map_or("untyped", |prim| prim.name())
+        ));
+    });
+    table_outcome(
+        committed_discharge_table(),
+        || crate::std_graph::normal_cdf_graph_digest(runtime),
+        id,
+        samples,
+        seed,
+        prim,
+    )
 }
 
-fn fuzz_ordered_pair(
+/// The row of `table` for one discharge. A missing table or row, or a
+/// `normal_cdf` row recorded against a different shipped graph than
+/// `shipped_digest` names, fails closed: the outcome carries the reason as
+/// its counterexample, so the record is `failed`.
+fn table_outcome(
+    table: Result<&DischargeTable, String>,
+    shipped_digest: impl FnOnce() -> Result<String, String>,
+    id: &str,
     samples: usize,
     seed: u64,
-    domain: &'static str,
-    error: impl Fn(f64, f64) -> f64,
+    prim: Option<Prim>,
 ) -> FuzzOutcome {
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let a = sample_signed_domain(i, samples, &mut rng, 10.0);
-        let b = sample_signed_domain(samples.saturating_sub(i + 1), samples, &mut rng, 10.0);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let err = error(lo, hi);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({"lo": lo, "hi": hi, "error": err})),
-                domain,
-            };
+    let unavailable = |reason: serde_json::Value| {
+        FuzzOutcome::new(
+            0,
+            f64::INFINITY,
+            Some(serde_json::json!({"discharge_table": reason})),
+            "committed standard-contract discharge table",
+            prim,
+        )
+    };
+    let table = match table {
+        Ok(table) => table,
+        Err(message) => return unavailable(serde_json::json!(message)),
+    };
+    let Some(row) = table.rows.iter().find(|row| {
+        row.contract == id
+            && row.samples == samples
+            && row.seed == seed
+            && row.outcome.dtype == prim
+    }) else {
+        return unavailable(serde_json::json!(format!(
+            "{DISCHARGE_TABLE_PATH} has no row for {id} at {} with {samples} samples and seed {seed}",
+            prim.map_or("no dtype", |prim| prim.name())
+        )));
+    };
+    if is_normal_cdf_contract(id) {
+        match shipped_digest() {
+            Ok(digest) if digest == table.std_graph_digest => {}
+            Ok(digest) => {
+                return unavailable(serde_json::json!({
+                    "stale": DISCHARGE_TABLE_PATH,
+                    "recorded_std_graph_digest": table.std_graph_digest,
+                    "shipped_std_graph_digest": digest,
+                }));
+            }
+            Err(message) => return unavailable(serde_json::json!(message)),
         }
     }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain,
-    }
+    row.outcome.clone()
 }
 
-fn fuzz_ordered_positive_pair(
-    samples: usize,
-    seed: u64,
-    domain: &'static str,
-    error: impl Fn(f64, f64) -> f64,
-) -> FuzzOutcome {
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let a = sample_positive_domain(i, samples, &mut rng);
-        let b = sample_positive_domain(samples.saturating_sub(i + 1), samples, &mut rng);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let err = error(lo, hi);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({"lo": lo, "hi": hi, "error": err})),
-                domain,
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain,
-    }
-}
-
-fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
-    use crate::concrete_eval;
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        // Generate a random data vector of size 3-8 and a quantile level
-        let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
-        let q = rng.next_unit();
-        let result = concrete_eval::quantile_linear_pub(&data, q);
-        let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let low_err = (min_val - result).max(0.0);
-        let high_err = (result - max_val).max(0.0);
-        let err = low_err.max(high_err);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({
-                    "data": data, "q": q, "result": result,
-                    "min": min_val, "max": max_val, "error": err
-                })),
-                domain: "quantile range bounded by [min, max]",
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain: "quantile range bounded by [min, max]",
-    }
-}
-
-fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
-    use crate::concrete_eval;
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
-        let a = rng.next_unit();
-        let b = rng.next_unit();
-        let (p, q) = if a <= b { (a, b) } else { (b, a) };
-        let rp = concrete_eval::quantile_linear_pub(&data, p);
-        let rq = concrete_eval::quantile_linear_pub(&data, q);
-        let err = (rp - rq).max(0.0);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({
-                    "data": data, "p": p, "q": q,
-                    "quantile_p": rp, "quantile_q": rq, "error": err
-                })),
-                domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
-    }
-}
-
-fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
-    use crate::concrete_eval;
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
-        let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let q0 = concrete_eval::quantile_linear_pub(&data, 0.0);
-        let q1 = concrete_eval::quantile_linear_pub(&data, 1.0);
-        let err = (q0 - min_val).abs().max((q1 - max_val).abs());
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({
-                    "data": data,
-                    "quantile_0": q0, "min": min_val,
-                    "quantile_1": q1, "max": max_val,
-                    "error": err
-                })),
-                domain: "quantile boundary: q=0 -> min, q=1 -> max",
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain: "quantile boundary: q=0 -> min, q=1 -> max",
-    }
-}
-
-fn counterexample_if(error: f64, counterexample: serde_json::Value) -> Option<serde_json::Value> {
-    (error > FUZZ_TOLERANCE).then(|| {
-        let mut value = counterexample;
-        value["error"] = serde_json::json!(error);
-        value
-    })
-}
-
-fn sample_signed_domain(index: usize, samples: usize, rng: &mut Lcg, radius: f64) -> f64 {
-    match index {
-        0 => 0.0,
-        1 => -radius,
-        2 => radius,
-        _ => {
-            let denom = samples.saturating_sub(1).max(1) as f64;
-            let grid = -radius + 2.0 * radius * (index as f64 / denom);
-            let jitter = (rng.next_unit() - 0.5) * (2.0 * radius / denom);
-            (grid + jitter).clamp(-radius, radius)
-        }
-    }
-}
-
-fn sample_positive_domain(index: usize, samples: usize, rng: &mut Lcg) -> f64 {
-    match index {
-        0 => 1.0,
-        1 => 1.0e-6,
-        2 => 1.0e6,
-        _ => {
-            let denom = samples.saturating_sub(1).max(1) as f64;
-            let grid = -6.0 + 12.0 * (index as f64 / denom);
-            let jitter = (rng.next_unit() - 0.5) * (12.0 / denom);
-            10.0_f64.powf((grid + jitter).clamp(-6.0, 6.0))
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_unit(&mut self) -> f64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let bits = self.state >> 11;
-        (bits as f64) * (1.0 / ((1_u64 << 53) as f64))
-    }
-}
-
-fn normal_cdf_erfc(x: f64) -> f64 {
-    0.5 * erfc_approx(-x / std::f64::consts::SQRT_2)
-}
-
-fn erfc_approx(x: f64) -> f64 {
-    1.0 - erf_approx(x)
-}
-
-fn erf_approx(x: f64) -> f64 {
-    if x == 0.0 {
-        return 0.0;
-    }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let ax = x.abs();
-    let p = 0.3275911_f64;
-    let a1 = 0.254829592_f64;
-    let a2 = -0.284496736_f64;
-    let a3 = 1.421413741_f64;
-    let a4 = -1.453152027_f64;
-    let a5 = 1.061405429_f64;
-    let t = 1.0 / (1.0 + p * ax);
-    let poly = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t;
-    sign * (1.0 - poly * (-(ax * ax)).exp())
+fn is_normal_cdf_contract(id: &str) -> bool {
+    matches!(
+        id,
+        NORMAL_CDF_RANGE | NORMAL_CDF_REFLECTION | NORMAL_CDF_MONOTONICITY
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::generator::*;
     use super::*;
 
     fn all_invariants() -> Vec<ContractInvariant> {
-        standard_contracts()
+        standard_contracts_at(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME)
             .into_iter()
             .flat_map(|contract| contract.invariants)
             .collect()
@@ -687,7 +756,8 @@ mod tests {
 
     #[test]
     fn k1_put_call_parity_consumes_cdf_reflection_as_fuzz_qualified_contract() {
-        let registry = standard_contract_registry();
+        let registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         let probe = registry.probe_consumer(
             "put_call_parity",
             CompositeVerdict::Proven,
@@ -710,8 +780,30 @@ mod tests {
     }
 
     #[test]
+    fn chelis_2957_normal_cdf_rows_are_checked_against_the_callers_runtime() {
+        // A runtime whose archive is not the one the table was computed from.
+        // Its graph digest cannot match, so every normal_cdf row fails closed,
+        // while a row that does not read the graph is still served.
+        static OTHER: EmbeddedRuntime =
+            EmbeddedRuntime::new("0.0.0", b"not the shipped archive", b"");
+        let mut normal_cdf_rows = 0;
+        for contract in standard_contracts_at(&[Prim::F64], &OTHER) {
+            for invariant in contract.invariants {
+                let evidence = &invariant.record.discharge.as_ref().unwrap().evidence;
+                if is_normal_cdf_contract(&invariant.id) {
+                    normal_cdf_rows += 1;
+                    assert_eq!(evidence["status"], "failed", "{}", invariant.id);
+                } else {
+                    assert_ne!(evidence["status"], "failed", "{}", invariant.id);
+                }
+            }
+        }
+        assert_eq!(normal_cdf_rows, 3);
+    }
+
+    #[test]
     fn normal_cdf_contracts_bind_to_bundled_callable_implementation() {
-        let normal = standard_contracts()
+        let normal = standard_contracts_at(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME)
             .into_iter()
             .find(|contract| contract.id == "std.normal_cdf")
             .expect("normal CDF contract exists");
@@ -770,7 +862,8 @@ mod tests {
 
     #[test]
     fn k3_corrupting_contract_discharge_degrades_dependent_consumer() {
-        let mut registry = standard_contract_registry();
+        let mut registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         let before = registry.probe_consumer(
             "put_call_parity",
             CompositeVerdict::Proven,
@@ -809,7 +902,8 @@ mod tests {
 
     #[test]
     fn k4_contract_assumption_non_vacuity_failure_is_invalid() {
-        let mut registry = standard_contract_registry();
+        let mut registry =
+            standard_contract_registry(&[Prim::F64], &chelis_std_bundle::EMBEDDED_RUNTIME);
         registry.insert(AssumptionRecord::new(
             EXP_POSITIVITY,
             Some(AssumptionDischarge::new(
@@ -823,5 +917,344 @@ mod tests {
         ));
         let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, [EXP_POSITIVITY]);
         assert_eq!(probe.composite_verdict, CompositeVerdict::Invalid);
+    }
+
+    // --- chelis#2965: discharges at a declared dtype ---
+
+    fn evidence(id: &str) -> serde_json::Value {
+        all_invariants()
+            .into_iter()
+            .find(|invariant| invariant.id == id)
+            .unwrap_or_else(|| panic!("{id} exists"))
+            .record
+            .discharge
+            .expect("discharged")
+            .evidence
+    }
+
+    #[test]
+    fn chelis_2965_float_contracts_record_their_evaluation_dtype() {
+        for id in [
+            NORMAL_CDF_RANGE,
+            NORMAL_CDF_REFLECTION,
+            NORMAL_CDF_MONOTONICITY,
+            EXP_POSITIVITY,
+            EXP_MONOTONICITY,
+            LOG_MONOTONICITY,
+            LOG_ONE,
+        ] {
+            let evidence = evidence(id);
+            assert_eq!(evidence["dtype"], "f64", "{id}");
+            assert_eq!(
+                evidence["widths"],
+                serde_json::json!({"f64": "validated"}),
+                "{id}"
+            );
+        }
+        assert!(evidence(QUANTILE_RANGE).get("dtype").is_none());
+    }
+
+    #[test]
+    fn chelis_2965_reflection_is_discharged_per_width_and_fails_at_f32() {
+        // No consumer may be validated at a width where the property is false:
+        // the f32 discharge of reflection fails on the shipped graph, so an f32
+        // consumer composes to Failed while an f64 consumer stays validated.
+        let at = |widths: &[Prim]| {
+            standard_contract_registry(widths, &chelis_std_bundle::EMBEDDED_RUNTIME).probe_consumer(
+                "put_call_parity",
+                CompositeVerdict::Proven,
+                [NORMAL_CDF_REFLECTION],
+            )
+        };
+        let f64_probe = at(&[Prim::F64]);
+        assert_eq!(
+            f64_probe.composite_verdict,
+            CompositeVerdict::ProvenModuloFuzzValidatedContract
+        );
+        let f32_probe = at(&[Prim::F32]);
+        assert_eq!(f32_probe.composite_verdict, CompositeVerdict::Failed);
+        let evidence = &f32_probe.assumptions[0]
+            .discharge
+            .as_ref()
+            .unwrap()
+            .evidence;
+        assert_eq!(evidence["status"], "failed");
+        assert_eq!(evidence["dtype"], "f32");
+        assert!(evidence.get("counterexample").is_some());
+        // A consumer that can reach both widths gets the weaker one.
+        let both = at(&[Prim::F64, Prim::F32]);
+        assert_eq!(both.composite_verdict, CompositeVerdict::Failed);
+        let evidence = &both.assumptions[0].discharge.as_ref().unwrap().evidence;
+        assert_eq!(
+            evidence["widths"],
+            serde_json::json!({"f64": "validated", "f32": "failed"})
+        );
+    }
+
+    #[test]
+    fn chelis_2965_unnamed_consumer_width_resolves_at_every_admitted_width() {
+        assert_eq!(consumer_widths(&[]), CONTRACT_FLOAT_WIDTHS.to_vec());
+        assert_eq!(
+            consumer_widths(&[Prim::Int32]),
+            CONTRACT_FLOAT_WIDTHS.to_vec()
+        );
+        assert_eq!(consumer_widths(&[Prim::F32, Prim::F32]), vec![Prim::F32]);
+    }
+
+    #[test]
+    fn chelis_2965_exp_positivity_is_the_float_property() {
+        let invariant = all_invariants()
+            .into_iter()
+            .find(|invariant| invariant.id == EXP_POSITIVITY)
+            .unwrap();
+        assert_eq!(invariant.assumption, "forall x. exp(x) >= 0");
+        let discharge = invariant.record.discharge.unwrap();
+        assert_eq!(discharge.method, DischargeMethod::Fuzz);
+        assert_eq!(discharge.evidence["status"], "validated");
+    }
+
+    #[test]
+    fn chelis_2965_exp_positivity_samples_reach_underflow_where_the_strict_law_fails() {
+        // The positivity sampler at each width reaches inputs where exp
+        // underflows to +0, so the strict real-model law `exp(x) > 0` is
+        // refuted there while the restated `exp(x) >= 0` holds.
+        for prim in [Prim::F32, Prim::F64] {
+            let radius = exp_underflow_radius(prim);
+            let strict = fuzz_unary(prim, 4096, 0xE0_2026, radius, "strict", |x| {
+                if kernel("exp", x).as_f64_lossy() > 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            });
+            let counterexample = strict
+                .counterexample
+                .unwrap_or_else(|| panic!("strict exp positivity not refuted at {}", prim.name()));
+            let x = counterexample["x"].as_f64().unwrap();
+            assert!(x < -100.0, "{}: {x}", prim.name());
+            let weak = fuzz_unary(prim, 4096, 0xE0_2026, radius, "weak", |x| {
+                let y = kernel("exp", x).as_f64_lossy();
+                if y >= 0.0 { 0.0 } else { -y }
+            });
+            assert!(weak.counterexample.is_none(), "{}", prim.name());
+        }
+    }
+
+    #[test]
+    fn chelis_2965_per_width_outcomes_of_the_float_contracts() {
+        // Executed per-width verdicts of the shipped graph and the correctly
+        // rounded kernels. Reflection holds only at f64: near zero `1 - N(x)`
+        // and `N(-x)` lie on different rounding grids at the narrower widths.
+        // The section 3.3 `Phi` graph is monotone at every width.
+        let expected = [
+            (NORMAL_CDF_RANGE, ["validated"; 4]),
+            (
+                NORMAL_CDF_REFLECTION,
+                ["failed", "failed", "failed", "validated"],
+            ),
+            (NORMAL_CDF_MONOTONICITY, ["validated"; 4]),
+            (EXP_POSITIVITY, ["validated"; 4]),
+            (EXP_MONOTONICITY, ["validated"; 4]),
+            (LOG_MONOTONICITY, ["validated"; 4]),
+            (LOG_ONE, ["validated"; 4]),
+        ];
+        let invariants =
+            standard_contracts_at(&CONTRACT_FLOAT_WIDTHS, &chelis_std_bundle::EMBEDDED_RUNTIME)
+                .into_iter()
+                .flat_map(|contract| contract.invariants)
+                .collect::<Vec<_>>();
+        for (id, statuses) in expected {
+            let invariant = invariants
+                .iter()
+                .find(|invariant| invariant.id == id)
+                .unwrap();
+            let widths = &invariant.record.discharge.as_ref().unwrap().evidence["widths"];
+            for (prim, status) in CONTRACT_FLOAT_WIDTHS.iter().zip(statuses) {
+                assert_eq!(widths[prim.name()], status, "{id} at {}", prim.name());
+            }
+        }
+    }
+
+    // --- chelis#2957: the committed discharge table ---
+
+    #[test]
+    fn chelis_2957_discharge_table_canary_recomputes_the_f32_reflection_row() {
+        // The per-pull-request canary: one row recomputed now, the f32
+        // reflection discharge, which fails on the shipped graph. The nightly
+        // `standard_contract_discharge_table` test recomputes every row.
+        let committed = committed_discharge_table()
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| {
+                row.contract == NORMAL_CDF_REFLECTION && row.outcome.dtype == Some(Prim::F32)
+            })
+            .unwrap();
+        let recomputed = recompute_fuzz_discharge(
+            NORMAL_CDF_REFLECTION,
+            committed.samples,
+            committed.seed,
+            Some(Prim::F32),
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
+        assert_eq!(&recomputed, &committed.outcome);
+        assert!(recomputed.counterexample.is_some());
+    }
+
+    #[test]
+    fn chelis_2957_committed_table_rows_are_the_discharge_plan() {
+        let table = committed_discharge_table().unwrap();
+        let rows = table
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.contract.as_str(),
+                    row.samples,
+                    row.seed,
+                    row.outcome.dtype,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, discharge_plan());
+        assert_eq!(
+            table.std_graph_digest,
+            crate::std_graph::normal_cdf_graph_digest(&chelis_std_bundle::EMBEDDED_RUNTIME)
+                .unwrap()
+        );
+        assert_eq!(render_discharge_table(table), DISCHARGE_TABLE_JSON);
+    }
+
+    #[test]
+    fn chelis_2957_registry_reads_the_table_and_never_fuzzes() {
+        RECOMPUTED.with(|count| count.set(0));
+        let registry = standard_contract_registry(
+            &CONTRACT_FLOAT_WIDTHS,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
+        let probe = registry.probe_consumer(
+            "consumer",
+            CompositeVerdict::Proven,
+            [NORMAL_CDF_REFLECTION, EXP_POSITIVITY, QUANTILE_RANGE],
+        );
+        assert!(
+            probe
+                .assumptions
+                .iter()
+                .all(|record| record.discharge.is_some())
+        );
+        assert_eq!(RECOMPUTED.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn chelis_2957_registry_resolves_only_the_reached_contracts() {
+        let resolved = |contracts: &[&str], widths: &[Prim]| {
+            RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
+            let reached = contracts.iter().map(|id| id.to_string()).collect();
+            let registry = standard_contract_registry_for(
+                Some(&reached),
+                widths,
+                None,
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            );
+            let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, contracts);
+            assert!(
+                probe
+                    .assumptions
+                    .iter()
+                    .all(|record| record.discharge.is_some())
+            );
+            RESOLVED_ROWS.with(|rows| rows.borrow().clone())
+        };
+        // No float contract reached: no float discharge is resolved.
+        assert_eq!(
+            resolved(&[QUANTILE_RANGE], &[]),
+            vec![format!("{QUANTILE_RANGE}@untyped")]
+        );
+        assert!(resolved(&[EXP_ZERO], &[]).is_empty());
+        assert!(resolved(&[], &[]).is_empty());
+        assert_eq!(
+            resolved(&[NORMAL_CDF_REFLECTION], &[Prim::F32]),
+            vec![format!("{NORMAL_CDF_REFLECTION}@f32")]
+        );
+        // The unfiltered registry resolves every row of the plan.
+        RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
+        let _ = standard_contract_registry(
+            &CONTRACT_FLOAT_WIDTHS,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
+        assert_eq!(
+            RESOLVED_ROWS.with(|rows| rows.borrow().len()),
+            discharge_plan().len()
+        );
+    }
+
+    #[test]
+    fn chelis_2957_table_lookup_fails_closed() {
+        let table = committed_discharge_table().unwrap();
+        let shipped = || Ok(table.std_graph_digest.clone());
+        let failed = |outcome: FuzzOutcome| {
+            assert_eq!(outcome.checked_samples, 0);
+            outcome.counterexample.expect("a failed outcome")["discharge_table"].clone()
+        };
+        // The committed row is served.
+        let served = table_outcome(
+            Ok(table),
+            shipped,
+            NORMAL_CDF_RANGE,
+            8192,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        );
+        assert!(served.counterexample.is_none());
+        // A sample plan the table does not hold.
+        let reason = failed(table_outcome(
+            Ok(table),
+            shipped,
+            NORMAL_CDF_RANGE,
+            8191,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        ));
+        assert!(reason.as_str().unwrap().contains("has no row"), "{reason}");
+        // A width the table does not hold for an untyped contract.
+        failed(table_outcome(
+            Ok(table),
+            shipped,
+            QUANTILE_RANGE,
+            8192,
+            0xCA_2026,
+            Some(Prim::F64),
+        ));
+        // A normal_cdf row recorded against another shipped graph.
+        let other = || Ok("0".repeat(64));
+        let reason = failed(table_outcome(
+            Ok(table),
+            other,
+            NORMAL_CDF_RANGE,
+            8192,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        ));
+        assert_eq!(reason["shipped_std_graph_digest"], "0".repeat(64));
+        // The digest does not gate a row that does not read the graph.
+        let exp = table_outcome(
+            Ok(table),
+            other,
+            EXP_POSITIVITY,
+            4096,
+            0xE0_2026,
+            Some(Prim::F64),
+        );
+        assert!(exp.counterexample.is_none());
+        // An unreadable table.
+        failed(table_outcome(
+            Err("broken".to_string()),
+            shipped,
+            EXP_POSITIVITY,
+            4096,
+            0xE0_2026,
+            Some(Prim::F64),
+        ));
     }
 }

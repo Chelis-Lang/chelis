@@ -171,6 +171,7 @@ out = grad(loss, wrt=xs)(values, tensor_to_scalar(count(&mask, 0)))
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -245,6 +246,7 @@ bad = grad(loss, wrt=xs)([], runtime_zero)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -303,6 +305,7 @@ fn generate_runtime_list_index_grad_source(len: usize) -> String {
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

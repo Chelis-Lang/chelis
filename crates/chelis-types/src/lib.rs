@@ -7,6 +7,7 @@
 //! use chelis_types::EffectKind;
 //! ```
 
+pub mod activation;
 pub mod adt;
 pub mod agreement;
 pub mod bitwise;
@@ -46,6 +47,8 @@ pub mod unsupported;
 mod rejection_registry_generated;
 
 pub mod builtin_discovery;
+#[cfg(test)]
+mod builtin_value_contract_tests;
 mod builtins;
 /// Source architecture guard for the `infer` module tree. Test-only: it
 /// inspects source layout, so it has no place in a release build.
@@ -56,8 +59,9 @@ pub use bitwise::{BitwiseError, BitwiseKind, bitwise_scalar, bitwise_tensor};
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
-    CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting, Realizability,
-    ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys, prelude_adt_defs,
+    COMPARISON_OPS, CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting,
+    Realizability, ShapeClass, axis_argument_layout, builtin_call_effect, builtin_decl,
+    builtin_env, builtin_env_names, builtin_value_contract_carried, case_keys, prelude_adt_defs,
     realizability, shape_class,
 };
 pub use cancel::{
@@ -72,14 +76,15 @@ pub use dtype_semantics::{
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, PreparedDropout, PreparedUniformLike, RandomKey, RawScalar, RawTensor,
     ReduceWindowGradOp, ScalarValue, StorageView, TensorReduceOp, TensorStorage, UniformBound,
-    arg_reduce_tensor_groups, bf16_from_f64_rne, cast_raw, cast_scalar, cast_trunc_raw,
-    cast_trunc_scalar, cast_trunc_tensor, compare_scalar_tensor, compare_scalars,
-    compare_tensor_scalar, compare_tensors, count_tensor_groups, f16_from_f64_rne, finalize_scalar,
-    finalize_tensor, float_binop, float_scalar_tensor_binop, float_tensor_binop,
-    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
-    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
-    reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars,
-    uniform_like_bound_adjoint,
+    arg_reduce_tensor_groups, bf16_from_f64_rne, canonical_nan_scalar, cast_raw, cast_scalar,
+    cast_trunc_raw, cast_trunc_scalar, cast_trunc_tensor, compare_scalar_tensor, compare_scalars,
+    compare_tensor_scalar, compare_tensors, count_tensor_groups, cumsum_tensor_lanes,
+    f16_from_f64_rne, finalize_scalar, finalize_tensor, float_binop, float_scalar_tensor_binop,
+    float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
+    int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
+    named_cast_raw, named_cast_scalar, named_cast_tensor, reduce_tensor_groups,
+    reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64, scatter_add_tensor_groups,
+    tensor_from_scalars, uniform_like_bound_adjoint,
 };
 pub use fitness::{
     FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,
@@ -96,9 +101,12 @@ pub use infer::{
     reset_grow_segment_bytes_for_test, resolve_declared_surface, run_on_grown_stack,
     set_grow_segment_bytes_for_test,
 };
-pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use linearity::{
+    LinearityInfo, check_linearity, check_linearity_with_context,
+    param_names as lexical_param_names, pattern_names as lexical_pattern_names,
+};
 pub use observation::{ElementRef, format_element, format_key, format_key_bits};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
-    linked_binding_in_module_of,
+    linked_binding_in_module_of, linked_constructor_source_name,
 };

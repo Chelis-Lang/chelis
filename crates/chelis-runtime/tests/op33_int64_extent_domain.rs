@@ -239,11 +239,11 @@ const NEGATIVE_MATRIX: &[(&str, &str)] = &[
     ),
     (
         "split-negative-size-compensating",
-        "Domain: split expects nonnegative i64 sizes, got -1",
+        "split list entry 1 is negative: -1\nnumeric trap: domain in split at i64",
     ),
     (
         "split-negative-size-leading",
-        "Domain: split expects nonnegative i64 sizes, got -1",
+        "split list entry 0 is negative: -1\nnumeric trap: domain in split at i64",
     ),
     (
         "concat-output-extent-at-i64-ceiling",

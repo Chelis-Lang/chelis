@@ -16,7 +16,7 @@ pub fn run(source: &str, native: bool) -> (bool, String) {
         let built = Command::cargo_bin("chelis")
             .expect("chelis")
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
-            .args(["build", "--allow-style-violations"])
+            .args(["build", "--emit-c", "--allow-style-violations"])
             .arg(&path)
             .args(["--target", "c", "-o"])
             .arg(&destination)

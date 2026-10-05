@@ -27,8 +27,10 @@ chelis-effects.workspace = true
 chelis-ir.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true
+# The evaluator pins the IEEE default floating-point environment with the
+# runtime's one implementation of the entry/exit guard (chelis#2964).
+chelis-runtime.workspace = true
 chelis-reef.workspace = true
-chelis-std-bundle.workspace = true
 chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-validate.workspace = true
@@ -42,13 +44,16 @@ serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+chelis-crmath.workspace = true
 tempfile = "3"
 # Tests that link generated C stage the runtime the bundle carries
 # (spec/08-backends.md §2.1) and link that exact archive; `ownership-ledger`
 # enables the ledger in that runtime.
-chelis-runtime.workspace = true
 chelis-runtime-bundle.workspace = true
 chelis-reef.workspace = true
+# Tests link the embedded chelis-std runtime; the library takes it as a
+# parameter and never depends on the bundle.
+chelis-std-bundle.workspace = true
 bincode = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
@@ -87,6 +92,11 @@ required-features = ["ownership-ledger"]
 [[test]]
 name = "fixed_control_host_c"
 path = "tests/fixed_control_host_c.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2957_eval_declared_width"
+path = "tests/issue_2957_eval_declared_width.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
@@ -140,8 +150,78 @@ path = "tests/issue_2577_filter_named_predicate.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2599_contextual_nullary_host_types"
+path = "tests/issue_2599_contextual_nullary_host_types.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2642_comparison_operand_extents"
+path = "tests/issue_2642_comparison_operand_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2781_loop_result_captured_by_a_loop"
 path = "tests/issue_2781_loop_result_captured_by_a_loop.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2883_extent_declaration_order"
+path = "tests/issue_2883_extent_declaration_order.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2891_aggregate_shared_operand"
+path = "tests/issue_2891_aggregate_shared_operand.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2907_scatter_update_extents"
+path = "tests/issue_2907_scatter_update_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_3029_scatter_replace_update_extents"
+path = "tests/issue_3029_scatter_replace_update_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_626_float_mod"
+path = "tests/issue_626_float_mod.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2076_integer_tensor_binops"
+path = "tests/issue_2076_integer_tensor_binops.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_3101_borrowed_operands"
+path = "tests/issue_3101_borrowed_operands.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_759_saturate_wrap"
+path = "tests/issue_759_saturate_wrap.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_3000_host_computed_comparisons"
+path = "tests/issue_3000_host_computed_comparisons.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_3031_sort_matches_eval"
+path = "tests/issue_3031_sort_matches_eval.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2914_record_operand_routing"
+path = "tests/issue_2914_record_operand_routing.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2917_activation_dimensions"
+path = "tests/issue_2917_activation_dimensions.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]

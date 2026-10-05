@@ -30,6 +30,42 @@ fn bool_value(shape: Vec<usize>, values: Vec<i64>) -> TensorValue {
     TensorValue::finalize_from_wide_int("logical oracle", Prim::Bool, shape, values).unwrap()
 }
 
+/// Evaluate `dag` with each named input a rank-1 tensor of ones of its
+/// length. chelis#2642: a same-shape operation whose operand extents the
+/// graph does not prove equal verifies, and checks their agreement when it
+/// runs (runtime_extents.md C2.3), so disagreeing lengths fail here.
+fn evaluate_lengths(dag: &Dag, precision: Prim, inputs: &[(&str, usize)]) -> Result<(), String> {
+    let inputs = inputs
+        .iter()
+        .map(|(name, length)| {
+            let ones = if precision == Prim::Bool {
+                bool_value(vec![*length], vec![1; *length])
+            } else {
+                value(precision, vec![*length], vec![1.0; *length])
+            };
+            ((*name).to_string(), ones)
+        })
+        .collect::<UnordMap<_, _>>();
+    eval_tensor(dag, &inputs).map(|_| ())
+}
+
+/// `dag` verifies, runs with agreeing lengths, and fails with disagreeing
+/// ones (chelis#2642).
+fn verifies_and_checks_agreement_when_run(
+    dag: &Dag,
+    precision: Prim,
+    agreeing: &[(&str, usize)],
+    disagreeing: &[(&str, usize)],
+    why: &str,
+) {
+    assert_eq!(verify::verify(dag), Vec::<String>::new(), "{why}");
+    evaluate_lengths(dag, precision, agreeing)
+        .unwrap_or_else(|error| panic!("{why}: agreeing lengths: {error}"));
+    if evaluate_lengths(dag, precision, disagreeing).is_ok() {
+        panic!("{why}: disagreeing lengths must fail when the graph runs");
+    }
+}
+
 fn scalar_bits(value: &TensorValue, index: usize) -> serde_json::Value {
     serde_json::to_value(value.storage().scalar_at(index)).unwrap()
 }
@@ -257,10 +293,10 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         verify::verify(&witnessed)
     );
 
-    let mut invalid = Dag::new();
-    let invalid_decl = invalid.declare("test");
-    let left = invalid.add_node(
-        invalid_decl,
+    let mut unproved = Dag::new();
+    let unproved_decl = unproved.declare("test");
+    let left = unproved.add_node(
+        unproved_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -268,8 +304,8 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         symbolic("n", Prim::F32),
         None,
     );
-    let right = invalid.add_node(
-        invalid_decl,
+    let right = unproved.add_node(
+        unproved_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -278,18 +314,19 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     tier2::lower_lt(
-        invalid_decl.into(),
-        &mut invalid,
+        unproved_decl.into(),
+        &mut unproved,
         left,
         right,
         &inferred_result,
         None,
     );
-    assert!(
-        verify::verify(&invalid)
-            .iter()
-            .any(|error| error.contains("exactly matching operand shape")),
-        "distinct unresolved symbols must still fail closed"
+    verifies_and_checks_agreement_when_run(
+        &unproved,
+        Prim::F32,
+        &[("left", 2), ("right", 2)],
+        &[("left", 2), ("right", 3)],
+        "distinct unresolved symbols are neither proved equal nor contradictory",
     );
 }
 
@@ -1030,11 +1067,12 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     distinct_symbols.add_root(compared);
-    assert!(
-        verify::verify(&distinct_symbols)
-            .iter()
-            .any(|error| error.contains("operand shape")),
-        "distinct unresolved symbols must not be treated as the same shape"
+    verifies_and_checks_agreement_when_run(
+        &distinct_symbols,
+        Prim::F32,
+        &[("left", 2), ("right", 2)],
+        &[("left", 2), ("right", 3)],
+        "distinct unresolved symbols are checked when the comparison runs",
     );
 
     let mut distinct_logical_symbols = Dag::new();
@@ -1073,16 +1111,74 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         },
         None,
     );
-    assert!(
-        verify::verify(&distinct_logical_symbols)
+    verifies_and_checks_agreement_when_run(
+        &distinct_logical_symbols,
+        Prim::Bool,
+        &[("left", 2), ("right", 2)],
+        &[("left", 2), ("right", 3)],
+        "distinct unresolved symbols are checked when the logical operation runs",
+    );
+
+    // Literal extents that differ contradict, and the verifier still
+    // refuses each operation over them.
+    let contradiction = |op: RiscOp, precisions: &[Prim], output: Prim| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let inputs = precisions
             .iter()
-            .any(|error| error.contains("exactly matching shape")),
-        "logical operations must reject distinct unresolved shape symbols"
+            .enumerate()
+            .map(|(index, precision)| {
+                dag.add_node(
+                    decl,
+                    RiscOp::Load {
+                        name: format!("input{index}").into(),
+                    },
+                    vec![],
+                    ty(&[2 + index.min(1)], *precision),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        dag.add_node(decl, op, inputs, ty(&[2], output), None);
+        verify::verify(&dag)
+    };
+    let errors = contradiction(
+        RiscOp::Compare(ComparisonKind::Eq),
+        &[Prim::F32, Prim::F32],
+        Prim::Bool,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("contradicting operand shapes")),
+        "{errors:?}"
+    );
+    let errors = contradiction(
+        RiscOp::Logical(LogicalKind::And),
+        &[Prim::Bool, Prim::Bool],
+        Prim::Bool,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("output shape must match its operands")),
+        "{errors:?}"
+    );
+    let errors = contradiction(
+        RiscOp::Where,
+        &[Prim::Bool, Prim::F32, Prim::F32],
+        Prim::F32,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("shapes that contradict")),
+        "{errors:?}"
     );
 }
 
 #[test]
-fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs() {
+fn verifier_defers_unproved_operand_shapes_and_rejects_producerless_anonymous_outputs() {
     let named = |name: &str, precision| TensorType {
         dims: vec![DimInfo::Named(name.into(), None)],
         precision,
@@ -1127,11 +1223,12 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         named("runtime", Prim::Bool),
         None,
     );
-    assert!(
-        verify::verify(&compare)
-            .iter()
-            .any(|error| error.contains("operand shape")),
-        "an unrelated shape dependency must not actualize a comparison operand"
+    verifies_and_checks_agreement_when_run(
+        &compare,
+        Prim::F32,
+        &[("decoy", 2), ("left", 2)],
+        &[("decoy", 3), ("left", 2)],
+        "a comparison operand shaped by an unrelated dependency is checked when it runs",
     );
 
     let mut logical = Dag::new();
@@ -1171,11 +1268,12 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         named("runtime", Prim::Bool),
         None,
     );
-    assert!(
-        verify::verify(&logical)
-            .iter()
-            .any(|error| error.contains("exactly matching shape")),
-        "an unrelated shape dependency must not actualize a logical operand"
+    verifies_and_checks_agreement_when_run(
+        &logical,
+        Prim::Bool,
+        &[("decoy", 2), ("left", 2), ("right", 2)],
+        &[("decoy", 2), ("left", 2), ("right", 3)],
+        "a logical operand shaped by an unrelated dependency is checked when it runs",
     );
 
     let mut where_dag = Dag::new();
@@ -1222,11 +1320,10 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         named("runtime", Prim::F32),
         None,
     );
-    assert!(
-        verify::verify(&where_dag)
-            .iter()
-            .any(|error| error.contains("branches must have exactly matching type")),
-        "an unrelated shape dependency must not actualize a where branch"
+    assert_eq!(
+        verify::verify(&where_dag),
+        Vec::<String>::new(),
+        "a where branch shaped by an unrelated dependency is checked when it runs"
     );
 
     let mut anonymous_compare_output = Dag::new();
@@ -1293,7 +1390,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     assert!(
         verify::verify(&anonymous_logical_output)
             .iter()
-            .any(|error| error.contains("exactly matching shape")),
+            .any(|error| error.contains("output shape")),
         "logical output needs explicit authority for an anonymous dimension"
     );
 
@@ -1325,11 +1422,12 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     unresolved_compare_authority.add_shape_dep(output, left);
-    assert!(
-        verify::verify(&unresolved_compare_authority)
-            .iter()
-            .any(|error| error.contains("operand shape") || error.contains("output shape")),
-        "an unresolved anonymous input must not launder comparison output authority"
+    verifies_and_checks_agreement_when_run(
+        &unresolved_compare_authority,
+        Prim::F32,
+        &[("left", 2), ("right", 2)],
+        &[("left", 2), ("right", 3)],
+        "an anonymous comparison output takes its operand's checked extent",
     );
 
     let mut unresolved_logical_authority = Dag::new();
@@ -1360,11 +1458,12 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     unresolved_logical_authority.add_shape_dep(output, left);
-    assert!(
-        verify::verify(&unresolved_logical_authority)
-            .iter()
-            .any(|error| error.contains("exactly matching shape")),
-        "an unresolved anonymous input must not launder logical output authority"
+    verifies_and_checks_agreement_when_run(
+        &unresolved_logical_authority,
+        Prim::Bool,
+        &[("left", 2), ("right", 2)],
+        &[("left", 2), ("right", 3)],
+        "an anonymous logical output takes its operand's checked extent",
     );
 }
 
@@ -1410,11 +1509,12 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         None,
     );
     add_dag.add_shape_dep(comparison, left);
-    assert!(
-        verify::verify(&add_dag)
-            .iter()
-            .any(|error| error.contains("operand shape")),
-        "a malformed same-shape operation must not inherit only its first input's axis"
+    verifies_and_checks_agreement_when_run(
+        &add_dag,
+        Prim::F32,
+        &[("left", 2), ("unrelated", 2)],
+        &[("left", 2), ("unrelated", 3)],
+        "the addition checks its operands before the comparison reads its result",
     );
 
     let mut pad_dag = Dag::new();
@@ -1447,11 +1547,14 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         None,
     );
     pad_dag.add_shape_dep(comparison, input);
+    // The pad's extent is one more than its input's, whatever the shape
+    // dependency says, so the comparison's agreement check refuses every run.
+    assert_eq!(verify::verify(&pad_dag), Vec::<String>::new());
+    let error = evaluate_lengths(&pad_dag, Prim::F32, &[("input", 2)])
+        .expect_err("a nonzero Pad shape dependency must not override its computed axis");
     assert!(
-        verify::verify(&pad_dag)
-            .iter()
-            .any(|error| error.contains("operand shape")),
-        "a nonzero Pad shape dependency must not override its computed axis"
+        error.contains("eq operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2"),
+        "{error}"
     );
 }
 
@@ -1652,16 +1755,16 @@ fn logical_random_activation_is_control_only_during_grad() {
     };
     let low = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, -1.0),
+        RiscOp::synth_const(Prim::F64, -1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let high = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, 1.0),
+        RiscOp::synth_const(Prim::F64, 1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let seed = dag.add_node(

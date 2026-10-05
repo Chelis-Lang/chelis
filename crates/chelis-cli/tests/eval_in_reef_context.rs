@@ -15,9 +15,6 @@
 //!    inside `cmd_eval` actually routes through the new API and that
 //!    `format_eval_result` formats the output the same way the legacy
 //!    `try_eval` did.
-//!
-//! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
-//! Phase H for the owning plan.
 
 use assert_cmd::Command;
 use chelis_compiler_api::{compile_reef_context, eval_in_context};
@@ -158,7 +155,12 @@ fn cmd_eval_reef_failure_preserves_transcript_channels() {
 ///    `<name> = <value>` lines, joined by newline, followed by the
 ///    `println!` trailing newline).
 fn expected_stdout(package_root: &Path, snippet: &str) -> String {
-    let ctx = compile_reef_context(Path::new(""), package_root).expect("compile_reef_context");
+    let ctx = compile_reef_context(
+        Path::new(""),
+        package_root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile_reef_context");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let mut lines = result.transcript.clone();
     // Issue #912 [05-OBS-6]: always label, matching format_eval_result.
@@ -305,19 +307,19 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
     );
 }
 
-/// Fixture #3: a snippet (no Module wrapper) evaluated from inside the
-/// package via `current_dir`. Covers the
-/// "loose snippet routes through `find_package_root_for_dir`" branch
-/// of the Phase H detector — equivalent to what `eval_reef.rs` already
-/// covers but explicitly compared against the baseline so a regression
-/// in dispatch can't pass silently.
+/// Fixture #3: a snippet (no Module wrapper) inside the package, evaluated
+/// from a directory outside every package. A file belongs to the package
+/// found by walking up from the file itself (spec/02 §P2, chelis#2918), so
+/// the snippet routes through the reef context whatever the current
+/// directory is, and the output is compared against the baseline so a
+/// regression in dispatch can't pass silently.
 #[test]
-fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
+fn cmd_eval_reef_package_loose_snippet_inside_the_package_matches_baseline() {
     let (_dir, root) = path_dep_package();
-    // Place the snippet OUTSIDE the package so the only way to detect
-    // the reef context is via `find_package_root_for_dir(current_dir)`.
-    let snippet_dir = tempdir().expect("snippet tempdir");
-    let entry_path = snippet_dir.path().join("snippet.ch");
+    // Run from a directory outside every package, so only the file's own
+    // location can select the reef context.
+    let elsewhere = tempdir().expect("elsewhere tempdir");
+    let entry_path = root.join("snippet.ch");
     let snippet = "import Mylib.Math (square)\n\n\
                    bench_value: i32 = square(7)\n";
     write_file(&entry_path, snippet);
@@ -327,7 +329,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .current_dir(&root)
+        .current_dir(elsewhere.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
         .expect("run chelis eval");
@@ -335,7 +337,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
     let actual = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert_eq!(
         actual, expected,
-        "Phase H cwd-detected reef package must match baseline"
+        "Phase H reef package found from the snippet's location must match baseline"
     );
 }
 
@@ -354,8 +356,8 @@ fn cmd_eval_raw_file_outside_reef_package_uses_legacy_path() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        // Set current_dir to a tempdir guaranteed not to be inside any
-        // reef package so the cwd-detect path also returns None.
+        // Run from the file's own tempdir, which no reef package contains,
+        // so no reef context applies.
         .current_dir(dir.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
@@ -607,6 +609,54 @@ fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run()
         !stderr.contains("SENTINEL_QF017"),
         "the effect of an unsurfaced host-arrow root must not run (0x): \
          the debug sentinel leaked into stderr: {stderr}"
+    );
+}
+
+/// Host-arrow-root surfacing, case (b'), the effect-free guard across a
+/// package boundary. The nullary entry declaration has no effect of its own:
+/// its `IO` comes from a library callee, so only the library's effect rows
+/// can show it is effectful. The root stays unsurfaced and the effect does not
+/// run, exactly as when the entry calls `debug` itself. The pure twin is case
+/// (a), whose library callee is effect-free and whose root is surfaced.
+#[test]
+fn cmd_eval_host_arrow_root_with_effectful_library_callee_stays_unsurfaced() {
+    let (_dir, root) = path_dep_package();
+    write_file(
+        &root.join("mylib/src/log.ch"),
+        "module Mylib.Log\nexport (shout)\n\n\
+         def shout(message: string) -> string = debug(message)\n",
+    );
+    let entry_path = root.join("src/arrowlibeff.ch");
+    let snippet = "module App.ArrowLibEff\n\
+                   import Mylib.Log (shout)\n\n\
+                   def logged() -> string = shout(\"SENTINEL_2863\")\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    assert!(
+        !roots.iter().any(|r| r["name"].as_str() == Some("logged")),
+        "a nullary root whose IO comes from a library callee must NOT be surfaced; \
+         got roots: {roots:?}"
+    );
+    assert!(
+        !stdout.contains("SENTINEL_2863") && !stderr.contains("SENTINEL_2863"),
+        "the library callee's effect ran for an unsurfaced root: stdout={stdout:?} \
+         stderr={stderr}"
     );
 }
 

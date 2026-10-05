@@ -1,8 +1,8 @@
 { ... }:
 
 {
-  tasks."chelis:install-commit-hook" = {
-    description = "Install the tracked commit-msg hook into the shared hooks directory";
+  tasks."chelis:install-git-hooks" = {
+    description = "Install the tracked commit-msg, pre-commit, and pre-push hooks into the shared hooks directory";
     after = [ "devenv:enterShell" ];
     exec = ''
       set -eu
@@ -15,44 +15,46 @@
       # worktree; the core.hooksPath comparison below is a string compare and
       # would miss an equivalent path spelled the other way.
       hooks_dir="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
-      template="$(git rev-parse --show-toplevel)/.githooks/commit-msg"
-
-      if [ ! -f "$template" ]; then
-        printf '%s\n' "commit hook: $template is missing; skipping install" >&2
-        exit 0
-      fi
-
+      templates="$(git rev-parse --show-toplevel)/.githooks"
       mkdir -p "$hooks_dir"
-      if ! cmp -s "$template" "$hooks_dir/commit-msg"; then
-        # Stage under a PID-unique name, then rename. Two things matter here.
-        # `cp` truncates before it writes and git silently accepts a commit
-        # whose hook is zero length, so copying over the live hook would leave
-        # a window with the guard off; `mv` within one directory is atomic.
-        # The name must also be unique per installer: every worktree of a clone
-        # writes to this one shared directory, so concurrent devenv shells race,
-        # and `cp` preserves the destination inode and mode. A shared staging
-        # name therefore lets one installer truncate another's already-executable
-        # file to zero bytes and the other publish it. mktemp rather than a
-        # PID-derived name: `$$` in a subshell reports the parent's PID, so it
-        # is not per-installer under every invocation shape.
-        staged="$(mktemp "$hooks_dir/commit-msg.XXXXXX")"
-        cp "$template" "$staged"
-        chmod 755 "$staged"
-        mv "$staged" "$hooks_dir/commit-msg"
-      fi
-      # Unconditionally, not inside the copy branch: `cmp` compares content, so
-      # an installed copy that lost its executable bit matches the template and
-      # would never be repaired. Git skips a non-executable hook silently, which
-      # is the one failure mode this whole change exists to prevent.
-      chmod +x "$hooks_dir/commit-msg"
+
+      for hook in commit-msg pre-commit pre-push; do
+        template="$templates/$hook"
+        if [ ! -f "$template" ]; then
+          printf '%s\n' "git hooks: $template is missing; skipping its install" >&2
+          continue
+        fi
+        if ! cmp -s "$template" "$hooks_dir/$hook"; then
+          # Stage under a unique name, then rename. Two things matter here.
+          # `cp` truncates before it writes and git silently accepts a commit
+          # whose hook is zero length, so copying over the live hook would leave
+          # a window with the guard off; `mv` within one directory is atomic.
+          # The name must also be unique per installer: every worktree of a clone
+          # writes to this one shared directory, so concurrent devenv shells race,
+          # and `cp` preserves the destination inode and mode. A shared staging
+          # name therefore lets one installer truncate another's already-executable
+          # file to zero bytes and the other publish it. mktemp rather than a
+          # PID-derived name: `$$` in a subshell reports the parent's PID, so it
+          # is not per-installer under every invocation shape.
+          staged="$(mktemp "$hooks_dir/$hook.XXXXXX")"
+          cp "$template" "$staged"
+          chmod 755 "$staged"
+          mv "$staged" "$hooks_dir/$hook"
+        fi
+        # Unconditionally, not inside the copy branch: `cmp` compares content, so
+        # an installed copy that lost its executable bit matches the template and
+        # would never be repaired. Git skips a non-executable hook silently, which
+        # is the one failure mode this whole change exists to prevent.
+        chmod +x "$hooks_dir/$hook"
+      done
 
       # An installed hook that cannot run is worse than none, because it
       # looks configured. core.hooksPath overrides the common directory, so
       # say so loudly rather than silently installing into a dead path.
       configured="$(git config --get core.hooksPath || true)"
       if [ -n "$configured" ] && [ "$configured" != "$hooks_dir" ]; then
-        printf '%s\n' "commit hook: core.hooksPath is set to $configured, so the" >&2
-        printf '%s\n' "hook installed at $hooks_dir will NOT run. Run:" >&2
+        printf '%s\n' "git hooks: core.hooksPath is set to $configured, so the" >&2
+        printf '%s\n' "hooks installed at $hooks_dir will NOT run. Run:" >&2
         printf '%s\n' "  git config --unset core.hooksPath" >&2
       fi
     '';

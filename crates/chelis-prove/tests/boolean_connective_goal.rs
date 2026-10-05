@@ -25,7 +25,7 @@ fn run(source: &str, tier: &str, samples: usize) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
         samples,
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) =
         run_surf_source_properties(source, &opts).expect("source parses and runs");

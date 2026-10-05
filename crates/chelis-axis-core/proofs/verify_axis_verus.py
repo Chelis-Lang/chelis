@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,21 @@ def run(*args: str | Path, cwd: Path = REPO, env: dict[str, str] | None = None) 
     subprocess.run([str(arg) for arg in args], cwd=cwd, env=env, check=True)
 
 
+def extract_archive(archive: Path, destination: Path) -> None:
+    """ZipFile extraction does not restore the release's POSIX executable bits."""
+    root = destination.resolve()
+    with zipfile.ZipFile(archive) as bundle:
+        for item in bundle.infolist():
+            path = (root / item.filename).resolve()
+            if not path.is_relative_to(root) or stat.S_ISLNK(item.external_attr >> 16):
+                raise ValueError(f"unsafe archive member: {item.filename}")
+        bundle.extractall(root)
+        for item in bundle.infolist():
+            mode = item.external_attr >> 16
+            if stat.S_ISREG(mode):
+                (root / item.filename).chmod(stat.S_IMODE(mode) & 0o777)
+
+
 def verifier_home() -> Path:
     try:
         asset, expected = ASSETS[(platform.system(), platform.machine())]
@@ -66,8 +82,7 @@ def verifier_home() -> Path:
     actual = hashlib.sha256(archive.read_bytes()).hexdigest()
     if actual != expected:
         raise SystemExit(f"Verus archive SHA-256 mismatch: {actual}")
-    with zipfile.ZipFile(archive) as bundle:
-        bundle.extractall(cache)
+    extract_archive(archive, cache)
     if not (home / "cargo-verus").is_file():
         raise SystemExit(f"Verus archive lacks cargo-verus: {home}")
     return home

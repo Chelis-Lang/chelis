@@ -103,6 +103,7 @@ fn vmap_over_symbolic_column_builds_without_symbolic_dim_ice() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

@@ -7,9 +7,11 @@
 //! This test compiles `examples/illustrative/copy_elision_probe.ch` to C and
 //! inspects the output. The locked findings:
 //!
-//!   * Zero `memcpy` calls. Explicit copies materialize through the same
-//!     contiguous realization loop used by `realize`, not through raw byte
-//!     copying.
+//!   * Zero `memcpy` calls in the code lowered from the probe. Explicit copies
+//!     materialize through the same contiguous realization loop used by
+//!     `realize`, not through raw byte copying. The linked correctly rounded
+//!     kernels (`exp`, `log`, `sin`) are `chelis-crmath`'s fixed text, whose
+//!     float bit casts are `memcpy`; they are set aside before counting.
 //!   * Ten independently owned tensor values: six fresh physical allocations
 //!     plus four exact-capacity repurposes selected by Phase 3's proof-bearing
 //!     planner. Borrowed `chelis_slot*` / `chelis_alloc_view` wrappers remain
@@ -43,6 +45,7 @@ use std::fs;
 use std::process::Command;
 
 use assert_cmd::cargo::CommandCargoExt;
+use chelis_crmath::c_source::{Kernel, kernel_text};
 use tempfile::tempdir;
 
 fn build_copy_elision_c_source() -> String {
@@ -53,6 +56,7 @@ fn build_copy_elision_c_source() -> String {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             "../../examples/illustrative/copy_elision_probe.ch",
             "--target",
             "c",
@@ -143,14 +147,36 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
     (total, count, per_alloc)
 }
 
+/// The unit without the correctly rounded kernel text the C backend linked
+/// into it: exactly the bytes `kernel_text` gives for the entries it calls.
+fn without_linked_kernels(source: &str) -> String {
+    let mut called: Vec<Kernel> = source
+        .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+        .filter_map(Kernel::from_entry)
+        .collect();
+    called.sort();
+    called.dedup();
+    assert!(
+        !called.is_empty(),
+        "the probe's exp, log, and sin call correctly rounded kernels"
+    );
+    let text = kernel_text(&called);
+    assert_eq!(
+        source.matches(text.as_str()).count(),
+        1,
+        "the unit carries its kernels' text exactly once"
+    );
+    source.replacen(text.as_str(), "", 1)
+}
+
 #[test]
 fn copy_probe_materializes_explicit_copies_without_memcpy() {
-    let source = build_copy_elision_c_source();
+    let source = without_linked_kernels(&build_copy_elision_c_source());
 
     let alloc_calls = source.matches("chelis_alloc(").count();
     let repurpose_calls = source.matches("chelis_tensor_repurpose(").count();
     let memcpy_calls = source.matches("memcpy(").count();
-    let fused_kernels = source.matches("parallel for simd").count();
+    let fused_kernels = source.matches("omp for simd").count();
     let restrict_qualifiers = source.matches("restrict").count();
     let borrowed_slot_wrappers = source.matches("chelis_slot").count();
     let legacy_view_allocations = source.matches("chelis_alloc_view").count();

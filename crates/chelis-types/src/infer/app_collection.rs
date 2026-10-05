@@ -1,8 +1,103 @@
 //! Collection operation and constructor rules.
 //!
-//! These helpers preserve list callback diagnostics and concat shape rules.
+//! These helpers own registered aggregate application checks and the
+//! post-unification list callback and dictionary rules, and preserve list
+//! callback diagnostics, deferred result constraints and concat shape rules.
 
 use super::*;
+
+/// Finish registered non-concat aggregates before the remaining operation
+/// families run. Concat retains its separate tensor/collection selector.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_registered_aggregate(
+    rule: builtins::AggregateRule,
+    source_site: CheckSite<'_>,
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    func_name: &Option<String>,
+    arg_tys: &[Type],
+    ret_tv: &Type,
+    env: &Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    let name = func_name
+        .as_deref()
+        .expect("registered aggregate has a name");
+    if arg_tys
+        .iter()
+        .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
+    {
+        return subst.apply(ret_tv);
+    }
+    let operands = match rule {
+        builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
+            if arg_tys.len() != 3 {
+                return report_builtin_arity(errors, node, source_site, name, 3, arg_tys.len());
+            }
+            let element = vg.fresh_type();
+            if let Err(error) = unify(
+                &arg_tys[2],
+                &Type::Adt("List".to_string(), vec![element.clone()]),
+                subst,
+            ) {
+                return report(errors, error.into());
+            }
+            // Invoke the callback with the initial accumulator. Its
+            // result is an independent slot: equality with the next
+            // accumulator belongs to the aggregate rule below.
+            let callback_result = match unify_checked_call_contract(
+                &kids[1],
+                None,
+                &arg_tys[0],
+                &[arg_tys[1].clone(), element],
+                None,
+                vg,
+                subst,
+                errors,
+                product,
+            ) {
+                Ok(result) => result,
+                Err(rejected) => return rejected,
+            };
+            if rule == builtins::AggregateRule::Scan {
+                vec![
+                    Type::Adt("List".to_string(), vec![arg_tys[1].clone()]),
+                    Type::Adt("List".to_string(), vec![callback_result]),
+                ]
+            } else {
+                vec![arg_tys[1].clone(), callback_result]
+            }
+        }
+        builtins::AggregateRule::Append
+        | builtins::AggregateRule::DictInsert
+        | builtins::AggregateRule::DictMerge
+        | builtins::AggregateRule::Concat => arg_tys.to_vec(),
+    };
+    match rule.decide(&operands, ret_tv, subst) {
+        Ok(Some(equation)) => {
+            subst.record_result_constraint(equation);
+            subst.apply(ret_tv)
+        }
+        Ok(None) => {
+            let name = func_name
+                .as_deref()
+                .expect("registered aggregate has a name");
+            UnresolvedOperandSite::new(node, kids, name, env).defer(
+                arg_tys,
+                ret_tv,
+                product,
+                ret_tv.clone(),
+            )
+        }
+        Err(mut error) => {
+            error.message = with_node_provenance(node, error.message);
+            report(errors, *error)
+        }
+    }
+}
 
 pub(super) fn collection_helper_type_error(
     node: &DeepNode,
@@ -212,7 +307,7 @@ impl CollectionDecision {
 ///
 pub(crate) fn decide_collection_constraint(
     constraint: &CollectionConstraint,
-    tensor_concat: Option<&TensorConcatCallEvidence>,
+    evidence: Option<&CollectionCallEvidence>,
     subst: &Subst,
 ) -> Result<Option<CollectionDecision>, String> {
     let result = constraint.result().clone();
@@ -270,7 +365,18 @@ pub(crate) fn decide_collection_constraint(
                 Type::Tensor(dims, _) => dims,
                 _ => vec![],
             };
-            dims.push(Dim::Wildcard);
+            // [05-OP-71]: a static count is the appended extent and a static
+            // negative count is refused, as the direct checker reads them.
+            dims.push(match evidence {
+                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) if *count < 0 => {
+                    return Err(format!(
+                        "split_keys argument 2: expected non-negative count, got {count} \
+                         ([05-OP-71])"
+                    ));
+                }
+                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) => Dim::Lit(*count),
+                _ => Dim::Wildcard,
+            });
             Ok(Some(CollectionDecision::RequiredEquality {
                 actual: Type::Tuple(vec![count.clone(), result.clone()]),
                 expected: Type::Tuple(vec![
@@ -338,9 +444,12 @@ pub(crate) fn decide_collection_constraint(
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
                 if lhs_name == "List" && lhs_args.len() == 1 =>
             {
-                let (raw_axis, list_info) = tensor_concat
-                    .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
-                    .unwrap_or((None, ConcatListInfo::BindingLen(None)));
+                let (raw_axis, list_info) = match evidence {
+                    Some(CollectionCallEvidence::TensorConcat(evidence)) => {
+                        (evidence.raw_axis, evidence.list_info.clone())
+                    }
+                    _ => (None, ConcatListInfo::BindingLen(None)),
+                };
                 tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(
                     |produced| {
                         Some(CollectionDecision::ProducedResult {
@@ -426,6 +535,25 @@ pub(super) enum ConcatListInfo {
     /// come from the §4.5.2 joined element type, so the sum is
     /// `joined extent x length` and requires uniform extents.
     BindingLen(Option<usize>),
+}
+
+/// Static call-site evidence with which a consumed transported relation is
+/// decided: what the direct checker reads from argument expressions rather
+/// than from their types. A checked function value carries the operation
+/// rule; its application contributes this evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CollectionCallEvidence {
+    TensorConcat(TensorConcatCallEvidence),
+    /// [05-OP-71]: `split_keys`'s count, when its expression folds to a
+    /// static integer.
+    SplitKeysCount(Option<i64>),
+}
+
+/// The static count of one already-inferred `split_keys`-shaped application,
+/// read exactly as `check_split_keys_signature` reads a direct call's.
+pub(super) fn split_keys_call_count(kids: &[deep::Expr], env: &Env) -> Option<i64> {
+    kids.get(2)
+        .and_then(|count| fold_static_int_expr(count, |name| env.static_size_value(name)))
 }
 
 /// Read the tensor-concat evidence from one already-inferred application.
@@ -554,18 +682,6 @@ pub(super) fn static_list_len(expr: Option<&deep::Expr>, env: &Env) -> Option<us
     None
 }
 
-/// Record (or clear) the statically-known list-literal length of a
-/// binding so a later `concat(name, axis)` can count elements
-/// (chelis#631). Add-symmetric like the size-provenance marking beside
-/// it: a re-bind to a non-literal RHS must clear any stale entry. A
-/// `(var other)` RHS propagates an existing entry transitively.
-pub(super) fn note_list_literal_binding(env: &mut Env, name: &str, rhs: &deep::Expr) {
-    match static_list_len(Some(rhs), env) {
-        Some(len) => env.mark_list_literal_len(name, len),
-        None => env.clear_list_literal_len(name),
-    }
-}
-
 /// Resolve an ADT constructor application and enforce its call shape.
 pub(super) fn prepare_constructor_application(
     func_name: &Option<String>,
@@ -642,6 +758,611 @@ pub(super) fn prepare_constructor_application(
     }
 
     Ok(ctor_lookup_name)
+}
+
+/// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
+/// Float, aggregate, tensor and random-key types are not dictionary keys.
+fn is_dict_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
+        _ => false,
+    }
+}
+
+/// List callback and dictionary rules after generic application
+/// unification: `map`, `filter`, `partition`, `flat_map`, `flatten`, `zip`,
+/// `enumerate` and the `dict_*` operations. [`finish_unified_app`] calls this
+/// for any callee its own dispatch does not name; `None` means `fname` is
+/// not one of these operations, or its rule had nothing to decide, and the
+/// dispatcher continues exactly as when the arms were inline.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_collection_app(
+    fname: &str,
+    source_site: CheckSite<'_>,
+    node: &DeepNode,
+    arg_tys: &[Type],
+    result_ty: &Type,
+    site: &UnresolvedOperandSite<'_>,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Option<Type> {
+    match fname {
+        "map" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            let elem_ty = vg.fresh_type();
+            let out_ty = vg.fresh_type();
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[0]),
+                &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[1]),
+                &Type::Adt("List".to_string(), vec![elem_ty]),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            return Some(Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]));
+        }
+        "filter" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            let elem_ty = vg.fresh_type();
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[0]),
+                &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                subst,
+            ) {
+                return Some(report(
+                    errors,
+                    collection_helper_type_error(
+                        node,
+                        "filter",
+                        "expects a callback that returns bool",
+                        te,
+                    ),
+                ));
+            }
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[1]),
+                &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            return Some(Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]));
+        }
+        "partition" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            let elem_ty = vg.fresh_type();
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[0]),
+                &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                subst,
+            ) {
+                return Some(report(
+                    errors,
+                    collection_helper_type_error(
+                        node,
+                        "partition",
+                        "expects a callback that returns bool",
+                        te,
+                    ),
+                ));
+            }
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[1]),
+                &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
+            return Some(Type::Tuple(vec![out_list.clone(), out_list]));
+        }
+        "flat_map" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            let elem_ty = vg.fresh_type();
+            let out_elem_ty = vg.fresh_type();
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[0]),
+                &Type::Fn(
+                    vec![elem_ty.clone()],
+                    Box::new(Type::Adt("List".to_string(), vec![out_elem_ty.clone()])),
+                ),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            if let Err(te) = unify(
+                &subst.apply(&arg_tys[1]),
+                &Type::Adt("List".to_string(), vec![elem_ty]),
+                subst,
+            ) {
+                return Some(report(errors, te.into()));
+            }
+            return Some(Type::Adt(
+                "List".to_string(),
+                vec![subst.apply(&out_elem_ty)],
+            ));
+        }
+        "flatten" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(outer_name, outer_args)
+                        if outer_name == "List" && outer_args.len() == 1 =>
+                    {
+                        match &outer_args[0] {
+                            Type::Adt(inner_name, inner_args)
+                                if inner_name == "List" && inner_args.len() == 1 =>
+                            {
+                                return Some(Type::Adt(
+                                    "List".to_string(),
+                                    vec![inner_args[0].clone()],
+                                ));
+                            }
+                            Type::Error(_) => return Some(result_ty.clone()),
+                            Type::Var(_) => {
+                                return Some(site.defer(
+                                    arg_tys,
+                                    result_ty,
+                                    product,
+                                    result_ty.clone(),
+                                ));
+                            }
+                            other => {
+                                return Some(report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_node_provenance(
+                                            node,
+                                            format!(
+                                                "flatten expects List[List[T]] input, got List[{other}]"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("flatten expects List[List[T]] input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "zip" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            let lhs = subst.apply(&arg_tys[0]);
+            let rhs = subst.apply(&arg_tys[1]);
+            match (lhs, rhs) {
+                (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                    if lhs_name == "List"
+                        && rhs_name == "List"
+                        && lhs_args.len() == 1
+                        && rhs_args.len() == 1 =>
+                {
+                    return Some(Type::Adt(
+                        "List".to_string(),
+                        vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
+                    ));
+                }
+                // chelis#1512: an upstream failure keeps the early
+                // return, so the cascade still suppresses. Order matters:
+                // an (Error, Var) pair must suppress, not suspend.
+                (Type::Error(_), _) | (_, Type::Error(_)) => {
+                    return Some(result_ty.clone());
+                }
+                (Type::Var(_), _) | (_, Type::Var(_)) => {
+                    return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                }
+                (lhs, rhs) => {
+                    return Some(report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(
+                                node,
+                                format!("zip expects List inputs, got {lhs} and {rhs}"),
+                            ),
+                            vec![],
+                        ),
+                    ));
+                }
+            }
+        }
+        "enumerate" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                        return Some(Type::Adt(
+                            "List".to_string(),
+                            vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
+                        ));
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("enumerate expects List input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "dict_of" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                        // chelis#2523: `dict_of`'s input is a list of
+                        // `(key, value)` pairs, so an element whose type is
+                        // still a variable is constrained to a pair rather
+                        // than admitted. That ties the result's key and
+                        // value types to the list's element, so a declared
+                        // result determines them (`dict_of([])`), and the
+                        // key rule below decides once the key is known.
+                        if let Type::Var(_) = subst.apply(&args[0]) {
+                            let pair = Type::Tuple(vec![vg.fresh_type(), vg.fresh_type()]);
+                            if let Err(te) = unify(&args[0], &pair, subst) {
+                                return Some(report(errors, te.into()));
+                            }
+                        }
+                        match subst.apply(&args[0]) {
+                            Type::Tuple(items) if items.len() == 2 => {
+                                let dict = Type::Adt(
+                                    "Dict".to_string(),
+                                    vec![items[0].clone(), items[1].clone()],
+                                );
+                                match &items[0] {
+                                    key if is_dict_key_type(key) => {}
+                                    Type::Error(_) => return Some(result_ty.clone()),
+                                    Type::Var(_) => {
+                                        return Some(site.defer(arg_tys, result_ty, product, dict));
+                                    }
+                                    other => {
+                                        return Some(report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_node_provenance(
+                                                    node,
+                                                    format!(
+                                                        "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56]), got {other}"
+                                                    ),
+                                                ),
+                                                vec![],
+                                            ),
+                                        ));
+                                    }
+                                }
+                                return Some(dict);
+                            }
+                            Type::Error(_) => return Some(result_ty.clone()),
+                            other => {
+                                return Some(report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_node_provenance(
+                                            node,
+                                            format!(
+                                                "dict_of expects List[(K, V)] input, got List[{other}]"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("dict_of expects List input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "dict_get" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
+                    if let Err(te) = unify(&args[0], &key_ty, subst) {
+                        return Some(report(errors, te.into()));
+                    }
+                    return Some(Type::Adt("Option".to_string(), vec![subst.apply(&args[1])]));
+                }
+                (Type::Error(_), _) | (_, Type::Error(_)) => return Some(result_ty.clone()),
+                // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                // route once the operand binds, and decides it at its
+                // instantiations if it never does.
+                (Type::Var(_), _) | (_, Type::Var(_)) => {
+                    return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                }
+                (dict_ty, key_ty) => {
+                    return Some(report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(
+                                node,
+                                format!(
+                                    "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    ));
+                }
+            }
+        }
+        "dict_contains" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
+                    if let Err(te) = unify(&args[0], &key_ty, subst) {
+                        return Some(report(errors, te.into()));
+                    }
+                    return Some(Type::Prim(Prim::Bool));
+                }
+                (Type::Error(_), _) | (_, Type::Error(_)) => return Some(result_ty.clone()),
+                // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                // route once the operand binds, and decides it at its
+                // instantiations if it never does.
+                (Type::Var(_), _) | (_, Type::Var(_)) => {
+                    return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                }
+                (dict_ty, key_ty) => {
+                    return Some(report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(
+                                node,
+                                format!(
+                                    "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    ));
+                }
+            }
+        }
+        "dict_remove" => {
+            if arg_tys.len() != 2 {
+                return Some(report_builtin_arity(
+                    errors,
+                    node,
+                    source_site,
+                    fname,
+                    2,
+                    arg_tys.len(),
+                ));
+            }
+            match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
+                    if let Err(te) = unify(&args[0], &key_ty, subst) {
+                        return Some(report(errors, te.into()));
+                    }
+                    return Some(Type::Adt(
+                        "Dict".to_string(),
+                        vec![subst.apply(&args[0]), subst.apply(&args[1])],
+                    ));
+                }
+                (Type::Error(_), _) | (_, Type::Error(_)) => return Some(result_ty.clone()),
+                // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                // route once the operand binds, and decides it at its
+                // instantiations if it never does.
+                (Type::Var(_), _) | (_, Type::Var(_)) => {
+                    return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                }
+                (dict_ty, key_ty) => {
+                    return Some(report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_node_provenance(
+                                node,
+                                format!(
+                                    "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    ));
+                }
+            }
+        }
+        "dict_keys" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                        return Some(Type::Adt("List".to_string(), vec![args[0].clone()]));
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("dict_keys expects Dict input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "dict_values" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                        return Some(Type::Adt("List".to_string(), vec![args[1].clone()]));
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("dict_values expects Dict input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "dict_entries" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                        return Some(Type::Adt(
+                            "List".to_string(),
+                            vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
+                        ));
+                    }
+                    Type::Error(_) => return Some(result_ty.clone()),
+                    Type::Var(_) => {
+                        return Some(site.defer(arg_tys, result_ty, product, result_ty.clone()));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("dict_entries expects Dict input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 #[cfg(test)]

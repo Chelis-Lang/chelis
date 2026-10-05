@@ -8,7 +8,8 @@
 //! 2. the `CHELIS_TOOLCHAIN` environment variable.
 //! 3. a `chelis-toolchain` file found by walking up from the cwd (its
 //!    first non-empty line is a bare version).
-//! 4. the nearest `reef.toml` `compiler = "=X.Y.Z"` pin, walking up.
+//! 4. the nearest `reef.toml` `compiler = "=X.Y.Z"` pin, walking up,
+//!    except for explicit `reef setup` (the pin is its provisioning target).
 //! 5. the recorded default (`<home>/default`).
 //!
 //! This is the reasoned order from the packaging design (§5.2): the
@@ -134,8 +135,13 @@ pub fn resolve(input: &ResolveInput) -> Option<Resolution> {
         });
     }
 
-    // 4. nearest reef.toml compiler pin (full upward walk).
-    if let Some((ver, path)) = find_reef_pin(input.cwd) {
+    // 4. The project pin selects a compiler, but is setup's provisioning
+    // target. Explicit setup uses the recorded default orchestrator after
+    // honoring the three deliberate overrides. Do not make this depend on
+    // whether the pin is installed: it is a dispatch rule, not a fallback.
+    let is_setup = forwarded.first().is_some_and(|arg| arg == "reef")
+        && forwarded.get(1).is_some_and(|arg| arg == "setup");
+    if !is_setup && let Some((ver, path)) = find_reef_pin(input.cwd) {
         return Some(Resolution {
             version: ver,
             source: ToolchainSource::ReefPin(path),
@@ -240,6 +246,80 @@ mod tests {
             s.write_default(d).unwrap();
         }
         s
+    }
+
+    #[test]
+    fn explicit_setup_uses_default_instead_of_project_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_default(tmp.path(), Some("0.18.12"));
+        fs::write(
+            tmp.path().join("reef.toml"),
+            "[package]\ncompiler = \"=0.9.9\"\n",
+        )
+        .unwrap();
+        let args = osv(&["reef", "setup", "--path", "project with spaces"]);
+        let result = resolve(&ResolveInput {
+            args: &args,
+            env_toolchain: None,
+            cwd: tmp.path(),
+            store: &store,
+        })
+        .unwrap();
+        assert_eq!(result.version, "0.18.12");
+        assert_eq!(
+            result.source,
+            ToolchainSource::Default(store.default_file())
+        );
+        assert_eq!(result.forwarded_args, args);
+    }
+
+    #[test]
+    fn explicit_setup_does_not_select_a_project_pin_without_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_default(tmp.path(), None);
+        fs::write(
+            tmp.path().join("reef.toml"),
+            "[package]\ncompiler = \"=0.9.9\"\n",
+        )
+        .unwrap();
+        let args = osv(&["reef", "setup"]);
+        assert!(
+            resolve(&ResolveInput {
+                args: &args,
+                env_toolchain: None,
+                cwd: tmp.path(),
+                store: &store
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn only_exact_setup_dispatch_skips_the_project_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_default(tmp.path(), Some("0.18.12"));
+        fs::write(
+            tmp.path().join("reef.toml"),
+            "[package]\ncompiler = \"=0.9.9\"\n",
+        )
+        .unwrap();
+        for items in [
+            &["reef", "doctor"][..],
+            &["reef", "setups"][..],
+            &["--help", "reef", "setup"][..],
+            &["check", "reef", "setup"][..],
+        ] {
+            let args = osv(items);
+            let result = resolve(&ResolveInput {
+                args: &args,
+                env_toolchain: None,
+                cwd: tmp.path(),
+                store: &store,
+            })
+            .unwrap();
+            assert_eq!(result.version, "0.9.9", "{items:?}");
+            assert!(matches!(result.source, ToolchainSource::ReefPin(_)));
+        }
     }
 
     #[test]

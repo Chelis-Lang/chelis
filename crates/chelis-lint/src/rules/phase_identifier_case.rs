@@ -1,7 +1,7 @@
 //! Rule `phase-identifier-case`. The historic `phaseA_*.rs` style embeds a
 //! camelCase chunk in an otherwise snake-case filename. New artifacts use
 //! semantic names; legacy artifacts that must retain the identifier use
-//! `phase_a_*.rs` (`CONTRIBUTING.md` § Declarative Naming).
+//! `phase_a_*.rs` (`docs/maintainer_guide.md` § Declarative Naming).
 
 use crate::{Context, Rule, Surface, Violation};
 use regex::Regex;
@@ -26,7 +26,7 @@ impl Rule for PhaseIdentifierCase {
     }
 
     fn spec_ref(&self) -> &str {
-        "CONTRIBUTING.md § Declarative Naming"
+        "docs/maintainer_guide.md § Declarative Naming"
     }
 
     fn applies_to(&self) -> &[Surface] {
@@ -53,7 +53,8 @@ impl Rule for PhaseIdentifierCase {
                 line: None,
                 col: None,
                 message: format!(
-                    "filename `{name}` uses legacy `phaseA` form; choose a semantic name, or use `phase_a` only when compatibility requires retaining the identifier, per CONTRIBUTING.md § Declarative Naming"
+                    "filename `{name}` uses legacy `phaseA` form; choose a semantic name, or use `phase_a` only when compatibility requires retaining the identifier, per {}",
+                    self.spec_ref()
                 ),
             }]
         } else {
@@ -83,7 +84,14 @@ mod tests {
         let v = run("phaseA_item6_from_github.rs");
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("phase_a"));
-        assert_eq!(v[0].spec_ref, "CONTRIBUTING.md § Declarative Naming");
+        assert_eq!(
+            v[0].spec_ref,
+            "docs/maintainer_guide.md § Declarative Naming"
+        );
+        assert!(
+            v[0].message
+                .ends_with("per docs/maintainer_guide.md § Declarative Naming")
+        );
     }
 
     #[test]

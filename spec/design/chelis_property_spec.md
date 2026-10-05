@@ -283,7 +283,7 @@ surfaces the check diagnostics and never reports success on a type-broken
 module. Derived producer obligations cannot be meaningfully verified
 without the checker-inferred signatures, so a rejectable producer must not
 be hidden behind an unrelated type error. Strict downstream prove-compat
-admission (FlukeBall) relies on this: a `prove` that exits `0` warrants
+admission relies on this: a `prove` that exits `0` warrants
 that the module type-checked and every obligation was discharged.
 
 ## JSON Output
@@ -375,7 +375,7 @@ In addition to `{kind:"property"}` records, `chelis prove` emits one
 invariant-carrying opaque type, and the `{kind:"summary"}` record gains an
 `obligations` field. These are **additive**: existing `kind:"property"` and
 `kind:"summary"` records and fields are unchanged in meaning, and a strict
-admission parser (FlukeBall) must add `kind:"obligation"` to its accepted
+downstream admission parser must add `kind:"obligation"` to its accepted
 record set deliberately at pin time — it is a new record kind, not a change
 to an existing one.
 

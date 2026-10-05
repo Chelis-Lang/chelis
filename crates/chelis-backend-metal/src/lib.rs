@@ -7,13 +7,12 @@
 //!
 //! Architectural decision: the Metal backend is **pure string emission** in
 //! Rust. There is no `metal-rs` / `objc` / `cocoa` crate dep. Apple-SDK
-//! integration happens later when the user runs
-//! `clang++ -fobjc-arc -framework Metal -framework Foundation` against the
-//! emitted `.mm`. This keeps the crate platform-portable (it builds on
+//! integration happens when the CLI invokes `clang++` against the emitted `.mm`
+//! (or downstream tooling compiles the `--emit-c` output). This keeps the crate platform-portable (it builds on
 //! Linux unchanged) and mirrors HIP exactly.
 //!
 //! See `spec/design/chelis_metal_backend_plan.md` and
-//! `spec/08-backends.md` §4 (Phase M).
+//! `spec/08-backends.md` §4.
 
 /// Primitive types the Metal backend's tensor-DAG path can realize.
 /// Declared from Metal hardware spec (Apple Silicon): no f64 support.
@@ -266,6 +265,7 @@ pub fn codegen_metal(
     func_name: &str,
 ) -> Result<MetalCodegenResult, Unsupported> {
     let dag = plan.dag();
+    chelis_ir::dag::reject_device_correctly_rounded_ops(dag.nodes(), "metal")?;
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);
     let symbolic_dims = dag.symbolic_params();

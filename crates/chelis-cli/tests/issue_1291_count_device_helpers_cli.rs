@@ -24,6 +24,7 @@ fn assert_device_target_emits_count_helper(target: &str) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().expect("UTF-8 example path"),
             "--target",
             target,
@@ -92,6 +93,7 @@ fn assert_multiple_count_helpers_use_separate_device_translation_units(target: &
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().expect("UTF-8 fixture path"),
             "--target",
             target,
@@ -156,6 +158,7 @@ fn metal_cli_gates_a_count_helper_with_the_full_device_policy() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().expect("UTF-8 fixture path"),
             "--target",
             "metal",
@@ -201,6 +204,7 @@ fn hip_cli_emits_a_count_helper_with_direct_sub() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().expect("UTF-8 fixture path"),
             "--target",
             "hip",
@@ -266,6 +270,7 @@ fn build_deep_uses_target_specific_direct_arithmetic_policy() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 deep.to_str().expect("UTF-8 fixture path"),
                 "--target",
                 target,

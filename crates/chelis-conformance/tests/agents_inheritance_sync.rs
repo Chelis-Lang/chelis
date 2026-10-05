@@ -38,9 +38,18 @@ fn scaffold_materializes_the_complete_pinned_agents_contract() {
     )
     .unwrap();
 
+    // The complete contract, with its repo-relative links pinned to the
+    // shell's release (contract §1).
+    const PATH: &str = "AGENTS.md";
     assert_eq!(
         managed_block::normalize_body(&block.body),
-        managed_block::normalize_body(&upstream)
+        managed_block::normalize_body(&chelis_conformance::links::pin_links(
+            &upstream,
+            PATH,
+            PATH,
+            VER,
+            &chelis_conformance::links::LocalTargets::for_shell(&[]),
+        ))
     );
     for skill in chelis_conformance::skills::SHARED_SKILLS {
         assert!(
@@ -54,7 +63,7 @@ fn scaffold_materializes_the_complete_pinned_agents_contract() {
 fn shell_owned_heading_exclusion_filters_sync_and_removal_restores_upstream() {
     let (_tmp, root) = green_shell();
     let path = root.join("AGENTS.md");
-    let local_text = "\n## Voyage Local Rule\nKeep experiment eras immutable.\n";
+    let local_text = "\n## Shell Local Rule\nKeep experiment eras immutable.\n";
     append(&path, local_text);
     let selector = selector_block(&["### Numeric Surface Discipline"]);
     append(&path, &selector);

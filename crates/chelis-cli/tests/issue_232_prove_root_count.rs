@@ -84,18 +84,13 @@ fn issue232_prove_with_module_export_does_not_phantom_root() {
         ));
 }
 
-/// Same shape but with `import` instead of `export` — both fall
-/// through the same lower_top_level catch-all, both must be skipped.
-/// The `import Math` directive desugars to an `(import {} Math (...))`
-/// Deep node whose lower-time emission of a `Const` root would
-/// otherwise add a phantom root.
-#[test]
-fn issue232_prove_with_module_import_does_not_phantom_root() {
-    let dir = tempdir().expect("tempdir");
-    let prop = dir.path().join("prop.ch");
-    let src = "\
+/// The `module Foo.Bar` program with an `import` directive in place of the
+/// `export`, shared by the import tests below.
+fn module_with_import(import: &str) -> String {
+    format!(
+        "\
 module Foo.Bar
-import Math
+{import}
 
 def w1() = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 
@@ -103,16 +98,29 @@ sig forward: tensor[2, f32] -> tensor[2, f32]
 def forward(x) = add(x, w1())
 
 @property output_sums_to_one forall(x: tensor[2, f32]):
-  {
+  {{
     y = forward(x)
     total = tensor_to_scalar(sum(y, 0))
     _ = drop(x)
     (total >= -100.0)
-  }
+  }}
   with samples = 1
   with seed = 0
-";
-    std::fs::write(&prop, src).expect("write prop.ch");
+"
+    )
+}
+
+/// Same shape but with `import` instead of `export` — both fall
+/// through the same lower_top_level catch-all, both must be skipped.
+/// The directive desugars to an `(import {} ...)` Deep node whose
+/// lower-time emission of a `Const` root would otherwise add a phantom
+/// root. A file outside every package imports from the bundled
+/// chelis-std (chelis#2881), so the import names a module it can reach.
+#[test]
+fn issue232_prove_with_module_import_does_not_phantom_root() {
+    let dir = tempdir().expect("tempdir");
+    let prop = dir.path().join("prop.ch");
+    std::fs::write(&prop, module_with_import("import Std.Scalar (abs)")).expect("write prop.ch");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -129,6 +137,35 @@ def forward(x) = add(x, w1())
         .stdout(predicate::str::contains(
             "property: output_sums_to_one -- 1/1 passed",
         ));
+}
+
+/// The negative twin: in a file outside every package, an import of a
+/// module outside the bundled chelis-std is rejected, naming the module
+/// and the missing manifest (chelis#2881), rather than being ignored.
+#[test]
+fn issue232_prove_rejects_a_non_std_import_outside_a_package() {
+    let dir = tempdir().expect("tempdir");
+    let prop = dir.path().join("prop.ch");
+    std::fs::write(&prop, module_with_import("import Math")).expect("write prop.ch");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            prop.to_str().unwrap(),
+            "--samples",
+            "1",
+            "--seed",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unresolved import `Math`").and(predicate::str::contains(
+                "needs a `reef.toml` package manifest",
+            )),
+        )
+        .stdout(predicate::str::contains("1/1 passed").not());
 }
 
 /// Negative-shape control: the same program WITHOUT `module`/`export`

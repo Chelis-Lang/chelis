@@ -155,16 +155,18 @@ starting and again before merging, and use the acknowledgement lines it requires
    mergeability, and inspect the prospective merge with `git merge-tree`. Rebase only
    when that result differs, is unsafe or unclear, or an identified semantic or
    structural issue requires a changed head. If a rebase is already planned, do it before
-   any other pushed change.
+   any other pushed change. When a base update is necessary, rebase onto the target
+   rather than merging the target in, and prefer that rebase to closing and reopening the
+   pull request or rerunning old CI: a rerun reuses the old synthetic merge, and a reopen
+   reruns CI anyway without moving the head.
 4. Every base merge, base-changing rebase, or other force-pushed rewrite is declared in
    the PR body with exactly one head-bound line before it is pushed:
    `Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>` for a
-   base update, or `Candidate-history-rewrite: <new-head-sha> <specific approved reason>`
+   base update, or `Candidate-history-rewrite: <new-head-sha> <specific reason>`
    for any other rewrite. The preflight rejects a missing, duplicate, stale-head, or
    empty line. If it rejects an already-pushed head, repair the body and rerun that same
    workflow; do not manufacture another change to satisfy the guard.
-5. Never force-push a red gate. Obtain explicit approval before any force push, then
-   use an exact-head `--force-with-lease`.
+5. Never force-push a red gate. Force-push only with an exact-head `--force-with-lease`.
 6. Documentation-only changes still require applicable CI on the candidate head.
 7. When reviews and repairs are complete and no further content change is planned,
    dispatch `PR Package Expansion` with the pull request number and exact head SHA,
@@ -323,6 +325,13 @@ are symlinks to `agent-skills/`.
   `Claude-Session` trailers, Codex or Claude attribution, AI co-authorship markers, or
   AI-session links in commit messages or PR bodies. The tracked commit-msg hook rejects
   them; `README.md` explains how it is installed.
+- **Documents describe the current state.** A new or substantially revised document reads
+  as a description of how things are, for a reader who never saw the history: no dated
+  status ("as of", "currently", "no longer"), delivery narrative, or decision attribution;
+  history lives in the changelog and its fragments, pull requests, and issues. A design
+  doc may state the problem it addresses and the alternatives it rejected; investigation
+  records and the archive keep their dates. No absolute machine paths or personal email addresses in
+  tracked files.
 - **Issues are closed manually.** Automatic closure is disabled: `Closes #N` in a PR body
   or commit has no effect, and merging never closes an issue. Close one deliberately
   with `gh issue close N --comment "resolved by #<PR>"` once the behavior is confirmed
@@ -485,6 +494,10 @@ holds the measurements behind these rules.
   immediately with the exact missing items. Prefer a labelled partial report over
   silence or an overstated completion claim, and deduplicate repeated reports that
   race with a resume nudge.
+- Every follow-up message to a running subagent, and every message to a peer session,
+  ends by asking the recipient to acknowledge it and confirm what it will do. No
+  acknowledgement by the recipient's next reply means the message was not received:
+  resend it, consolidated.
 - More than five subagents live at once under one orchestrator needs the user's
   explicit approval and a stated reason. Five is the widest fan-out measured working
   here, not a certified safe width, and it is a separate budget from the CPU one above.
@@ -522,16 +535,18 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 - Type system: no implicit precision promotion, named tensor dimensions match by name,
   no implicit broadcasting (explicit `expand` only), integer literals default to `i32`
   and float literals to `f32`.
-- `chelis build` emits C, a header, runtime artifacts, and compile flags; `--target hip`
-  emits host code with embedded kernel strings. Neither invokes the native compiler.
+- `chelis build` invokes the native compiler for C, HIP, or Metal and produces an
+  executable or static library, retaining sources and runtime artifacts. `--emit-c`
+  stops after source emission. CPU is the acceptance priority; GPU targets remain
+  prerelease. See `docs/book/src/backends.md`.
 
 ## The Chelis-Lang Repositories
 
-One line each, as of 2026-09-21; `gh repo list Chelis-Lang` is the live set, and the
-conformance `REGISTRY` in `crates/chelis-conformance` is the authority on which shells
-the conformance tooling binds. Every shell consumes the compiler-bundled `chelis-std`
-runtime and is bound by the shell contract; the registry records whether it does so
-through reef, a Cargo workspace, or Docker.
+The public repositories, one line each. The conformance `REGISTRY` in
+`crates/chelis-conformance` is the authority on which shells the conformance tooling
+binds. Every shell consumes the compiler-bundled `chelis-std` runtime and is bound by
+the shell contract; the registry records whether it does so through reef, a Cargo
+workspace, or Docker.
 
 | Repository | Contains |
 |---|---|
@@ -539,33 +554,10 @@ through reef, a Cargo workspace, or Docker.
 | `nautilus` | Shell: numerical methods, statistics, linear algebra, optimization, ODE/SDE solvers, special functions. The scipy analogue. |
 | `coral` | Shell: typed dataframes whose numeric columns are tensors. The pandas analogue. |
 | `shoals` | Shell: quantitative finance on nautilus and coral: pricing, risk, curves, stochastic processes. |
-| `school` | Shell: machine learning, sole home of the NN surface (layers, losses, optimizers, training loop, model zoo). Reference implementation of the shell contract. |
-| `octant` | Shell: LaTeX-to-Chelis bridge with provenance tracking; a notation adapter, not a CAS. |
-| `c-earchin` | Shell: EARS requirements-to-Chelis bridge with property-witness metadata. |
-| `calcify` | Shell: Python-to-Chelis translation. |
-| `hydronnx` | Shell: ONNX import into Chelis IR. |
-| `whale` | Shell: reusable betting models. |
-| `hull` | Shell: the executable language specification, a self-hosted reference checker and evaluator differential-tested against the compiler. |
 | `hello-chelis` | Example programs; the smallest conforming shell. |
-| `beacon` | Shell, early and not yet registered: sound bound-propagation verification over lowered RISC DAGs. |
-| `LaCaDiLE` | Lean development of the typing rules: tensor derivatives, ownership, randomness and resource protocols. Supports the soundness work; does not certify the compiler. |
-| `buoy` | Rust tracer from normative requirement atoms to evidence, models, proofs, and implementation sites. |
-| `sonar` | Neural-network verification in C Note: reconnaissance, corpus, decision briefs. |
 | `economoist` | Verified economic and dynamic-programming models in Chelis. |
-| `c-note` | The verified-computing web notebook for finance, built on the Chelis stack. |
-| `ci` | Reusable CI/CD workflows and pinned actions consumed by every repository. |
-| `barnacle` | Standalone Dylint lint libraries maintained by the project. |
 | `arb-sys` | Rust bindings to the Arb arbitrary-precision library. |
-| `sand-dollar` | S3 cache configuration. |
-| `openspec` | Shared OpenSpec planning store, including Chelis's `chelis-*` domain; no compiler or numbered-spec authority. |
-| `.github` | Default community health files for the organization. |
-| `website` | Astro monorepo for chelis.ch and cproof.ai. |
-| `gtm` | C Proof go-to-market: brand, content, sales deck, talk tooling. |
-| `Voyage` | Agent-authoring benchmark: quantitative-finance program tasks against shoals. |
-| `Benchmarking-grading` | Answer keys for the benchmark, kept out of the solver-visible task repo. |
-| `ref-check` | Source-backed bibliography imports and offline LaTeX reference gates. |
-| `school-bootstrap` | Clean-room typed-Python references for sklearn algorithms, translated via calcify and vendored into school. |
-| `flukeball`, `flukeball_2`, `flukeball_house` | Private betting-model experiments; `_house` is the orchestrator side holding results the authoring agents must not see. |
+| `bed` | Versioned external civil data: the IANA time-zone database and the holiday and market-calendar packages that `Std.Datetime` consumes. |
 
 ## Pointers
 
@@ -573,7 +565,9 @@ through reef, a Cargo workspace, or Docker.
   symlinks to that one authored tree, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
   `red-team` alias is wired to `redteam-exec` with its fresh-round and verify modes. The
   set: `redteam-exec`, `spec-sync`, `phase-gate`, `backend-numerics`, `example-corpus`,
-  `cli-surface`, `packaging-install`, `issue-resolution`.
+  `cli-surface`, `packaging-install`, `issue-resolution`. Shells also receive
+  `chelis-std`, the downstream-authoring skill authored at
+  `packages/chelis-std/SKILL.md`.
 - **Toolchain and packaging.** `chelisup` is the installer and pin-resolving `chelis`
   shim; `chelis reef setup` is the orchestrator. Use the
   [`packaging-install` skill](agent-skills/packaging-install/SKILL.md) for any change

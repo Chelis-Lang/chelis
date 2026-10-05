@@ -91,9 +91,7 @@ fn adt_with_fields() {
 #[test]
 fn pipe_with_lambda() {
     check_ok(
-        "(def {} result
-           (pipe {} (lit {type: (t-prim {} f32)} 1.0)
-                    (fn {} (params {} x) (var {} x))))",
+        "(def {}\n  result\n  (app {} (fn {} (params {} x) (var {} x)) (lit {type: (t-prim {} f32)} 1.0)))\n",
     );
 }
 
@@ -177,6 +175,37 @@ fn independent_binding_generalization_visits_zero_environment_bindings() {
         crate::env::generalize_sweep_env_visits(),
         0,
         "the production level path must not enumerate environment bindings"
+    );
+}
+
+/// The shape of `Std.Datetime.Zone.date_rule_at`, without the stdlib: the
+/// scrutinee instantiates `day`'s deferred branch joins in the declaration
+/// scope, and the destructure's `let` carries those intermediates beside the
+/// pattern variable. Under `generalize-sweep-oracle` both generalizers must
+/// keep them shared; in every build the components stay tied to `found`.
+#[test]
+fn destructured_match_payload_keeps_scrutinee_join_intermediates_shared() {
+    let source = |use_of_a: &str| {
+        format!(
+            "def pick(c: bool, d: bool) -> i64 = {{\n\
+               day = if c then Some((1i64, 2i64)) else if d then Some((3i64, 4i64)) else None\n\
+               match day with {{\n\
+                 | Some(found) => {{\n\
+                   (a, b) = found\n\
+                   {use_of_a}\n\
+                 }}\n\
+                 | None => 0i64\n\
+               }}\n\
+             }}\n"
+        )
+    };
+    assert_surf_ok(&source("add(a, b)"));
+    let errors = surf_check_errors(&source("add(string_len(string_concat(a, \"!\")), b)"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "a destructured i64 component must not be usable as a string: {errors:?}"
     );
 }
 
@@ -667,9 +696,9 @@ def reorder(x: tensor[2, 2, 3, f32]) -> tensor[3, 2, 2, f32] =
     );
 
     for (axes, reason) in [
-        ("0, 0, 2", "appears more than once"),
-        ("-1, 0, 1", "out of bounds"),
-        ("3, 0, 1", "out of bounds"),
+        ("0, 0, 2", "got repeated axis 0"),
+        ("-1, 0, 1", "axis in 0..3"),
+        ("3, 0, 1", "axis in 0..3"),
         ("0, 1", "axis indices"),
     ] {
         let source = format!(
@@ -1149,7 +1178,7 @@ def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> ten
 }
 
 /// Ragged extents are NOT recoverable through a binding — only the
-/// literal length survives (`Env::list_literal_lens`), and the
+/// literal length survives (`Env::list_literal_len`), and the
 /// §4.5.2 join has already widened the mismatched extents to `*`. A
 /// let-bound ragged list therefore keeps the honest wildcard: a
 /// claim the direct form would reject is accepted permissively.
@@ -2200,7 +2229,10 @@ def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cas
 fn a_tensor_cast_to_a_key_is_rejected() {
     assert!(Prim::Key.is_valid_tensor_precision());
     let source = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::F32));
-    for mode in [chelis_deep::CastMode::Checked, chelis_deep::CastMode::Trunc] {
+    for mode in [
+        chelis_deep::CastMode::Checked,
+        chelis_deep::CastMode::Named(chelis_deep::NamedCastMode::Trunc),
+    ] {
         let error = crate::infer::expr_record::cast_result_from_settled_source(
             source.clone(),
             Prim::Key,
@@ -2221,5 +2253,524 @@ fn a_tensor_cast_to_a_key_is_rejected() {
             &crate::unify::Subst::new(),
         )
         .is_ok()
+    );
+}
+
+/// chelis#3009: spec/04 §4.3 types `cumsum`, `trace` and `einsum` as
+/// `sum_result(p, default(p))`, which is i32 for an i8 or i16 operand, the
+/// dtype both evaluation lanes store. The operand dtype is rejected as the
+/// result, and a dtype with no default sum accumulator is rejected outright.
+#[test]
+fn cumsum_and_trace_are_typed_by_the_default_sum_result() {
+    for (operand, result) in [
+        ("i8", "i32"),
+        ("i16", "i32"),
+        ("i32", "i32"),
+        ("i64", "i64"),
+        ("f16", "f16"),
+        ("bf16", "bf16"),
+        ("f32", "f32"),
+        ("f64", "f64"),
+    ] {
+        let cumsum =
+            format!("def f(x: tensor[3, {operand}]) -> tensor[3, {result}] = cumsum(x, 0)\n");
+        let errors = surf_check_errors(&cumsum);
+        assert!(errors.is_empty(), "{cumsum}: {errors:?}");
+        let trace =
+            format!("def f(x: tensor[2, 2, {operand}]) -> tensor[{result}] = trace(x, 0, 1)\n");
+        let errors = surf_check_errors(&trace);
+        assert!(errors.is_empty(), "{trace}: {errors:?}");
+        let einsum = format!(
+            "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {result}] = einsum(\"ij,jk->ik\", a, b)\n"
+        );
+        let errors = surf_check_errors(&einsum);
+        assert!(errors.is_empty(), "{einsum}: {errors:?}");
+    }
+    for operand in ["i8", "i16"] {
+        let cumsum =
+            format!("def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n");
+        assert!(
+            !surf_check_errors(&cumsum).is_empty(),
+            "{cumsum} must not check at the operand dtype"
+        );
+        let trace =
+            format!("def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n");
+        assert!(
+            !surf_check_errors(&trace).is_empty(),
+            "{trace} must not check at the operand dtype"
+        );
+        let einsum = format!(
+            "def f(a: tensor[1, 2, {operand}], b: tensor[2, 3, {operand}]) -> tensor[1, 3, {operand}] = einsum(\"ij,jk->ik\", a, b)\n"
+        );
+        assert!(
+            !surf_check_errors(&einsum).is_empty(),
+            "{einsum} must not check at the operand dtype"
+        );
+        // A consumer that requires the operand dtype rejects the widened prefix.
+        let downstream = format!(
+            "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+        );
+        assert!(
+            !surf_check_errors(&downstream).is_empty(),
+            "{downstream} must not check"
+        );
+    }
+    // The output extents follow the equation's labels.
+    let errors = surf_check_errors(
+        "def f(a: tensor[1, 2, f32], b: tensor[2, 3, f32]) -> tensor[3, 1, f32] = einsum(\"ij,jk->ik\", a, b)\n",
+    );
+    assert!(
+        !errors.is_empty(),
+        "einsum output extents must follow the equation"
+    );
+    let errors = surf_check_errors(
+        "def f(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[bool] = einsum(\"i,i->\", a, b)\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("default sum accumulator")),
+        "a bool einsum must be rejected for its dtype: {errors:?}"
+    );
+    // [05-OP-53] (chelis#3044): `cumsum` and `trace` carry the arithmetic
+    // operand family, as `sum` does, so a bool operand is refused at the
+    // operand before its result dtype is considered.
+    for (op, source) in [
+        (
+            "cumsum",
+            "def f(x: tensor[3, bool]) -> tensor[3, bool] = cumsum(x, 0)\n",
+        ),
+        (
+            "trace",
+            "def f(x: tensor[2, 2, bool]) -> tensor[bool] = trace(x, 0, 1)\n",
+        ),
+    ] {
+        let errors = surf_check_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains(&format!("`{op}`"))
+                    && error.message.contains("bool")),
+            "{source} must be rejected for its dtype: {errors:?}"
+        );
+    }
+}
+
+/// chelis#3009: a precision variable denotes every dtype its bound admits
+/// ([04-INF-6]), so `sum`, `cumsum`, `trace` and `einsum` over it type as
+/// `sum_result` only when that is one type across the bound: the variable
+/// itself for `Float` or `{i32, i64}`, one concrete dtype for `{i8, i16}`.
+/// `Int`, `Numeric` and an unbounded variable are rejected at the
+/// definition, where an i8 call would otherwise carry i32 data typed i8.
+#[test]
+fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
+    // The binder's dtypes have no single sum_result; the diagnostic names
+    // the operation's result rule.
+    let rejects_the_bound = |error: &CheckError| {
+        error.message.contains("has no single result dtype") && error.message.contains("sum_result")
+    };
+    let bodies = [
+        ("tensor[3, p]", "tensor[3, R]", "cumsum(x, 0i32)"),
+        ("tensor[3, p]", "tensor[R]", "sum(x, 0i32)"),
+        ("tensor[2, 2, p]", "tensor[R]", "trace(x, 0, 1)"),
+        ("tensor[2, p]", "tensor[R]", "einsum(\"i,i->\", copy(x), x)"),
+    ];
+    for (operand, result, body) in bodies {
+        for (bound, result_dtype) in [
+            ("Float", "p"),
+            ("{i32, i64}", "p"),
+            ("{f32, i64}", "p"),
+            ("{i8, i16}", "i32"),
+            ("{i8, i32}", "i32"),
+        ] {
+            let source = format!(
+                "def f[p: {bound}](x: {operand}) -> {} = {body}\n",
+                result.replace('R', result_dtype)
+            );
+            let errors = surf_check_errors(&source);
+            assert!(errors.is_empty(), "{source}: {errors:?}");
+        }
+        for binder in ["p: Int", "p: Numeric", "p: {i8, i64}", "p"] {
+            let source = format!(
+                "def f[{binder}](x: {operand}) -> {} = {body}\n",
+                result.replace('R', "p")
+            );
+            let errors = surf_check_errors(&source);
+            assert!(
+                errors.iter().any(rejects_the_bound),
+                "{source} must be rejected at the definition: {errors:?}"
+            );
+        }
+    }
+    // The reviewer's witness: at i8 the call would hold i32 data typed i8.
+    let errors = surf_check_errors(
+        "def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         def g(x: tensor[3, i8]) -> tensor[3, i8] = add(f(copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8, 10i8]))\n",
+    );
+    assert!(
+        errors.iter().any(rejects_the_bound),
+        "the generic i8 cumsum witness must be rejected: {errors:?}"
+    );
+    // A `Float` generic instantiates at f16 and keeps the operand dtype.
+    let errors = surf_check_errors(
+        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
+         out = f(cast(to_tensor([1.0, 2.0, 3.0]), f16))\n",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// chelis#3009: `einsum`'s operands share one dtype `p` ([05-OP-33]), so the
+/// checker identifies their precisions before deciding `sum_result(p)`.
+/// Two distinct binders, or two different concrete dtypes, are rejected,
+/// and no operand shape leaves the result undecided: an unresolved operand
+/// replays once it binds, and a malformed equation is rejected.
+#[test]
+fn einsum_operands_share_one_precision_and_the_result_is_always_decided() {
+    // The reviewer's two-binder witness.
+    let errors = surf_check_errors(
+        "def a[p: Int, q: Int](x: tensor[2, p], y: tensor[2, q]) -> tensor[2, p] = einsum(\"i,i->i\", x, y)\n\
+         def g(x: tensor[2, i8]) -> tensor[2, i8] = add(a(copy(x), copy(x)), x)\n\
+         out = g(to_tensor([10i8, 10i8]))\n",
+    );
+    assert!(!errors.is_empty(), "two distinct binders must not check");
+    // A concrete i8/i16 pair.
+    let errors = surf_check_errors(
+        "def f(x: tensor[2, i8], y: tensor[2, i16]) -> tensor[i32] = einsum(\"i,i->\", x, y)\n",
+    );
+    assert!(
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                && error.message.contains("share one dtype")
+        ),
+        "{errors:?}"
+    );
+    // Equation, rank and output-label violations are decided statically.
+    for equation in ["i,i", "i->i", "I,i->i", "ij,i->i", "i,i->ii", "i,i->k"] {
+        let source = format!(
+            "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = einsum(\"{equation}\", x, y)\n"
+        );
+        assert!(
+            !surf_check_errors(&source).is_empty(),
+            "{source} must not check"
+        );
+    }
+    // An unannotated lambda operand is decided when the call binds it.
+    let lambda = |declared: &str| {
+        format!(
+            "def f(x: tensor[2, i8]) -> tensor[{declared}] = {{\n  g = fn (a, b) -> einsum(\"i,i->\", a, b)\n  g(copy(x), x)\n}}\n"
+        )
+    };
+    let errors = surf_check_errors(&lambda("i32"));
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        !surf_check_errors(&lambda("i8")).is_empty(),
+        "the replayed einsum must type at i32"
+    );
+}
+
+/// chelis#3009: a variadic named-axis `sum` over an operand whose type is
+/// not yet known replays once the operand binds, so its result is
+/// `sum_result` of the bound dtype rather than left undecided.
+#[test]
+fn variadic_sum_over_an_unresolved_operand_is_decided_when_it_binds() {
+    let lambda = |declared: &str| {
+        format!(
+            "def f(x: tensor[seq, head, i8]) -> tensor[{declared}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+        )
+    };
+    let errors = surf_check_errors(&lambda("i32"));
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        !surf_check_errors(&lambda("i8")).is_empty(),
+        "the replayed sum must type at i32"
+    );
+}
+
+/// Every rejection that spec/04 §5.7.1's widening causes (an i8 or i16
+/// `sum`, `cumsum`, `trace` or `einsum` returns i32) names the operation,
+/// the operand and result dtypes and the rule, and says how to repair it:
+/// declare the widened result, or narrow it explicitly.
+#[test]
+fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
+    let message_of = |source: &str| -> String {
+        let errors = surf_check_errors(source);
+        assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+        errors[0].message.clone()
+    };
+    let assert_contains = |message: &str, phrases: &[&str]| {
+        for phrase in phrases {
+            assert!(message.contains(phrase), "missing `{phrase}` in: {message}");
+        }
+    };
+    for operand in ["i8", "i16"] {
+        let narrow = format!("narrow it explicitly with `cast(..., {operand})`");
+        // The concrete mismatch against a declared result, per operation.
+        for (op, source) in [
+            (
+                "cumsum",
+                format!("def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cumsum(x, 0)\n"),
+            ),
+            (
+                "sum",
+                format!("def f(x: tensor[3, {operand}]) -> tensor[{operand}] = sum(x, 0i32)\n"),
+            ),
+            (
+                "trace",
+                format!(
+                    "def f(x: tensor[2, 2, {operand}]) -> tensor[{operand}] = trace(x, 0, 1)\n"
+                ),
+            ),
+            (
+                "einsum",
+                format!(
+                    "def f(a: tensor[2, {operand}], b: tensor[2, {operand}]) -> tensor[{operand}] = einsum(\"i,i->\", a, b)\n"
+                ),
+            ),
+            (
+                "cumsum",
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = {{\n  y: tensor[3, {operand}] = cumsum(x, 0)\n  y\n}}\n"
+                ),
+            ),
+            (
+                "sum",
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[i32] = {{\n  y: tensor[{operand}] = sum(x, 0i32)\n  cast(y, i32)\n}}\n"
+                ),
+            ),
+        ] {
+            let message = message_of(&source);
+            assert_contains(
+                &message,
+                &[
+                    &format!("`{op}` over {operand} returns i32"),
+                    "spec/04 §5.7.1",
+                    "declare the result as i32",
+                    &narrow,
+                ],
+            );
+            // Only `sum` and `einsum` take an accumulator.
+            assert_eq!(
+                message.contains("pass `accumulator=i64` and declare i64"),
+                matches!(op, "sum" | "einsum"),
+                "{message}"
+            );
+        }
+        // A downstream operation that needs the operand dtype, and a call
+        // through a local function, cannot name the operation.
+        for source in [
+            format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = add(cumsum(copy(x), 0), x)\n"
+            ),
+            format!(
+                "def f(x: tensor[seq, head, {operand}]) -> tensor[{operand}] = {{\n  g = fn (t) -> sum(t, seq, head)\n  g(x)\n}}\n"
+            ),
+        ] {
+            let message = message_of(&source);
+            assert_contains(
+                &message,
+                &[
+                    &format!(
+                        "if the i32 value is the result of `sum`, `cumsum`, `trace` or `einsum` over {operand}"
+                    ),
+                    "spec/04 §5.7.1",
+                    "declare the result as i32",
+                    "for `sum` and `einsum`, pass `accumulator=i64` and declare i64",
+                    &narrow,
+                ],
+            );
+        }
+        // Both repairs check.
+        assert!(
+            surf_check_errors(&format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[3, i32] = cumsum(x, 0)\n"
+            ))
+            .is_empty()
+        );
+        let narrowed = format!(
+            "def f(x: tensor[3, {operand}]) -> tensor[3, {operand}] = cast(cumsum(x, 0), {operand})\n"
+        );
+        assert!(surf_check_errors(&narrowed).is_empty(), "{narrowed}");
+    }
+    // A mismatch the widening cannot explain carries no note.
+    let message = message_of("def f(x: tensor[3, i64]) -> tensor[3, i32] = cumsum(x, 0)\n");
+    assert!(!message.contains("§5.7.1"), "{message}");
+    // A binder whose bound admits i8 or i16 and that the widened result
+    // instantiates at i32.
+    for binder in ["{i8, i32}", "{i8, i16}"] {
+        let errors = surf_check_errors(&format!(
+            "def f[P: {binder}](x: tensor[3, P]) -> tensor[P] = sum(x, 0i32)\n"
+        ));
+        assert!(
+            errors.iter().any(|error| error.message.contains(
+                "if this i32 is the result of `sum`, `cumsum`, `trace` or `einsum` over i8 or i16, spec/04 §5.7.1 widened it"
+            )),
+            "{binder}: {errors:?}"
+        );
+    }
+    // The generic-binder rejection, and the same rejection decided for a hole.
+    let generic = [
+        "spec/04 §5.7.1 sums an i8 or i16 operand in i32",
+        "bound the variable to dtypes that share one result",
+        "declare the widened result",
+    ];
+    assert_contains(
+        &message_of("def f[p: Int](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n"),
+        &generic,
+    );
+    let hole = chelis_deep::parser::parse_str(include_str!(
+        "../../../../chelis-cli/tests/fixtures/sum_result_holes/g1h.dp"
+    ))
+    .expect("deep parse");
+    let errors = match check_ir_program(&hole) {
+        Ok(_) => Vec::new(),
+        Err(result) => result.errors,
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|error| generic.iter().all(|phrase| error.message.contains(phrase))),
+        "{errors:?}"
+    );
+}
+
+/// chelis#2985: an explicit `accumulator=` on `matmul`, `sum` or `einsum`
+/// types the call by spec/04 §5.7.1's permitted-pairs table: `sum` and
+/// `einsum` return `sum_result(p, a)` and `matmul` its operand dtype. A pair
+/// the table omits (narrower than the default, or of the other numeric kind),
+/// any other callee, and an operand whose dtype is not concrete are rejected.
+#[test]
+fn explicit_accumulator_types_by_the_permitted_pairs_table() {
+    let pairs = [
+        (
+            "bf16",
+            &["f32", "f64"][..],
+            &["bf16", "f16", "i32", "i64"][..],
+        ),
+        ("f16", &["f32", "f64"], &["f16", "bf16", "i32"]),
+        ("f32", &["f32", "f64"], &["f16", "bf16", "i32", "i64"]),
+        ("f64", &["f64"], &["f32", "i64"]),
+        ("i8", &["i32", "i64"], &["i8", "i16", "f32", "f64"]),
+        ("i16", &["i32", "i64"], &["i8", "i16", "f32"]),
+        ("i32", &["i32", "i64"], &["i16", "f64"]),
+        ("i64", &["i64"], &["i32", "f64"]),
+    ];
+    for (operand, permitted, rejected) in pairs {
+        let reduced = matches!(operand, "bf16" | "f16");
+        for accumulator in permitted {
+            let result = if reduced { operand } else { accumulator };
+            for source in [
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[{result}] = sum(x, 0i32, accumulator={accumulator})\n"
+                ),
+                format!(
+                    "def f(a: tensor[3, {operand}], b: tensor[3, {operand}]) -> tensor[{result}] = einsum(\"i,i->\", a, b, accumulator={accumulator})\n"
+                ),
+            ] {
+                let errors = surf_check_errors(&source);
+                assert!(errors.is_empty(), "{source}: {errors:?}");
+            }
+            if operand.starts_with('f') || operand == "bf16" {
+                let source = format!(
+                    "def f(a: tensor[2, 2, {operand}], b: tensor[2, 2, {operand}]) -> tensor[2, 2, {operand}] = matmul(a, b, accumulator={accumulator})\n"
+                );
+                let errors = surf_check_errors(&source);
+                assert!(errors.is_empty(), "{source}: {errors:?}");
+            }
+        }
+        for accumulator in rejected {
+            let kind = if accumulator.starts_with('i') == operand.starts_with('i') {
+                "at least as wide as its operand and its default"
+            } else {
+                "has its operand's numeric kind"
+            };
+            let source = format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[{accumulator}] = sum(x, 0i32, accumulator={accumulator})\n"
+            );
+            let errors = surf_check_errors(&source);
+            assert!(
+                errors.iter().any(|error| error.message.contains(&format!(
+                    "`sum` over {operand} does not admit `accumulator={accumulator}`"
+                )) && error.message.contains(kind)
+                    && error
+                        .message
+                        .contains("omit the argument to accumulate in the default")),
+                "{source}: {errors:?}"
+            );
+        }
+    }
+    // A widened result no longer checks at the default result dtype.
+    assert!(
+        !surf_check_errors(
+            "def f(x: tensor[3, i8]) -> tensor[i32] = sum(x, 0i32, accumulator=i64)\n"
+        )
+        .is_empty()
+    );
+    // Integer matmul stays rejected with or without an accumulator.
+    assert!(!surf_check_errors(
+        "def f(a: tensor[2, 2, i32], b: tensor[2, 2, i32]) -> tensor[2, 2, i32] = matmul(a, b, accumulator=i64)\n"
+    )
+    .is_empty());
+    // Only `matmul`, `sum` and `einsum` take an accumulator.
+    for (name, source) in [
+        (
+            "cumsum",
+            "def f(x: tensor[3, i8]) -> tensor[3, i32] = cumsum(x, 0i32, accumulator=i64)\n",
+        ),
+        (
+            "trace",
+            "def f(x: tensor[2, 2, f32]) -> tensor[f32] = trace(x, 0, 1, accumulator=f64)\n",
+        ),
+        (
+            "mean",
+            "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32, accumulator=f64)\n",
+        ),
+    ] {
+        let errors = surf_check_errors(source);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains(&format!("`{name}` takes no `accumulator=` argument"))),
+            "{source}: {errors:?}"
+        );
+    }
+    let errors = surf_check_errors(
+        "def g(x: tensor[3, f32]) -> tensor[f32] = x\ndef f(x: tensor[3, f32]) -> tensor[3, f32] = g(x, accumulator=f64)\n",
+    );
+    assert!(!errors.is_empty(), "a user function takes no accumulator");
+    // The pair is decided at the call, over a concrete operand dtype.
+    for binder in ["p: Float", "p: {f32, f64}"] {
+        let source = format!(
+            "def f[{binder}](x: tensor[3, p]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)\n"
+        );
+        let errors = surf_check_errors(&source);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains("this operand's dtype is a type variable")
+                && !error.message.contains("declare the operand")),
+            "{source}: {errors:?}"
+        );
+    }
+    // A borrowed operand is decided on its referent.
+    for source in [
+        "def f(x: &tensor[3, f32]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)\n",
+        "def f(x: &tensor[3, i8]) -> tensor[i64] = sum(x, 0i32, accumulator=i64)\n",
+        "def f(a: &tensor[3, i8], b: &tensor[3, i8]) -> tensor[i64] = einsum(\"i,i->\", a, b, accumulator=i64)\n",
+        "def f(a: &tensor[2, 2, f16], b: &tensor[2, 2, f16]) -> tensor[2, 2, f16] = matmul(a, b, accumulator=f64)\n",
+        "def f(x: &tensor[batch, seq, head, i8]) -> tensor[batch, i64] = sum(x, seq, head, accumulator=i64)\n",
+    ] {
+        let errors = surf_check_errors(source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+    let errors = surf_check_errors(
+        "def f(x: &tensor[3, i8]) -> tensor[i64] = sum(x, 0i32, accumulator=i8)\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("does not admit `accumulator=i8`")),
+        "{errors:?}"
     );
 }

@@ -151,7 +151,7 @@ For reductions: more complex — depends on reduction axis size and output shape
 ### Test Strategy (~15 tests)
 
 - [x] `add(const(1), const(2))` on GPU produces 3.0
-- [x] All elementwise unary ops: neg, exp, log, sin, sqrt — GPU matches CPU (within 1e-5 for f32)
+- [x] All elementwise unary ops: neg, exp, log, sin, sqrt — GPU output checked against CPU (device transcendentals are now fenced under [05-UNS-1]; [05-OBS-3] admits no value difference)
 - [x] All elementwise binary ops: add, mul, max_elem, cmplt — GPU matches CPU
 - [x] `cmplt` produces 1.0f/0.0f on GPU (not integer bool)
 - [x] Reduction: `sum(x, axis=0)` on GPU matches CPU
@@ -193,7 +193,7 @@ Commit 6: Red team
 - `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` — manual GPU oracle
 - `chelis build examples/mnist.ch --target hip` emits `mnist_hip.cpp`, `mnist_hip.h`, `chelis_runtime.{h,c}`, and `chelis_hip_runtime.h`
 - GPU add(const(1), const(2)) = 3.0
-- Every supported Phase 1a RISC op path matches the evaluator within 1e-4
+- Every supported Phase 1a RISC op path matches the evaluator byte for byte ([05-OBS-3])
 
 ### Prerequisites / Environment
 

@@ -304,6 +304,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
         | WireRiscOp::Recip
@@ -314,6 +315,9 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::Cos
         | WireRiscOp::Tan
         | WireRiscOp::Atan
+        | WireRiscOp::Tanh
+        | WireRiscOp::Erf
+        | WireRiscOp::Erfc
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -347,7 +351,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::Drop
         | WireRiscOp::Realize
         | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::NamedCast { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::BlasMatmul { .. }
         | WireRiscOp::Gather { .. }
@@ -390,6 +394,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Relu
+            | WireRiscOp::Softmax { .. }
             | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
@@ -400,6 +405,9 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::Cos
             | WireRiscOp::Tan
             | WireRiscOp::Atan
+            | WireRiscOp::Tanh
+            | WireRiscOp::Erf
+            | WireRiscOp::Erfc
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
@@ -408,7 +416,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::Dropout {}
             | WireRiscOp::DropoutReplay {}
             | WireRiscOp::Cast { .. }
-            | WireRiscOp::CastTrunc { .. }
+            | WireRiscOp::NamedCast { .. }
             | WireRiscOp::FusedElem { .. }
     )
 }

@@ -68,6 +68,53 @@ pub(super) fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) ->
     })
 }
 
+/// Use the same source-location carrier as Deep type diagnostics. Native Deep
+/// supplies a measured coordinate; Surf supplies the opaque `surf:` identity.
+pub(super) fn at_check_site(site: &deep::Expr, error: CheckError) -> CheckError {
+    match TypeDiagnosticLocation::from_expr(site) {
+        Some(span) => span.attach(error),
+        None => error,
+    }
+}
+
+pub(super) fn at_check_node(node: Option<&DeepNode>, error: CheckError) -> CheckError {
+    match node.and_then(TypeDiagnosticLocation::from_node) {
+        Some(span) => span.attach(error),
+        None => error,
+    }
+}
+
+/// Borrow the application node on eager paths; only suspended checks retain
+/// an owned location. A successful call never clones its source identity.
+#[derive(Clone, Copy)]
+pub(super) enum CheckSite<'a> {
+    Expr(&'a deep::Expr),
+    Node(&'a DeepNode),
+    Deferred(Option<&'a TypeDiagnosticLocation>),
+}
+
+pub(super) fn report_at_check_site(
+    errors: &mut DiagnosticSink<'_>,
+    error: CheckError,
+    site: CheckSite<'_>,
+) -> Type {
+    match site {
+        CheckSite::Expr(expr) => report(errors, at_check_site(expr, error)),
+        CheckSite::Node(node) => report(errors, at_check_node(Some(node), error)),
+        CheckSite::Deferred(location) => report_at(errors, error, location),
+    }
+}
+
+impl CheckSite<'_> {
+    pub(super) fn owned_location(self) -> Option<TypeDiagnosticLocation> {
+        match self {
+            Self::Expr(expr) => TypeDiagnosticLocation::from_expr(expr),
+            Self::Node(node) => TypeDiagnosticLocation::from_node(node),
+            Self::Deferred(location) => location.cloned(),
+        }
+    }
+}
+
 /// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): report a
 /// wrong-arity call of a shape-polymorphic builtin. Before the witness-token
 /// migration these arity guards returned a SILENT `Type::Error` -- an
@@ -75,51 +122,55 @@ pub(super) fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) ->
 /// the builtin lane. The guard now pushes an `ArityMismatch` naming the
 /// builtin and the expected/found counts, so the malformed call is rejected
 /// with a diagnostic instead of exempted from checking.
-/// Span-free sibling of [`report_builtin_arity`] for the `check_*_signature`
-/// helpers, which receive `arg_tys`/`errors` but not the `(list)` node. Same
-/// chelis#731 §C3 role: a wrong-arity signature-checked builtin used to return
-/// a silent `Type::Error`; it now reports an `ArityMismatch`. `expected` is a
-/// prose description ("at least 2 arguments", "3 or 4 arguments") since these
-/// guards range over exact and minimum arities.
-pub(super) fn report_builtin_arity_bare(
+/// A source-located arity guard for signature-checked builtins whose accepted
+/// argument counts are ranges or alternatives rather than one exact count.
+pub(super) fn report_builtin_arity_range(
     errors: &mut DiagnosticSink<'_>,
+    site: CheckSite<'_>,
     builtin: &str,
     expected: &str,
     got: usize,
 ) -> Type {
-    report(
+    report_at_check_site(
         errors,
-        CheckError::new(
+        CheckError::with_types(
             CheckErrorKind::ArityMismatch,
             format!(
                 "builtin `{builtin}` expects {expected}, got {got} argument(s) \
                  (chelis#731 [04-TOT-3])"
             ),
+            expected.to_string(),
+            format!("{got} argument(s)"),
             vec![],
         ),
+        site,
     )
 }
 
 pub(super) fn report_builtin_arity(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
+    site: CheckSite<'_>,
     builtin: &str,
     expected: usize,
     got: usize,
 ) -> Type {
-    report(
+    report_at_check_site(
         errors,
-        CheckError::new(
+        CheckError::with_types(
             CheckErrorKind::ArityMismatch,
             with_node_provenance(
                 node,
                 format!(
-                    "builtin `{builtin}` expects {expected} argument(s), got {got} \
+                    "builtin `{builtin}` expects {expected} argument(s), got {got} argument(s) \
                      (chelis#731 [04-TOT-3])"
                 ),
             ),
+            format!("{expected} argument(s)"),
+            format!("{got} argument(s)"),
             vec![],
         ),
+        site,
     )
 }
 
@@ -127,6 +178,29 @@ pub(super) fn report_builtin_arity(
 /// (RFC D-META; the key is unprefixed language semantics).
 pub(super) fn deftype_opaque_meta(meta: &deep::Metadata) -> bool {
     meta.opaque().is_some()
+}
+
+/// Whether `expr` is the finite, untyped `Cons`/`Nil` chain a bracket literal
+/// desugars to (spec/02-surf-syntax.md §P10b).
+pub(super) fn is_bracket_literal(expr: &deep::Expr) -> bool {
+    let is_variable = |expr: &deep::Expr, name: &str| {
+        matches!(stamped_parts(expr), Some((DeepTag::Var, meta, [atom]))
+            if meta.ty().is_none() && symbol_name(atom) == Some(name))
+    };
+    let mut tail = expr;
+    loop {
+        if is_variable(tail, "Nil") {
+            return true;
+        }
+        match stamped_parts(tail) {
+            Some((DeepTag::App, meta, [cons, _, rest]))
+                if meta.ty().is_none() && is_variable(cons, "Cons") =>
+            {
+                tail = rest;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Extract a symbol name from an Expr.
@@ -504,7 +578,13 @@ pub(crate) fn decide_shape_route(
         );
         return result;
     }
-    match shape_route_result(&route, operand) {
+    match shape_route_result(
+        &route,
+        operand,
+        SumResultSlot::Fresh(vg),
+        TypeDiagnosticLocation::from_node(node),
+        subst,
+    ) {
         Ok((result, updates)) => {
             if let Some(expected_updates) = updates
                 && let crate::unify::ShapeRoute::Gather {
@@ -551,9 +631,15 @@ pub(crate) fn decide_shape_route(
 /// Returns `(result type, updates obligation)`. The updates unification is the
 /// caller's because discharge runs inside unification while the eager arm has
 /// a `&mut Subst`; the DECISION of what updates must equal is here.
+///
+/// A `trace` whose result precision waits on an inference variable publishes
+/// a type from `slot`, gated to the decided result ([`publish_sum_result`]).
 pub(crate) fn shape_route_result(
     route: &crate::unify::ShapeRoute,
     operand: &Type,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
 ) -> Result<(Type, Option<Type>), String> {
     use crate::unify::ShapeRoute;
     // Strip one borrow only for the routes whose arms do, so a deferred
@@ -593,7 +679,10 @@ pub(crate) fn shape_route_result(
         } => {
             let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
             let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
-            Ok((infer_trace_result_type(operand, axis1, axis2)?, None))
+            Ok((
+                infer_trace_result_type(operand, axis1, axis2, slot, location, subst)?,
+                None,
+            ))
         }
     }
 }
@@ -659,6 +748,9 @@ pub(super) fn infer_trace_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("trace expects tensor input, got {tensor_ty}"));
@@ -674,7 +766,383 @@ pub(super) fn infer_trace_result_type(
         .enumerate()
         .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
         .collect();
-    Ok(Type::Tensor(out_dims, precision.clone()))
+    let precision = default_sum_result_precision("trace", precision, subst)?;
+    Ok(publish_sum_result(
+        "trace", out_dims, precision, slot, location, subst,
+    ))
+}
+
+/// The result of `einsum(equation, left, right)` under [05-OP-33], for two
+/// settled tensor operands whose precisions the caller has already unified:
+/// each output label takes the extent of its first occurrence scanning left
+/// then right, at `sum_result(p, default(p))`. An equation outside the
+/// grammar, a label count that differs from an operand's rank, an output
+/// label absent from both inputs or repeated, and a rank-spread operand,
+/// whose rank no fixed equation can match at every instantiation, are each
+/// rejected; there is no undecided outcome.
+pub(super) fn infer_einsum_result_type(
+    equation: &str,
+    left: &Type,
+    right: &Type,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
+) -> Result<Type, String> {
+    let (Type::Tensor(left_dims, precision), Type::Tensor(right_dims, _)) = (left, right) else {
+        return Err(format!(
+            "einsum expects two tensor operands, got {left} and {right}"
+        ));
+    };
+    let grammar = || {
+        format!(
+            "einsum equation `{equation}` must match `[a-z]*,[a-z]*->[a-z]*` \
+             (spec/05-risc-primitives.md [05-OP-33])"
+        )
+    };
+    let Some((inputs, output)) = equation.split_once("->") else {
+        return Err(grammar());
+    };
+    let Some((left_labels, right_labels)) = inputs.split_once(',') else {
+        return Err(grammar());
+    };
+    if [left_labels, right_labels, output]
+        .iter()
+        .any(|labels| !labels.chars().all(|label| label.is_ascii_lowercase()))
+    {
+        return Err(grammar());
+    }
+    for (side, labels, dims) in [
+        ("left", left_labels, left_dims),
+        ("right", right_labels, right_dims),
+    ] {
+        if dims.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
+            return Err(format!(
+                "einsum equation `{equation}` fixes the {side} operand's rank at {}, but \
+                 the operand has a rank spread, which denotes every rank \
+                 ([05-OP-33], [04-INF-6])",
+                labels.len()
+            ));
+        }
+        if labels.len() != dims.len() {
+            return Err(format!(
+                "einsum equation `{equation}` gives the {side} operand {} labels, but it \
+                 has rank {} ([05-OP-33])",
+                labels.len(),
+                dims.len()
+            ));
+        }
+    }
+    let mut dims = Vec::with_capacity(output.len());
+    for (index, label) in output.chars().enumerate() {
+        if output.chars().take(index).any(|earlier| earlier == label) {
+            return Err(format!(
+                "einsum output label `{label}` must occur exactly once in `{equation}` \
+                 ([05-OP-33])"
+            ));
+        }
+        let dim = left_labels
+            .chars()
+            .position(|candidate| candidate == label)
+            .map(|position| &left_dims[position])
+            .or_else(|| {
+                right_labels
+                    .chars()
+                    .position(|candidate| candidate == label)
+                    .map(|position| &right_dims[position])
+            })
+            .ok_or_else(|| {
+                format!(
+                    "einsum output label `{label}` must occur in an input of `{equation}` \
+                     ([05-OP-33])"
+                )
+            })?;
+        dims.push(dim.clone());
+    }
+    let precision = default_sum_result_precision("einsum", precision, subst)?;
+    Ok(publish_sum_result(
+        "einsum", dims, precision, slot, location, subst,
+    ))
+}
+
+/// How a `sum`-family call's result precision stands when the call is checked.
+pub(super) enum SumResultPrecision {
+    /// The result precision is known now.
+    Decided(TensorPrec),
+    /// The operand's precision is an inference variable whose dtypes have no
+    /// single result. The call publishes its own result type and a
+    /// [`crate::unify::DeferredOperandGate::SumResult`] decides it once the
+    /// variable binds, or at the declaration boundary.
+    Pending(TypeVar),
+}
+
+/// `sum_result(p, default(p))`, spec/04 §5.7.1: the result dtype of an
+/// operation that accumulates with the default sum accumulator (`sum`,
+/// `cumsum`, `trace`, `einsum`). i8 and i16 widen to i32; a dtype with no
+/// default accumulator, such as bool, is rejected.
+///
+/// Over a precision variable the result is decided now when one type covers
+/// every dtype the variable admits ([`bound_sum_result_precision`]).
+/// Otherwise it waits for the variable: inference may still bind it (a hole,
+/// or a lambda parameter's precision), and an authored binder is decided at
+/// the declaration boundary over every dtype its bound admits ([04-INF-6]).
+pub(super) fn default_sum_result_precision(
+    op: &str,
+    precision: &TensorPrec,
+    subst: &Subst,
+) -> Result<SumResultPrecision, String> {
+    match precision {
+        TensorPrec::Concrete(prim) => settled_sum_result_precision(op, &Type::Prim(*prim))
+            .map(|result| SumResultPrecision::Decided(TensorPrec::Concrete(result))),
+        TensorPrec::Var(variable) => Ok(match bound_sum_result_precision(op, *variable, subst) {
+            Ok(result) => SumResultPrecision::Decided(result),
+            Err(_) => SumResultPrecision::Pending(*variable),
+        }),
+    }
+}
+
+/// Where a waiting `sum`-family result gets the type it publishes.
+pub(crate) enum SumResultSlot<'a> {
+    /// The checked call: publish `dims` at a fresh precision variable, so a
+    /// consumer sees the result's shape before its precision is decided.
+    Fresh(&'a mut VarGen),
+    /// A deferred decision: publish the type the call already handed out.
+    Existing(&'a Type),
+}
+
+/// The result tensor a `sum`-family call publishes: `dims` at the decided
+/// precision, or, while the precision waits, a type from `slot` with a gate
+/// that unifies `dims` at the decided precision into it later.
+pub(super) fn publish_sum_result(
+    op: &str,
+    dims: Vec<Dim>,
+    precision: SumResultPrecision,
+    slot: SumResultSlot<'_>,
+    location: Option<TypeDiagnosticLocation>,
+    subst: &Subst,
+) -> Type {
+    match precision {
+        SumResultPrecision::Decided(precision) => Type::Tensor(dims, precision),
+        SumResultPrecision::Pending(variable) => {
+            let published = match slot {
+                SumResultSlot::Fresh(vg) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Var(vg.fresh_tvar()))
+                }
+                SumResultSlot::Existing(published) => published.clone(),
+            };
+            subst.record_deferred_tensor_operand(
+                variable,
+                crate::unify::DeferredOperandGate::SumResult {
+                    op: op.to_string(),
+                    dims,
+                    result: Box::new(published.clone()),
+                    location,
+                },
+            );
+            published
+        }
+    }
+}
+
+/// `sum_result(p, default(p))` for a settled precision.
+pub(crate) fn settled_sum_result_precision(op: &str, resolved: &Type) -> Result<Prim, String> {
+    match resolved {
+        Type::Prim(prim) => prim
+            .default_reduce_sum_result_precision()
+            .map_err(|message| {
+                format!(
+                    "{op} expects a tensor precision with a default sum accumulator, so that its \
+                 result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+                 got {}; {message}",
+                    prim.name()
+                )
+            }),
+        other => Err(format!(
+            "{op} expects a tensor precision with a default sum accumulator, so that its \
+             result sum_result(p, default(p)) exists (spec/04-type-system.md §5.7.1), \
+             got {other}"
+        )),
+    }
+}
+
+/// `sum_result(p, default(p))` over every dtype the precision variable admits
+/// ([04-INF-6]): the variable itself when sum_result keeps each one (a
+/// float, i32 or i64 bound), one concrete dtype when it maps them all there
+/// (`{i8, i16}` gives i32), and otherwise no single type.
+pub(crate) fn bound_sum_result_precision(
+    op: &str,
+    variable: TypeVar,
+    subst: &Subst,
+) -> Result<TensorPrec, String> {
+    let restriction = subst.tvar_restriction(variable);
+    let members = Prim::ACTIVE_FLOATS
+        .into_iter()
+        .chain(Prim::ACTIVE_INTEGERS)
+        .chain([Prim::Bool])
+        .filter(|prim| restriction.is_none_or(|bound| bound.admits(*prim)))
+        .collect::<Vec<_>>();
+    let results = members
+        .iter()
+        .map(|member| member.default_reduce_sum_result_precision().ok())
+        .collect::<Vec<_>>();
+    if members
+        .iter()
+        .zip(&results)
+        .all(|(member, result)| *result == Some(*member))
+    {
+        return Ok(TensorPrec::Var(variable));
+    }
+    if let Some((Some(first), rest)) = results.split_first()
+        && rest.iter().all(|result| *result == Some(*first))
+    {
+        return Ok(TensorPrec::Concrete(*first));
+    }
+    let bound = match restriction {
+        Some(bound) => format!("its bound `{}`", bound.bound_spelling()),
+        None => "an unbounded variable".to_string(),
+    };
+    Err(format!(
+        "{op} over a tensor whose precision is a type variable has no single result dtype, \
+         because spec/04 §5.7.1 sums an i8 or i16 operand in i32 and returns that i32 total \
+         but returns i32, i64 and the floats at their own dtype, so sum_result(p, default(p)) \
+         is not one dtype across the dtypes {bound} admits ([04-INF-6]); bound the variable to dtypes that \
+         share one result (`Float`, `{{i32, i64}}`, or `{{i8, i16}}` with an i32 result), \
+         or cast the operand to a concrete dtype and declare the widened result"
+    ))
+}
+
+/// The spec/04 §5.7.1 repair note for a mismatch between a dtype `p` that
+/// `sum`, `cumsum`, `trace` and `einsum` widen (i8, i16) and the dtype they
+/// return for it (i32), in either order. `op` names the operation when the
+/// mismatched expression is known to be one; otherwise the note names all
+/// four conditionally. A function type compares its results, so a def whose
+/// body mismatches its declared signature gets the note too.
+pub(crate) fn sum_result_widening_note(
+    op: Option<&str>,
+    left: &Type,
+    right: &Type,
+) -> Option<String> {
+    fn result_prim(ty: &Type) -> Option<Prim> {
+        match ty {
+            Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(*prim),
+            Type::Fn(_, result) => result_prim(result),
+            _ => None,
+        }
+    }
+    let (left, right) = (result_prim(left)?, result_prim(right)?);
+    let widened = |operand: Prim, result: Prim| {
+        operand.default_reduce_sum_result_precision() == Ok(result) && operand != result
+    };
+    let (operand, result) = if widened(left, right) {
+        (left.name(), right.name())
+    } else if widened(right, left) {
+        (right.name(), left.name())
+    } else {
+        return None;
+    };
+    Some(match op {
+        Some(op @ ("sum" | "einsum")) => format!(
+            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
+             {result} and returns that {result} total; declare the result as {result} (or pass \
+             `accumulator=i64` and declare i64), or narrow it explicitly with \
+             `cast(..., {operand})`"
+        ),
+        Some(op) => format!(
+            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
+             {result} and returns that {result} total; declare the result as {result}, or \
+             narrow it explicitly with `cast(..., {operand})`"
+        ),
+        None => format!(
+            "if the {result} value is the result of `sum`, `cumsum`, `trace` or `einsum` over \
+             {operand}, spec/04 §5.7.1 widened it, because those operations sum {operand} in \
+             {result} and return that {result} total; declare the result as {result} (or, for \
+             `sum` and `einsum`, pass `accumulator=i64` and declare i64), or narrow it \
+             explicitly with `cast(..., {operand})`"
+        ),
+    })
+}
+
+/// spec/04 §5.7.1's permitted-pairs table for an explicit accumulator:
+/// the result dtype of `operation` (`matmul`, `sum` or `einsum`) over
+/// operand dtype `operand` accumulating in `accumulator`, or the diagnostic
+/// for a pair the table omits. `sum` and `einsum` return
+/// `sum_result(p, a)`; `matmul` returns its operand dtype.
+pub(crate) fn explicit_accumulator_result(
+    operation: &str,
+    operand: Prim,
+    accumulator: Prim,
+) -> Result<Prim, String> {
+    use Prim::*;
+    let permitted: &[Prim] = match (operation, operand) {
+        (_, Bf16 | F16 | F32) => &[F32, F64],
+        (_, F64) => &[F64],
+        ("matmul", _) => &[],
+        (_, Int8 | Int16 | Int32) => &[Int32, Int64],
+        (_, Int64) => &[Int64],
+        _ => &[],
+    };
+    if permitted.contains(&accumulator) {
+        return Ok(match (operation, operand) {
+            ("matmul", _) | (_, Bf16 | F16) => operand,
+            _ => accumulator,
+        });
+    }
+    let names = permitted
+        .iter()
+        .map(|prim| format!("`accumulator={}`", prim.name()))
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return Err(format!(
+            "`{operation}` over {} admits no accumulator (spec/04 §5.7.1)",
+            operand.name()
+        ));
+    }
+    let reason = if accumulator.is_integer() != operand.is_integer()
+        || accumulator.is_float() != operand.is_float()
+    {
+        "an accumulator has its operand's numeric kind"
+    } else {
+        "an accumulator is at least as wide as its operand and its default"
+    };
+    Err(format!(
+        "`{operation}` over {} does not admit `accumulator={}`, because {reason} \
+         (spec/04 §5.7.1); omit the argument to accumulate in the default, or write {}",
+        operand.name(),
+        accumulator.name(),
+        names.join(" or ")
+    ))
+}
+
+/// The spec/04 §5.7.1 note for a binder bounded to admit i8 or i16 that a
+/// body instantiated at `prim`, the i32 that `sum`, `cumsum`, `trace` and
+/// `einsum` return for those operands.
+pub(crate) fn sum_result_bound_note(admits_small_integer: bool, prim: Prim) -> Option<String> {
+    (admits_small_integer && prim == Prim::Int32).then(|| {
+        "if this i32 is the result of `sum`, `cumsum`, `trace` or `einsum` over i8 or i16, \
+         spec/04 §5.7.1 widened it, because those operations sum i8 and i16 in i32 and return \
+         that i32 total; declare that result as i32 (or, for `sum` and `einsum`, pass \
+         `accumulator=i64` and declare i64), or bound the binder to dtypes that share one \
+         sum result"
+            .to_string()
+    })
+}
+
+/// The `sum`-family operation `expr` evaluates to directly: a call to `sum`,
+/// `cumsum`, `trace` or `einsum`, or a `let` or `fn` whose tail is one.
+pub(crate) fn sum_family_tail_op(expr: &deep::Expr) -> Option<&'static str> {
+    let mut tail = expr;
+    loop {
+        let (tag, _, kids) = stamped_parts(tail)?;
+        match tag {
+            DeepTag::App => {
+                let name = ir_builtin_name_of_expr(kids.first()?)?;
+                return ["sum", "cumsum", "trace", "einsum"]
+                    .into_iter()
+                    .find(|op| *op == name);
+            }
+            DeepTag::Let | DeepTag::Fn => tail = kids.last()?,
+            _ => return None,
+        }
+    }
 }
 
 /// One selected axis of a `diagonal` pair, identified by its position in the
@@ -1020,508 +1488,6 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
-// ── Declaration collection (first pass) ──────────────────────────
-
-/// Which declaration kinds a `collect_declarations` sub-pass should process.
-///
-/// `deftype` constructor schemes expand transparent type aliases in their
-/// field types at registration (see `AdtRegistry::expand_aliases`), so every
-/// `typealias` must be in the registry first. Running `Aliases` over all
-/// top-level items before `Rest` guarantees that even for a forward reference
-/// — an alias declared textually after the `deftype` that uses it, as in
-/// `Hull.Ast` where `type EffectRow = List[Effect]` follows `type Type = ...
-/// | TArrow(Type, Type, EffectRow) | ...`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DeclPhase {
-    /// Process only `typealias` declarations.
-    Aliases,
-    /// Process everything except `typealias` (`deftype`, `defsig`, ...).
-    Rest,
-}
-
-pub(super) fn definition_owns_function_metadata_prebind(expr: &deep::Expr) -> bool {
-    let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    let Some(body) = kids.get(1) else {
-        return false;
-    };
-    tagged_children(body, DeepTag::Fn).is_some()
-}
-
-/// Record the [04-INF-4] source position of every top-level eager value, and
-/// the outer binding each one shadows.
-///
-/// This runs before any signature is collected, so `env.lookup` still sees the
-/// pre-existing import or stacked-library binding rather than this unit's
-/// own. The ordinal is the value's `def`, never a separated sibling `defsig`:
-/// a signature is metadata about a declaration, not the declaration itself,
-/// so it may not publish the value early. The first `def` of a duplicated
-/// name owns the position; the duplicate itself is already an error.
-fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut Env) {
-    env.reset_top_level_value_scope();
-    for (declaration_index, (_, expr)) in items.iter().enumerate() {
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if definition_owns_function_metadata_prebind(expr) {
-            continue;
-        }
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        if env.top_level_value_ordinal(name).is_some() {
-            continue;
-        }
-        let shadowed = env.lookup(name).cloned();
-        env.note_top_level_value_ordinal(name.to_string(), declaration_index, shadowed);
-    }
-}
-
-/// Run the two-phase declaration collection over `items` (already flattened
-/// past `module` wrappers, each paired with its lexical module key):
-/// register all type aliases, then everything else.
-///
-/// Every declared signature stays in the global header environment, including
-/// an eager value's. [04-INF-4] scope is decided by
-/// [`Env::top_level_value_visibility`] at each reference, not by withholding
-/// or replaying bindings along the inference schedule: the schedule reorders
-/// function bodies, so a binding timeline cannot express source order.
-pub(super) fn collect_all_declarations(
-    items: &[(Option<String>, &deep::Expr)],
-    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &mut AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    debug_assert_eq!(items.len(), declaration_diagnostic_owners.len());
-    // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
-    // over the bare item list. Our `items` is paired with module keys, so
-    // project to the `&deep::Expr` slice the reporters expect.
-    let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
-    report_duplicate_defs(&bare_items, errors);
-    report_duplicate_defsigs(&bare_items, errors);
-    report_orphan_defsigs(items, errors);
-    report_builtin_shadowing(&bare_items, errors);
-    note_eager_value_ordinals(items, env);
-    let resolution_env = precollect_type_resolution_env(items, adt_reg);
-    // Install the provisional self/forward header scope explicitly in this
-    // per-check registry clone. Declaration bodies resolve against it, while
-    // only successful bodies enter the validated maps that survive serde.
-    adt_reg.install_resolution_env(resolution_env.clone());
-    // chelis#930: per-declaration cancellation. This runs BEFORE body
-    // inference, so without it the first ~1.3 s of a 1500-declaration check
-    // (measured, debug build) is uninterruptible and a cancellation arriving
-    // in that window waits it out. An abandoned collection leaves later
-    // declarations unbound; the check entry's `cancellation_gate` rejects the
-    // unit before anything reads it.
-    let cancel = crate::cancel::current_cancel_token();
-    for (index, (module, expr)) in items.iter().enumerate() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return;
-        }
-        let diagnostic_owner = declaration_diagnostic_owners
-            .get(index)
-            .and_then(Option::as_ref);
-        collect_declarations(
-            expr,
-            module.as_deref(),
-            env,
-            vg,
-            subst,
-            adt_reg,
-            &resolution_env,
-            errors,
-            DeclPhase::Aliases,
-            diagnostic_owner,
-        );
-    }
-    for (index, (module, expr)) in items.iter().enumerate() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return;
-        }
-        let diagnostic_owner = declaration_diagnostic_owners
-            .get(index)
-            .and_then(Option::as_ref);
-        collect_declarations(
-            expr,
-            module.as_deref(),
-            env,
-            vg,
-            subst,
-            adt_reg,
-            &resolution_env,
-            errors,
-            DeclPhase::Rest,
-            diagnostic_owner,
-        );
-    }
-    // [04-LIN-10] / spec/04 section 8.4.1: every `type` of this check, and of
-    // the library context it extends, is registered now and no body has been
-    // inferred yet, so the key-carrying set is complete before any generic is
-    // instantiated.
-    subst.set_key_carrying_adts(adt_reg.key_carrying_adts());
-}
-
-/// Collect nominal names and arities before resolving any declaration body.
-/// This permits self and forward references without registering an unchecked
-/// definition in the serde-backed ADT registry.
-pub(super) fn precollect_type_resolution_env(
-    items: &[(Option<String>, &deep::Expr)],
-    adt_reg: &AdtRegistry,
-) -> TypeResolutionEnv {
-    let mut headers = TypeResolutionEnv::from_registry(adt_reg);
-    let mut declarations: UnordMap<String, (Vec<String>, Vec<&deep::Expr>)> = UnordMap::new();
-    for (_, expr) in items {
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if !matches!(tag, DeepTag::Deftype | DeepTag::Typealias) {
-            continue;
-        }
-        let (Some(name), Some(params_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
-        else {
-            continue;
-        };
-        if stamped_parts(params_expr).is_some_and(|(tag, _, _)| tag == DeepTag::Variant) {
-            // Legacy Deep permits omitting the explicit empty parameter list.
-            declarations.insert(name.to_string(), (Vec::new(), kids[1..].iter().collect()));
-        } else {
-            let params = match params_expr {
-                deep::Expr::BareList(elements, _) => elements.as_slice(),
-                _ => continue,
-            };
-            if params.iter().all(|param| symbol_name(param).is_some()) {
-                let names = params
-                    .iter()
-                    .filter_map(symbol_name)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                let bodies = if tag == DeepTag::Typealias {
-                    kids.get(2).into_iter().collect()
-                } else {
-                    kids[2..].iter().collect()
-                };
-                declarations.insert(name.to_string(), (names, bodies));
-            }
-        }
-    }
-
-    // Kind inference is a deterministic fixed point over declaration
-    // headers. A parameter becomes dimension-kinded only when every observed
-    // use is dimensional; type, mixed, and unused parameters remain ordinary
-    // types, preserving the language's unkinded-binder default.
-    let mut evidence = declarations
-        .to_sorted()
-        .into_iter()
-        .map(|(name, (params, _))| (name.clone(), vec![(false, false); params.len()]))
-        .collect::<UnordMap<_, _>>();
-    loop {
-        let before = evidence.clone();
-        for (name, (params, bodies)) in declarations.to_sorted() {
-            let indices = params
-                .iter()
-                .enumerate()
-                .map(|(index, param)| (param.as_str(), index))
-                .collect::<UnordMap<_, _>>();
-            for body in bodies {
-                collect_nominal_kind_evidence(
-                    body,
-                    Some(NominalParamKind::Type),
-                    &indices,
-                    &mut evidence,
-                    name,
-                    &headers,
-                );
-            }
-        }
-        if evidence == before {
-            break;
-        }
-    }
-    for (name, (params, _)) in declarations.into_sorted() {
-        let kinds = evidence
-            .remove(&name)
-            .unwrap_or_else(|| vec![(false, false); params.len()])
-            .into_iter()
-            .map(|(type_use, dimension_use)| {
-                if dimension_use && !type_use {
-                    NominalParamKind::Dimension
-                } else {
-                    NominalParamKind::Type
-                }
-            })
-            .collect();
-        headers.insert(name, kinds);
-    }
-    headers
-}
-
-fn collect_nominal_kind_evidence(
-    expr: &deep::Expr,
-    context: Option<NominalParamKind>,
-    own_params: &UnordMap<&str, usize>,
-    evidence: &mut UnordMap<String, Vec<(bool, bool)>>,
-    owner: &str,
-    existing_headers: &TypeResolutionEnv,
-) {
-    stack_guard!("collect_nominal_kind_evidence", expr);
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
-    };
-    let record = |name: &str,
-                  context: Option<NominalParamKind>,
-                  evidence: &mut UnordMap<String, Vec<(bool, bool)>>| {
-        let Some(index) = own_params.get(name).copied() else {
-            return;
-        };
-        let Some(entries) = evidence.get_mut(owner) else {
-            return;
-        };
-        match context {
-            Some(NominalParamKind::Type) => entries[index].0 = true,
-            Some(NominalParamKind::Dimension) => entries[index].1 = true,
-            None => {}
-        }
-    };
-    match tag {
-        DeepTag::TVar => {
-            if let Some(name) = kids.first().and_then(symbol_name) {
-                record(name, context, evidence);
-            }
-        }
-        DeepTag::DVar | DeepTag::DRank => {
-            if let Some(name) = kids.first().and_then(symbol_name) {
-                record(name, Some(NominalParamKind::Dimension), evidence);
-            }
-        }
-        DeepTag::TTensor => {
-            if let Some((precision, dimensions)) = kids.split_last() {
-                for dimension in dimensions {
-                    collect_nominal_kind_evidence(
-                        dimension,
-                        Some(NominalParamKind::Dimension),
-                        own_params,
-                        evidence,
-                        owner,
-                        existing_headers,
-                    );
-                }
-                collect_nominal_kind_evidence(
-                    precision,
-                    Some(NominalParamKind::Type),
-                    own_params,
-                    evidence,
-                    owner,
-                    existing_headers,
-                );
-            }
-        }
-        DeepTag::TAdt => {
-            let Some(target) = kids.first().and_then(symbol_name) else {
-                return;
-            };
-            for (index, argument) in kids.iter().skip(1).enumerate() {
-                let propagated = evidence
-                    .get(target)
-                    .and_then(|entries| entries.get(index))
-                    .and_then(|(type_use, dimension_use)| {
-                        if *type_use {
-                            Some(NominalParamKind::Type)
-                        } else if *dimension_use {
-                            Some(NominalParamKind::Dimension)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| {
-                        existing_headers
-                            .param_kinds(target)
-                            .and_then(|kinds| kinds.get(index).copied())
-                    });
-                collect_nominal_kind_evidence(
-                    argument,
-                    propagated,
-                    own_params,
-                    evidence,
-                    owner,
-                    existing_headers,
-                );
-            }
-        }
-        DeepTag::TFn | DeepTag::TRef | DeepTag::TTuple => {
-            for child in kids {
-                collect_nominal_kind_evidence(
-                    child,
-                    Some(NominalParamKind::Type),
-                    own_params,
-                    evidence,
-                    owner,
-                    existing_headers,
-                );
-            }
-        }
-        _ => {
-            for child in kids {
-                collect_nominal_kind_evidence(
-                    child,
-                    context,
-                    own_params,
-                    evidence,
-                    owner,
-                    existing_headers,
-                );
-            }
-        }
-    }
-}
-
-/// Build the program-shape opacity metadata (RFC D-CHECK) from the
-/// flattened `(module key, item)` list: per-module export sets, the
-/// top-level binding -> module map, and the formatted "exported
-/// producers with signatures" entries per opaque type used by the
-/// violation error contract. Runs after declaration collection so the
-/// registry already carries every `deftype`'s `opaque` flag and
-/// defining module.
-pub(super) fn build_opacity_meta(
-    items: &[(Option<String>, &deep::Expr)],
-    adt_reg: &AdtRegistry,
-    env: &Env,
-) -> crate::opacity::OpacityModuleMeta {
-    let mut meta = crate::opacity::OpacityModuleMeta::default();
-    // Declared signature types (from `defsig` nodes) for producer
-    // display; keyed by binding name like `meta.bindings`.
-    let mut declared_sigs: UnordMap<String, Type> = UnordMap::new();
-    // Pass 1: export sets. Lexical `(export ...)` nodes attribute to
-    // their module wrapper; package-linked exports arrive as
-    // top-level nodes whose names carry the reef internal-name stem
-    // (the reef rewrite emits them with internal names), so each
-    // exported name self-attributes through its stem.
-    for (module, item) in items {
-        // chelis#1107: carrier-preserving read. A `List`-only destructure
-        // skipped every stamped declaration, leaving both maps empty on the
-        // stamped ingress -- the opacity diagnostic then reported "exported
-        // producers: none" for a module that exports one.
-        let Some((tag, _, kids)) = stamped_parts(item) else {
-            continue;
-        };
-        if tag != DeepTag::Export {
-            continue;
-        }
-        for child in kids {
-            let Some(name) = symbol_name(child) else {
-                continue;
-            };
-            let target = match module {
-                Some(module) => Some(module.clone()),
-                None => crate::opacity::reef_module_stem(name),
-            };
-            if let Some(target) = target {
-                meta.exports
-                    .entry(target)
-                    .or_default()
-                    .insert(name.to_string());
-            }
-        }
-    }
-    // Pass 2: binding -> module attribution and declared sigs.
-    // Stem-attributed (package-linked) bindings are recorded only
-    // when their module's export set is known: without it, the sixth
-    // rejection's no-export-decl-means-sealed rule would reject
-    // legitimately exported producers in pipelines that strip Export
-    // decls (fail-open for unattributable names by design).
-    for (module, item) in items {
-        // chelis#1107: carrier-preserving read, as in pass 1 above.
-        let Some((tag, _, kids)) = stamped_parts(item) else {
-            continue;
-        };
-        if !matches!(tag, DeepTag::Def | DeepTag::Defsig) {
-            continue;
-        }
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let target = match module {
-            Some(module) => Some(module.clone()),
-            None => crate::opacity::reef_module_stem(name)
-                .filter(|stem| meta.exports.contains_key(stem)),
-        };
-        let Some(target) = target else {
-            continue;
-        };
-        meta.bindings.insert(name.to_string(), target);
-        if tag == DeepTag::Defsig
-            && let Some(scheme) = env.lookup(name)
-        {
-            declared_sigs.insert(name.to_string(), scheme.body.clone());
-        }
-    }
-    // Producer enumeration per opaque type: exported bindings of the
-    // defining module whose declared RESULT type mentions the type
-    // (containment chased through named type definitions).
-    for (adt_name, def) in &adt_reg.defs {
-        if !def.opaque {
-            continue;
-        }
-        let Some(module) = &def.defining_module else {
-            continue;
-        };
-        let Some(export_set) = meta.exports.get(module) else {
-            continue;
-        };
-        let mut entries: std::collections::BTreeSet<String> = Default::default();
-        for name in export_set {
-            if meta.bindings.get(name) != Some(module) {
-                continue;
-            }
-            let Some(sig) = declared_sigs.get(name) else {
-                continue;
-            };
-            let result = match sig {
-                Type::Fn(_, ret) => ret.as_ref(),
-                other => other,
-            };
-            if crate::opacity::type_mentions_adt(result, adt_name, adt_reg) {
-                // RT-1 F3: store the producer entry de-mangled so the
-                // reef surface renders `probability: (f32) -> Probability`
-                // rather than the internal `pkg__...` names.
-                entries.insert(format!(
-                    "{}: {}",
-                    crate::opacity::demangle_ident(name),
-                    crate::opacity::demangle_type(sig)
-                ));
-            }
-        }
-        if !entries.is_empty() {
-            meta.producer_entries
-                .entry(adt_name.clone())
-                .or_default()
-                .extend(entries);
-        }
-    }
-    meta
-}
-
-/// Reject two same-name `def` declarations in one program (chelis#258).
-///
-/// A def's value binding is silent last-write-wins (`env.bind` →
-/// `UnordMap::insert`, like the `defsig` arm of `collect_declarations`), and
-/// Chelis does not dispatch same-name `def`s by argument arity or tensor
-/// rank. So two `def f`s whose sigs differ only in rank leave just one arm
-/// reachable: callers of the other rank fire a confusing `DimensionMismatch`
-/// at the call site instead of a clear error at the redundant definition.
-/// This mirrors the duplicate-`deftype` / duplicate-`typealias` rejection
-/// already in `collect_declarations`, moving the diagnostic to the
-/// definition site.
-///
-/// Scoped to `def` (not `defsig`): a `defsig` legitimately co-occurs with a
-/// synthesized signature for the same name (an inline-annotated `def`
-/// desugars to both a `defsig` and a `def`), so a same-name `defsig` is not
-/// on its own a duplicate definition. `items` is already flattened past
-/// `module` wrappers, and the prelude lives in the builtin env rather than as
-/// `def` nodes here, so only genuine in-program user redefinitions match.
 /// [`report`], lifted into the `Option<Type>` early-return channel that the
 /// post-unification application checks use.
 ///
@@ -1531,420 +1497,6 @@ pub(super) fn build_opacity_meta(
 /// continues to the next one.
 pub(super) fn reject(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Option<Type> {
     Some(report(errors, error))
-}
-
-pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let mut seen: UnordSet<&str> = UnordSet::new();
-    for expr in items {
-        // chelis#1107: `stamped_parts` reads both carriers. A `List`-only
-        // destructure skipped every stamped declaration, so this check fired
-        // on `check_ir_program` (which normalizes Node to List) and never on
-        // `check_typed_program`.
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if tag != DeepTag::Def {
-            continue;
-        }
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        if !seen.insert(name) {
-            errors.push(CheckError::new(
-                CheckErrorKind::DuplicateDefinition,
-                format!("duplicate definition: `{name}` is defined more than once"),
-                vec![format!(
-                    "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
-                )],
-            ));
-        }
-    }
-}
-
-/// Reject two same-name `defsig` declarations in one program.
-///
-/// Chelis does not dispatch user functions by arity, type, or rank; the valid
-/// same-name declaration pair is exactly one `defsig` plus one `def`. Multiple
-/// `defsig`s for a name otherwise feed several last-write-wins maps
-/// (`collect_declarations`, declared-param-type collection, signature metadata)
-/// and make the enforced signature order-dependent.
-pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let mut seen: UnordSet<&str> = UnordSet::new();
-    for expr in items {
-        // chelis#1107: carrier-preserving read, as in `report_duplicate_defs`.
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if tag != DeepTag::Defsig {
-            continue;
-        }
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        if !seen.insert(name) {
-            errors.push(CheckError::new(
-                CheckErrorKind::DuplicateDefinition,
-                format!("duplicate signature: `{name}` has more than one `defsig`"),
-                vec![format!(
-                    "keep a single `defsig` for `{name}`: Chelis does not dispatch same-name functions by argument type, arity, or rank"
-                )],
-            ));
-        }
-    }
-}
-
-/// Reject a `defsig` that has no same-name `def` in the same check unit and
-/// lexical module. A signature describes a Chelis definition; it is not an
-/// extern/runtime declaration. Letting it create a callable binding by itself
-/// makes `check` accept a symbol that no lowering lane can define (#850).
-pub(super) fn report_orphan_defsigs(
-    items: &[(Option<String>, &deep::Expr)],
-    errors: &mut DiagnosticSink<'_>,
-) {
-    // Linked dependency interfaces intentionally contain signature-only rows:
-    // their bodies live in the supplying package artifact. Reef validates
-    // every authored source module and synthetic entry before installing the
-    // linked-program guard. The exemption therefore requires both that
-    // in-process provenance and the linker's reserved mangled-name format;
-    // neither fact alone can exempt an authored orphan. Raw Deep/Surf units
-    // and persistent checker contexts still take the same-unit check below.
-    let mut defs: UnordSet<(Option<&str>, &str)> = UnordSet::new();
-    for (module, expr) in items {
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if let Some(name) = kids.first().and_then(symbol_name) {
-            defs.insert((module.as_deref(), name));
-        }
-    }
-
-    for (module, expr) in items {
-        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        if crate::opacity::linked_program() && crate::opacity::is_linker_format_name(name) {
-            continue;
-        }
-        if !defs.contains(&(module.as_deref(), name)) {
-            let qualified = module
-                .as_deref()
-                .map(|module| format!("{module}.{name}"))
-                .unwrap_or_else(|| name.to_string());
-            errors.push(CheckError::new(
-                CheckErrorKind::UnboundVariable {
-                    identifier: qualified.clone(),
-                },
-                format!(
-                    "defsig `{qualified}` has no matching `def` in the same check unit: \
-                     signatures describe Chelis definitions and do not declare runtime symbols"
-                ),
-                vec![
-                    format!("add `def {name}` beside the signature, or remove the orphan signature"),
-                    "A future external-call surface must use an explicit typed capability; a bare `defsig` is not one"
-                        .to_string(),
-                ],
-            ));
-        }
-    }
-}
-
-/// Reject a top-level `def` or `defsig` whose name appears in the closed
-/// builtin vocabulary (chelis#353, spec/04-type-system.md §8.6).
-///
-/// Top-level builtin names identify the language's intrinsic call surface.
-/// This check imports `BUILTIN_NAMES`, the same closed table evaluator and
-/// lowering dispatch consume, so the reserved declaration set cannot drift
-/// from that surface. Rejecting a same-name top-level declaration prevents a
-/// user signature from redefining the intrinsic operation. Lexical bindings
-/// are different: ordinary scope resolution selects them before builtin
-/// dispatch in every execution lane (chelis#1076).
-///
-/// Deliberately narrow scope:
-/// - Reef package modules never reach this check with bare names: reef
-///   rewrites package decls to internal `pkg__...` names (and rewrites
-///   their call sites with them) before the checker runs, so a package
-///   `def sum` is allowed and genuinely dispatches to the user def (the
-///   stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on this).
-/// - Function parameters and block-locals may reuse builtin names: they
-///   shadow the builtin under ordinary lexical scoping in every lane.
-///
-/// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
-/// same name; report once per name, as the `def` (what the user wrote).
-pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let decl_name = |expr: &deep::Expr, tag: DeepTag| -> Option<String> {
-        // chelis#1107: carrier-preserving read. Without it the §8.6 shadowing
-        // gate never fired on the stamped ingress.
-        let (found_tag, _, kids) = stamped_parts(expr)?;
-        if found_tag != tag {
-            return None;
-        }
-        kids.first()
-            .and_then(symbol_name)
-            .filter(|name| builtins::BUILTIN_NAMES.contains(name))
-            .map(str::to_string)
-    };
-
-    let def_names: UnordSet<String> = items
-        .iter()
-        .filter_map(|expr| decl_name(expr, DeepTag::Def))
-        .collect();
-
-    let mut reported: UnordSet<String> = UnordSet::new();
-    for expr in items {
-        let Some(name) = decl_name(expr, DeepTag::Def).or_else(|| decl_name(expr, DeepTag::Defsig))
-        else {
-            continue;
-        };
-        if !reported.insert(name.clone()) {
-            continue;
-        }
-        let decl_kw = if def_names.contains(&name) {
-            "def"
-        } else {
-            "sig"
-        };
-        errors.push(CheckError::new(
-            CheckErrorKind::BuiltinShadowing,
-            format!(
-                "`{decl_kw} {name}` shadows the builtin function `{name}`: user `def`/`sig` \
-                 declarations may not reuse builtin names (spec/04-type-system.md \u{00a7}8.6). \
-                 Top-level builtin names identify the intrinsic call surface and cannot be \
-                 rebound with a user signature."
-            ),
-            vec![format!(
-                "rename `{name}` (e.g. `{name}2` or `my_{name}`); inside a reef package \
-                 module the name is allowed because package declarations are \
-                 internal-name-rewritten before checking"
-            )],
-        ));
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn collect_declarations(
-    expr: &deep::Expr,
-    lexical_module: Option<&str>,
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &mut AdtRegistry,
-    headers: &TypeResolutionEnv,
-    errors: &mut DiagnosticSink<'_>,
-    phase: DeclPhase,
-    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) {
-    let Some((tag, meta, kids)) = stamped_parts(expr) else {
-        return;
-    };
-
-    // Aliases register first so `deftype` field-type alias expansion sees a
-    // fully-populated alias table; every other decl kind runs in the second
-    // sub-pass.
-    let in_phase = match phase {
-        DeclPhase::Aliases => tag == DeepTag::Typealias,
-        DeclPhase::Rest => tag != DeepTag::Typealias,
-    };
-    if !in_phase {
-        return;
-    }
-
-    match tag {
-        DeepTag::Deftype => {
-            // Reject same-namespace collisions (another `deftype`, a
-            // `typealias`, or a prelude ADT registered earlier in this
-            // program). Without this check `AdtRegistry::defs` is
-            // silently last-write-wins, which propagates wrong
-            // constructor types and (per `compute_tensor_carrying_adts`
-            // in linearity.rs) order-dependent borrow semantics.
-            if let Some(name) = kids.first().and_then(symbol_name)
-                && let Some(prior_kind) = adt_reg.existing_kind(name)
-            {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DuplicateDefinition,
-                    format!(
-                        "duplicate type definition: `{name}` was already declared as a {prior_kind}"
-                    ),
-                    vec![format!("rename one of the `{name}` declarations")],
-                ));
-                return;
-            }
-            // RFC D-CHECK: record opacity + module identity on the
-            // registered AdtDef. The module key is the lexical
-            // wrapper when present, else the reef internal-name stem
-            // of the deftype's own (rewritten) name. `@opaque`
-            // requires a named module (RT-0 M6): a top-level opaque
-            // declaration has no module identity, which would make
-            // the enforcement boundary collide across combined
-            // sources.
-            let opaque = deftype_opaque_meta(meta);
-            let defining_module = crate::opacity::module_key_for_item(
-                lexical_module,
-                kids.first().and_then(symbol_name),
-            );
-            if opaque
-                && defining_module.is_none()
-                && let Some(name) = kids.first().and_then(symbol_name)
-            {
-                errors.push(crate::opacity::unmoduled_opaque_error(name));
-            }
-            let adt_name = kids.first().and_then(symbol_name).map(str::to_string);
-            if let Ok(ctors) =
-                adt_reg.register_deftype(kids, vg, headers, errors, opaque, defining_module)
-            {
-                for (name, scheme) in ctors {
-                    if let Some(owner) = &adt_name {
-                        env.bind_constructor(name, owner.clone(), scheme);
-                    } else {
-                        // `register_deftype` reports malformed declarations;
-                        // retain the former defensive binding behavior if a
-                        // future parser shape can return constructors without
-                        // an authored owner name.
-                        env.bind(name, scheme);
-                    }
-                }
-            }
-        }
-        DeepTag::Defsig => {
-            // (defsig {dtype_bounds?} name [(binders...)] type_expr)
-            if let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids)
-                && let Some(name) = symbol_name(name_expr)
-                && let Some(binder_names) = defsig_binder_names(binder_list, errors)
-            {
-                let dtype_bounds = declaration_dtype_bounds(meta);
-                let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type_with_binder_identities(
-                    type_expr,
-                    vg,
-                    adt_reg,
-                    TypeUseSite::Defsig,
-                    BinderMode::ExplicitGeneric(&binder_names),
-                    dtype_bounds,
-                    declaration_diagnostic_owner,
-                    errors,
-                );
-                let bounds = match &resolved {
-                    Ok(resolved) => &resolved.bounds,
-                    Err(rejected) => &rejected.bounds,
-                };
-                let installed = install_declared_bounds(bounds, subst, name, errors);
-                subst.leave_level(signature_level, vg);
-                match (resolved, installed) {
-                    (Ok(resolved), Ok(())) => {
-                        let scheme = env.generalize(&resolved.ty, subst);
-                        subst.name_generic_parameters(
-                            &scheme,
-                            name,
-                            &resolved.binder_identities.type_names(),
-                        );
-                        env.bind(name.to_string(), scheme);
-                        env.record_declared_binder_identities(name, resolved.binder_identities);
-                    }
-                    (Ok(resolved), Err(witness)) => {
-                        let recovery = crate::deep_type::RejectedSignatureType::from_resolved(
-                            resolved.ty,
-                            witness,
-                        );
-                        env.bind_rejected_signature(name.to_string(), recovery, subst);
-                        env.record_declared_binder_identities(name, resolved.binder_identities);
-                    }
-                    (Err(rejected), _) => {
-                        env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
-                        env.record_declared_binder_identities(name, rejected.binder_identities);
-                    }
-                }
-            }
-        }
-        DeepTag::Typealias => {
-            // (typealias {} Name (params...) type_expr)
-            if kids.len() >= 3
-                && let Some(name) = symbol_name(&kids[0])
-            {
-                if let Some(prior_kind) = adt_reg.existing_kind(name) {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DuplicateDefinition,
-                        format!(
-                            "duplicate type definition: `{name}` was already declared as a {prior_kind}"
-                        ),
-                        vec![format!("rename one of the `{name}` declarations")],
-                    ));
-                    return;
-                }
-                let params = match &kids[1] {
-                    deep::Expr::BareList(elements, _) => elements
-                        .iter()
-                        .filter_map(symbol_name)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
-
-                let param_kinds = headers
-                    .param_kinds(name)
-                    .map(<[NominalParamKind]>::to_vec)
-                    .unwrap_or_else(|| vec![NominalParamKind::Type; params.len()]);
-                let explicit_params = params
-                    .iter()
-                    .cloned()
-                    .zip(param_kinds.iter().copied())
-                    .collect::<UnordMap<_, _>>();
-                let mut resolver = DeepTypeResolver::new(
-                    TypeUseSite::TypeAliasBody,
-                    BinderMode::ExplicitKinds(&explicit_params),
-                    headers,
-                    vg,
-                    errors,
-                );
-                if let Ok(aliased_ty) = resolver.resolve(&kids[2]) {
-                    let param_args = params
-                        .iter()
-                        .zip(&param_kinds)
-                        .map(|(param, kind)| match kind {
-                            NominalParamKind::Type => NominalArg::Type(Type::Var(
-                                resolver
-                                    .type_var(param)
-                                    .expect("type-kinded alias parameter is pre-bound"),
-                            )),
-                            NominalParamKind::Dimension => NominalArg::Dimension(Dim::Var(
-                                resolver
-                                    .dim_var(param)
-                                    .expect("dimension-kinded alias parameter is pre-bound"),
-                            )),
-                        })
-                        .collect();
-                    adt_reg.register_alias(
-                        name.to_string(),
-                        params,
-                        param_kinds,
-                        param_args,
-                        aliased_ty.into_type(),
-                    );
-                }
-            }
-        }
-        DeepTag::Def => {
-            // `spec/03-deep-syntax.md` §2.2: a declaration's signature owns
-            // its binders, so a dtype-family bound on a `def` is an error
-            // rather than a second, silently-preferred source of truth. Surf
-            // routes a `def [..]` bound here only when a standalone `sig`
-            // already declares the name; without one the desugarer emits the
-            // bound on the synthesized `defsig` instead.
-            if let Some(name) = kids.first().and_then(symbol_name)
-                && meta.dtype_bounds().is_some()
-            {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!(
-                        "`{name}` declares a dtype-family bound on its `def`, but a declaration's `defsig` owns its binders"
-                    ),
-                    vec![format!("declare the bound on `{name}`'s signature")],
-                ));
-            }
-        }
-        _ => {}
-    }
 }
 
 // ── Tier-2 rank-polymorphism Body Discipline ─────────────────────
@@ -2383,8 +1935,8 @@ pub(super) fn infer_top_level(
         // collapsing the param-side and return-side of the callee into
         // the same equivalence class. The post-body sig-unify then drives
         // the return position to `Ref(t)` instead of the declared `t`,
-        // surfacing as `def 'tadd' body doesn't match declared signature:
-        // body has type `(&t, &t) -> &t`, declared type is `(&t, &t) -> t``.
+        // surfacing as a mismatch between inferred `(&t, &t) -> &t`
+        // and declared `(&t, &t) -> t`.
         // Annotated params do not hit this because their concrete type
         // (`&tensor[..]`) flows through the call site directly. Seeding
         // bare params with the declared type here makes the bare-arg path
@@ -2607,13 +2159,9 @@ pub(super) fn infer_top_level(
                     Some(TypeErrorKind::DtypeFamilyMismatch) => CheckErrorKind::PrecisionMismatch,
                     _ => CheckErrorKind::TypeMismatch,
                 };
-                // RT-2 fixup B1: when the mismatch is a tensor
-                // precision mismatch (notably a `reduce_sum` body
-                // whose result precision differs from the declared
-                // one), include a §5.7.1 cite directly in the message
-                // so the user sees the result-precision table rule
-                // rather than a generic "doesn't match declared
-                // signature".
+                // A §5.7.1 widening (an i8 or i16 `sum`-family result is
+                // i32) gets its repair note here rather than leaving the
+                // reader to find the rule behind a whole-signature mismatch.
                 let extra = if let Some(error) = unify_result
                     .as_ref()
                     .err()
@@ -2621,33 +2169,30 @@ pub(super) fn infer_top_level(
                 {
                     format!(": {}", error.message)
                 } else {
-                    match (&resolved_body, &resolved_decl) {
-                        (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
-                            if body_prec != decl_prec =>
-                        {
-                            format!(
-                                " (precision `{}` vs declared `{}`; if the body is a \
-                             `reduce_sum`, see spec/04-type-system.md §5.7.1: \
-                             narrow integer operands widen to i32 to prevent \
-                             silent overflow; use `tensor[{}]` or omit the result \
-                             type)",
-                                body_prec.name(),
-                                decl_prec.name(),
-                                body_prec.name(),
-                            )
-                        }
-                        _ => String::new(),
-                    }
+                    sum_result_widening_note(
+                        sum_family_tail_op(&kids[1]),
+                        &resolved_body,
+                        &resolved_decl,
+                    )
+                    .map(|note| format!("; {note}"))
+                    .unwrap_or_default()
                 };
-                errors.push(CheckError::new(
+                let error = CheckError::with_types(
                     mismatch_kind,
                     format!(
-                        "def '{}' body doesn't match declared signature: \
-                         body has type `{}`, declared type is `{}`{}",
-                        name, resolved_body, resolved_decl, extra
+                        "def '{name}' body doesn't match declared signature: \
+                         expected `{resolved_decl}`, got `{resolved_body}`{extra}"
                     ),
+                    resolved_decl.to_string(),
+                    resolved_body.to_string(),
                     vec![],
-                ));
+                );
+                let location = TypeDiagnosticLocation::from_expr(&kids[1])
+                    .or_else(|| TypeDiagnosticLocation::from_expr(expr));
+                errors.push(match location {
+                    Some(location) => location.attach(error),
+                    None => error,
+                });
             }
             // #39 wildcard narrowing. The narrow may now substitute a
             // declared `Dim::Var` or `Dim::Name` into a body
@@ -2694,30 +2239,11 @@ pub(super) fn infer_top_level(
 
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
-        // chelis#397/#469: record the size provenance of a top-level value
-        // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
-        // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
-        // whether it is a materializable extent (static / shape-sourced) or a
-        // sourceless runtime scalar. Classified against the pre-binding scope.
-        // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
-        // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env, adt_reg, subst) {
-            SizeClass::Static => {
-                if let Some(value) =
-                    fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-                {
-                    env.mark_static_size_value(&name, value);
-                } else {
-                    env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
-                }
-            }
-            SizeClass::ShapeSourced => {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
-            }
-            SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
-        }
-        // chelis#631: same discipline for list-literal lengths.
-        note_list_literal_binding(env, &name, &kids[1]);
+        // The binding's value facts (a static extent such as
+        // `zero_count = sub(0i64, 0i64)`, or a list literal's length), read
+        // against the pre-binding scope. A deferred recursive member is a
+        // function, which carries none.
+        let facts = rhs_binding_facts(env, &kids[1]);
         if defer_recursive_binding {
             product
                 .group_result_origins
@@ -2738,7 +2264,7 @@ pub(super) fn infer_top_level(
                 errors,
             );
             subst.name_generic_parameters(&scheme, &name, &declared_type_names);
-            env.bind(name, scheme);
+            env.bind_with_facts(name, scheme, facts);
             None
         }
     } else {

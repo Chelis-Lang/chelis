@@ -66,8 +66,8 @@ fn canonical_signed_constants_execute_exact_split_draws_in_surf_and_deep() {
                     "template = to_tensor([{zeros}])\n\
                  sampled = {{\n\
                    (a, b) = split_key(key_from_seed({seed_expr}))\n\
-                   first = uniform_like(a, template, 0.0f32, 1.0f32)\n\
-                   second = uniform_like(b, template, 0.0f32, 1.0f32)\n\
+                   first = uniform_like(a, template, 0.0{dtype}, 1.0{dtype})\n\
+                   second = uniform_like(b, template, 0.0{dtype}, 1.0{dtype})\n\
                    concat([first, second], 0i32)\n }}\n"
                 ),
             );
@@ -90,7 +90,6 @@ fn canonical_signed_constants_execute_exact_split_draws_in_surf_and_deep() {
                     "--output",
                     out_dir.to_str().unwrap(),
                 ]));
-                assert!(common::link_generated(&out_dir, "sample.c", "sample").success());
                 let compiled = success(
                     std::process::Command::new(out_dir.join("sample"))
                         .output()
@@ -203,7 +202,6 @@ fn a_shadowed_neg_in_a_seed_draws_from_the_closures_value() {
         "--output",
         out_dir.to_str().unwrap(),
     ]));
-    assert!(common::link_generated(&out_dir, "shadow.c", "shadow").success());
     let compiled = success(
         std::process::Command::new(out_dir.join("shadow"))
             .output()

@@ -1,4 +1,4 @@
-# Further Reference
+# Reference Map
 
 This guide explains how to write and run Chelis programs. The numbered language
 specifications define the rules in full. Use the guide to get started and the

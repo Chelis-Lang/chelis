@@ -13,9 +13,6 @@
 use assert_cmd::Command;
 use std::path::Path;
 
-#[path = "common/mod.rs"]
-mod common;
-
 const GRAD_BODY: &str = "def h(x: tensor[*, f32]) -> tensor[f32] = {
   y: tensor[3, f32] = pad(x, [[0i64, 0i64]], 0.0f32)
   sum(y, 0i32)
@@ -215,9 +212,19 @@ fn a_taken_arms_local_ascription_traps_in_eval_file() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
-/// The whole-program C lane: `chelis build --target c`, linked and run.
-/// Its stdout on success, or its build or run output on failure.
-fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> {
+/// The stage at which the whole-program C lane stopped.
+#[derive(Debug)]
+enum CStage {
+    /// `chelis build`, native compilation included.
+    Build,
+    /// The published executable's own run.
+    Run,
+}
+
+/// The whole-program C lane: `chelis build --target c` and its published
+/// executable. Its stdout on success, or the stage that failed with that
+/// stage's output.
+fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, (CStage, String)> {
     let path = directory.join(format!("{stem}.ch"));
     std::fs::write(&path, source).unwrap();
     let out_dir = directory.join(format!("{stem}-out"));
@@ -233,17 +240,15 @@ fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> 
         ],
     );
     if !built.status.success() {
-        return Err(format!("build: {}", text(&built)));
+        return Err((CStage::Build, text(&built)));
     }
-    let linked = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
-    assert!(linked.success(), "{stem}: link failed: {linked}");
     let run = std::process::Command::new(out_dir.join(stem))
         .output()
         .unwrap();
     if run.status.success() {
         Ok(String::from_utf8_lossy(&run.stdout).into_owned())
     } else {
-        Err(text(&run))
+        Err((CStage::Run, text(&run)))
     }
 }
 
@@ -267,7 +272,7 @@ fn the_grad_body_row_builds_and_agrees_with_eval_file_in_c() {
         c => failures.push(format!("untaken: eval {:?}, C {c:?}", text(&eval))),
     }
     match c_file(directory.path(), "grad_body_taken_c", &taken(source)) {
-        Err(c) if c.contains(trap) => {}
+        Err((CStage::Run, c)) if c.contains(trap) => {}
         c => failures.push(format!("taken: C {c:?}")),
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));

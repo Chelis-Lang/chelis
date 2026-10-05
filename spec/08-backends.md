@@ -1,22 +1,21 @@
 # Backends
 
-**Status:** Active outline.
-Phase 0 defines the C backend.
-Phase 1 adds the GPU backend.
-Later backends are integration layers.
+This chapter defines how a checked program becomes executable code: the C backend,
+the GPU backends, and the invariants every backend preserves.
 
 ## 1. Backend Strategy
 
 Chelis lowers typed programs to a RISC DAG and treats backend emission as a separate
 concern from parsing, type checking, and lowering.
-The backend strategy is intentionally sequential:
+The backends are layered:
 
-1. make the C backend correct and complete
-2. use it as the numerical oracle for later backends
-3. add a single GPU code generation path based on HIP
-4. add ecosystem integration backends later
+1. the C backend is the reference host backend
+2. it is the numerical oracle the other backends are checked against
+3. GPU code generation is source-to-source: HIP for AMD GPUs (§3) and Metal for
+   Apple GPUs (§4)
+4. ecosystem integration backends are additive layers (§5)
 
-The project does **not** plan multiple competing native code generators in Phase 0.
+Chelis does **not** maintain multiple competing native host code generators.
 
 ### 1.1 Evaluation output and failure
 
@@ -32,14 +31,27 @@ evaluation obey the same channel rules. Compiler API evaluation errors retain
 the preceding transcript separately from diagnostics so embedders can choose
 their own output sink without rerunning the program.
 
-## 2. Phase 0: C Backend
+### 1.2 Executable grammar validation
+
+`chelis validate` checks source against the executable grammars before any
+backend runs:
+
+- `chelis validate --surf file.ch` validates Surf syntax against the PEG conformance grammar
+- `chelis validate --deep file.dp` validates Deep syntax plus the closed tag/metadata/arity rules
+- `chelis validate --desugar file.ch` validates compiler-desugared canonical Deep output
+
+The validator lives in the standalone `chelis-validate` crate. Its test suite checks
+agreement across the executable examples, the illustrative syntax examples,
+`SKILL.md`, curated positive spec fixtures, and curated negative fixtures.
+
+## 2. C Backend
 
 The C backend is the reference implementation.
 Its job is to turn the DAG into portable host code that can be compiled with the system
 toolchain.
 
 "Reference implementation" here means the first and most complete backend, and the
-practical numeric oracle the later backends are checked against. It does not mean the C
+practical numeric oracle the other backends are checked against. It does not mean the C
 backend DEFINES the values: every lane, the evaluator included, owes its results to
 `spec/04-type-system.md` §9 - [04-NUM-8]'s arithmetic width, [04-NUM-1..7]'s finalize and
 trap rules, and [04-NUM-11]'s exactness guarantee - and where a lane and those atoms
@@ -96,7 +108,7 @@ Downstream C code SHALL call declarations from the generated header, and tooling
 consume the generated associations rather than reconstructing symbols from Chelis
 source spellings.
 
-Current design points:
+Design points:
 
 - emit loops for elementwise, reduction, and movement operations
 - use OpenMP for elementwise and reduction parallelism
@@ -108,7 +120,7 @@ Current design points:
   `chelis_tuple_from_values(...)`, and typed extraction goes through the
   `chelis_tuple_get_*` helpers documented in `chelis_runtime.h`
 
-This backend is the correctness oracle for future GPU and interoperability backends.
+This backend is the correctness oracle for the GPU and interoperability backends.
 
 Generated code holds no random state: every draw reads the key it is given
 ([05-RNG-1]), so reentrant and concurrent public invocations share nothing
@@ -171,143 +183,93 @@ take them from that compiler's runtime export and SHALL verify the archive
 against the export's digest. The carried runtime adds no C callable and does not
 change callable metadata `abi_version: 2` (spec/11 §1.4).
 
-## 3. Phase 1: HIP Backend
+## 3. HIP Backend
 
-The GPU plan is Futhark-style source-to-source compilation:
+The HIP backend uses Futhark-style source-to-source compilation:
 
 - host-side control remains in generated C
 - GPU kernels are emitted as HIP source strings
 - `hiprtc` performs runtime compilation of those kernels
 
-This is the only planned native GPU path.
-Chelis does **not** plan separate CUDA and OpenCL backend implementations.
-HIP is the vendor-facing abstraction layer.
+HIP is the vendor-facing abstraction layer for AMD GPUs.
+Chelis does **not** maintain separate CUDA and OpenCL backend implementations.
 
-### Phase 1a: Kernel Code Generation (complete)
+### 3.1 Kernel code generation
 
 The `chelis-backend-hip` crate generates HIP host source with embedded HIP kernel strings.
-Same ABI as the C backend (`chelis_tensor **inputs/outputs`).
+It uses the same ABI as the C backend (`chelis_tensor **inputs/outputs`).
 
-Authoritative Phase 1a oracle:
-
-```sh
-cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
-```
-
-HIP kernel execution:
-
-- kernel source strings for the Phase 1a execution surface:
-  elementwise ops, reductions, fill, and cast
-- `chelis-ir::grad_then_fuse` preserves the required Phase 1b ordering:
-  differentiate the ordinary DAG first, then fuse the resulting gradient DAG
-- shapes/strides passed as individual int kernel parameters (not device pointers)
+- kernel source strings cover elementwise ops, reductions, fill, and cast
+- `chelis-ir::grad_then_fuse` differentiates the ordinary DAG first, then fuses the
+  resulting gradient DAG
+- shapes/strides are passed as individual int kernel parameters (not device pointers)
 - debug builds reset/check a per-module `chelis_gpu_failure` flag after every kernel launch
 - views preserve backing allocation size so debug index guards validate against real storage
 - movement ops (reshape, permute, expand, insert, stride) are host-side metadata operations
-- naive reductions (one thread per output element, inner loop over axis)
-- `chelis_gpu_free` for allocations, `chelis_gpu_free_view` for views
+- `chelis_gpu_free` releases allocations and `chelis_gpu_free_view` releases views
 - `chelis build app.ch --target hip` emits compilable `*_hip.cpp` host output
-- `pad` and `shrink` are implemented as typed per-output-element kernels
-  (`kernel_pad{_dtype}` / `kernel_shrink{_dtype}`); GPU output is verified
-  equal to the `chelis-ir` evaluator by the `g16_pad_*` / `g16_shrink_*`
-  cases in the `gpu_correctness` manual oracle
+- `pad` and `shrink` are typed per-output-element kernels
+  (`kernel_pad{_dtype}` / `kernel_shrink{_dtype}`)
 
-### Phase 1b: Kernel Fusion
+### 3.2 Kernel fusion
 
-Greedy elementwise fusion: adjacent single-consumer elementwise ops are merged into
-`FusedElem` nodes that emit as single GPU kernels. MNIST drops from 27 to 19 kernel
-launches.
+Greedy elementwise fusion merges adjacent single-consumer elementwise ops into
+`FusedElem` nodes that emit as single GPU kernels.
 
-- fusion pass in `chelis-ir/src/fuse.rs` (DAG-to-DAG rewrite, shared by all backends)
-- `FusedElem` variant in `RiscOp` with `FusedStep`/`FusedStepOp`/`FusedInput` types
-- elementwise→reduction fusion: when a FusedElem's sole consumer is a reduction,
+- the fusion pass in `chelis-ir/src/fuse.rs` is a DAG-to-DAG rewrite shared by all backends
+- `RiscOp::FusedElem` carries `FusedStep`/`FusedStepOp`/`FusedInput` data
+- elementwise→reduction fusion: when a `FusedElem`'s sole consumer is a reduction,
   the elementwise chain is inlined into the reduction kernel's inner loop
-- HIP emitter generates fused kernel source strings (register-chained computation)
-- C backend emits fused `#pragma omp parallel for` loops (wired into CLI for both targets)
-- evaluator decomposes `FusedElem` back to individual ops for testing
-- multi-consumer split fusion: per spec, multi-consumer nodes are materialized and serve
-  as external inputs to downstream chains
+- the HIP emitter generates fused kernel source strings (register-chained computation)
+- the C backend emits fused `#pragma omp parallel for` loops for both targets
+- the evaluator decomposes `FusedElem` back to individual ops
+- multi-consumer nodes are materialized and serve as external inputs to downstream chains
 - `realize()` lowers to a real DAG materialization barrier and blocks fusion across it
-- `egg` evaluation skipped; greedy heuristic sufficient for Phase 1b scope
 
-### Phase 1c: Memory Planning (complete)
-
-Authoritative Phase 1c oracle:
-
-```sh
-cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
-```
-
-HIP memory planning:
+### 3.3 Memory planning
 
 - greedy slot reuse for non-overlapping storage lifetimes in `chelis-backend-hip/src/memory.rs`
-- unique input copies transferred once, with repeated `Load(name)` nodes aliasing the first copy
-- planner-driven cleanup: every metadata wrapper freed once, every backing slot freed once
+- unique input copies are transferred once, with repeated `Load(name)` nodes aliasing the first copy
+- planner-driven cleanup: every metadata wrapper is freed once, and every backing slot is freed once
 - movement ops and `store` remain metadata aliases over the chosen backing slot
-- kernel outputs iterate over logical element count (`d_t->size`), while input guard checks still use backing `storage_size`
-- HIP codegen reports a peak-memory formula plus an optional concrete estimate when every slot size is statically known
-- `chelis build --target hip` prints the formula unconditionally and the concrete estimate when available
-- the reporting surface includes inline staged-reduction scratch chains used by Phase 1d scalar reductions
-- no runtime memory-budget comparison or checkpoint insertion yet; Phase 1c ships reporting-only visibility
+- kernel outputs iterate over logical element count (`d_t->size`), while input guard
+  checks use backing `storage_size`
+- HIP codegen reports a peak-memory formula plus an optional concrete estimate when
+  every slot size is statically known
+- `chelis build --target hip` prints the formula unconditionally and the concrete
+  estimate when available
+- the reported formula includes the inline staged-reduction scratch chains of §3.4
 
-### Phase 1d: Optimized Reductions + hipBLAS (complete)
-
-Authoritative Phase 1d oracle:
-
-```sh
-cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
-```
-
-Current implementation:
+### 3.4 Reductions and hipBLAS
 
 - segmented reductions use a single runtime-sized axis-specific kernel for the generic path
 - fused elementwise→reduction kernels reuse that same runtime-sized segmented reduction path
-- scalar contiguous reductions use a staged scratch-chain reduction with inline `hipMalloc`/`hipFree`, outside the Phase 1c slot planner
-- the peak-memory formula includes the worst single staged scratch chain alongside the slot-plan terms
+- scalar contiguous reductions use a staged scratch-chain reduction with inline
+  `hipMalloc`/`hipFree`, outside the slot planner of §3.3
+- the peak-memory formula includes the worst single staged scratch chain alongside the
+  slot-plan terms
 - contiguous `f32` matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
   rank-2 emits `chelis_hipblas_sgemm_row_major(...)`, while batched/symbolic matmul emits
   runtime-sized calls through `chelis_hipblas_sgemm_batched_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
-- `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
+- `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS
+  specialization is emitted
 
-### Phase 1f: Executable Grammar (complete)
+### 3.5 Symbolic dimensions
 
-Authoritative Phase 1f oracle:
+Symbolic dimensions use the stable tensor ABI on both the C and HIP backends:
+generated functions bind symbolic names from input tensor metadata at runtime and
+validate repeated occurrences across all participating inputs.
 
-```sh
-cargo test -p chelis-e2e --test example_corpus_validate
-```
+Symbolic shape normalization is name-stable and conservative: memory planners
+canonicalize product ordering/associativity and arithmetic identities such as
+`n * 1`, but they do not alpha-rename unrelated symbols. Alpha-renaming is valid
+only for paths that carry explicit same-property `forall` or binder-equivalent
+dimension identity.
 
-Executable grammar validation:
+### 3.6 Resource-region checks
 
-- `chelis validate --surf file.ch` validates Surf syntax against the PEG conformance grammar
-- `chelis validate --deep file.dp` validates Deep syntax plus the closed tag/metadata/arity rules
-- `chelis validate --desugar file.ch` validates compiler-desugared canonical Deep output
-- the validator is implemented in the standalone `chelis-validate` crate and wired through the CLI
-- the oracle suite checks agreement across executable examples, illustrative syntax examples,
-  `SKILL.md`, curated positive spec fixtures, and curated negative fixtures
-
-GPU execution and executable grammar validation have dedicated tests and manual gates.
-Backend limitations:
-
-- symbolic dimensions are implemented on the stable tensor ABI for both backends:
-  generated functions bind symbolic names from input tensor metadata at runtime and
-  validate repeated occurrences across all participating inputs
-- symbolic shape normalization v1 is name-stable and conservative: memory planners
-  canonicalize product ordering/associativity and arithmetic identities such as
-  `n * 1`, but they do not alpha-rename unrelated symbols. Alpha-renaming is only
-  valid for future paths that carry explicit same-property `forall` or
-  binder-equivalent dimension identity.
-- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
-  are supported, but a symbolic hidden size remains a follow-up
-- dotted Deep module/import round-trip remains a separate Phase 2 parser/decompiler follow-up
-
-These are real backend limitations, not hidden caveats, but they do not block Phase 2
-language work.
-
-### Phase 2a backend-boundary checks
-
-The first shipped effect surface interacts with backend selection in two explicit ways:
+The effect surface interacts with backend selection in two explicit ways:
 
 - `chelis build --target c` admits only exact `with device("cpu") { ... }`
   host regions; every other device designator, including `cpu:<label>`, is
@@ -315,15 +277,25 @@ The first shipped effect surface interacts with backend selection in two explici
   `spec/04-type-system.md` [04-EFF-2]
 - `chelis build --target hip` rejects incompatible non-GPU resource regions
 
-## 4. Phase M: Metal Backend (macOS GPU peer)
+### 3.7 Coverage and GPU agreement
 
-The Metal backend is the macOS-native GPU peer of the HIP backend. It is not a
-continuation of HIP work — it is an independent backend track that mirrors HIP's
-architecture exactly:
+Operation and dtype coverage differs by target. `spec/04-type-system.md` §1.1.3
+controls dtype admission, an operation a target does not support produces a target
+diagnostic before emission, and `docs/CHELIS_SURFACE.md` §6 lists each target's
+current coverage.
+
+Each HIP GPU correctness case asserts that the HIP GPU result equals the `chelis-ir`
+evaluator, including the `g16_pad_*` / `g16_shrink_*` movement cases. Those cases need
+an AMD GPU, so they are manual gates; `docs/manual_gates.md` lists their commands.
+
+## 4. Metal Backend
+
+The Metal backend is the macOS-native GPU peer of the HIP backend. It is an
+independent backend that mirrors HIP's architecture:
 
 - host-side control remains in generated source, here Objective-C++ in `.mm` files
 - GPU kernels are emitted as Metal Shading Language (MSL) source strings
-- `[MTLDevice newLibraryWithSource:options:error:]` performs runtime compilation —
+- `[MTLDevice newLibraryWithSource:options:error:]` performs runtime compilation,
   the direct analog of `hiprtc` for the HIP path
 
 Same ABI as the C and HIP backends:
@@ -331,198 +303,119 @@ Same ABI as the C and HIP backends:
 
 The Metal backend is **pure string emission** in Rust. The crate has zero macOS-only
 Rust dependencies (no `metal-rs`, no `objc`); it builds, tests, and lints clean on
-Linux, macOS, and Windows. Apple-SDK integration happens later when the user runs
+Linux, macOS, and Windows. Apple-SDK integration happens when the user runs
 `clang++ -fobjc-arc -framework Metal -framework Foundation` against the emitted
 `.mm`. This keeps `--target metal` available as a cross-compilation target and
-mirrors how HIP works (no `hip-rs` dep on the Rust side; the user runs `hipcc`).
+mirrors how HIP works (no `hip-rs` dependency on the Rust side; the user runs `hipcc`).
+`docs/manual_gates.md` records the dependency-tree check for this property.
 
 Full design in `spec/design/chelis_metal_backend_plan.md`.
 
-### Phase M0: Spec sync (complete)
-
-Authoritative oracle:
-
-```sh
-grep -F "[MTLDevice newLibraryWithSource:]" \
-  spec/design/chelis_metal_backend_plan.md
-```
-
-The grep proves the Metal runtime model has been switched away from the original
-`metal-rs` Rust runtime to the string-emission-plus-runtime-source-compilation
-model that mirrors HIP.
-
-### Phase M1: Scaffolding + CLI dispatch
+### 4.1 Crate structure and target admission
 
 `crates/chelis-backend-metal/` is structurally a peer of `crates/chelis-backend-hip/`:
 `src/{lib,emit,kernels,launch,memory,blas}.rs`, `runtime/chelis_metal_runtime.h`,
 `tests/{codegen_structure,codegen_adversarial,gpu_correctness}.rs`.
 
-`chelis build --target metal` is wired in `crates/chelis-cli/src/main.rs` alongside
-`--target c` and `--target hip`. `pad`/`shrink` are implemented as typed MSL
-movement kernels (WS-8A) and pass through to codegen; the reject pass no longer
-denies them. Per-dtype admit/reject decisions for
+`chelis build --target metal` dispatches alongside `--target c` and `--target hip`.
+`pad`/`shrink` are typed MSL movement kernels. Per-dtype admit/reject decisions for
 the Metal backend are pinned in `spec/04-type-system.md` §1.1.3 (the
 per-backend dtype matrix); the CLI gate, the IR validation pass, and the
 codegen entry point each consult that matrix. f64 is **hard-rejected** on
 Metal with the FP64-ALU hardware diagnostic per §1.1.3; bf16 admits at
 codegen but pipeline creation surfaces the Apple7+ requirement at runtime
-on pre-Apple7 devices, also per §1.1.3. Sort/argsort/cumsum/cumprod don't
-exist as IR variants today — when they're added, both backends' reject
-passes will need the corresponding arms; documented as a follow-up rather
-than a current guarantee.
+on pre-Apple7 devices, also per §1.1.3.
 
-Authoritative oracle:
-
-```sh
-cargo build --workspace && \
-cargo test -p chelis-cli --test cli -- target_metal && \
-cargo tree -p chelis-cli --prefix none --no-dedupe \
-  | python3 -c 'import sys, re
-forbidden = ("metal", "objc", "objc-foundation", "objc_id", "objc_exception",
-             "cocoa", "core-graphics", "core-foundation", "block")
-pattern = re.compile(r"^(" + "|".join(re.escape(n) for n in forbidden) + r") v")
-bad = sorted({l.strip() for l in sys.stdin if pattern.match(l)})
-sys.exit(1 if bad else 0)'
-```
-
-The `cargo tree` step enforces the no-Apple-SDK-Rust-deps invariant.
-
-### Phase M2: Elementwise emission
+### 4.2 Kernel emission
 
 `MetalEmitter` mirrors `HipEmitter::emit_dag` (same passes: `collect_kernels`,
 `emit_kernel_string_decl`, signature emission, `emit_input_shape_preamble`,
 plan-driven slot allocation). MSL replaces HIP C/C++ syntax for kernel
 declarations, thread indexing, buffer qualifiers, and math built-ins.
+Reshape is metadata-only. `docs/CHELIS_SURFACE.md` §6 lists the operations the
+Metal target admits.
 
-Coverage: add/sub/mul/div/neg/exp/log/sqrt/sin/cast/clamp/where, fill,
-fused elementwise chains, reshape (metadata-only), permute, expand, insert.
+### 4.3 Reductions
 
-Authoritative oracle:
+MSL reduction templates (sum/max/min) use threadgroup memory and tree
+reduction, with two passes for arrays larger than one threadgroup. Fused
+elementwise-into-reduction reuses the `reduction_inlined_fused_elems`
+path in `chelis-ir`.
 
-```sh
-cargo test -p chelis-backend-metal --test codegen_structure
-```
+### 4.4 Matmul
 
-### Phase M3: macOS CI compile-and-link smoke
+A custom 16×16 tiled MSL matmul kernel needs no MPS dependency. The specialization
+rule mirrors the HIP hipBLAS detection: rank-2 contiguous f32 matmul subgraphs
+(`insert + mul + sum(axis=1)`) route to `chelis_metal_matmul_tiled`. bf16, i8, i16,
+i32, and i64 matmul (where admitted by `spec/04-type-system.md` §5.7.2) route through
+the parameterized 16×16 tiled MSL kernel. `chelis_metal_runtime.h` exposes MPS
+wrapper helpers for f32 and f16 matmul under the ARC ownership model pinned in
+`spec/04-type-system.md` §1.1.3 ("Metal runtime header: ARC vs MRC and MPS wrapper
+ownership model").
+
+### 4.5 Compile-and-link smoke
 
 A Python smoke harness (`.github/scripts/smoke_macos_metal.py`) drives
 `chelis build --target metal` on a fixed-shape elementwise program and then runs
 `clang++ -std=c++17 -fobjc-arc -O2 ... -framework Metal -framework Foundation`
-on the emitted `.mm`. Smoke is intentionally compile-and-link only;
-`MTLCreateSystemDefaultDevice` may return null on macos-latest VMs, so kernel
-dispatch is gated to the workstation (Phase M6), not CI.
+on the emitted `.mm`. The smoke is compile-and-link only:
+`MTLCreateSystemDefaultDevice` may return null on hosted macOS CI machines, so kernel
+dispatch is checked by the device gate of §4.6. Shard 2 of the `macos-workspace-shard` job in
+`.github/workflows/macos-nightly.yml` runs it.
 
-Authoritative oracle: the `macos-smoke` GitHub Actions job exits 0.
+### 4.6 GPU correctness and numeric agreement
 
-### Phase M4: Reductions + fused-elementwise-into-reduction
-
-MSL reduction templates (sum/max/min) using threadgroup memory and tree
-reduction. Two-pass for arrays larger than one threadgroup. Fused
-elementwise-into-reduction reuses the existing `reduction_inlined_fused_elems`
-path in `chelis-ir`.
-
-Authoritative oracle:
-
-```sh
-cargo test -p chelis-backend-metal --test codegen_structure -- reduction
-```
-
-### Phase M5: Tiled matmul
-
-Custom 16×16 tiled MSL matmul kernel (no MPS dep). The specialization rule
-mirrors the original HIP hipBLAS detection: rank-2 contiguous f32 matmul
-subgraphs (`insert + mul + sum(axis=1)`) route to
-`chelis_metal_matmul_tiled`. Rank ≥ 3 and symbolic batched matmul remain a
-Metal follow-up.
-
-Authoritative oracle:
-
-```sh
-cargo test -p chelis-backend-metal --test codegen_structure -- matmul_tiled
-```
-
-### Phase M6: GPU correctness oracle (manual)
-
-`tests/gpu_correctness.rs` with `#[ignore]` on every test. Each test invokes
-`codegen_metal`, writes the emitted `.mm` to a tempdir, drives `clang++` against
-`-framework Metal -framework Foundation`, runs the resulting binary, and asserts
-agreement with the `chelis-ir` evaluator within Metal-specific f32 tolerances.
-
-Authoritative oracle (manual, requires Apple Silicon Mac with a usable Metal
-device):
-
-```sh
-cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
-```
-
-This is the single oracle for M2–M6 GPU correctness. MSL fast-math semantics may
-require widened tolerance versus HIP for `exp`/`log`/`sqrt`-heavy kernels;
-specific kernels needing higher precision use `precise::*` qualifiers per-call.
-
-#### Metal numeric-agreement gate (cross-backend oracle)
+`tests/gpu_correctness.rs` marks every test `#[ignore]`. Each test invokes
+`codegen_metal`, writes the emitted `.mm` to a temporary directory, drives `clang++`
+against `-framework Metal -framework Foundation`, runs the resulting binary, and
+compares the result with the `chelis-ir` evaluator.
 
 The C backend is the numeric oracle for every GPU backend (§2). The Metal
-numeric-agreement contract is: for each kernel under test, the Metal GPU
-result must equal the `chelis-ir` evaluator (which the C backend is verified
-against) within the Metal f32 tolerance (`ABS_TOL`/`REL_TOL` in
-`tests/gpu_correctness.rs`, `1e-4` each, widened per fast-math note above).
-`assert_close` in that file is the agreement check.
-
-This gate is **manual and workstation-only** — it is NOT part of default CI,
-because `MTLCreateSystemDefaultDevice` returns null on the macos-latest CI VMs
-(only the compile-and-link `macos-smoke` job, Phase M3, runs in CI). Mirrors
-how the HIP `gpu_correctness` oracle is gated (manual, requires a HIP GPU).
-
-- Owning phase: Phase M6.
-- Command (Apple Silicon Mac with a usable Metal device):
-  `cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1`
-- Success condition: every `#[ignore]` test passes (exit 0); each asserts
-  Metal GPU == evaluator within tolerance.
-
-WS-8A added `m6_pad_*` / `m6_shrink_*` cases (1-D and 2-D pad/shrink, non-zero
-fill, and a pad→shrink roundtrip) to this gate, mirroring the HIP `g16_*`
+numeric-agreement contract is [05-OBS-3]'s: for each kernel under test, every
+Metal result has the same bits as the `chelis-ir` evaluator (which the C backend
+is verified against). There is no Metal-specific absolute or relative tolerance.
+A Metal kernel admits an operation only where it can produce those bits:
+without fast math or contraction, with round-to-nearest-even and preserved
+subnormals, and with every transcendental computed by a Chelis-owned correctly
+rounded kernel. An MSL built-in, `precise::` included, is not one, because MSL
+bounds its error rather than rounding correctly. MSL also permits a device to
+flush f32 subnormals or round f32 arithmetic toward zero, and has no f64, so an
+operation or dtype whose bits the device cannot guarantee is rejected under
+[05-UNS-1], never approximated.
+(The Metal and HIP lanes do not yet meet this contract; see
+[chelis#2968](https://github.com/Chelis-Lang/chelis/issues/2968) and
+[chelis#2969](https://github.com/Chelis-Lang/chelis/issues/2969).)
+The `m6_pad_*` / `m6_shrink_*` cases (1-D and 2-D
+pad/shrink, non-zero fill, and a pad→shrink roundtrip) mirror the HIP `g16_*`
 cases one-for-one.
 
-### Phase M7: Adversarial test surface
+The gate needs an Apple Silicon Mac with a usable Metal device, so it is manual and
+outside default CI; `docs/manual_gates.md` lists its command and success condition.
+
+### 4.7 Adversarial tests
 
 `tests/codegen_adversarial.rs` mirrors `crates/chelis-backend-hip/tests/codegen_adversarial.rs`.
 Cases: zero-element tensors, rank-0 scalars, symbolic dims of 0/1, bool through
 `where`, cast f32→bool→f32 round-trip, very large grids (>2^16 threadgroups),
 single-element reductions, matmul with degenerate dimensions.
 
-Authoritative oracle:
+### 4.8 Target constraints
 
-```sh
-cargo test -p chelis-backend-metal --test codegen_adversarial
-```
-
-### Carried-forward limitations
-
-- `sort`, `argsort`, `cumsum`, `cumprod`, `diagonal`, `trace` not on the GPU path
 - f64 is **hard-rejected** on Metal because Apple Silicon GPUs have no FP64 ALUs;
   software emulation is out of scope. The diagnostic and rationale are pinned in
-  `spec/04-type-system.md` §1.1.3. f64 workloads must use `--target c` or
+  `spec/04-type-system.md` §1.1.3. f64 workloads use `--target c` or
   `--target hip`.
-- bf16 on Metal requires Apple7+ GPU family (M3 or later); the kernel template
+- bf16 on Metal requires the Apple7+ GPU family (M3 or later); the kernel template
   guards `bfloat` on `__METAL_VERSION__ >= 320`, and runtime pipeline creation
   surfaces a clean diagnostic on M1/M2 devices. See `spec/04-type-system.md`
   §1.1.3 for both surfaces.
-- MPS integration for f32 and f16 matmul is the wrapper-helper plan from
-  WS-M1; `chelis_metal_runtime.h` exposes the helpers under the ARC
-  ownership model pinned in `spec/04-type-system.md` §1.1.3 ("Metal runtime
-  header: ARC vs MRC and MPS wrapper ownership model"). bf16, i8, i16,
-  i32, and i64 matmul (where admitted by §5.7.2) routes through the
-  parameterized 16x16 tiled MSL kernel rather than MPS.
-- Async dispatch deferred; M-phase uses `waitUntilCompleted` for synchronous launches
-- `peak_device_bytes_formula` semantically reports peak system RAM for tensor
-  storage on Apple Silicon (no separate VRAM); the CLI prefixes the formula with
-  a one-line note so users do not double-count
+- `peak_device_bytes_formula` reports peak system RAM for tensor storage on Apple
+  Silicon (no separate VRAM); the CLI prefixes the formula with a one-line note so
+  users do not double-count
 
-These are real backend limitations, not hidden caveats.
+## 5. Integration Backends
 
-## 5. Later Integration Backends
-
-Later backends are additive:
+Integration backends are additive:
 
 ### StableHLO
 
@@ -539,23 +432,66 @@ These do not replace the C/HIP/Metal path.
 
 Interactive execution is not a separate backend.
 Tide and `chelis eval` use the IR evaluator first.
-If latency later becomes a problem, the escalation order is:
+If interactive latency becomes a problem, the escalation order is:
 
 1. cached C artifacts
 2. persistent compiler helper
 3. JIT only if measured workloads justify it
 
-No Cranelift-based backend is currently planned.
+Chelis has no Cranelift-based backend.
 
 ## 7. Backend Selection
 
-Planned command surface:
+Native build command surface:
 
 - `chelis build app.ch`
 - `chelis build app.ch --target hip`
 - `chelis build app.ch --target metal`
 
-Additional targets may be added later as StableHLO, FX, and Triton land.
+`chelis build` SHALL invoke the selected target's native compiler and produce an
+executable when the checked root manifest requires an observation entry point, or
+a static library without a process entry when it does not. Compilation SHALL use
+the target's required support sources and compiler/linker flags. Every lane's
+arithmetic, host and device alike, SHALL be compiled without implicit
+floating-point contraction (`-ffp-contract=off` or the device compiler's
+equivalent) and without any value-changing optimization: no fast math,
+reassociation, flush-to-zero, or approximate reciprocal, square root, or
+transcendental. The compile and link invocations are a function of the declared
+target: the compiler SHALL NOT add flags derived from the build host's CPU (such
+as `-march=native`), and SHALL run each native tool with an environment cleared
+to a fixed allowlist, so that an ambient variable (for example `CFLAGS`,
+`CCC_OVERRIDE_OPTIONS`, or `NIX_CFLAGS_COMPILE`) cannot change generated code. A
+selected native compiler that does not honor this profile, including a wrapper
+that injects flags, SHALL fail the build rather than produce an artifact.
+Emitted code computes every transcendental with the compiler-owned correctly
+rounded kernels of [05-OP-46], never with the host math library, a vendor vector
+library, or a compiler built-in. Executable
+linking SHALL name the carried staged runtime archive by path (§2.1).
+
+Every entry point through which other code runs compiled Chelis code, namely an
+executable's process entry, an exported static-library function, and a binding
+call, SHALL establish round-to-nearest-even with flush-to-zero and
+denormals-are-zero disabled before any Chelis arithmetic, and SHALL restore the
+caller's floating-point control state when it returns, a trap return included.
+The evaluator establishes the same state on every thread on which it computes.
+Every lane finalizes a NaN produced by floating arithmetic or conversion to
+[04-NUM-2]'s canonical NaN, whatever default NaN or payload propagation its
+hardware has.
+Static libraries contain the compiled module and support objects; their consumers
+link the carried runtime archive and the target's reported native dependencies.
+
+`--emit-c` SHALL emit only the generated C-family sources, headers, runtime support,
+and compile guidance, without requiring a native compiler or archiver. It applies
+to C, HIP C++, and Metal Objective-C++ output. Both modes retain generated sources.
+The output option selects the existing output directory or explicit source filename;
+the executable uses that source stem and the library uses `lib<source-stem>.a`.
+
+A native tool failure SHALL fail the build, name the failing tool and stage, and
+preserve its diagnostics. Missing-tool diagnostics SHALL explain how to install
+it. A failed build SHALL NOT replace a previously published native artifact;
+success SHALL be reported only after the new native artifact exists.
+
+Integration backends (§5) add further targets.
 
 ## 8. Invariants
 
@@ -564,9 +500,10 @@ All backends must preserve:
 - the numeric semantics of `spec/04-type-system.md` §9: finalize at the declared dtype,
   compute at the arithmetic width [04-NUM-8] declares, trap per [04-NUM-9]/[04-NUM-10],
   and carry values without collapse per [04-NUM-11]
-- numerical correctness within documented tolerances, which under [04-NUM-8] cover
-  implementation variance at a single width (libm against SLEEF against vForce) and never
-  a structural width mismatch between lanes
+- bit-identical values across lanes and hosts: [05-OBS-3] grants no operation a
+  nonzero bound, the transcendentals are correctly rounded under [05-OP-46], and no
+  host math library, vendor vector library, compiler, flag, or floating-point
+  environment is a source of variance (§7)
 - named-dimension and precision semantics established before lowering
 - agreement with the reference C backend on the shared test suite - a practical oracle
   for the invariants above, not a substitute for them

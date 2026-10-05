@@ -181,7 +181,7 @@ should also follow:
 
 Audit traces (a runtime event, a stack frame, a profiler hit, a
 generated source line in a debugger) resolve to host-side source
-lines — the `.c` / `.cpp` / `.mm` file that customers, profilers, and
+lines — the `.c` / `.cpp` / `.mm` file that users, profilers, and
 debuggers read. Embedded kernel source is a runtime artifact compiled
 by the GPU driver; it is not itself an audit-trace target.
 
@@ -206,7 +206,7 @@ recoverable from either.
 If a future backend introduces a new artifact kind (e.g., a SPIR-V
 intermediate, a precompiled `.metallib`, a kernel cache distributed
 separately from the host source), this principle answers what should
-happen with spans there: if customers will trace through the artifact
+happen with spans there: if users will trace through the artifact
 to find original source, spans go in it; if the artifact is a runtime
 build product not on the audit-trace path, spans don't.
 
@@ -718,7 +718,7 @@ line in the emitted C (the at-the-emission-level audit invariant),
 range, and (d) the emitted C compiles via gcc.
 
 🔴 **Red-team gate after S6.** Fresh local subagent. Same shipping
-bar as S5: span-survival is a customer-visible audit promise; any
+bar as S5: span-survival is a user-visible audit promise; any
 gap between sidecar and emitted C breaks the trust stack.
 
 ### S7 — Source-qualified node identity (chelis#1172)

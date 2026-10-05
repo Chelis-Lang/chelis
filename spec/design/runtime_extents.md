@@ -125,7 +125,14 @@ nothing asked for. Stating the pipe's meaning once cannot have that effect.
 With #1266/#569
   admitted beside it, no provenance restriction remains and removing the walk
   itself is all that is left of B2b-2's acceptance half.
-- #1482 needs an actual shape source for a synthesized constant. The
+- #469 removed the walk. The checker no longer classifies an `expand`/`insert`
+  size by provenance and the lowerer's bare-name rejection lowers the name as
+  an `RtDim::Node` instead, so a scalar parameter, a `cast` over one, a local or
+  top-level binding, a call result and any checked arithmetic over them execute
+  on every host lane. A size must still be exactly `i64`: a value binding named
+  in the size slot keeps its own type rather than being retyped as an extent.
+- #1482's synthesized activation constants take the activation's input as
+  their shape source. The
   declaration consumers no longer use legacy name recovery: every name a lane
   renders resolves through `ExtentOrigin`, and a name that resolves to none is
   a typed receipt. #665's kept-axis instance and #1566's binder-spelling
@@ -1269,9 +1276,9 @@ name that resolves to no origin is a typed receipt from
 `check_rendered_dim_origins`, which is an emission obligation rather than a
 lowering one, and `CEmitter::declared_dim_names` is the executable invariant
 that the two declaration loops cover the rendered set between them. A
-synthesized Const's value supplies no shape: #1482 needs an actual axis source,
-not a guessed dimension or a bypass of the cardinality check. Recheck the
-current sigmoid/silu/gelu witnesses; the ReLU mechanism was removed by #1313.
+synthesized Const's value supplies no shape, so its axis source is a recorded
+shape dependency on the activation's input (#1482), never a guessed dimension or
+a bypass of the cardinality check; the ReLU mechanism was removed by #1313.
 
 Three rules bind the binding consumer, and each is here because its absence
 was measured. A binding consumer skips a class whose extent an operation
@@ -1363,7 +1370,7 @@ DAG route, which is what `is_static_constructor` now answers for a `(record
 Only after these consumers and guards protect the admitted domain may B2b-2
 remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
 `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
-provenance rejection sites. `shape_deps` stays: `root_reach` traverses it, so
+provenance rejection sites. #469 removed them. `shape_deps` stays: `root_reach` traverses it, so
 removing it would silently merge scopes and reintroduce #1566, and it is a
 declared WireDag v9 transport whose removal is a schema change with its own
 numeric census obligations. It carries a third obligation since B2b-0b: a named
@@ -1395,25 +1402,21 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The phase-B corpus contains 206 rows. Completion requires `--phase b` to
+The phase-B corpus contains 207 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 30 non-`executes_exactly` values against 176
-`executes_exactly`; the dispositions below account for the thirty.
-Twenty-nine rows are `rejects_exactly`, an exit state, since those programs
+column contains 29 non-`executes_exactly` values against 178
+`executes_exactly`; the dispositions below account for the twenty-nine.
+Twenty-eight rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
-defect. Nine of the twenty-nine predate B2c:
+defect. Nine of the twenty-eight predate B2c:
 `expand.positional.replacement.non_unit_source_static`,
 `shrink.to_end.nonzero_start`, and the seven `route.untied` rows
 (`gather.gate`, `matmul.match`, `scatter_replace.gate`, `sum.copy`,
 `sum.match`, `sum.record` and `trace.gate`), whose operand is still unresolved
 where the shape-computed route runs, so the route returns a result nothing ties
-to the shape it computes and any declared shape is admitted. Fourteen are
-B2c's. One is `expand.sourceless_size.pipe_position`, chelis#1791's half B: a
-size with no tensor source was accepted in pipe position and rejected written
-directly, because the size rule matched the operand's type first and a pipe
-stage's operand was unresolved. The other thirteen are
-the two `concat.literal_claim.inlined_root` rows, which B2c moved off
+to the shape it computes and any declared shape is admitted. Thirteen are
+B2c's: the two `concat.literal_claim.inlined_root` rows, which B2c moved off
 `silent_unguarded`, plus five more lane pairs of the same class
 (`pad.identity_axis.literal_claim.inlined_root`, `claim.literal.identity_root`,
 `pad.literal_claim.inlined_root`, `claim.named.resolved.inlined_root` and
@@ -1429,8 +1432,13 @@ moved. Six more rejection rows cover `dtype.late_precision`:
 dtype policy first ran, plus `authored_contract` and
 `indirect_and_transitive`, which require definition-time admission and
 restriction transport instead of callee-body inspection. One row,
-`shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
-an owned receipt rather than an unexplained gap.
+`shrink.elementwise_const.build`, executes: #1482 gave the synthesized
+activation constants their shape source. B2c also recorded
+`expand.sourceless_size.pipe_position`, chelis#1791's half B, as a
+`rejects_exactly` checker verdict: a size with no tensor source was accepted
+in pipe position and rejected written directly. #469 removed the provenance
+rule that row exercised, so it is now the `expand.runtime_size.pipe_position`
+lane pair, executing on both lanes.
 
 The five evaluator gradient rows already have executable receipts from #2070.
 This slice moves the two formerly deferred native primitive-scalar rows to
@@ -1561,8 +1569,8 @@ before chelis#1909 and rejected it with the wrong diagnostic after).
 The lowerer bound the accumulator to a synthesized variable, so a callee's own
 shape source stopped resolving and the lanes disagreed
 (`pipe.bare_name_stage.expand_source.{eval,c}`, and
-`pipe.bare_name_stage.lint_fix.c` for the same program as `chelis lint --fix`
-writes it). `chelis_deep::pipe::fold_pipes` states the sentence once, over
+`pipe.bare_name_stage.lint_fix.c` for the same pipe spelling of a direct call
+taken through the real style path). `chelis_deep::pipe::fold_pipes` states the sentence once, over
 every checker entry's input, and each of those passes lost its own pipe arm
 rather than gaining a rule.
 
@@ -1986,7 +1994,7 @@ All are Slice B work under #1277 unless expressly separated.
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` and for `pad` at the OUTERMOST activation (exported def, value binding, inlined root), and for a declared axis that passes an op-computed extent through. A helper whose NAMED result is consumed inside another def's body is guarded through its resolved binder; the spellings that bind the enclosing result to a rigid dim parameter are checker rejections under section 4.4.1. A claim the owner's own rule statically REFUTES is not stamped and is not executed either: B2c REJECTS it when the activation is lowered, with one fatal diagnostic both host lanes render byte-identically at exit 1, which is section 4.7's "A violation proven from literals is a type error" reaching the case the checker cannot see. The checker keeps that verdict wherever the extent IS visible to it, which a literal parameter extent makes it (`claim.literal.kernel_entry.checker`); what it cannot see is an extent that becomes literal only because a call supplied concrete arguments, and `tensor_concat_result_type`'s `Dim::Wildcard` under section 4.5.4 rule 3 is why `concat`'s DAG path is the sharpest instance. #526's `n + n` checker-tier repair is unchanged by this and remains the right fix for the type it would give. Non-unit stride delivery is separated into #1907/#1931; same-shape result ownership is #1948; local tensor ascriptions are #2110. None is evidence that B2b-0b already closed them. An out-of-domain span on the only claim-failing axis of a `shrink` is not reported as a claim failure: the local guard declines a span whose end runs past its operand, so both lanes report spec/05 §2.4.1's overshoot as the runtime's `Domain: shrink bounds outside input extent` line followed by [04-NUM-9]'s trap line, under a disagreeing literal claim, an agreeing one and a free dim alike, wherever the evaluator raises that diagnostic directly (#1797). Two pre-existing divergence classes remain outside that statement and are not closed by it: a SECOND axis whose in-domain span disagrees with its own claim is still reported as that claim on eval while C reports the overshoot, and a host transform such as `grad` prefixes its own wrapper to the eval text. A span that is empty as well as out of domain is still refused first by #616's operation-level admission rule and renders per lane under #1795 |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered, and a root's restated literal claim defers to them when a graph-fixed extent entails it, never when an ABI parameter's axis does, decided by `resolve_axis_extent`'s origin rather than by the neighbouring operation (#1782) |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is sized from the extent its callee's instantiation absorbed (#1801) |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source. No provenance restriction remains: #1266/#569's field and pipe spellings and #1379's arithmetic sizes are all admitted, so what is left of this row's acceptance half is deleting the walk itself. `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566), and #1482's synthesized constants take their input as shape source. No provenance restriction remains: #1266/#569's field and pipe spellings and #1379's arithmetic sizes are all admitted, and #469 deleted the walk itself, which delivers this row's acceptance half. `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | DELIVERED. Every recorded phase-A and phase-B row has a registered receipt that executes and passes; `--phase b` demands PASS with no `--allow-shortfall`; the withdrawn phase `c` is out of `SLICE_PHASES`, so `--phase final` reaches its row report, passes on the host lanes, and is the nightly `runtime-extent-oracle` job's one step; and `claimed_extent_contract` runs as an ordinary test over all 55 cells with its preparation baseline retired. It moved no row, met no cell, and closes none of the issues listed below |
 | #1907/#1931 stride closure | typed `Stride.strides[*]` carriers and C2.5's operation/result ordering | validate every runtime step before span computation; add `ComputedAxisExtent::StrideSpan` for positive non-unit steps; preserve independent operation-precondition and result-claim failures; replace the old disposition lock with exact positive/negative Eval/C compile-run receipts and final-corpus rows |
 | #1948 same-shape result claims | C2.3's independent claim contract and spec/04 §4.7's returned-value producer rule | attach each declared-result obligation to the returned same-shape operation; represent every positive-rank agreement member without a selected operand origin; run operand agreement before the result guard; prove the dedicated check/Eval/compiled-C matrix and update the earlier #1798 attribution receipts |

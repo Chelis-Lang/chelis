@@ -302,9 +302,9 @@ Einsum lowers to matmul + reshape + permute in the RISC DAG. The Metal backend d
 
 ### 3.3 Metal Runtime (`chelis_metal_runtime.h`)
 
-**Architectural decision (2026-04-29).** This section was originally specified as a Rust-side runtime in `crates/chelis-runtime/` using the `metal-rs` crate, exposed to generated C via `#[no_mangle] pub extern "C"` functions. After comparing against how the HIP backend actually works, that approach was rejected and replaced with **string-emission-only** to mirror HIP exactly. The HIP backend has no Rust intermediary: it emits `.cpp` host source with embedded HIP kernel strings, and `hiprtc` performs runtime compilation. The user runs `hipcc` themselves; no `hip-rs` Rust crate sits between the generated code and the GPU runtime.
+**Architectural decision (2026-04-29).** This section was originally specified as a Rust-side runtime in `crates/chelis-runtime/` using the `metal-rs` crate, exposed to generated C via `#[no_mangle] pub extern "C"` functions. After comparing against how the HIP backend actually works, that approach was rejected and replaced with **string-emission-only** to mirror HIP exactly. The HIP backend has no Rust intermediary: it emits `.cpp` host source with embedded HIP kernel strings, and `hiprtc` performs runtime compilation. `chelis build` invokes `hipcc` (or prints guidance with `--emit-c`); no `hip-rs` Rust crate sits between the generated code and the GPU runtime.
 
-The Metal backend now follows the same shape: emit `.mm` host source with embedded MSL kernel strings; `[MTLDevice newLibraryWithSource:options:error:]` plays the `hiprtc` role at runtime; the user runs `clang++ -framework Metal -framework Foundation` themselves. This keeps `chelis-runtime` platform-portable (no `cfg(target_os = "macos")` branches), avoids `metal-rs` ABI churn tracking Apple SDK changes, and gives both GPU backends the same architecture so contributors only have one model to learn.
+The Metal backend now follows the same shape: emit `.mm` host source with embedded MSL kernel strings; `[MTLDevice newLibraryWithSource:options:error:]` plays the `hiprtc` role at runtime; `chelis build` invokes `clang++` with the required frameworks. This keeps `chelis-runtime` platform-portable (no `cfg(target_os = "macos")` branches), avoids `metal-rs` ABI churn tracking Apple SDK changes, and gives both GPU backends the same architecture so contributors only have one model to learn.
 
 **Runtime location:** `crates/chelis-backend-metal/runtime/chelis_metal_runtime.h` — peer of `chelis_hip_runtime.h`. Pure Objective-C++ header, `static inline` helpers, no Rust. Emitted host `.mm` files `#import` it.
 
@@ -472,11 +472,11 @@ Unsupported Metal lowering returns the shared typed `Unsupported` channel before
 paths are created or files are written. An aborting Objective-C++ placeholder is not a
 successful build artifact.
 
-`cmd_build_metal` writes `<func_name>_metal.mm` plus the header, copies `chelis_metal_runtime.h` from `chelis_backend_metal::runtime_dir()` into the output, prints the symbolic dim list, the unified-memory-aware `peak_device_bytes` formula, and the recommended `clang++` recipe.
+`cmd_build_metal` writes `<func_name>_metal.mm` plus the header, copies `chelis_metal_runtime.h` from `chelis_backend_metal::runtime_dir()` into the output, prints the symbolic dim list, the unified-memory-aware `peak_device_bytes` formula, and compiles a native executable or static library; `--emit-c` prints the recommended `clang++` recipe instead.
 
-**No `cfg(target_os = "macos")` gate on the CLI side.** The Metal backend crate is pure Rust string emission — it builds and runs identically on Linux, macOS, and Windows. The platform-specific work happens later when the user invokes `clang++` against the emitted `.mm`. This keeps `--target metal` available as a cross-compilation target (you can produce Metal source on a Linux build server for later compilation on a Mac).
+**No `cfg(target_os = "macos")` gate on the CLI side.** The Metal backend crate is pure Rust string emission — it builds and runs identically on Linux, macOS, and Windows. Native builds invoke `clang++` against the emitted `.mm`; `--emit-c` remains available without the macOS SDK. This keeps `--target metal` available as a cross-compilation target (you can produce Metal source on a Linux build server for later compilation on a Mac).
 
-The compile command printed by `cmd_build_metal`:
+The source-only compile guidance printed with `--emit-c`:
 
 ```sh
 clang++ -std=c++17 -fobjc-arc -O2 <func>_metal.mm \
@@ -631,7 +631,7 @@ crates/chelis-runtime/build.rs      -- no Metal/Foundation framework links
 - **Matmul correctness:** Same for `matmul(a, b)`. The f32 and f16 paths route through the MPS wrapper helpers (`chelis_metal_mps_gemm_f32` / `chelis_metal_mps_gemm_f16`) per the ARC ownership model in `spec/04-type-system.md` §1.1.3; bf16 routes through the parameterized 16x16 tiled MSL kernel; integer matmul is rejected at type-check per §5.7.2 and never reaches the backend. Verify f32/f16 against an MPS-reference baseline; verify bf16 against an f32 reference within bf16 tolerance.
 - **Fused correctness:** Same for `exp(add(mul(a, b), c))`, verify the output is from a single fused kernel (grep generated C for kernel count) and numerically correct.
 - **Fallback correctness:** Same for a program using `cumsum` (CPU fallback), verify it still produces correct results via the fallback path.
-- **Evaluator agreement:** For every test, the Metal-compiled binary must produce results matching `chelis eval` within the dtype's documented tolerance (f32 ~1e-6 relative; f16 ~1e-3; bf16 ~1e-2; integer dtypes byte-identical). This is the silent-corruption gate: byte-identical agreement on integer dtypes catches the silent-downgrade class the C-backend WS-A0 footgun fix surfaced.
+- **Evaluator agreement:** For every test, the Metal-compiled binary must produce results byte-identical to `chelis eval` at every dtype; [05-OBS-3] grants no backend-specific tolerance, and device transcendentals and Metal f64 are rejected under [05-UNS-1] until correctly rounded device kernels exist (`spec/design/correctly_rounded_math.md` §4.3). This is the silent-corruption gate: byte-identical agreement on integer dtypes catches the silent-downgrade class the C-backend WS-A0 footgun fix surfaced.
 
 ### CI considerations
 
@@ -680,7 +680,7 @@ M2: Elementwise emission + structural test surface (default-gate)
 
 M3: Compile-and-link smoke on macOS CI (default-gate, macOS only)
 ├── .github/scripts/smoke_macos_metal.py (Python, not shell)
-├── Drives chelis build --target metal then clang++ -framework Metal/Foundation
+├── Drives native chelis build --target metal and verifies library linking
 ├── Compile-and-link only, NO execution — MTLCreateSystemDefaultDevice may
 │   return null on macos-latest VMs (Apple's CI GPU policy oscillates)
 ├── Append step to .github/workflows/ci.yml macos-workspace-shard job (shard 2)

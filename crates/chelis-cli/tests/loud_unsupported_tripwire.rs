@@ -510,12 +510,10 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        1,
-        "the `map_or(-1_i64, ...)` \
-         process-exit-code default (proven-structural: a signal-killed \
-         child has no exit code, and -1 is the conventional sentinel, not \
-         a chelis#703 value substitution) newly counted by the rt791 F6 \
-         widening. The former scalarization first-element read was FIXED \
+        0,
+        "the `map_or(-1_i64, ...)` process-exit-code default moved to \
+         chelis-runtime's host_process with chelis#1297, which both lanes \
+         call and this pattern's scope does not scan. The former scalarization first-element read was FIXED \
          by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
          and errors loudly on an empty buffer), shrinking this row per B1. \
          The interpreter's with-seed default was FIXED by chelis#2413 \
@@ -552,12 +550,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
-        6,
+        4,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
-         appear), its escaped {{:.8}} message quote, two rel_err \
-         tolerance-assert messages, and two {value:e} renders inside the \
-         same lock messages (counted since the round-4 F5 exp-selector \
-         widening) - not product exits",
+         appear), its escaped {{:.8}} message quote, and two {value:e} \
+         renders inside the same lock messages - not product exits (the two \
+         rel_err tolerance-assert messages left with chelis#2957's \
+         correctly rounded kernels)",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -660,12 +658,14 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-types/src/observation.rs",
-        6,
+        5,
         "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
          plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
-         messages (round-4 F5 widening), plus [05-OP-1]'s one sealed \
-         decimal-place formatter - the sanctioned formatter's implementation \
-         and its self-checks, not additional exits",
+         messages (round-4 F5 widening) - the sanctioned formatter's \
+         implementation and its self-checks, not additional exits. \
+         [05-OP-1]'s decimal-place formatter left with chelis#1295: \
+         round_to rounds with exact integer arithmetic in chelis-runtime's \
+         host_round",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -705,7 +705,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        29,
+        25,
         "chelis#1650 removed five List-conversion Debug interpolations; \
          declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
@@ -717,12 +717,14 @@ const BASELINE: &[Entry] = &[
          to typed kernel errors; chelis#1299 removed two obsolete 2D \
          shape-debug diagnostics when convolution became rank-generic; \
          chelis#2631 consolidated two bitwise/shift mismatch diagnostics \
-         into one shared tagged-kernel dispatcher",
+         into one shared tagged-kernel dispatcher; chelis#3107 routed the \
+         elementwise and logical shape-disagreement diagnostics through the \
+         shared chelis_abi::failure rendering",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        22,
+        20,
         "declared derived-Debug residue carriers: Err(format!) \
          diagnostics over Value/callable/handle shapes; the seven \
          chelis#890/#903 JSON/CSV builtin dispatch arms left with \
@@ -731,7 +733,9 @@ const BASELINE: &[Entry] = &[
          pipe-only callable-application path is deleted, and with it its \
          `pipe stage is not callable: {other:?}` arm. One fewer since \
          chelis#2413: the `with seed` handler and its seed diagnostic are \
-         deleted",
+         deleted. Two fewer since chelis#1297: the assert_eq_tensor shape \
+         diagnostic moved to chelis-runtime's host_assert, which renders \
+         shapes without Debug",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -750,13 +754,15 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        21,
+        20,
         "cfg-gated runtime unit-test assertions, not product exits; \
          chelis#729 Phase 1 replaced one raw-scalar assertion with two \
          sealed ScalarValue assertion sites (net +1); branch-owned JSON \
          and CSV pipeline centralization removed the former local test \
          assertions; chelis#1281 replaced two lossy reduction Debug \
-         assertions with exact typed-storage checks (net -2)",
+         assertions with exact typed-storage checks (net -2); chelis#3041 \
+         replaced the f64 einsum accumulator lock with exact witnesses \
+         (net -1)",
     ),
     (
         Pat::RustDebugNumericFormat,

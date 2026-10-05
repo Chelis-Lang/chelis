@@ -33,6 +33,7 @@ use std::rc::Rc;
 use chelis_deep::DeepTag;
 use chelis_deep::ast::Expr;
 use chelis_ir::lower::SubexprLoweringContext;
+use chelis_types::CheckedProgram;
 use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
@@ -51,16 +52,21 @@ pub(super) fn take_terminal_index_builds() -> u64 {
     TERMINAL_INDEX_BUILDS.with(|builds| builds.replace(0))
 }
 
+/// The lazily built index of [`ProgramScope::resolve_def_key`].
+pub(super) type TerminalIndexCell = std::sync::OnceLock<UnordMap<String, Vec<String>>>;
+
 pub(super) struct ProgramScope {
     /// Every top-level definition in scope, library and new code, registered
     /// once by `register_top_level_defs` while the context is built.
-    defs: UnordMap<String, Expr>,
+    /// Shared with every other evaluation of the same prepared program
+    /// (chelis#3144).
+    defs: std::sync::Arc<UnordMap<String, Expr>>,
     /// Combined library + new-code Deep type-env. Threaded into
     /// subexpression lowering when the host runtime hits a `grad` / `vmap`
     /// form or routes a named-axis call, so the lowerer resolves free names
     /// the same way the C backend does. Empty when no library context is
     /// present (e.g. unit tests that don't need transform support).
-    type_env: UnordMap<String, Expr>,
+    type_env: std::sync::Arc<UnordMap<String, Expr>>,
     /// The subexpression lowering context named-axis routing lowers through
     /// (chelis#2207). Preparing one folds the pipes in every definition, so
     /// before this a routed reduction re-folded the whole program, all of
@@ -76,7 +82,9 @@ pub(super) struct ProgramScope {
     /// through one group instead of sorting and scanning the whole linked
     /// program on every ask, which the evaluator made up to four times per
     /// application.
-    terminal_index: OnceCell<UnordMap<String, Vec<String>>>,
+    /// Shared with every other evaluation of the same prepared program, like
+    /// the definitions it indexes (chelis#3144).
+    terminal_index: std::sync::Arc<TerminalIndexCell>,
     /// [`Self::reached_by_call`] per spelling, derived once: a kernel applied
     /// in a loop walks its body once, not once per application.
     reached_by_call: RefCell<UnordMap<String, Rc<[String]>>>,
@@ -84,12 +92,26 @@ pub(super) struct ProgramScope {
 
 impl ProgramScope {
     pub(super) fn new(defs: UnordMap<String, Expr>, type_env: UnordMap<String, Expr>) -> Self {
+        Self::shared(
+            std::sync::Arc::new(defs),
+            std::sync::Arc::new(type_env),
+            std::sync::Arc::default(),
+        )
+    }
+
+    /// A scope over definitions and a type environment that a prepared
+    /// program derived once for all of its evaluations (chelis#3144).
+    pub(super) fn shared(
+        defs: std::sync::Arc<UnordMap<String, Expr>>,
+        type_env: std::sync::Arc<UnordMap<String, Expr>>,
+        terminal_index: std::sync::Arc<TerminalIndexCell>,
+    ) -> Self {
         Self {
             defs,
             type_env,
             routing_lowering_context: OnceCell::new(),
             transform_lowering_context: OnceCell::new(),
-            terminal_index: OnceCell::new(),
+            terminal_index,
             reached_by_call: RefCell::new(UnordMap::new()),
         }
     }
@@ -202,16 +224,22 @@ impl ProgramScope {
         self.transform_lowering_context.get_or_init(build).clone()
     }
 
-    /// The lowering context named-axis routing uses, built on first use and
-    /// reused for the scope's lifetime (chelis#2207).
-    ///
-    /// This is the context `chelis_ir::lower::try_lower_subexpr_program`
-    /// builds for itself from the same two tables, so routing through it
-    /// lowers exactly as that entry does.
-    pub(super) fn routing_lowering_context(&self) -> SubexprLoweringContext {
+    /// The checked lowering context named-axis routing uses, built on first
+    /// use and reused for the scope's lifetime (chelis#2207, chelis#3092).
+    /// This constructor requires the checked artifact because its local-site
+    /// obligations are independent of the type environment.
+    pub(super) fn routing_lowering_context(
+        &self,
+        checked: &CheckedProgram,
+        declared_signatures: &UnordMap<String, Expr>,
+    ) -> SubexprLoweringContext {
         self.routing_lowering_context
             .get_or_init(|| {
-                SubexprLoweringContext::over_program(self.type_env.clone(), self.defs.clone())
+                SubexprLoweringContext::from_checked_program(
+                    checked,
+                    self.defs.as_ref().clone(),
+                    declared_signatures.clone(),
+                )
             })
             .clone()
     }
@@ -415,15 +443,6 @@ impl<'s> ReachWalk<'s> {
                 }
             }
             // Each stage after the first is applied to the running value.
-            DeepTag::Pipe => {
-                for (index, child) in children.iter().enumerate() {
-                    self.expr(child);
-                    if index == 0 {
-                        continue;
-                    }
-                    self.applied(child);
-                }
-            }
             _ => {
                 for child in children {
                     self.expr(child);

@@ -47,10 +47,10 @@ fn new_scaffold_uses_the_current_reef_manifest_schema() {
 fn declared_local_skill_survives_sync_and_audit() {
     let (_tmp, root) = green_shell();
     // A repo-local domain skill the shared set does not include.
-    std::fs::create_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    std::fs::create_dir_all(root.join("agent-skills/shell-domain")).unwrap();
     std::fs::write(
-        root.join("agent-skills/chelis-std/SKILL.md"),
-        "# chelis-std domain skill\nShell-authored.\n",
+        root.join("agent-skills/shell-domain/SKILL.md"),
+        "# shell-domain domain skill\nShell-authored.\n",
     )
     .unwrap();
     // Undeclared, it is drift.
@@ -62,19 +62,19 @@ fn declared_local_skill_survives_sync_and_audit() {
     // Declare it; sync preserves it and both agent symlinks expose it.
     append(
         &root.join("reef.toml"),
-        "\n[conform]\nlocal_skills = [\"chelis-std\"]\n",
+        "\n[conform]\nlocal_skills = [\"shell-domain\"]\n",
     );
-    let notices = scaffold::materialize_skills(&root).unwrap();
+    let notices = scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
-        root.join("agent-skills/chelis-std/SKILL.md").exists(),
+        root.join("agent-skills/shell-domain/SKILL.md").exists(),
         "sync must preserve a declared local skill"
     );
     assert!(
-        !notices.iter().any(|n| n.contains("chelis-std")),
+        !notices.iter().any(|n| n.contains("shell-domain")),
         "a declared local skill must not warn as pruned: {notices:?}"
     );
-    assert!(root.join(".claude/skills/chelis-std/SKILL.md").exists());
-    assert!(root.join(".codex/skills/chelis-std/SKILL.md").exists());
+    assert!(root.join(".claude/skills/shell-domain/SKILL.md").exists());
+    assert!(root.join(".codex/skills/shell-domain/SKILL.md").exists());
     assert!(audit::audit(&root).ok());
 }
 
@@ -84,7 +84,7 @@ fn undeclared_extra_skill_is_pruned_with_a_warning() {
     std::fs::create_dir_all(root.join("agent-skills/rogue")).unwrap();
     std::fs::write(root.join("agent-skills/rogue/SKILL.md"), "rogue\n").unwrap();
 
-    let notices = scaffold::materialize_skills(&root).unwrap();
+    let notices = scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
         !root.join("agent-skills/rogue").exists(),
         "an undeclared skill is still pruned"
@@ -128,7 +128,7 @@ fn shell_local_block_passes_audit_and_survives_sync() {
 
     // Sync regenerates the managed span, keeps the block verbatim, and updates
     // both agent-surface symlinks before audit accepts the tree.
-    let notices = scaffold::materialize_skills(&root).unwrap();
+    let notices = scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
         notices.is_empty(),
         "no change-flag when upstream is unchanged: {notices:?}"
@@ -151,7 +151,7 @@ fn shell_local_exclusion_removes_an_upstream_section_and_survives_sync() {
         !audit::audit(&root).ok(),
         "the section is still present until sync applies the exclusion"
     );
-    scaffold::materialize_skills(&root).expect("sync subtractive override");
+    scaffold::materialize_skills(&root, VER).expect("sync subtractive override");
     let after = std::fs::read_to_string(&skill).unwrap();
     assert!(after.contains("## Policy") && after.contains("## Rules"));
     assert!(
@@ -165,7 +165,7 @@ fn shell_local_exclusion_removes_an_upstream_section_and_survives_sync() {
     assert!(after.contains("Use the shell's own example gate."));
     assert!(audit::audit(&root).ok());
 
-    scaffold::materialize_skills(&root).expect("repeat sync");
+    scaffold::materialize_skills(&root, VER).expect("repeat sync");
     assert_eq!(std::fs::read_to_string(&skill).unwrap(), after);
 }
 
@@ -174,12 +174,12 @@ fn removing_a_shell_local_exclusion_restores_the_current_upstream_section() {
     let (_tmp, root) = green_shell();
     let skill = root.join("agent-skills/example-corpus/SKILL.md");
     append(&skill, &format!("\n{SUBTRACTIVE_BLOCK}"));
-    scaffold::materialize_skills(&root).expect("exclude section");
+    scaffold::materialize_skills(&root, VER).expect("exclude section");
 
     let filtered = std::fs::read_to_string(&skill).unwrap();
     let directive = "<!-- shell-local:exclude:begin -->\n<!-- ## Verification -->\n<!-- shell-local:exclude:end -->\n\n";
     std::fs::write(&skill, filtered.replace(directive, "")).unwrap();
-    scaffold::materialize_skills(&root).expect("restore section");
+    scaffold::materialize_skills(&root, VER).expect("restore section");
 
     let restored = std::fs::read_to_string(&skill).unwrap();
     assert!(restored.contains("For executable examples:"));
@@ -198,7 +198,7 @@ fn unknown_shell_local_exclusion_heading_fails_audit_and_sync() {
     let r = row(&report, "vendored-skills");
     assert_eq!(r.verdict, audit::Verdict::Fail);
     assert!(r.diagnostic.contains("## Not Upstream"), "{}", r.diagnostic);
-    let err = scaffold::materialize_skills(&root).unwrap_err();
+    let err = scaffold::materialize_skills(&root, VER).unwrap_err();
     assert!(err.contains("## Not Upstream"), "{err}");
 }
 
@@ -219,7 +219,7 @@ fn malformed_shell_local_exclusion_block_fails_audit_and_sync() {
         "{}",
         r.diagnostic
     );
-    let err = scaffold::materialize_skills(&root).unwrap_err();
+    let err = scaffold::materialize_skills(&root, VER).unwrap_err();
     assert!(err.contains("shell-local:exclude:end"), "{err}");
 }
 
@@ -232,7 +232,7 @@ fn shell_local_change_flag_fires_when_upstream_span_diverges() {
     let body = std::fs::read_to_string(&skill).unwrap();
     std::fs::write(&skill, format!("STALE UPSTREAM LINE\n{body}\n{BLOCK}")).unwrap();
 
-    let notices = scaffold::materialize_skills(&root).unwrap();
+    let notices = scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
         notices
             .iter()
@@ -304,9 +304,9 @@ fn sync_with_a_block_is_byte_stable_across_repeated_runs() {
 
     // First materialize normalizes the layout; every subsequent materialize must
     // be a byte-for-byte no-op (no drift, no re-flagging, no block duplication).
-    scaffold::materialize_skills(&root).unwrap();
+    scaffold::materialize_skills(&root, VER).unwrap();
     let once = std::fs::read_to_string(&skill).unwrap();
-    let notices = scaffold::materialize_skills(&root).unwrap();
+    let notices = scaffold::materialize_skills(&root, VER).unwrap();
     let twice = std::fs::read_to_string(&skill).unwrap();
     assert_eq!(
         once, twice,

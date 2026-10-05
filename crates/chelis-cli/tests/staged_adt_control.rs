@@ -48,7 +48,7 @@ fn eval_and_c(stem: &str, source: &str) -> (String, String) {
     let out = dir.path().join("out");
     let build = Command::cargo_bin("chelis")
         .unwrap()
-        .args(["build", path, "--target", "c", "--output"])
+        .args(["build", "--emit-c", path, "--target", "c", "--output"])
         .arg(&out)
         .output()
         .unwrap();
@@ -159,6 +159,7 @@ fn assert_failure_in_both_lanes(source: &str, expected: &str) {
     let build = Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&file)
         .args(["--target", "c", "--output"])
         .arg(&out)

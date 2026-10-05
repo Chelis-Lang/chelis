@@ -87,6 +87,7 @@ fn build_run_and_emit(source: &str, stem: &str) -> (String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -728,7 +729,7 @@ fn top_level_list_alias_releases_the_shared_allocation_once() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = [1i64, 2i64, 3i64]\nb = a\n";
+    let source = "a: List[i64] = [1i64, 2i64, 3i64]\nb = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_list");
     assert_retain_release_counts(
         &emitted,
@@ -782,7 +783,7 @@ fn two_aliases_of_one_list_release_it_once() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = [1i64, 2i64]\nb = a\nc = a\n";
+    let source = "a: List[i64] = [1i64, 2i64]\nb = a\nc = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_list_twice");
     assert_retain_release_counts(
         &emitted,
@@ -800,8 +801,10 @@ fn distinct_top_level_lists_are_each_released() {
     if skip_without_cc() {
         return;
     }
-    let (_stdout, emitted) =
-        build_run_and_emit("a = [1i64, 2i64]\nb = [3i64, 4i64]\n", "distinct_lists");
+    let (_stdout, emitted) = build_run_and_emit(
+        "a: List[i64] = [1i64, 2i64]\nb: List[i64] = [3i64, 4i64]\n",
+        "distinct_lists",
+    );
     assert_retain_release_counts(
         &emitted,
         "chelis_list_retain(",
@@ -861,7 +864,7 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
         return;
     }
     let source = "def idl(p: List[i64]) -> List[i64] = p\n\
-                  def h3() -> i64 = {\n  base = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
                   n = h3()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_balance");
     let body = emitted_function(&emitted, "int64_t h3()");
@@ -894,9 +897,9 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     // binding on the other, so the result is both argument-aliasing and
     // outer-aliasing. The retain has already fired for the argument, so
     // the outer-alias verdict must not cancel the release.
-    let source = "g = [9i64]\n\
+    let source = "g: List[i64] = [9i64]\n\
                   def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
-                  def h1() -> i64 = {\n  base = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
                   n = h1()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_outer");
     let body = emitted_function(&emitted, "int64_t h1()");
@@ -987,7 +990,7 @@ fn renaming_a_lambda_parameter_that_shadows_a_binding_changes_nothing() {
     assert_alpha_invariant(
         "def idl(x: List[i64]) -> List[i64] = x\n\
          def h() -> i64 = {\n\
-         \x20 p = [[1i64], [2i64]]\n\
+         \x20 p: List[List[i64]] = [[1i64], [2i64]]\n\
          \x20 q = map(fn (p) -> idl(p), p)\n\
          \x20 add(len(p), len(q))\n\
          }\n\
@@ -1009,7 +1012,7 @@ fn renaming_a_let_binder_inside_a_function_changes_nothing() {
         "g = to_tensor([1.0f32, 2.0f32])\n\
          def f() -> tensor[2, f32] = {\n\
          \x20 q = g\n\
-         \x20 z = {\n    q = [7i64]\n    q\n  }\n\
+         \x20 z = {\n    q: List[i64] = [7i64]\n    q\n  }\n\
          \x20 m = len(z)\n\
          \x20 if (m > 0i64) then q else q\n\
          }\n\
@@ -1154,11 +1157,11 @@ fn a_parameter_spelled_like_a_binder_key_takes_no_retain() {
     // then looked like a transfer of that binding and took a retain nobody
     // releases.
     let colliding = "def f(__bind_0: List[i64]) -> List[i64] = {\n\
-                     \x20 q = [1i64]\n  __bind_0\n}\n\
-                     z = [7i64]\nb = f(z)\n";
+                     \x20 q: List[i64] = [1i64]\n  __bind_0\n}\n\
+                     z: List[i64] = [7i64]\nb = f(z)\n";
     let distinct = "def f(zzq_param: List[i64]) -> List[i64] = {\n\
-                    \x20 q = [1i64]\n  zzq_param\n}\n\
-                    z = [7i64]\nb = f(z)\n";
+                    \x20 q: List[i64] = [1i64]\n  zzq_param\n}\n\
+                    z: List[i64] = [7i64]\nb = f(z)\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_param");
     let body = emitted_function(&emitted, "chelis_list* f(chelis_list* __bind_0)");
     assert_eq!(
@@ -1188,10 +1191,10 @@ fn a_let_binder_shadowing_a_parameter_does_not_mask_an_outer_result() {
     // `outer == false`, the caller claimed the captured global it actually
     // returns, and `main` released `g` twice. Parameters are the outermost
     // scope, so `env` decides.
-    let colliding = "g = [1i64]\n\
+    let colliding = "g: List[i64] = [1i64]\n\
                      def f(p: List[i64]) -> List[i64] = {\n  p = g\n  p\n}\n\
                      b = f([2i64])\nc = g\n";
-    let distinct = "g = [1i64]\n\
+    let distinct = "g: List[i64] = [1i64]\n\
                     def f(p: List[i64]) -> List[i64] = {\n\
                     \x20 zzq_inner = g\n  zzq_inner\n}\n\
                     b = f([2i64])\nc = g\n";
@@ -1283,7 +1286,7 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     // the block frees at its close, the result slot needs the issue #406
     // escape retain the bare-`Var` and call transfers already take. Without
     // it the block released one allocation twice.
-    let source = "def h() -> i64 = {\n  base = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
+    let source = "def h() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
                   n = h()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "builtin_transfer_balance");
     let body = emitted_function(&emitted, "int64_t h()");

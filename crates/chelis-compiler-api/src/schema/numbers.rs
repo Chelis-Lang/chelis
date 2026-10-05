@@ -15,6 +15,7 @@ macro_rules! float_adapter {
 
         impl $name {
             pub fn new(value: f64) -> Result<Self, String> {
+                let _fp_env = chelis_runtime::FpEnvGuard::enter();
                 if !value.is_finite() || !($admit)(value) {
                     return Err($rule.to_string());
                 }
@@ -26,6 +27,7 @@ macro_rules! float_adapter {
             }
 
             pub fn get(self) -> f64 {
+                let _fp_env = chelis_runtime::FpEnvGuard::enter();
                 match self.0.element_ref() {
                     ElementRef::F64(value) => value,
                     _ => unreachable!("fixed f64 carrier admission"),
@@ -33,6 +35,7 @@ macro_rules! float_adapter {
             }
 
             pub fn scalar(self) -> ScalarValue {
+                let _fp_env = chelis_runtime::FpEnvGuard::enter();
                 self.0
             }
         }
@@ -99,6 +102,7 @@ pub struct SourceInteger(ScalarValue);
 
 impl SourceInteger {
     pub fn new(value: i64) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self(
             scalar_from_i64("wire-integer", Prim::Int64, value)
                 .expect("int64 stores exactly in int64"),
@@ -106,6 +110,7 @@ impl SourceInteger {
     }
 
     pub fn get(self) -> i64 {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self.0.element_ref() {
             ElementRef::I64(value) => value,
             _ => unreachable!("fixed int64 carrier admission"),
@@ -113,6 +118,7 @@ impl SourceInteger {
     }
 
     pub fn scalar(self) -> ScalarValue {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.0
     }
 }
@@ -154,6 +160,7 @@ pub struct NonnegativeCount(ScalarValue);
 
 impl NonnegativeCount {
     pub fn new(value: i64) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if value < 0 {
             return Err("fixed count must be a nonnegative int64".to_string());
         }
@@ -161,6 +168,7 @@ impl NonnegativeCount {
     }
 
     pub fn get(self) -> i64 {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self.0.element_ref() {
             ElementRef::I64(value) => value,
             _ => unreachable!("fixed int64 carrier admission"),
@@ -168,6 +176,7 @@ impl NonnegativeCount {
     }
 
     pub fn scalar(self) -> ScalarValue {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.0
     }
 }
@@ -220,6 +229,7 @@ pub struct NonnegativeExtent(ScalarValue);
 
 impl NonnegativeExtent {
     pub fn new(value: i64) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if value < 0 {
             return Err("dimension extent must be a nonnegative int64".to_string());
         }
@@ -227,6 +237,7 @@ impl NonnegativeExtent {
     }
 
     pub fn get(self) -> i64 {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self.0.element_ref() {
             ElementRef::I64(value) => value,
             _ => unreachable!("fixed int64 extent admission"),
@@ -234,6 +245,7 @@ impl NonnegativeExtent {
     }
 
     pub fn scalar(self) -> ScalarValue {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.0
     }
 }

@@ -44,10 +44,17 @@ enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
     TensorF32Bits(Vec<usize>, Vec<u32>),
     Domain(&'static str, &'static [&'static str]),
-    TargetDivisionByZero,
     ExactTargetDivisionByZero,
     EntryShapeMismatch(&'static str),
     Reject(&'static str),
+    RejectReductionAxisBounds {
+        rank: usize,
+        axis: i64,
+    },
+    /// spec/04 section 4.7: the checker accepts, and every lane rejects the
+    /// program before execution because literals visible only after inlining
+    /// prove the violation.
+    LiteralProof,
 }
 
 fn vector(n: usize) -> Input {
@@ -328,7 +335,7 @@ fn cases() -> Vec<Case> {
         1512,
         "def f(x: tensor[1, f32]) -> tensor[f32] = sum(expand(x, 0i32, 3i64), 1i32)\n",
         None,
-        Expected::Reject("out of bounds"),
+        Expected::RejectReductionAxisBounds { rank: 1, axis: 1 },
     );
     add(
         "validation.permute.good",
@@ -722,6 +729,7 @@ fn observe_host_lane(
         binary,
         &[
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             if api { "c" } else { target },
@@ -938,6 +946,49 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
         }
         return failures;
     }
+    if let Expected::RejectReductionAxisBounds { rank, axis } = case.expected {
+        let errors = check["errors"].as_array().expect("checker errors");
+        let expected = format!("axis in -{rank}..{rank}");
+        let got = axis.to_string();
+        let call_offset = case.source.find("sum(").expect("authored reduction call");
+        let diagnostic = errors.iter().find(|error| {
+            error["kind"] == "DimensionMismatch"
+                && error["expected"] == expected
+                && error["got"] == got
+                && error["span"]["offset"] == call_offset
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("sum argument 2")
+                        && message.contains(&format!("axis {axis}"))
+                        && message.contains(&expected)
+                        && message.contains(&got)
+                })
+        });
+        if check["success"] != false || diagnostic.is_none() {
+            failures.push(format!(
+                "{}.check: expected a located, directional sum-axis bounds rejection: {errors:?}",
+                case.id
+            ));
+        }
+        for lane in ["eval", "c"] {
+            let run = &observation[lane];
+            if !run.is_null()
+                && (run["success"] != false
+                    || !run["stderr"].as_str().is_some_and(|stderr| {
+                        diagnostic
+                            .and_then(|error| error["message"].as_str())
+                            .is_some_and(|message| {
+                                stderr.contains("DimensionMismatch:") && stderr.contains(message)
+                            })
+                    }))
+            {
+                failures.push(format!(
+                    "{}.{}: expected the same checker rejection, not execution",
+                    case.id, lane
+                ));
+            }
+        }
+        return failures;
+    }
     if check["success"] != true || check["score"] != 1.0 || check["errors"] != json!([]) {
         failures.push(format!("{}.check: expected score 1 and no errors", case.id));
     }
@@ -973,6 +1024,12 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     .as_ref()
                         == Some(&(shape.clone(), data.clone()))
             }
+            Expected::LiteralProof => {
+                run["success"] == false
+                    && stdout.is_empty()
+                    && stderr.contains("DimensionMismatch:")
+                    && stderr.contains("(extents fixed by literals after inlining)")
+            }
             Expected::Domain(op, context) => {
                 run["stage"] == "execute"
                     && run["success"] == false
@@ -1003,21 +1060,6 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                                 == *bits
                     })
             }
-            Expected::TargetDivisionByZero => {
-                // The existing C integer helper uses its older diagnostic.
-                // Assert each lane's arithmetic failure independently: an
-                // earlier reshape claim failure does not satisfy this case.
-                run["stage"] == "execute"
-                    && run["success"] == false
-                    && stderr.lines().any(|line| {
-                        line.strip_prefix("error: ").unwrap_or(line)
-                            == if lane == "eval" {
-                                "numeric trap: division by zero in floor_div at i64"
-                            } else {
-                                "integer division or remainder by zero"
-                            }
-                    })
-            }
             Expected::ExactTargetDivisionByZero => {
                 run["stage"] == "execute"
                     && run["success"] == false
@@ -1029,7 +1071,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
             Expected::EntryShapeMismatch(context) => {
                 run["stage"] == "execute" && run["success"] == false && stderr.contains(context)
             }
-            Expected::Reject(_) => unreachable!(),
+            Expected::Reject(_) | Expected::RejectReductionAxisBounds { .. } => unreachable!(),
         };
         if !satisfied {
             failures.push(format!("{}.{}: contract not met: {run}", case.id, lane));
@@ -1909,7 +1951,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             ),
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(3), vector(6)],
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         );
     }
     assert_eq!(cases.len(), 60);
@@ -2031,7 +2073,7 @@ fn staged_sources_preserve_native_lists_and_host_literals() {
     for n in [4, 6] {
         for (kind, body, axis) in [
             ("tuple_list", "{\n  sizes = ([1i64, 2i64], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
-            ("list_capture", "{\n  sizes = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
+            ("list_capture", "{\n  sizes: List[i64] = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
             ("nested_list", "{\n  sizes = ([[1i64], [2i64]], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
             ("string_literal", format!("{{\n  text = \"{}\"\n  reshape(x, [string_len(text), 2i64])\n}}", if n == 4 { "aa" } else { "aaa" }), 0),
         ] {
@@ -2078,7 +2120,7 @@ fn staged_graph_segments_preserve_eager_sources() {
             if n == 2 {
                 Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
             } else {
-                Expected::TargetDivisionByZero
+                Expected::ExactTargetDivisionByZero
             },
         );
     }
@@ -2332,7 +2374,7 @@ fn static_reshape_folding_preserves_declaring_input_contract() {
             } else {
                 // Concrete incompatible arguments are static type errors;
                 // only the externally supplied input reaches an ABI check.
-                Expected::Reject("dimension mismatch")
+                Expected::Reject("axis 0")
             };
         }
         let observed = observe(&case);
@@ -2364,7 +2406,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             2,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[4, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "literal_positive",
@@ -2394,7 +2436,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             2,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "named_good_first_later_trap",
@@ -2404,7 +2446,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             1,
             "sub(shape(x, 0i32), 4i64)",
             "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
-            Expected::TargetDivisionByZero,
+            Expected::ExactTargetDivisionByZero,
         ),
         (
             "named_positive",
@@ -2467,7 +2509,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             "(tensor[d0, f32]) -> tensor[f32]",
             vec![vector(n)],
             if n == 4 {
-                Expected::TargetDivisionByZero
+                Expected::ExactTargetDivisionByZero
             } else {
                 Expected::Tensor(vec![], vec![9.0])
             },
@@ -3097,12 +3139,21 @@ fn checked_extent_transforms_contract() {
                     )
                 };
                 for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                    // chelis#3115: under `def main`, inlining the gradient fixes
+                    // the unit claim's operand to the 2-element literal, so
+                    // section 4.7 rejects the program before execution.
+                    let expected =
+                        if !good && family == "unit" && transform != "vmap" && form == "main" {
+                            Expected::LiteralProof
+                        } else {
+                            expected.clone()
+                        };
                     let case = Case {
                         id: format!("transform.{family}.{transform}.{form}.{good}"),
                         issue: 1277,
                         source: format!("{definition}\n{extra}{prefix} {call}\n"),
                         signature: Some(signature),
-                        expected: expected.clone(),
+                        expected,
                         exported: None,
                     };
                     let observation = observe(&case);

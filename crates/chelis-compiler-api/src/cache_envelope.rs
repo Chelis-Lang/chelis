@@ -95,7 +95,8 @@ impl CachePayload for crate::LibraryContext {
     // V23: result-origin quantifiers preserve complete scope components.
     // V24: result-origin schemes also carry scalar/tensor key relations.
     // V25: raw origins retain their own quantified dtype restrictions.
-    const FORMAT_VERSION: u32 = 25;
+    // V26 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
+    const FORMAT_VERSION: u32 = 26;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -144,7 +145,8 @@ impl CachePayload for crate::StdLibContext {
     // V41 (#2419): the merged lowered DAG adds Iota and ordered List
     // capture/cotangent operations to RiscOp's bincode layout. Main's V36
     // and the branch's V40 encoded different payloads.
-    const FORMAT_VERSION: u32 = 41;
+    // V42 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
+    const FORMAT_VERSION: u32 = 42;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
@@ -189,7 +191,7 @@ impl std::fmt::Display for CacheError {
             CacheError::UnsupportedVersion { stored, expected } => write!(
                 f,
                 "cache file format version {stored} not supported by this binary \
-                 (expects {expected})"
+                 (expects {expected}); regenerate with the current compiler"
             ),
         }
     }
@@ -544,12 +546,17 @@ mod tests {
             envelope.version = 2;
             envelope.payload = vec![0xff];
         });
+        let error = load::<StdLibContext>(&path, key(2)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cache file format version 2 not supported by this binary (expects 1); regenerate with the current compiler"
+        );
         assert!(matches!(
-            load::<StdLibContext>(&path, key(2)),
-            Err(CacheError::UnsupportedVersion {
+            error,
+            CacheError::UnsupportedVersion {
                 stored: 2,
                 expected: 1
-            })
+            }
         ));
     }
 

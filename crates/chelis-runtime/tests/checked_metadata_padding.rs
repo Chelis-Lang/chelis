@@ -100,7 +100,13 @@ fn padding_rejects_negative_width_and_unrepresentable_output_before_access() {
     }
     for (case, reason) in [
         ("valid", None),
-        ("negative", Some("Domain:")),
+        (
+            "negative",
+            Some(
+                "pad_sequences_to target extent at axis 1 is negative: -1\n\
+                 numeric trap: domain in pad_sequences_to at i64",
+            ),
+        ),
         ("product", Some("Overflow:")),
         ("bytes", Some("Overflow:")),
     ] {

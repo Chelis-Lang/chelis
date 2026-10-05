@@ -4,6 +4,7 @@ mod c_source_name;
 mod eval_output;
 mod eval_timeout;
 mod lane_check;
+mod native_build;
 mod prove;
 mod style_gate;
 
@@ -15,6 +16,7 @@ use chelis_compiler_api::schema::{
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepExprCarrier};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 use chelis_surf::ast::{Decl, ImportKind};
 use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
 use chelis_unord::{UnordMap, UnordSet};
@@ -29,7 +31,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
@@ -164,18 +166,19 @@ enum Command {
         expr: Option<String>,
         /// Emit the raw `EvalResult` as JSON on stdout instead of the
         /// human-readable rendering. Stdout carries JSON only; warnings
-        /// and errors stay on stderr. Empty-roots inputs emit
-        /// `{"roots":[]}`.
+        /// and errors stay on stderr. A definitions-only input emits a
+        /// record whose `roots` array is empty.
         #[arg(long, action = ArgAction::SetTrue)]
         json: bool,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
-        /// Target backend for realizability inference. Determines which
-        /// capability set is used for lane assignment. Default: `eval`
-        /// (full capability). Use `--target c` to manifest under C
-        /// backend constraints — required for #763 cross-lane comparison.
+        /// Target backend for realizability inference: `eval`, `c`, `hip`,
+        /// or `metal`. Determines which backend's capabilities the
+        /// evaluation must respect. Default: `eval` (full capability). Use
+        /// `--target c` to evaluate under the C backend's constraints, for
+        /// example when comparing evaluator output with a C build.
         #[arg(long)]
         target: Option<String>,
         /// Abandon the evaluation after this many seconds and exit
@@ -183,7 +186,7 @@ enum Command {
         ///
         /// For unattended and scripted use: without it, a mis-sized or
         /// accidentally quadratic program is indistinguishable from one
-        /// that is still making progress (chelis#914). Interactive Ctrl-C
+        /// that is still making progress. Interactive Ctrl-C
         /// already works and needs no flag.
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
@@ -244,7 +247,7 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
     },
-    /// Compile to C (default) or HIP GPU code
+    /// Build a native executable or static library for C, HIP, or Metal
     ///
     /// Auto-detects the input language from the file extension: `.dp`
     /// inputs are routed through the Deep ingestion path; everything else
@@ -274,6 +277,9 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+        /// Emit C-family sources and runtime support without native compilation.
+        #[arg(long, action = ArgAction::SetTrue)]
+        emit_c: bool,
     },
     /// Write the runtime this chelis build carries
     Runtime {
@@ -325,7 +331,7 @@ enum Command {
         #[clap(long, value_name = "neg|blocked")]
         expect: Option<ExpectArg>,
     },
-    /// Run L2 property checks discovered in Surf or Deep inputs
+    /// Check the `@property` declarations in Surf or Deep inputs
     Prove {
         /// Path to a package, directory, `.ch`, or `.dp` input
         path: Option<PathBuf>,
@@ -347,8 +353,8 @@ enum Command {
         /// Override bridge span manifest for a single `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
-        /// Verification tier: auto (A→B→C), fuzz-only, smt-only, induction-only, type-only, beacon-only
-        #[clap(long, default_value = "auto")]
+        /// Verification tier: auto (type check, then induction for a property that calls a recursive function, otherwise SMT, then sampling), fuzz-only, smt-only, induction-only, beacon-only
+        #[clap(long, default_value = "auto", value_parser = ["auto", "fuzz-only", "smt-only", "induction-only", "beacon-only"])]
         tier: String,
         /// SMT solver timeout in milliseconds (default 5000)
         #[clap(long, default_value = "5000")]
@@ -359,14 +365,17 @@ enum Command {
         /// Optional wall budget in milliseconds including compiler preparation (maximum one day)
         #[arg(long, value_parser = clap::value_parser!(u64).range(..=86_400_000))]
         beacon_wall_budget: Option<u64>,
-        /// Floor for invariant rejection-sampling acceptance rate before
-        /// the generator-starvation classifier fires (RFC D-STARVE). 0.0
-        /// disables the classifier (legacy exhaustion => error path).
+        /// Minimum acceptance rate when sampling inputs that must satisfy an
+        /// opaque type's invariant. Below it, the property is reported as
+        /// unsupported because the generator is starved. 0.0 disables the
+        /// floor, and an exhausted generator is then reported as an error.
         #[clap(long, default_value = "0.01")]
         invariant_min_rate: f64,
-        /// Resolve imports through the reef package rooted at this path.
-        /// If not set, auto-detects by walking ancestor directories for
-        /// reef.toml.
+        /// Link files with no `module` declaration against the reef package
+        /// rooted at this path. A file that declares a `module` belongs to
+        /// the package found from its own location, and naming a different
+        /// package for it is an error. If not set, every file uses the
+        /// package found by walking up from its own directory.
         #[clap(long)]
         package: Option<PathBuf>,
         /// Print machine-readable JSON describing prove capabilities
@@ -430,6 +439,21 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
+    /// Preserve old pipe grouping and literal values, with exact Deep proof.
+    Pipes {
+        /// Previous toolchain executable, used as the independent baseline.
+        #[arg(long)]
+        baseline_compiler: PathBuf,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        inplace: bool,
+        /// Process files independently; report every failure and exit nonzero.
+        #[arg(long)]
+        keep_going: bool,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
     /// Rewrite the isolated Surf v0.18 grammar to canonical Surf v0.19.
     Surf {
         /// Source grammar version. The only supported legacy version is 0.18.
@@ -540,12 +564,11 @@ enum ReefCommand {
     /// By default, missing-from-registry dependencies are
     /// auto-fetched from the canonical hosting org's GitHub release
     /// tags before the build resumes; pass `--no-auto-fetch` to
-    /// opt out. Phase A Item 8 introduced this default and the
-    /// opt-out flag — see `spec/design/reef_distribution.md` § Item 8.
+    /// opt out.
     Build {
         path: Option<PathBuf>,
-        /// Disable Item 8's default-on auto-fetch of missing-from-
-        /// registry dependencies. With this flag set, a missing
+        /// Disable the default auto-fetch of dependencies missing from
+        /// the local registry. With this flag set, a missing
         /// dependency surfaces an error naming the URL that
         /// would have been auto-fetched, plus the recommended
         /// `chelis reef install --from-github <url>` recovery step.
@@ -586,11 +609,9 @@ enum ReefCommand {
     ///   chelis monorepo's `packages/<name>/dist/` directory.
     /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
     ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` via
-    ///   the GitHub REST API (the public `/releases/download/...` URL
-    ///   form does not serve private-repo bytes; the canonical
-    ///   chelis-lang shells are private during the pre-launch era).
-    ///   Both assets are validated through the same on-disk
-    ///   verification path as `--from-monorepo`. Authentication uses
+    ///   the GitHub REST API. Both assets are validated through the
+    ///   same on-disk verification path as `--from-monorepo`. Every
+    ///   request is authenticated, also for a public repository, with
     ///   `GITHUB_TOKEN`, falling back to `gh auth token`.
     /// * `--from-lockfile` — read the project's `reef.lock`, walk every
     ///   dependency, and re-fetch each one from the `remote_origin` it
@@ -601,8 +622,8 @@ enum ReefCommand {
     ///   populate origins.
     /// * `--bootstrap [<ORG>/<REPO>@<TAG>...]` — install canonical shell
     ///   releases in dependency order. With no explicit entries, the
-    ///   built-in default list installs nautilus, coral, shoals, and
-    ///   octant. `chelis-std` is compiler-bundled and rejected as an
+    ///   toolchain's built-in default list is installed. `chelis-std`
+    ///   is compiler-bundled and rejected as an
     ///   explicit bootstrap target.
     ///
     /// The four sources are mutually exclusive — exactly one of them
@@ -620,8 +641,9 @@ enum ReefCommand {
         from_monorepo: Option<PathBuf>,
         /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
         /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
-        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`)
-        /// because the canonical-org repos are private.
+        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`): Reef
+        /// fetches release assets through the authenticated GitHub REST
+        /// API, also for a public repository.
         #[arg(long, value_name = "ORG/REPO@TAG", conflicts_with_all = ["from_lockfile", "bootstrap"])]
         from_github: Option<String>,
         /// Re-install every dependency named by the project's
@@ -642,9 +664,8 @@ enum ReefCommand {
         /// canonical-org GitHub Releases.
         ///
         /// Pass zero or more `<org>/<repo>@<tag>` entries. With no
-        /// entries, the built-in
-        /// [`chelis_reef::DEFAULT_BOOTSTRAP_LIST`] is used (canonical
-        /// shells: nautilus, coral, shoals, octant). The
+        /// entries, the toolchain's built-in list of canonical shells is
+        /// used. The
         /// installer fetches each shell's manifest, builds a
         /// dependency graph, topologically sorts, and installs each
         /// shell via the same path as `--from-github`. Cycles and
@@ -689,9 +710,9 @@ enum ReefCommand {
         /// Package root (defaults to `.`).
         path: Option<PathBuf>,
     },
-    /// Manage chelis compiler **source crates** (the class-(c) dependency)
-    /// for shells that link `chelis-ir` / `chelis-types` … as Cargo path
-    /// deps via a `[chelis-src]` section in `reef.toml`.
+    /// Manage chelis compiler **source crates** for shells that link
+    /// `chelis-ir` / `chelis-types` … as Cargo path deps via a
+    /// `[chelis-src]` section in `reef.toml`.
     ///
     /// Maintains a version-keyed source store under
     /// `~/.local/share/chelis-src/` (a bare mirror of canonical
@@ -713,7 +734,7 @@ enum ReefCommand {
     /// (`<chelis home>/toolchains/<ver>`, fixed with `chelisup install`);
     /// for crate-linking shells, whether the source store and `../chelis`
     /// slot are synced to the pin; and for shells declaring `[artifacts]`,
-    /// whether each binary artifact is installed (Item 11 / chelis#468).
+    /// whether each binary artifact is installed.
     /// Read-only; it never installs.
     Doctor {
         /// Directory to scan (defaults to `.`): the root itself and each
@@ -723,7 +744,7 @@ enum ReefCommand {
     },
     /// Print the resolved on-disk path of an installed binary artifact.
     ///
-    /// Item 11 (chelis#468): binary artifacts declared in `[artifacts]`
+    /// Binary artifacts declared in `[artifacts]`
     /// and installed via `chelis reef install --from-lockfile` are placed
     /// at `$CHELIS_HOME/bin/<name>` (default `~/.chelis/bin/<name>`).
     /// `chelis reef which <artifact>` prints that path so consumers point
@@ -733,20 +754,22 @@ enum ReefCommand {
         /// Logical artifact name (the `[artifacts.<name>]` key).
         artifact: String,
     },
-    /// Bring a freshly-cloned shell to its pins in one command (WS-C, §7).
+    /// Bring a freshly-cloned shell to its pins in one command.
     ///
+    /// Bare shim invocation uses the recorded default compiler as the
+    /// orchestrator; explicit toolchain overrides retain precedence.
     /// Reads the `reef.toml` compiler pin, then, in order:
     /// 1. ensures the pinned toolchain is installed, auto-installing it by
     ///    delegating to `chelisup` when it is missing;
     /// 2. `reef install --from-lockfile` — source packages + binary
-    ///    artifacts (chelis#468) from `reef.lock`, when one is present;
-    /// 3. `reef src sync` — chelis source crates (chelis#571), when the
+    ///    artifacts from `reef.lock`, when one is present;
+    /// 3. `reef src sync` — chelis source crates, when the
     ///    manifest carries a `[chelis-src]` section;
     /// 4. prints the `reef doctor` health summary.
     ///
-    /// This is the current-chelis entry point for the cross-version case
-    /// (§5.4): it may itself install the pinned toolchain, so a
-    /// clone-and-`setup` does the right thing without reaching for `+<ver>`.
+    /// It may itself install the pinned toolchain, so a clone followed by
+    /// `setup` works even when the pin names a toolchain other than the
+    /// running one, without reaching for `+<ver>`.
     Setup {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
@@ -795,8 +818,10 @@ enum ConformCommand {
     },
     /// Regenerate the managed blocks and re-materialize the skill set from the
     /// pinned toolchain, restamping to the reef pin. The AGENTS.md block receives
-    /// the complete pinned root Chelis contract. Touches only managed regions,
-    /// `agent-skills/`, `.claude/skills/`, and `.codex/skills/`. Refuses, before writing anything, on
+    /// the complete pinned root Chelis contract and the docs/CHELIS_SURFACE.md
+    /// block the complete pinned capability surface guide. Touches only managed
+    /// regions, `agent-skills/`, `.claude/skills/`, `.codex/skills/`, and the
+    /// `CLAUDE.md -> AGENTS.md` symlink. Refuses, before writing anything, on
     /// a repo missing an artifact it restamps in place; run `conform init` first.
     /// Shell-owned text outside managed regions is preserved. In `reef.toml`,
     /// `[conform] local_skills = [...]` preserves shell-owned skill additions and
@@ -804,8 +829,9 @@ enum ConformCommand {
     /// Within a retained skill's trailing `shell-local` block, comment-wrapped
     /// headings between `<!-- shell-local:exclude:begin -->` and
     /// `<!-- shell-local:exclude:end -->` remove inherited sections.
-    /// The same standalone selector span outside AGENTS.md's managed block
-    /// removes exact inherited AGENTS.md sections. Removing a selector restores
+    /// The same standalone selector span outside the managed block of AGENTS.md
+    /// or docs/CHELIS_SURFACE.md removes exact inherited sections of that
+    /// document. Removing a selector restores
     /// the current upstream section on the next sync; selecting the root
     /// `# Chelis Agent Contract` heading omits the whole inherited body. Full
     /// inheritance is the default, and each shell should keep the inherited and
@@ -831,10 +857,12 @@ enum ConformCommand {
     /// `excluded_skills = [...]` for named embedded removals.
     /// A retained skill's `shell-local:exclude` heading selectors are also
     /// reapplied while its local block is preserved. Standalone AGENTS.md
-    /// selectors are applied to the complete pinned root contract in the same
-    /// way. Selector control markers must be standalone Markdown comments,
-    /// outside code fences and enclosing HTML blocks. `.claude/skills` and
-    /// `.codex/skills` are restored as `../agent-skills` symlinks.
+    /// selectors are applied to the complete pinned root contract, and
+    /// docs/CHELIS_SURFACE.md selectors to the complete pinned surface guide, in
+    /// the same way. Selector control markers must be standalone
+    /// Markdown comments, outside code fences and enclosing HTML blocks.
+    /// `.claude/skills` and `.codex/skills` are restored as `../agent-skills`
+    /// symlinks, and `CLAUDE.md` as a symlink to `AGENTS.md`.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
@@ -885,6 +913,9 @@ enum ReefSrcCommand {
 }
 
 fn main() {
+    // Before any host or user lookup: the static Linux build must not load
+    // the host's NSS plugins.
+    chelisup::nss::use_builtin_services();
     // Tier B process isolation: if this process was spawned as a prove worker,
     // run one cvc5 solve and exit before doing anything else; otherwise enable
     // isolation so every Tier B solve runs in a short-lived child whose crash
@@ -913,6 +944,13 @@ fn main() {
             check,
         }) => cmd_fmt(&file, inplace, check),
         Some(Command::Migrate { command }) => match command {
+            MigrateCommand::Pipes {
+                baseline_compiler,
+                check,
+                inplace,
+                keep_going,
+                paths,
+            } => cmd_migrate_pipes(&baseline_compiler, &paths, check, inplace, keep_going),
             MigrateCommand::Surf {
                 from,
                 check,
@@ -983,6 +1021,7 @@ fn main() {
             output,
             target,
             deep,
+            emit_c,
             allow_style_violations,
         }) => cmd_build_dispatch(
             &file,
@@ -990,6 +1029,7 @@ fn main() {
             &target,
             deep,
             allow_style_violations,
+            emit_c,
         ),
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Runtime { command }) => cmd_runtime(command),
@@ -1125,80 +1165,88 @@ fn main() {
 }
 
 fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
-    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let deep_exprs = if annotate {
-        match chelis_types::check_ir_program(&deep_exprs) {
-            Ok(checked) => checked.annotated_exprs().to_vec(),
-            Err(result) => {
-                // [04-FIT-26]: the shared projected rendering, never `{:?}`.
-                const PREFIX: &str =
-                    "`chelis deep --annotate` requires a well-typed program; type errors:";
-                return Err(
-                    match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
-                        Ok(lines) => format!("{PREFIX}\n{lines}"),
-                        Err(reason) => format!("{PREFIX} {reason}"),
-                    }
-                    .into(),
-                );
+    // Call trees produced from long pipe chains need the same owned stack
+    // segment as checking, including temporary AST destruction.
+    chelis_types::run_on_grown_stack(|| {
+        let source = fs::read_to_string(file)?;
+        let decls = chelis_surf::parser::parse_str(&source)?;
+        let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+        let deep_exprs = if annotate {
+            match chelis_types::check_ir_program(&deep_exprs) {
+                Ok(checked) => checked.annotated_exprs().to_vec(),
+                Err(result) => {
+                    // [04-FIT-26]: the shared projected rendering, never `{:?}`.
+                    const PREFIX: &str =
+                        "`chelis deep --annotate` requires a well-typed program; type errors:";
+                    return Err(
+                        match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
+                            Ok(lines) => format!("{PREFIX}\n{lines}"),
+                            Err(reason) => format!("{PREFIX} {reason}"),
+                        }
+                        .into(),
+                    );
+                }
             }
-        }
-    } else {
-        deep_exprs
-    };
-    let output = if flat {
-        chelis_deep::printer::print_canonical_flat(&deep_exprs)
-    } else {
-        chelis_deep::printer::print_canonical(&deep_exprs)
-    };
-    print!("{output}");
-    Ok(())
+        } else {
+            deep_exprs
+        };
+        let output = if flat {
+            chelis_deep::printer::print_canonical_flat(&deep_exprs)
+        } else {
+            chelis_deep::printer::print_canonical(&deep_exprs)
+        };
+        print!("{output}");
+        Ok(())
+    })
 }
 
 fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let options = if verbose {
-        chelis_surf::decompile::DecompileOptions::verbose()
-    } else {
-        chelis_surf::decompile::DecompileOptions::idiomatic()
-    };
-    let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
-    if ext == "dp" {
-        let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-        let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
-        let surf = chelis_surf::decompile::try_decompile_program_with_context(
-            &deep_exprs,
-            &options,
-            synthetic_name,
-        )?;
-        let surf = if verbose {
-            surf
+    // Pipes now decompile through nested applications. Keep parsing, resugaring,
+    // canonical rendering and temporary tree destruction on the compiler stack.
+    chelis_types::run_on_grown_stack(|| {
+        let source = fs::read_to_string(file)?;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let options = if verbose {
+            chelis_surf::decompile::DecompileOptions::verbose()
         } else {
-            canonicalize_decompiled_surf(&surf)?
+            chelis_surf::decompile::DecompileOptions::idiomatic()
         };
-        print!("{surf}");
-    } else {
-        // For .ch files, round-trip through deep and back
-        let decls = chelis_surf::parser::parse_str(&source)?;
-        // Public Deep is post-expansion. Resugaring the pre-expansion
-        // compiler-only `defmacro`/`macro-invoke` forms would invent a second
-        // Surf dialect and makes even a valid macro program fail here.
-        let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-        let surf = chelis_surf::decompile::try_decompile_program_with_context(
-            &deep_exprs,
-            &options,
-            synthetic_name,
-        )?;
-        let surf = if verbose {
-            surf
+        let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
+        if ext == "dp" {
+            let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+            let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
+            let surf = chelis_surf::decompile::try_decompile_program_with_context(
+                &deep_exprs,
+                &options,
+                synthetic_name,
+            )?;
+            let surf = if verbose {
+                surf
+            } else {
+                canonicalize_decompiled_surf(&surf)?
+            };
+            print!("{surf}");
         } else {
-            canonicalize_decompiled_surf(&surf)?
-        };
-        print!("{surf}");
-    }
-    Ok(())
+            // For .ch files, round-trip through deep and back
+            let decls = chelis_surf::parser::parse_str(&source)?;
+            // Public Deep is post-expansion. Resugaring the pre-expansion
+            // compiler-only `defmacro`/`macro-invoke` forms would invent a second
+            // Surf dialect and makes even a valid macro program fail here.
+            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+            let surf = chelis_surf::decompile::try_decompile_program_with_context(
+                &deep_exprs,
+                &options,
+                synthetic_name,
+            )?;
+            let surf = if verbose {
+                surf
+            } else {
+                canonicalize_decompiled_surf(&surf)?
+            };
+            print!("{surf}");
+        }
+        Ok(())
+    })
 }
 
 fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -1208,29 +1256,154 @@ fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error
 }
 
 fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if inplace && check {
-        return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
-    }
-    let source = fs::read_to_string(file)?;
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let output = if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
-        chelis_deep::printer::print_canonical(&deep_exprs)
-    } else {
-        // .ch: parse Surf -> pretty-print Surf while preserving surface
-        // choices and source comments.
-        chelis_surf::format::format_source(&source)?
-    };
-    if check {
-        if output == source {
-            return Ok(());
+    // Call trees produced from long pipe chains need the same owned stack
+    // segment as checking, including temporary AST destruction.
+    chelis_types::run_on_grown_stack(|| {
+        if inplace && check {
+            return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
         }
-        return Err(format!("{} is not canonically formatted", file.display()).into());
+        let source = fs::read_to_string(file)?;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let output = if ext == "dp" {
+            let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
+            chelis_deep::printer::print_canonical(&deep_exprs)
+        } else {
+            // .ch: parse Surf -> pretty-print Surf while preserving surface
+            // choices and source comments.
+            chelis_surf::format::format_source(&source)?
+        };
+        if check {
+            if output == source {
+                return Ok(());
+            }
+            return Err(format!("{} is not canonically formatted", file.display()).into());
+        }
+        if inplace {
+            fs::write(file, &output)?;
+        } else {
+            print!("{output}");
+        }
+        Ok(())
+    })
+}
+
+fn cmd_migrate_pipes(
+    baseline_compiler: &Path,
+    paths: &[PathBuf],
+    check: bool,
+    inplace: bool,
+    keep_going: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if check && inplace {
+        return Err("`migrate pipes` cannot combine --check and --inplace".into());
     }
-    if inplace {
-        fs::write(file, &output)?;
-    } else {
-        print!("{output}");
+    if keep_going && !check && !inplace {
+        return Err("--keep-going requires --check or --inplace".into());
+    }
+    if !check && !inplace && paths.len() != 1 {
+        return Err(
+            "printing migration requires one path; use --check or --inplace for a batch".into(),
+        );
+    }
+    let prepare = |path: &Path| -> Result<(PathBuf, String, String), Box<dyn std::error::Error>> {
+        if inplace {
+            preflight_migration_target(path)?;
+        }
+        let original = fs::read_to_string(path)?;
+        let output = std::process::Command::new(baseline_compiler)
+            .args(["deep", "--flat"])
+            .arg(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "{}: previous compiler rejected the source: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        let previous = String::from_utf8(output.stdout)?;
+        let migration = chelis_surf::pipe_migration::prepare(&original, &previous)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let declarations = chelis_surf::parser::parse_str(&migration.source)?;
+        let current = expanded_desugared_program(&declarations).map_err(boxed_string_error)?;
+        let normalize = chelis_surf::resugar::normalize_deep_for_surface_roundtrip;
+        let expected = chelis_deep::printer::print_canonical(&normalize(&migration.baseline)?);
+        let actual = chelis_deep::printer::print_canonical(&normalize(&current)?);
+        if actual != expected {
+            return Err(
+                "migration rejected: expanded Deep differs from the previous compiler".into(),
+            );
+        }
+        Ok((path.to_path_buf(), original, migration.source))
+    };
+    let mut staged = Vec::new();
+    let mut blocked = Vec::new();
+    let mut succeeded = 0;
+    for path in paths {
+        let result = prepare(path).and_then(|migration| {
+            if keep_going {
+                if check && migration.1 != migration.2 {
+                    return Err("pipe migration required".into());
+                }
+                if inplace {
+                    persist_migrations_atomically(std::slice::from_ref(&migration))?;
+                }
+                eprintln!(
+                    "{}: {}",
+                    path.display(),
+                    if inplace { "migrated" } else { "unchanged" }
+                );
+            } else {
+                staged.push(migration);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => succeeded += 1,
+            Err(error) => {
+                let message = if keep_going {
+                    error.to_string().replace(
+                        "no migration files were changed",
+                        "this file was not modified",
+                    )
+                } else {
+                    error.to_string()
+                };
+                blocked.push(format!("{}: {message}", path.display()));
+            }
+        }
+    }
+    if keep_going {
+        eprintln!(
+            "pipe migration: {succeeded} succeeded, {} failed",
+            blocked.len()
+        );
+    }
+    if !blocked.is_empty() {
+        return Err(format!(
+            "{}{}",
+            blocked.join("\n"),
+            if keep_going { "" } else { "; no files written" }
+        )
+        .into());
+    }
+    if keep_going {
+        return Ok(());
+    }
+    if check {
+        let stale: Vec<_> = staged
+            .iter()
+            .filter(|(_, old, new)| old != new)
+            .map(|(path, _, _)| path.display().to_string())
+            .collect();
+        if !stale.is_empty() {
+            return Err(format!("pipe migration required: {}", stale.join(", ")).into());
+        }
+    } else if inplace {
+        persist_migrations_atomically(&staged)?;
+    } else if let Some((_, _, migrated)) = staged.first() {
+        print!("{migrated}");
     }
     Ok(())
 }
@@ -1644,17 +1817,50 @@ fn parse_eval_target(target: Option<&str>) -> Result<chelis_types::types::Target
 fn build_root_manifest(
     checked: &chelis_types::CheckedProgram,
     target: BuildTarget,
+    entry_defs: &UnordSet<String>,
 ) -> chelis_types::manifest::RootManifest {
     let target = match target {
         BuildTarget::C => chelis_types::types::Target::C,
         BuildTarget::Hip => chelis_types::types::Target::Hip,
         BuildTarget::Metal => chelis_types::types::Target::Metal,
     };
+    owed_root_manifest(checked, target, entry_defs)
+}
+
+/// [05-OBS-7]'s owed roots for one selected program: the target-aware
+/// manifest of the checked program, restricted to the roots whose originating
+/// definition the entry program declares. A package build links chelis-std,
+/// its dependencies and its sibling modules ahead of the entry module. Those
+/// declarations are library code the entry calls, not roots it owes, exactly
+/// as `chelis eval` evaluates a package entry against its compiled library
+/// context (chelis#2624). A file outside a package is its own entry, so every
+/// root it declares is owed.
+fn owed_root_manifest(
+    checked: &chelis_types::CheckedProgram,
+    target: chelis_types::types::Target,
+    entry_defs: &UnordSet<String>,
+) -> chelis_types::manifest::RootManifest {
     let realizability = chelis_effects::realizability::infer_realizability(
         checked,
         chelis_compiler_api::target_capability::tensor_capable_prims(target),
     );
-    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+    let mut manifest =
+        chelis_effects::realizability::compute_root_manifest(checked, &realizability);
+    manifest
+        .entries
+        .retain(|entry| entry_defs.contains(entry.def_name.as_str()));
+    manifest
+}
+
+/// The definitions the entry program declares itself, as opposed to those
+/// linked in from its dependencies: every top-level `def` of `entry_exprs`,
+/// inside a module wrapper or outside one.
+fn entry_def_names(entry_exprs: &[DeepExpr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for expr in entry_exprs {
+        collect_manifest_decl_names(expr, &mut names);
+    }
+    names
 }
 
 fn verified_host_codegen_program(
@@ -1692,8 +1898,9 @@ fn verified_host_execution_codegen_program(
 
 fn execution_host_requires_host_backend(
     checked: &chelis_types::CheckedProgram,
+    entry_defs: &UnordSet<String>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let manifest = build_root_manifest(checked, BuildTarget::C);
+    let manifest = build_root_manifest(checked, BuildTarget::C, entry_defs);
     let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest(checked, &manifest)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     Ok(host
@@ -1723,6 +1930,10 @@ fn compiled_host_lowering_error_for_cli(diagnostic: chelis_ir::lower::LowerDiagn
                 .is_some_and(|issue| issue.number() == 1058)
     });
     if is_cross_lane_nonliteral_window {
+        diagnostic.to_string()
+    } else if diagnostic.is_dimension_mismatch() {
+        // spec/04-type-system.md section 4.7: a type error proven from
+        // literals after inlining; its rendering names the checker's kind.
         diagnostic.to_string()
     } else {
         format!("Lowering error: {diagnostic}")
@@ -1898,10 +2109,9 @@ fn cmd_eval_inner(
     {
         style_gate::enforce_style_gate(path, &source, allow_style_violations)?;
     }
-    // Phase H, cmd_eval slice: when the user is evaluating a `--file` whose
-    // reef package is detectable (either the file lives inside a package or
-    // the current working directory does, matching the existing dispatch
-    // inside `chelis_reef::prepare_program_for_eval_file`), build a
+    // Phase H, cmd_eval slice: when the user is evaluating a `--file` that
+    // lives inside a reef package (found by walking up from the file, as
+    // `check` and `build` find it; spec/02 §P2), build a
     // `CompiledContext` once and route the user's source through
     // `eval_in_context`. The library decls (chelis-std + reef deps + the
     // package's own modules) are already type-checked and lowered, so the
@@ -1952,7 +2162,7 @@ fn cmd_eval_inner(
             // RFC v5 (RT-1 F2 bypass): a `--file` resolving into a reef
             // package evaluates reef-linker output (mangled), through the
             // fast path AND the `load_eval_decls` fallback below (which
-            // re-formats + re-evaluates the linked decls). Accept the
+            // checks and evaluates the linked decls). Accept the
             // linker name format for the rest of this arm. The raw `.dp`
             // case returned above, so it keeps the flag FALSE and rejects
             // mangled names as a forge.
@@ -1969,32 +2179,38 @@ fn cmd_eval_inner(
             }
             // Raw `--file foo.ch` outside any reef package, or a reef
             // package whose graph the new context-builder can't yet
-            // hash: fall back to the legacy `prepare_eval` path.
-            let (decls, entry_decls) = load_eval_decls(path)?;
+            // hash: fall back to the legacy `prepare_eval` path. A
+            // single-file program that imports is linked against the bundled
+            // chelis-std (chelis#2881), so it too evaluates linker output.
+            let EvalDecls {
+                decls,
+                entry_decls,
+                linked,
+            } = load_eval_decls(path)?;
+            let _single_file_linked_guard = linked.then(chelis_types::install_linked_program_guard);
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-            let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
-            let source = chelis_surf::format::format_program(&decls);
+            let checked =
+                checked_compilation_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             // [05-OBS-7..11]: selection consumes the same target-aware
             // manifest as evaluation and build. The former source-derived
             // list excluded pure nullary defs whenever the file also had a
             // value root, so eval and C disagreed about owed output. Filter
             // by entry-file declaration identity, but take names/topology
             // exclusively from the manifest.
-            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target)?;
+            let selected_roots =
+                manifest_root_names_from_decls(&entry_decls, checked.program(), target)?;
+            // The checked compilation itself is lowered and run, so the
+            // program checked is exactly the program evaluated; it is never
+            // printed back to Surf and parsed again (chelis#3129).
+            let outcome = chelis_compiler_api::compiler::eval_checked_selected_for_target(
+                checked,
+                &selected_roots,
+                target,
+            );
             if json {
-                prepare_eval_json(try_eval_result_for_target(
-                    SourceKind::Surf,
-                    &source,
-                    Some(&selected_roots),
-                    target,
-                ))
+                prepare_eval_json(outcome)
             } else {
-                prepare_eval_text(try_eval_for_target(
-                    SourceKind::Surf,
-                    &source,
-                    Some(&selected_roots),
-                    target,
-                ))
+                prepare_eval_text(outcome.map(|result| format_eval_result(&result)))
             }
         }
         (None, Some(e)) => {
@@ -2021,12 +2237,11 @@ fn cmd_eval_inner(
 }
 
 /// Detect whether `chelis eval --file <path>` should route through the
-/// Phase H `compile_reef_context + eval_in_context` fast path. Mirrors the
-/// dispatch baked into `chelis_reef::prepare_program_for_eval_file`:
-/// - if `<path>` parses as a single `module Foo` decl, the package root is
-///   discovered by walking up from `<path>` itself,
-/// - otherwise (a loose snippet file), the package root is discovered by
-///   walking up from the current working directory.
+/// Phase H `compile_reef_context + eval_in_context` fast path. The package is
+/// the one found by walking up from `<path>` itself, whether or not the file
+/// declares a `module`, exactly as `chelis_reef::prepare_program_for_file`
+/// finds it for `check` and `build` (spec/02 §P2, chelis#2918). The current
+/// directory plays no part.
 ///
 /// Returns `Ok(Some(root))` when a reef package applies (route through the
 /// new path), `Ok(None)` when no reef package is in scope (caller falls
@@ -2038,15 +2253,10 @@ fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std:
     // A parse failure here is non-fatal for routing: fall back to the
     // legacy path so the user sees the same parse error they would have
     // before the refactor.
-    let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+    if chelis_surf::parser::parse_str(&source).is_err() {
         return Ok(None);
-    };
-    if matches!(decls.as_slice(), [Decl::Module { .. }]) {
-        chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
-    } else {
-        let cwd = env::current_dir()?;
-        chelis_reef::find_package_root_for_dir(&cwd).map_err(boxed_string_error)
     }
+    chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
 }
 
 /// Outcome from the Phase H context path. Kept distinct from a generic boxed
@@ -2088,6 +2298,7 @@ fn prepare_eval_in_context(
         package_root,
         &entries,
         true,
+        &EMBEDDED_RUNTIME,
     ) {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -2191,7 +2402,8 @@ fn copy_cost_for_file(
         return copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs);
     }
 
-    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
+        .map_err(boxed_string_error)?;
     let (decls, entry_decls, linked_program) = match prepared {
         Some(prepared) => (prepared.decls, prepared.entry_decls, true),
         None => {
@@ -2208,8 +2420,7 @@ fn copy_cost_for_file(
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let check_deep_exprs = if linked_program {
         let entry_seeds = entry_seed_names(&entry_deep_exprs);
-        let live_deep_exprs = drop_unreachable_eval_only_defs(deep_exprs.clone(), &entry_seeds);
-        prune_build_program_to_reachable_defs(&live_deep_exprs, &entry_seeds)
+        prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds)
     } else {
         deep_exprs.clone()
     };
@@ -2854,7 +3065,7 @@ fn cmd_check_one(file: &Path, show_inferred: bool, allow_style_violations: bool)
     // deeply-nested but finite reef-linked program (the Shoals pricer) would
     // otherwise SIGSEGV in one of those derived-recursive passes even though
     // the type checker itself is now safe. One grow at this boundary covers
-    // them all uniformly. See docs/investigations/wi1_infer_recursion_depth.md.
+    // them all uniformly. See docs/archive/investigations/wi1_infer_recursion_depth.md.
     chelis_types::run_on_grown_stack(|| {
         cmd_check_one_on_grown_stack(file, show_inferred, allow_style_violations)
     })
@@ -2926,7 +3137,7 @@ fn cmd_check_one_on_grown_stack(
     // emitting no JSON and exiting 1. Catch the parse error here,
     // route it through `synthetic_check_report_with_error`, and let
     // the caller map "errors non-empty" to exit 2 as documented.
-    let prepared = match chelis_reef::prepare_program_for_file(file) {
+    let prepared = match chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME) {
         Ok(prepared) => prepared,
         Err(message) => {
             return synthetic_check_report_with_error(&message);
@@ -3323,20 +3534,6 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         Err(_) => mine,
     };
     for violation in filtered {
-        // Parity with `cmd_lint`'s emit path (LP-LEAK-A / LP-LEAK-B):
-        // suppress warnings for rules that opt in to `check_mirrors_fix`
-        // when the autofix would silently decline or be rejected by the
-        // typed-pipeline gate. Without this filter `chelis check` floods
-        // with the same non-actionable false positives that
-        // `chelis lint --check` already suppresses, because the advisory
-        // emit path applied only the path-glob exception filter. Both
-        // code paths now run `should_suppress_unfixable_violation`, so
-        // the two cannot drift again. The explicit file is both the
-        // lint scope and the fixability-probe target; walking its parent
-        // can make a temp fixture recursively lint all of `/tmp`.
-        if should_suppress_unfixable_violation(lint_scope, &rules, &violation) {
-            continue;
-        }
         eprintln!("warning: {violation}");
     }
 }
@@ -3860,6 +4057,7 @@ fn cmd_build_dispatch(
     target: &str,
     deep_flag: bool,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
     // Every build target stages the runtime this chelis carries. A runtime
@@ -3867,6 +4065,7 @@ fn cmd_build_dispatch(
     // since this build, is an error reported before any output is written
     // (spec/08-backends.md §2.1).
     chelis_runtime_bundle::preflight()?;
+    native_build::protect_input(file, output, target.as_str())?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
@@ -3897,10 +4096,54 @@ fn cmd_build_dispatch(
                 );
             }
         }
-        cmd_build_deep(file, output, target, allow_style_violations)
+        cmd_build_deep(file, output, target, allow_style_violations, emit_c)
     } else {
-        cmd_build(file, output, target, allow_style_violations)
+        cmd_build(file, output, target, allow_style_violations, emit_c)
     }
+}
+
+/// A standalone Surf file has one unambiguous authored span namespace.
+/// Linked programs need their source-file map before a span can name a snippet.
+fn render_build_check_failure(
+    error: &chelis_compiler_api::pipeline::PipelineRejection,
+    authored: Option<(&Path, &str)>,
+) -> String {
+    use chelis_compiler_api::pipeline::PipelineRejection;
+    let mut message = format!("Check errors: {error}");
+    let Some((file, source)) = authored else {
+        return message;
+    };
+    let errors = match error {
+        PipelineRejection::Type { fitness } => fitness.errors.as_slice(),
+        PipelineRejection::Linearity { errors } => errors.as_slice(),
+        _ => return message,
+    };
+    for diagnostic in errors {
+        let Some(offset) = diagnostic
+            .span_offset
+            .filter(|&offset| offset < source.len() && source.is_char_boundary(offset))
+        else {
+            continue;
+        };
+        let start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+        let end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |index| offset + index);
+        let line = source[..start]
+            .bytes()
+            .filter(|&byte| byte == b'\n')
+            .count()
+            + 1;
+        let column = source[start..offset].chars().count();
+        message.push_str(&format!(
+            "\n  --> {}:{line}:{}\n  {line} | {}\n    | {}^",
+            file.display(),
+            column + 1,
+            &source[start..end],
+            " ".repeat(column)
+        ));
+    }
+    message
 }
 
 fn cmd_build(
@@ -3908,11 +4151,12 @@ fn cmd_build(
     output: Option<&std::path::Path>,
     target: BuildTarget,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Ok(source) = fs::read_to_string(file) {
-        style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
-    }
-    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let source = fs::read_to_string(file)?;
+    style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
+    let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
+        .map_err(boxed_string_error)?;
     // RFC v5 (RT-1 F2 bypass): a reef-prepared build checks reef-linker
     // output; accept the linker's reserved internal-name format. Raw
     // `.ch`/`.dp` builds keep the flag FALSE and reject mangled names.
@@ -3928,10 +4172,7 @@ fn cmd_build(
     // (chelis#2331).
     let (decls, entry_decls) = match &prepared {
         Some(prepared) => (prepared.decls.clone(), Some(prepared.entry_decls.clone())),
-        None => {
-            let source = fs::read_to_string(file)?;
-            (chelis_surf::parser::parse_str(&source)?, None)
-        }
+        None => (chelis_surf::parser::parse_str(&source)?, None),
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
     // and reject a zero-declaration program rather than emitting a
@@ -3946,15 +4187,23 @@ fn cmd_build(
         return Err(boxed_string_error(EMPTY_PROGRAM_MESSAGE.to_string()));
     }
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    // Both consumers of the entry program below read nothing from it but its
-    // top-level names, so derive those seeds once. When the entry program is
+    // Every consumer of the entry program below reads nothing from it but its
+    // top-level names, so derive those names once: the reachability seeds and
+    // the definitions whose roots the build owes. When the entry program is
     // the whole program they come straight off `full_deep_exprs`, which is the
     // second desugar pass this removes (chelis#2331).
-    let entry_seeds = match &entry_decls {
+    let (entry_seeds, entry_defs) = match &entry_decls {
         Some(entry) => {
-            entry_seed_names(&expanded_desugared_program(entry).map_err(boxed_string_error)?)
+            let entry_exprs = expanded_desugared_program(entry).map_err(boxed_string_error)?;
+            (
+                entry_seed_names(&entry_exprs),
+                entry_def_names(&entry_exprs),
+            )
         }
-        None => entry_seed_names(&full_deep_exprs),
+        None => (
+            entry_seed_names(&full_deep_exprs),
+            entry_def_names(&full_deep_exprs),
+        ),
     };
     // Check the entire selected program before removing unreachable definitions.
     // A clean layered result proves the same program; failures and cache-disabled
@@ -3974,73 +4223,44 @@ fn cmd_build(
     };
     let selected_checked = match selected_checked {
         Some(checked) => checked,
-        None => checked_compilation_with_effects(&full_deep_exprs)
-            .map_err(|e| format!("Check errors: {e}"))?,
+        None => checked_compilation_with_effects_typed(&full_deep_exprs).map_err(|e| {
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+        })?,
     };
-    // This gate covers tensor_scan in the selected program independently of
-    // the later backend checks on the retained emission program.
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            selected_checked.program(),
-            target,
-        ),
-    )?;
 
-    // Both transformations only remove definitions. Compare lengths to know
-    // whether the checked program still represents the exact emission input.
+    // Pruning only removes definitions. Compare lengths to know whether the
+    // checked program still represents the exact emission input.
     let selected_len = full_deep_exprs.len();
-    let eval_pruned_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_seeds);
-    let eval_drop_fired = eval_pruned_deep_exprs.len() != selected_len;
-    let pruned_deep_exprs =
-        prune_build_program_to_reachable_defs(&eval_pruned_deep_exprs, &entry_seeds);
-    let pruning_fired = pruned_deep_exprs.len() != eval_pruned_deep_exprs.len();
+    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_seeds);
+    let pruning_fired = pruned_deep_exprs.len() != selected_len;
 
     // Loose C sources preserve authored host-library definitions when the
-    // post-drop program needs the host backend. Do not let a removed eval-only
-    // definition select this path.
-    let post_drop_checked =
-        if prepared.is_none() && target == BuildTarget::C && pruning_fired && eval_drop_fired {
-            Some(
-                checked_compilation_with_effects(&eval_pruned_deep_exprs)
-                    .map_err(|e| format!("Check errors: {e}"))?,
-            )
-        } else {
-            None
-        };
-    let preserve_host_library_surface =
-        prepared.is_none() && target == BuildTarget::C && pruning_fired && {
-            let checked = post_drop_checked.as_ref().unwrap_or(&selected_checked);
-            execution_host_requires_host_backend(checked.program())?
-        };
+    // program needs the host backend.
+    let preserve_host_library_surface = prepared.is_none()
+        && target == BuildTarget::C
+        && pruning_fired
+        && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
     let deep_exprs = if preserve_host_library_surface {
-        eval_pruned_deep_exprs
+        full_deep_exprs
     } else {
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
-    // Reuse a semantic proof only if neither removal changed its program.
-    // A preserved host surface may reuse the separate post-drop proof; all
-    // other changed emission inputs must be checked again before lowering.
-    let checked_compilation = if !eval_drop_fired
-        && (!pruning_fired || preserve_host_library_surface)
-    {
+    // Reuse the semantic proof only if pruning did not change its program;
+    // a changed emission input is checked again before lowering.
+    let checked_compilation = if !pruning_fired || preserve_host_library_surface {
         selected_checked
-    } else if preserve_host_library_surface {
-        post_drop_checked.expect("a changed preserved host surface was checked")
     } else {
-        checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?
+        checked_compilation_with_effects_typed(&deep_exprs).map_err(|e| {
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+        })?
     };
     let checked = checked_compilation.program();
-    let root_manifest = build_root_manifest(checked, target);
+    let root_manifest = build_root_manifest(checked, target, &entry_defs);
     let requires_main = root_manifest.requires_main();
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4111,7 +4331,6 @@ fn cmd_build(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4139,7 +4358,14 @@ fn cmd_build(
                     )?
                 };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(
+                    result,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    requires_main,
+                    emit_c,
+                )
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -4150,12 +4376,18 @@ fn cmd_build(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
+                cmd_build_c(
+                    fused,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4220,7 +4452,7 @@ fn cmd_build(
                 )?;
                 let result =
                     chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_hip_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4244,16 +4476,15 @@ fn cmd_build(
                 cmd_build_hip(
                     fused,
                     func_name,
-                    file,
                     output,
                     &symbolic_dims,
                     &root_manifest,
+                    emit_c,
                 )
             }
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4311,7 +4542,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_metal_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4339,7 +4570,14 @@ fn cmd_build(
                 // boundary; this typed gate owns the public early diagnostic.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(
+                    fused,
+                    func_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
     }
@@ -4364,6 +4602,7 @@ fn cmd_build_deep(
     output: Option<&std::path::Path>,
     target: BuildTarget,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
@@ -4377,22 +4616,13 @@ fn cmd_build_deep(
     let selected_checked =
         checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     let entry_seeds = entry_seed_names(&deep_exprs);
+    let entry_defs = entry_def_names(&deep_exprs);
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
     let pruning_fired = pruned_deep_exprs.len() != deep_exprs.len();
     // The backend gate must also see declarations that pruning would remove.
-    // When nothing was pruned, the retained-program gate below sees the same
-    // checked program and needs no duplicate pass.
-    if pruning_fired {
-        shared_compiler_gate(
-            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                selected_checked.program(),
-                target,
-            ),
-        )?;
-    }
     let preserve_host_library_surface = target == BuildTarget::C
         && pruning_fired
-        && execution_host_requires_host_backend(selected_checked.program())?;
+        && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
     let final_deep_exprs = if preserve_host_library_surface {
         deep_exprs.clone()
     } else {
@@ -4406,16 +4636,11 @@ fn cmd_build_deep(
             .map_err(|e| format!("Check errors: {e}"))?
     };
     let checked = checked_compilation.program();
-    let root_manifest = build_root_manifest(checked, target);
+    let root_manifest = build_root_manifest(checked, target, &entry_defs);
     let requires_main = root_manifest.requires_main();
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4468,7 +4693,6 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4496,7 +4720,14 @@ fn cmd_build_deep(
                     )?
                 };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(
+                    result,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    requires_main,
+                    emit_c,
+                )
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -4507,12 +4738,18 @@ fn cmd_build_deep(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
+                cmd_build_c(
+                    fused,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4572,7 +4809,7 @@ fn cmd_build_deep(
                 )?;
                 let result =
                     chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_hip_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4596,16 +4833,15 @@ fn cmd_build_deep(
                 cmd_build_hip(
                     fused,
                     func_name,
-                    file,
                     output,
                     &symbolic_dims,
                     &root_manifest,
+                    emit_c,
                 )
             }
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4658,7 +4894,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_metal_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4683,7 +4919,14 @@ fn cmd_build_deep(
                 // Deep get the same f64 rejection behavior.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(
+                    fused,
+                    func_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
     }
@@ -4794,7 +5037,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ReefCommand::Update { package, offline } => {
-            let report = chelis_reef::update_project(Path::new("."), package.as_deref(), !offline)?;
+            let report = chelis_reef::update_project(
+                Path::new("."),
+                package.as_deref(),
+                !offline,
+                &EMBEDDED_RUNTIME,
+            )?;
             if report.changes.is_empty() {
                 println!("All Reef packages are current.");
             } else {
@@ -4813,8 +5061,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             json,
             offline,
         } => {
-            let report =
-                chelis_reef::outdated_project(Path::new("."), package.as_deref(), !offline)?;
+            let report = chelis_reef::outdated_project(
+                Path::new("."),
+                package.as_deref(),
+                !offline,
+                &EMBEDDED_RUNTIME,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if report.packages.is_empty() {
@@ -4840,7 +5092,8 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             let options = chelis_reef::BuildOptions {
                 auto_fetch: !no_auto_fetch,
             };
-            let artifacts = chelis_reef::build_package_with_options(&root, &options)?;
+            let artifacts =
+                chelis_reef::build_package_with_options(&root, &options, &EMBEDDED_RUNTIME)?;
             println!(
                 "Built {} {}",
                 artifacts.package.name, artifacts.package.version
@@ -4889,7 +5142,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         },
         ReefCommand::Publish { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let artifacts = chelis_reef::publish_package(&root)?;
+            let artifacts = chelis_reef::publish_package(&root, &EMBEDDED_RUNTIME)?;
             println!(
                 "Published {} {}",
                 artifacts.package.name, artifacts.package.version
@@ -4965,8 +5218,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                  selectors; pass each `<ORG>/<REPO>@<TAG>` after `--bootstrap`"
                             .into());
                     }
-                    // Empty list = use the built-in default. The list is
-                    // hand-maintained for the pre-launch dev team; see
+                    // Empty list = use the built-in default; see the
                     // `chelis_reef::DEFAULT_BOOTSTRAP_LIST` rustdoc.
                     let raw_specs: Vec<String> = if bootstrap_args.is_empty() {
                         chelis_reef::DEFAULT_BOOTSTRAP_LIST
@@ -4984,7 +5236,8 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                         parsed.push(chelis_reef::GitHubReleaseSpec::parse(s)?);
                     }
                     let registry_root = chelis_reef::registry_home()?;
-                    let installed = chelis_reef::install_bootstrap(&parsed, &registry_root)?;
+                    let installed =
+                        chelis_reef::install_bootstrap(&parsed, &registry_root, &EMBEDDED_RUNTIME)?;
                     for artifact in &installed {
                         println!(
                             "Installed {} {}",
@@ -5019,7 +5272,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::ExportBundle { path, output } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let manifest = chelis_reef::export_bundle(&root, &output)?;
+            let manifest = chelis_reef::export_bundle(&root, &output, &EMBEDDED_RUNTIME)?;
             println!(
                 "Exported bundle for {} {} to {}",
                 manifest.root_package.name,
@@ -5030,7 +5283,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::Schema { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let schema = chelis_reef::package_schema(&root)?;
+            let schema = chelis_reef::package_schema(&root, &EMBEDDED_RUNTIME)?;
             let json = serde_json::to_string_pretty(&schema)
                 .map_err(|e| format!("serialize schema: {e}"))?;
             println!("{json}");
@@ -5107,7 +5360,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 })?;
             let mut written: Vec<String> = Vec::new();
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;
@@ -5116,13 +5369,16 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
-                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
             println!(
-                "synced managed blocks + skill links to chelis {version} at {}",
+                "synced managed blocks + agent links to chelis {version} at {}",
                 root.display()
             );
         }
@@ -5157,7 +5413,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 written.push(rel);
             }
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;
@@ -5166,12 +5422,15 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
-                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
-            println!("restamped managed blocks + skill links to chelis {version}");
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
+            println!("restamped managed blocks + agent links to chelis {version}");
 
             // Offline gate, categorized (chelis#655). A failure on a row whose
             // artifact the bump itself writes (its pins/managed-block stamps/
@@ -6292,12 +6551,49 @@ fn testing_hook_enabled(name: &str) -> bool {
         && env::var(name).as_deref() == Ok("1")
 }
 
-fn hang_test_suite_if_requested(name: &str) {
+/// Progress-file line a hung testing hook appends once everything it emitted
+/// before hanging is recorded, so the supervisor can expire the suite deadline
+/// at the hang instead of racing the suite's real work against a short clock.
+const TESTING_HANG_REACHED_LINE: &[u8] = b"{\"testing_hang_reached\":true}";
+
+/// Whether a hung testing hook ends the suite deadline as soon as it hangs.
+///
+/// Debug builds only: release builds compile this to `false`, so neither the
+/// announcement nor the early expiry exists in a distributed `chelis`.
+#[cfg(debug_assertions)]
+fn suite_deadline_expires_at_hang() -> bool {
+    testing_hook_enabled("CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG")
+}
+
+#[cfg(not(debug_assertions))]
+fn suite_deadline_expires_at_hang() -> bool {
+    false
+}
+
+fn hang_test_suite_if_requested(name: &str, progress_path: &Path) {
     if testing_hook_enabled(name) {
+        if suite_deadline_expires_at_hang() {
+            let _ = io::stdout().flush();
+            let _ = io::stderr().flush();
+            if let Ok(mut progress) = fs::OpenOptions::new().append(true).open(progress_path) {
+                let _ = progress
+                    .write_all(TESTING_HANG_REACHED_LINE)
+                    .and_then(|_| progress.write_all(b"\n"))
+                    .and_then(|_| progress.flush());
+            }
+        }
         loop {
             thread::park();
         }
     }
+}
+
+fn testing_hang_reached(progress_path: &Path) -> bool {
+    fs::read(progress_path).is_ok_and(|bytes| {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line == TESTING_HANG_REACHED_LINE)
+    })
 }
 
 fn emit_finalized_test_suite_if_requested(
@@ -7204,33 +7500,38 @@ fn cmd_test(
         ));
     }
 
-    // Bucket 6c: when the user runs `chelis test path/to/file.ch` from a
-    // directory that is not itself inside a reef package, derive the
-    // reef-package root from the target path instead of the raw cwd.
-    // We start the lookup at the target's directory (or the target itself
-    // if it is a directory) and walk upward; if no reef.toml is found we
-    // fall back to the raw cwd so the existing "no reef.toml" error path
-    // still fires with its actionable message.
+    // The tests belong to the reef package found by walking up from the
+    // target itself (the target directory, or a target file's directory),
+    // as every command classifies a file (spec/02 §P2, chelis#2918); the
+    // current directory plays no part beyond being the default target.
     let target_dir_for_reef = if target.is_dir() {
         target.clone()
     } else {
+        // A bare relative file name has an empty parent: its directory is
+        // the current one.
         target
             .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| raw_cwd.clone())
     };
-    let cwd = match chelis_reef::find_package_root_for_dir(&target_dir_for_reef) {
-        Ok(Some(root)) => root,
-        // No reef found from the target — try the raw cwd next; if that
-        // fails too, fall through with raw_cwd and let `prepare_reef_graph`
-        // emit its standard error.
-        _ => match chelis_reef::find_package_root_for_dir(&raw_cwd) {
-            Ok(Some(root)) => root,
-            _ => raw_cwd.clone(),
-        },
+    let Some(cwd) = chelis_reef::find_package_root_for_dir(&target_dir_for_reef)? else {
+        let default_target = if path.is_none() {
+            "; with no path it runs `tests/` under the current directory"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "no reef.toml found in `{}` or any parent up to $HOME: `chelis test` runs the tests \
+             of the reef package that contains its target, and `{}` lies in no reef \
+             package{default_target}",
+            target_dir_for_reef.display(),
+            target.display(),
+        ));
     };
 
     let test_files = discover_test_files(&target)?;
+    require_test_files_in_one_package(&test_files, &cwd)?;
     if test_files.is_empty() {
         // An `--expect` suite that finds zero probes is a misconfiguration, not
         // a pass: a guard that runs nothing is silently green (the exact
@@ -7302,7 +7603,7 @@ fn cmd_test(
     // The result is intentionally dropped — `compile_reef_context`
     // below builds its own graph; we only invoke this for the
     // up-front "is this a reef package?" gate.
-    let _ = chelis_reef::prepare_reef_graph(&cwd)?;
+    let _ = chelis_reef::prepare_reef_graph(&cwd, &EMBEDDED_RUNTIME)?;
 
     // Phase G' (final) — with the linearity divergence root-caused
     // (annotate_ir_program now registers prelude ADTs, matching
@@ -7332,6 +7633,7 @@ fn cmd_test(
         &cwd,
         &test_entries,
         true,
+        &EMBEDDED_RUNTIME,
     ) {
         Ok(context) => context,
         Err(err) if is_local_registry_hash_unsupported(&err) => {
@@ -7339,6 +7641,7 @@ fn cmd_test(
                 &reef_home_path,
                 &cwd,
                 &test_entries,
+                &EMBEDDED_RUNTIME,
             )
             .map_err(|err| format!("compile test context: {}", compiler_error_messages(&err)))?
         }
@@ -7640,9 +7943,45 @@ struct TestBatchManifestFile {
 }
 
 struct ClassifiedTestJobs {
-    batch_jobs: Vec<TestBatchManifestFile>,
+    /// Eligible files partitioned into bounded shards, each compiled as one
+    /// unit by its own worker. See `MAX_BATCH_FILES`.
+    batch_shards: Vec<Vec<TestBatchManifestFile>>,
     file_jobs: Vec<TestFileJob>,
 }
+
+/// Upper bound on the test files merged into a single `--batch-mode auto`
+/// compilation unit.
+///
+/// One unbounded batch serialized the whole suite: the batch ran in a single
+/// subprocess while `--jobs` was applied only to the files that had been
+/// demoted out of it, so a 42-file batch compiled and evaluated on one thread.
+/// chelis#1391 measured shoals' 49-file suite at 17.68m wall / 19.56m CPU for
+/// `auto` against 5.74m / 21.42m for `file`: 3.1x the wall to save 9% of the
+/// CPU, and a hosted 2-vCPU runner could not fit it in a 2400s budget at all.
+///
+/// The bound is 4 because the merged-unit cost is superlinear in unit size, not
+/// merely serial. Measured on a 36-file synthetic corpus at one commit, varying
+/// only this bound: 36 files in one unit cost 244.4s wall / 244.5s CPU; at 16,
+/// 40.4s / 83.2s; at 8, 10.5s / 43.2s; at 4, 4.2s / 34.2s; at 2, 2.1s / 17.0s.
+/// Bounding the unit therefore cuts CPU as well as wall -- five units of eight
+/// files cost a fifth of the CPU one unit of thirty-six did -- so this is not a
+/// scheduling tweak. 4 sits in the near-linear part of that curve while still
+/// amortizing a shared compile across four files. That corpus is deliberately
+/// declaration-dense and overstates the cost a typical suite pays, so the bound
+/// is chosen from the curve's shape rather than fitted to its minimum.
+///
+/// A file count only bounds the unit indirectly: four very large files can still
+/// reach the superlinear region. Bounding declarations instead would be exact,
+/// and is left to chelis#1391's follow-up rather than guessed at here.
+///
+/// The bound is a constant rather than a function of the worker count so that
+/// batch composition stays machine-independent. `BatchScope` collisions are
+/// judged per batch, so a core-count-dependent partition would make *which*
+/// files demote -- and therefore the `CHELIS_TEST_EXPLAIN_BATCHING` output and
+/// any abandoned-batch warning -- differ between two machines running the same
+/// suite. Smaller scopes also collide less often, so sharding admits strictly
+/// more files to batching than one shared scope did.
+const MAX_BATCH_FILES: usize = 4;
 
 struct TestBatchManifestTempfile {
     #[allow(dead_code)]
@@ -7709,18 +8048,6 @@ fn shared_compiler_gate(
     result.map_err(|error| boxed_string_error(compiler_error_messages(&error)))
 }
 
-fn apply_shared_host_builtin_gates(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    shared_compiler_gate(chelis_compiler_api::compiler::reject_host_only_builtins(
-        program, target,
-    ))?;
-    shared_compiler_gate(chelis_compiler_api::compiler::reject_eval_only_builtins(
-        program, target,
-    ))
-}
-
 fn apply_shared_window_gates(
     dag: &chelis_ir::Dag,
     target: BuildTarget,
@@ -7755,31 +8082,34 @@ fn run_test_jobs_auto(
     failed: &mut usize,
     progress_file: Option<&Path>,
 ) -> Result<bool, String> {
-    let classified = classify_test_jobs_for_batch(test_jobs, filter);
+    let classified = classify_test_jobs_for_batch(test_jobs, filter, MAX_BATCH_FILES);
     let mut rows_by_index = BTreeMap::<usize, Vec<TestRow>>::new();
     let mut file_fallback_jobs = classified.file_jobs;
-    let mut fallback_reason = None::<BatchFallbackReason>;
+    // One entry per shard that was abandoned. A shard falls back on its own,
+    // so one bad shard no longer costs the whole suite its batching.
+    let mut shard_fallbacks = Vec::<(Vec<TestBatchManifestFile>, BatchFallbackReason)>::new();
 
-    if !classified.batch_jobs.is_empty() {
-        match run_test_batch_subprocess(
+    if !classified.batch_shards.is_empty() {
+        let worker_count = jobs.resolve(classified.batch_shards.len());
+        let outcomes = run_test_batch_shards(
             self_path,
             cwd,
-            &classified.batch_jobs,
+            &classified.batch_shards,
+            worker_count,
             timeout_secs,
             compiled_context_handoff,
             progress_file,
-        )? {
-            BatchSubprocessOutcome::Rows(rows) => {
-                if let Some(reason) =
-                    group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index)
-                {
-                    file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
-                    fallback_reason = Some(reason);
+        )?;
+        for (shard, outcome) in classified.batch_shards.iter().zip(outcomes) {
+            let reason = match outcome {
+                BatchSubprocessOutcome::Rows(rows) => {
+                    group_batch_rows_by_file(shard, rows, &mut rows_by_index)
                 }
-            }
-            BatchSubprocessOutcome::Fallback(reason) => {
-                file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
-                fallback_reason = Some(reason);
+                BatchSubprocessOutcome::Fallback(reason) => Some(reason),
+            };
+            if let Some(reason) = reason {
+                file_fallback_jobs.extend(batch_jobs_as_file_jobs(shard));
+                shard_fallbacks.push((shard.clone(), reason));
             }
         }
     }
@@ -7803,8 +8133,8 @@ fn run_test_jobs_auto(
     // Reported before the rows: the batch was abandoned before any of these
     // rows existed, and a reader who stops at the first failing row still sees
     // that the run did not take the path it asked for.
-    if let Some(reason) = &fallback_reason {
-        emit_batch_fallback_note(out, json, &classified.batch_jobs, reason)?;
+    for (shard, reason) in &shard_fallbacks {
+        emit_batch_fallback_note(out, json, shard, reason)?;
     }
 
     for job in test_jobs {
@@ -7813,7 +8143,110 @@ fn run_test_jobs_auto(
         }
     }
 
-    Ok(fallback_reason.is_some())
+    Ok(!shard_fallbacks.is_empty())
+}
+
+/// Run each batch shard in its own worker, up to `worker_count` at a time, and
+/// return their outcomes in shard order.
+///
+/// This is where chelis#1391's wall-clock regression is paid back: the batch
+/// used to be one subprocess regardless of `--jobs`, so the suite's whole
+/// compile sat on one thread.
+fn run_test_batch_shards(
+    self_path: &Path,
+    cwd: &Path,
+    shards: &[Vec<TestBatchManifestFile>],
+    worker_count: usize,
+    timeout_secs: u64,
+    compiled_context_handoff: &CompiledContextHandoff,
+    progress_file: Option<&Path>,
+) -> Result<Vec<BatchSubprocessOutcome>, String> {
+    let progress = progress_file
+        .map(|path| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map(|file| Arc::new(Mutex::new(file)))
+                .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
+        })
+        .transpose()?;
+
+    if worker_count <= 1 || shards.len() <= 1 {
+        let mut outcomes = Vec::with_capacity(shards.len());
+        for shard in shards {
+            outcomes.push(run_test_batch_subprocess(
+                self_path,
+                cwd,
+                shard,
+                timeout_secs,
+                compiled_context_handoff,
+                progress.as_deref(),
+            )?);
+        }
+        return Ok(outcomes);
+    }
+
+    let shards_owned = Arc::new(shards.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (result_tx, result_rx) =
+        std::sync::mpsc::channel::<(usize, Result<BatchSubprocessOutcome, String>)>();
+    let self_path = self_path.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    let mut handles = Vec::new();
+
+    for _ in 0..worker_count.min(shards.len()) {
+        let shards_owned = Arc::clone(&shards_owned);
+        let next_index = Arc::clone(&next_index);
+        let result_tx = result_tx.clone();
+        let self_path = self_path.clone();
+        let cwd = cwd.clone();
+        let handoff = compiled_context_handoff.clone();
+        let progress = progress.clone();
+        handles.push(thread::spawn(move || {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::SeqCst);
+                let Some(shard) = shards_owned.get(index) else {
+                    break;
+                };
+                let outcome = run_test_batch_subprocess(
+                    &self_path,
+                    &cwd,
+                    shard,
+                    timeout_secs,
+                    &handoff,
+                    progress.as_deref(),
+                );
+                if result_tx.send((index, outcome)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(result_tx);
+
+    let mut collected = BTreeMap::new();
+    for (index, outcome) in result_rx {
+        collected.insert(index, outcome);
+    }
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "a test batch shard worker panicked".to_string())?;
+    }
+
+    let mut outcomes = Vec::with_capacity(shards.len());
+    for index in 0..shards.len() {
+        match collected.remove(&index) {
+            Some(outcome) => outcomes.push(outcome?),
+            None => {
+                return Err(format!(
+                    "test batch shard {index} of {} produced no outcome",
+                    shards.len()
+                ));
+            }
+        }
+    }
+    Ok(outcomes)
 }
 
 fn batch_jobs_as_file_jobs(batch_jobs: &[TestBatchManifestFile]) -> Vec<TestFileJob> {
@@ -7860,8 +8293,10 @@ fn group_batch_rows_by_file(
 fn classify_test_jobs_for_batch(
     test_jobs: &[TestFileJob],
     filter: Option<&str>,
+    max_batch_files: usize,
 ) -> ClassifiedTestJobs {
-    let mut batch_jobs = Vec::new();
+    let mut batch_shards: Vec<Vec<TestBatchManifestFile>> = Vec::new();
+    let mut shard: Vec<TestBatchManifestFile> = Vec::new();
     let mut file_jobs = Vec::new();
     let mut batch_scope = BatchScope::default();
 
@@ -7906,22 +8341,34 @@ fn classify_test_jobs_for_batch(
             file_jobs.push(job.clone());
             continue;
         }
+        // Close the shard before admitting into it, so each shard's scope
+        // covers exactly the files that shard compiles together. A file that
+        // collides inside one shard is demoted as before; it is not retried
+        // against the next shard, because retrying would make a file's own
+        // placement depend on the order the shards filled up.
+        if shard.len() >= max_batch_files {
+            batch_shards.push(std::mem::take(&mut shard));
+            batch_scope = BatchScope::default();
+        }
         let scope = test_file_scope_names(&flat);
         if let Some(collision) = batch_scope.admit(&job.rel_display, &scope) {
             explain_batch_demotion(&job.rel_display, &collision);
             file_jobs.push(job.clone());
             continue;
         }
-        batch_jobs.push(TestBatchManifestFile {
+        shard.push(TestBatchManifestFile {
             index: job.index,
             file: job.file.clone(),
             rel_display: job.rel_display.clone(),
             tests: tests.into_iter().map(|test| test.name).collect(),
         });
     }
+    if !shard.is_empty() {
+        batch_shards.push(shard);
+    }
 
     ClassifiedTestJobs {
-        batch_jobs,
+        batch_shards,
         file_jobs,
     }
 }
@@ -8186,7 +8633,7 @@ fn run_test_batch_subprocess(
     batch_jobs: &[TestBatchManifestFile],
     timeout_secs: u64,
     compiled_context_handoff: &CompiledContextHandoff,
-    progress_file: Option<&Path>,
+    progress: Option<&Mutex<fs::File>>,
 ) -> Result<BatchSubprocessOutcome, String> {
     let manifest = TestBatchManifest {
         files: batch_jobs.to_vec(),
@@ -8202,28 +8649,32 @@ fn run_test_batch_subprocess(
         .current_dir(cwd);
     compiled_context_handoff.apply_to(&mut cmd);
 
-    let mut progress = progress_file
-        .map(|path| {
-            fs::OpenOptions::new()
-                .append(true)
-                .open(path)
-                .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
-        })
-        .transpose()?;
     let worker_timeout = batch_worker_timeout(batch_jobs, timeout_secs);
     let output = match run_batch_worker_command_with_timeout(cmd, worker_timeout, |line| {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
-            return;
-        };
-        if test_row_from_json(&value).is_none() {
-            return;
+        // The batch's hang announcement follows its rows on this one pipe, so
+        // recording it here proves every earlier row is already in progress.
+        let announced_hang = line == TESTING_HANG_REACHED_LINE && suite_deadline_expires_at_hang();
+        if !announced_hang {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return;
+            };
+            if test_row_from_json(&value).is_none() {
+                return;
+            }
         }
-        if let Some(progress) = progress.as_mut() {
-            let _ = progress.write_all(line);
-            let _ = progress.write_all(b"\n");
-            let _ = progress.flush();
+        if let Some(progress) = progress {
+            // One write per row, under the shared lock: concurrent shards
+            // append to the same file, and a line split across two write calls
+            // could interleave with another shard's and be unparseable.
+            let mut framed = Vec::with_capacity(line.len() + 1);
+            framed.extend_from_slice(line);
+            framed.push(b'\n');
+            if let Ok(mut file) = progress.lock() {
+                let _ = file.write_all(&framed);
+                let _ = file.flush();
+            }
         }
     }) {
         Ok(output) => output,
@@ -8728,6 +9179,34 @@ fn preflight_test_selection(
     }
 }
 
+/// Each file belongs to the reef package found by walking up from its own
+/// directory (spec/02 §P2, chelis#2918). A `chelis test` run executes one
+/// package's files against that package's context, so a discovered file that
+/// belongs to another package, such as one inside a package nested under the
+/// target, is rejected rather than run in a package it does not belong to.
+fn require_test_files_in_one_package(
+    test_files: &[PathBuf],
+    package_root: &Path,
+) -> Result<(), String> {
+    for file in test_files {
+        let own = chelis_reef::find_package_root_for_input(file)?;
+        if own.as_deref() == Some(package_root) {
+            continue;
+        }
+        let belongs = match &own {
+            Some(root) => format!("the reef package at `{}`", root.display()),
+            None => "no reef package".to_string(),
+        };
+        return Err(format!(
+            "`{}` belongs to {belongs}, not to the reef package at `{}` whose tests this run \
+             executes; run `chelis test` on that package's files separately",
+            file.display(),
+            package_root.display(),
+        ));
+    }
+    Ok(())
+}
+
 /// The modules `files` import (chelis#2558). A file that cannot be read or
 /// parsed contributes nothing: it cannot run against any context, and its
 /// worker reports the read or parse failure as that file's result.
@@ -8984,7 +9463,7 @@ fn run_forked_test_suite(
         start_forked_suite_parent_watchdog(supervisor_read, progress_path.clone());
         ignore_test_suite_sigterm_if_requested();
         write_test_progress_rows_if_requested(&progress_path);
-        hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE");
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE", &progress_path);
         let suite_result =
             emit_finalized_test_suite_if_requested(json, expect).unwrap_or_else(|| {
                 cmd_test(
@@ -9005,7 +9484,7 @@ fn run_forked_test_suite(
                 2
             }
         };
-        hang_test_suite_if_requested("CHELIS_TEST_HANG_AFTER_SUITE");
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_AFTER_SUITE", &progress_path);
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
         unsafe {
@@ -9016,7 +9495,9 @@ fn run_forked_test_suite(
     drop(stdout_write);
     drop(stderr_write);
     drop(supervisor_read);
-    let output = run_forked_suite_pid_with_timeout(pid, stdout_read, stderr_read, timeout);
+    let hang_progress = suite_deadline_expires_at_hang().then_some(progress_path.as_path());
+    let output =
+        run_forked_suite_pid_with_timeout(pid, stdout_read, stderr_read, timeout, hang_progress);
     // Keep this write end live until the child has been reaped and its output
     // collected. If this public supervisor is killed, kernel closure wakes the
     // child watchdog, which unlinks progress before killing the process group.
@@ -9049,6 +9530,7 @@ fn run_forked_suite_pid_with_timeout(
     stdout_read: std::os::fd::OwnedFd,
     stderr_read: std::os::fd::OwnedFd,
     timeout: Duration,
+    hang_progress: Option<&Path>,
 ) -> Result<TestWorkerOutput, std::io::Error> {
     use std::os::unix::process::ExitStatusExt;
 
@@ -9063,33 +9545,49 @@ fn run_forked_suite_pid_with_timeout(
         child_stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
     let started = Instant::now();
-    let deadline = started.checked_add(timeout);
-    let suite_term_at = deadline.map(|deadline| {
-        deadline
-            .checked_sub(Duration::from_millis(200))
-            .unwrap_or(started)
-    });
+    let term_grace = Duration::from_millis(200);
+    let mut deadline = started.checked_add(timeout);
+    let mut suite_term_at =
+        deadline.map(|deadline| deadline.checked_sub(term_grace).unwrap_or(started));
     let mut timed_out = false;
     let mut suite_term_sent = false;
+    // The leader's wait status, once reaped. A group signal can reap it too
+    // (see `signal_suite_group`), so it is never waited for twice.
+    let mut reaped = None;
     let wait_status = loop {
-        if let Some(status) = waitpid_nonblocking(pid)? {
+        if reaped.is_none() {
+            reaped = waitpid_nonblocking(pid)?;
+        }
+        if let Some(status) = reaped {
             // A leader may die while a worker still owns the captured pipes.
             // Always quiesce its process group before joining reader threads;
             // a legitimate leader has already reaped its workers, making this
             // an ESRCH no-op.
-            send_suite_pid_signal(pid, libc::SIGKILL)?;
+            send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped)?;
             break status;
         }
         let now = Instant::now();
+        if !suite_term_sent && hang_progress.is_some_and(testing_hang_reached) {
+            // A debug-build testing hook announced its hang: the deadline ends
+            // here, with the same SIGTERM-then-SIGKILL grace as the real one.
+            suite_term_at = Some(now);
+            deadline = now.checked_add(term_grace);
+        }
         if !suite_term_sent && suite_term_at.is_some_and(|term_at| now >= term_at) {
             timed_out = true;
             suite_term_sent = true;
-            send_suite_pid_signal(pid, libc::SIGTERM)?;
+            send_suite_pid_signal(pid, libc::SIGTERM, &mut reaped)?;
+            if reaped.is_some() {
+                continue;
+            }
         }
         if deadline.is_some_and(|deadline| now >= deadline) {
             timed_out = true;
-            send_suite_pid_signal(pid, libc::SIGKILL)?;
-            break waitpid_blocking(pid)?;
+            send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped)?;
+            break match reaped {
+                Some(status) => status,
+                None => waitpid_blocking(pid)?,
+            };
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -9219,16 +9717,184 @@ fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::
     child.kill()
 }
 
+/// Signal the suite's process group, the leader `pid` and its descendants.
+///
+/// `reaped` holds the leader's wait status once the supervisor has reaped it.
+/// On macOS a refused signal can reap the leader here (see
+/// `signal_suite_group`), so callers read `reaped` afterwards instead of
+/// waiting for the leader again.
 #[cfg(unix)]
-fn send_suite_pid_signal(pid: libc::pid_t, signal: libc::c_int) -> Result<(), std::io::Error> {
-    let rc = unsafe { libc::kill(-pid, signal) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            return Err(err);
+fn send_suite_pid_signal(
+    pid: libc::pid_t,
+    signal: libc::c_int,
+    reaped: &mut Option<libc::c_int>,
+) -> Result<(), std::io::Error> {
+    signal_suite_group(
+        || {
+            if unsafe { libc::kill(-pid, signal) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        },
+        || {
+            if reaped.is_none() {
+                *reaped = waitpid_nonblocking(pid)?;
+            }
+            Ok(())
+        },
+        SUITE_GROUP_EXIT_GRACE,
+    )
+}
+
+/// How long macOS may refuse a group signal before the refusal is taken as a
+/// genuine permission failure.
+#[cfg(unix)]
+const SUITE_GROUP_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// Deliver one signal to a process group; ESRCH means the group is gone.
+///
+/// macOS answers EPERM while a member of the group is exiting, including a
+/// leader that has exited but that its parent has not reaped. On EPERM this
+/// first calls `reap_leader`, which reaps the supervisor's own exited leader,
+/// then signals again, for at most `grace`; EPERM that outlasts it is returned
+/// unchanged. Elsewhere every error but ESRCH is returned at once.
+#[cfg(unix)]
+fn signal_suite_group(
+    mut kill: impl FnMut() -> Result<(), std::io::Error>,
+    mut reap_leader: impl FnMut() -> Result<(), std::io::Error>,
+    grace: Duration,
+) -> Result<(), std::io::Error> {
+    let started = Instant::now();
+    loop {
+        match kill() {
+            Ok(()) => return Ok(()),
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+            Err(err)
+                if cfg!(target_os = "macos")
+                    && err.raw_os_error() == Some(libc::EPERM)
+                    && started.elapsed() < grace =>
+            {
+                reap_leader()?;
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => return Err(err),
         }
     }
-    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod suite_group_signal_tests {
+    use super::*;
+
+    /// Run `signal_suite_group` against scripted kill replies (`None` is a
+    /// delivered signal, `Some(errno)` a failure; the last reply repeats) and
+    /// report its result, how many signals it sent and how often it tried to
+    /// reap the leader.
+    fn signal_with(
+        replies: &[Option<i32>],
+        grace: Duration,
+    ) -> (std::io::Result<()>, usize, usize) {
+        let mut calls = 0;
+        let mut reaps = 0;
+        let result = signal_suite_group(
+            || {
+                let reply = replies[calls.min(replies.len() - 1)];
+                calls += 1;
+                match reply {
+                    None => Ok(()),
+                    Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+                }
+            },
+            || {
+                reaps += 1;
+                Ok(())
+            },
+            grace,
+        );
+        (result, calls, reaps)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exiting_group_eperm_reaps_and_retries_until_the_group_is_gone() {
+        let replies = [Some(libc::EPERM), Some(libc::EPERM), Some(libc::ESRCH)];
+        let (result, calls, reaps) = signal_with(&replies, Duration::from_secs(60));
+        result.expect("an exiting group is not a denial");
+        assert_eq!((calls, reaps), (3, 2));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn eperm_past_the_grace_keeps_the_original_error() {
+        let (result, calls, _) = signal_with(&[Some(libc::EPERM)], Duration::from_millis(50));
+        let error = result.expect_err("a lasting denial is fatal");
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert!(calls > 1, "EPERM was not retried");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn eperm_is_reported_at_once_off_macos() {
+        let (result, calls, reaps) = signal_with(&[Some(libc::EPERM)], Duration::from_secs(60));
+        let error = result.expect_err("EPERM is a denial");
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert_eq!((calls, reaps), (1, 0));
+    }
+
+    #[test]
+    fn delivered_and_vanished_signals_succeed_without_retry() {
+        for reply in [None, Some(libc::ESRCH)] {
+            let (result, calls, reaps) = signal_with(&[reply], Duration::from_secs(60));
+            result.expect("delivered or gone");
+            assert_eq!((calls, reaps), (1, 0));
+        }
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let (result, calls, reaps) = signal_with(&[Some(libc::EINVAL)], Duration::from_secs(60));
+        let error = result.expect_err("an invalid signal is fatal");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!((calls, reaps), (1, 0));
+    }
+
+    /// The suite leader is the supervisor's own child, so after it exits it
+    /// stays a zombie in its group until the supervisor reaps it. Darwin
+    /// refuses the group signal with EPERM for as long as that lasts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exited_unreaped_leader_is_reaped_rather_than_reported() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            unsafe {
+                libc::setpgid(0, 0);
+                libc::_exit(7);
+            }
+        }
+        // Wait for the exit without reaping, so the leader is a zombie.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited, 0, "waitid: {}", std::io::Error::last_os_error());
+
+        let mut reaped = None;
+        let result = send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped);
+        let status = match reaped {
+            Some(status) => status,
+            None => waitpid_blocking(pid).expect("reap the leader the signal left behind"),
+        };
+        result.expect("an exited leader is not a permission denial");
+        assert!(reaped.is_some(), "the exited leader was not reaped");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
+    }
 }
 
 #[cfg(unix)]
@@ -9597,8 +10263,8 @@ fn load_test_execution_context(files: &[&Path]) -> Result<TestExecutionContext, 
         }
         _ => {
             let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
-            let graph = chelis_reef::prepare_reef_graph(&cwd)?
-                .covering(&test_entry_imports(files))?
+            let graph = chelis_reef::prepare_reef_graph(&cwd, &EMBEDDED_RUNTIME)?
+                .covering(&test_entry_imports(files), &EMBEDDED_RUNTIME)?
                 .into_owned();
             Ok(TestExecutionContext::ReefGraph(Box::new(graph)))
         }
@@ -9697,6 +10363,12 @@ fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i3
         if let Ok(path) = env::var("CHELIS_TEST_HANG_PID_FILE") {
             fs::write(path, std::process::id().to_string())
                 .map_err(|e| format!("write hung-batch pid file: {e}"))?;
+        }
+        if suite_deadline_expires_at_hang() {
+            out.write_all(TESTING_HANG_REACHED_LINE)
+                .and_then(|_| out.write_all(b"\n"))
+                .and_then(|_| out.flush())
+                .map_err(|e| format!("announce hung batch: {e}"))?;
         }
         loop {
             thread::park();
@@ -10111,7 +10783,7 @@ fn compile_check_in_exec_context(
     exec_context: &TestExecutionContext,
     flat_decls: &[Decl],
 ) -> Result<(), String> {
-    chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
+    chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls, &EMBEDDED_RUNTIME)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -10144,16 +10816,15 @@ fn prepare_eval_in_exec_context(
     synth_decls: &[Decl],
 ) -> Result<PreparedTestEval, String> {
     // RFC v5 (RT-1 F2 bypass): both branches feed reef-linked decls to
-    // the checker -- the Context branch through `prepare_eval_in_context`
-    // (which rewrites + checks internally) and the ReefGraph branch by
-    // formatting linked decls to Surf text and re-evaluating via
-    // `prepare_eval`, which loses the in-process provenance across the
-    // text round-trip. Re-assert the linked flag for both so the
-    // linker's internal names are accepted.
+    // the checker -- the Context branch through
+    // `prepare_eval_decls_in_context` (which rewrites + checks internally)
+    // and the ReefGraph branch through `prepare_eval_decls` on the linked
+    // decls. Re-assert the linked flag for both so the linker's internal
+    // names are accepted.
     let _linked = chelis_types::install_linked_program_guard();
     match exec_context {
         TestExecutionContext::Context(ctx) => {
-            // `prepare_eval_in_context` runs the reef rewriter
+            // `prepare_eval_decls_in_context` runs the reef rewriter
             // (rewrite_entry_decls_with_reef_graph) and the
             // _with_context type/effect/linearity stages internally
             // against the cached library snapshot. Per-file work is
@@ -10161,8 +10832,7 @@ fn prepare_eval_in_exec_context(
             // graph's ~50 modules. Avoid the legacy
             // compile_with_reef_graph call here — it would re-check
             // the entire library and defeat the cache.
-            let source_text = chelis_surf::format::format_program(synth_decls);
-            chelis_compiler_api::compiler::prepare_eval_in_context(ctx, &source_text)
+            chelis_compiler_api::compiler::prepare_eval_decls_in_context(ctx, synth_decls)
                 .map(PreparedTestEval::InContext)
                 .map_err(|err| {
                     err.errors
@@ -10173,18 +10843,16 @@ fn prepare_eval_in_exec_context(
                 })
         }
         TestExecutionContext::ReefGraph(_) => {
-            let prepared =
-                chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
-                    .map_err(|e| e.to_string())?;
-            let source_text = chelis_surf::format::format_program(&prepared.decls);
-            // `prepare_eval` is deprecated externally but retained for a
+            let prepared = chelis_reef::compile_with_reef_graph(
+                exec_context.reef_graph(),
+                synth_decls,
+                &EMBEDDED_RUNTIME,
+            )
+            .map_err(|e| e.to_string())?;
+            // `prepare_eval_decls` is deprecated externally but retained for a
             // directly-invoked worker that was not handed a compiled context.
             #[allow(deprecated)]
-            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            });
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
                 err.errors
                     .iter()
@@ -10219,13 +10887,8 @@ fn prepare_rewritten_batch_in_exec_context(
         TestExecutionContext::ReefGraph(graph) => {
             let prepared =
                 chelis_reef::compile_rewritten_entry_batch_with_reef_graph(graph, batch)?;
-            let source_text = chelis_surf::format::format_program(&prepared.decls);
             #[allow(deprecated)]
-            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            });
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
                 err.errors
                     .iter()
@@ -10391,27 +11054,30 @@ fn eval_module_init(
     // `compile_with_reef_graph` + `eval_selected`. The in-context
     // path is unblocked for `chelis eval`/`check` consumers but not
     // for `chelis test` until the linearity divergence is fixed.
-    let prepared = match chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
-    {
+    let prepared = match chelis_reef::compile_with_reef_graph(
+        exec_context.reef_graph(),
+        flat_decls,
+        &EMBEDDED_RUNTIME,
+    ) {
         Ok(p) => p,
         Err(err) => return Some(format!("compile: {err}")),
     };
-    let source_text = chelis_surf::format::format_program(&prepared.decls);
+    let linked_decls = prepared.decls;
     let outcome = run_test_with_timeout(
         move || {
-            // RFC v5 (RT-1 F2 bypass): `source_text` is the reef-linked
-            // module formatted back to Surf (internal-name mangled);
-            // `eval_selected` re-parses + re-checks it. This closure
-            // runs on a SPAWNED worker thread, so the main-thread
-            // linked-program guard does not apply -- install it here so
-            // the linker's own names are accepted in this thread.
+            // RFC v5 (RT-1 F2 bypass): `linked_decls` is the reef-linked
+            // module (internal-name mangled), which `eval_decls_selected`
+            // checks and runs as it is. This closure runs on a SPAWNED
+            // worker thread, so the main-thread linked-program guard does
+            // not apply -- install it here so the linker's own names are
+            // accepted in this thread.
             let _linked = chelis_types::install_linked_program_guard();
-            let request = EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source_text,
-                bindings: BTreeMap::new(),
-            };
-            Ok(chelis_compiler_api::compiler::eval_selected(request, &module_roots).map(|_| ()))
+            Ok(chelis_compiler_api::compiler::eval_decls_selected(
+                &linked_decls,
+                BTreeMap::new(),
+                &module_roots,
+            )
+            .map(|_| ()))
         },
         timeout,
         &format!("module-init timeout after {}s", timeout.as_secs()),
@@ -10443,16 +11109,37 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
-fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
-    let current_dir = env::current_dir()?;
-    if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &current_dir)
+/// The program `chelis eval --file` evaluates.
+struct EvalDecls {
+    /// The whole program.
+    decls: Vec<Decl>,
+    /// The evaluated file's own declarations.
+    entry_decls: Vec<Decl>,
+    /// Whether the reef linker produced `decls`.
+    linked: bool,
+}
+
+fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
+    let source =
+        fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+    let decls =
+        chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    // The file is linked by its own location, as `check` and `build` link
+    // it (spec/02 §P2, chelis#2918).
+    if let Some(prepared) = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
         .map_err(boxed_string_error)?
     {
-        return Ok((prepared.decls, prepared.entry_decls));
+        return Ok(EvalDecls {
+            decls: prepared.decls,
+            entry_decls: prepared.entry_decls,
+            linked: true,
+        });
     }
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
-    Ok((decls.clone(), decls))
+    Ok(EvalDecls {
+        entry_decls: decls.clone(),
+        decls,
+        linked: false,
+    })
 }
 
 fn cmd_validate(
@@ -10499,6 +11186,7 @@ fn cmd_build_c(
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let func_name = c_name.symbol();
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
@@ -10523,7 +11211,14 @@ fn cmd_build_c(
             .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
         result.reseal_artifact(func_name)?;
     }
-    cmd_build_c_result(result, c_name, output, &symbolic_dims, requires_main)
+    cmd_build_c_result(
+        result,
+        c_name,
+        output,
+        &symbolic_dims,
+        requires_main,
+        emit_c,
+    )
 }
 
 fn cmd_build_c_result(
@@ -10532,6 +11227,7 @@ fn cmd_build_c_result(
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10564,25 +11260,16 @@ fn cmd_build_c_result(
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    if requires_main {
-        println!(
-            "Compile: {} -O2 {} {} {} {} -o {}",
-            toolchain.compiler,
-            toolchain.compile_flags.join(" "),
-            c_path.display(),
-            staged.archive.display(),
-            toolchain.link_flags.join(" "),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile object: {} -O2 {} -c {}",
-            toolchain.compiler,
-            toolchain.compile_flags.join(" "),
-            c_path.display()
-        );
+    native_build::NativeBuild {
+        target: "c",
+        compiler: toolchain.compiler.into(),
+        sources: vec![c_path],
+        compile_flags: toolchain.compile_flags,
+        link_flags: toolchain.link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_hip_host(
@@ -10590,6 +11277,7 @@ fn cmd_build_hip_host(
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10655,36 +11343,19 @@ fn cmd_build_hip_host(
             }
         }
     }
-    let mut support_sources = helper_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    support_sources.push(
-        runtime_dir
-            .join("chelis_device_owner.cpp")
-            .display()
-            .to_string(),
-    );
-    let support_sources = support_sources.join(" ");
-    if requires_main {
-        println!(
-            "Compile: hipcc {} {} {} {} -lpthread -ldl {} -o {}",
-            compile_flags.join(" "),
-            c_path.display(),
-            support_sources,
-            staged.archive.display(),
-            link_flags.join(" "),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile objects: hipcc {} -c {} {}",
-            compile_flags.join(" "),
-            c_path.display(),
-            support_sources
-        );
+    let mut sources = vec![c_path.clone()];
+    sources.extend(helper_paths);
+    sources.push(runtime_dir.join("chelis_device_owner.cpp"));
+    native_build::NativeBuild {
+        target: "hip",
+        compiler: native_build::compiler_override("CHELIS_HIPCC", "hipcc"),
+        sources,
+        compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_metal_host(
@@ -10692,6 +11363,7 @@ fn cmd_build_metal_host(
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10760,30 +11432,18 @@ fn cmd_build_metal_host(
             link_flags.extend(helper.result.link_flags.iter().cloned());
         }
     }
-    let helper_sources = helper_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if requires_main {
-        println!(
-            "Compile: clang++ {} -O2 {} {} {} {} -o {}",
-            compile_flags.join(" "),
-            mm_path.display(),
-            helper_sources,
-            staged.archive.display(),
-            link_flags.join(" "),
-            mm_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile objects: clang++ {} -O2 -c {} {}",
-            compile_flags.join(" "),
-            mm_path.display(),
-            helper_sources
-        );
+    let mut sources = vec![mm_path];
+    sources.extend(helper_paths);
+    native_build::NativeBuild {
+        target: "metal",
+        compiler: native_build::compiler_override("CHELIS_METAL_CXX", "clang++"),
+        sources,
+        compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn tensor_manifest_observation_driver(func_name: &str, root_names: &[String]) -> String {
@@ -10935,10 +11595,10 @@ fn tensor_manifest_root_names(
 fn cmd_build_hip(
     dag: chelis_ir::dag::Dag,
     func_name: &str,
-    _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let selected = chelis_backend_hip::prepare_dag_for_codegen(dag);
@@ -11009,45 +11669,44 @@ fn cmd_build_hip(
     if let Some(bytes) = result.peak_device_bytes_estimate {
         println!("Estimated peak device memory: {}", human_bytes(bytes));
     }
-    let mut flags: Vec<&str> = result
-        .compile_flags
-        .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    flags.sort();
-    flags.dedup();
-    if requires_main {
-        println!(
-            "Compile: hipcc {} {} {} {} -lpthread -ldl -o {}",
-            flags.join(" "),
-            c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display(),
-            staged.archive.display(),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile object: hipcc {} -c {} {}",
-            flags.join(" "),
-            c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display()
-        );
+    let mut link_flags = result.link_flags;
+    link_flags.extend(["-lpthread".into(), "-ldl".into()]);
+    native_build::NativeBuild {
+        target: "hip",
+        compiler: native_build::compiler_override("CHELIS_HIPCC", "hipcc"),
+        sources: vec![c_path.clone(), runtime_dir.join("chelis_device_owner.cpp")],
+        compile_flags: result.compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_metal(
     dag: chelis_ir::dag::Dag,
     func_name: &str,
-    _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
+    root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let verified = verified_dag_codegen_program(dag)?;
     let plan = chelis_backend_metal::plan_metal(verified);
-    let result = chelis_backend_metal::codegen_metal(plan, func_name)?;
+    let mut result = chelis_backend_metal::codegen_metal(plan, func_name)?;
+    let requires_main = root_manifest.requires_main();
+    if requires_main {
+        let root_names = tensor_manifest_root_names(
+            &result.output_labels,
+            root_manifest,
+            BuildTarget::Metal,
+            "Metal",
+        )?;
+        result
+            .mm_source
+            .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
+    }
 
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -11102,22 +11761,16 @@ fn cmd_build_metal(
     if let Some(bytes) = result.peak_device_bytes_estimate {
         println!("Estimated peak device memory: {}", human_bytes(bytes));
     }
-    // Preserve the (-framework, NAME) pair ordering — sorting would split
-    // them. Compile flags first, then link flags, in their declared order.
-    let flags: Vec<&str> = result
-        .compile_flags
-        .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    println!(
-        "Compile: clang++ {} -O2 {} {} -o {}",
-        flags.join(" "),
-        mm_path.display(),
-        staged.archive.display(),
-        mm_path.with_extension("").display()
-    );
-    Ok(())
+    native_build::NativeBuild {
+        target: "metal",
+        compiler: native_build::compiler_override("CHELIS_METAL_CXX", "clang++"),
+        sources: vec![mm_path],
+        compile_flags: result.compile_flags,
+        link_flags: result.link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
+    }
+    .finish(emit_c)
 }
 
 fn human_bytes(bytes: usize) -> String {
@@ -11142,7 +11795,7 @@ fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Erro
             Ok(())
         }
         Some(TideCommand::Mcp) => {
-            chelis_tide::mcp::run_stdio_blocking()?;
+            chelis_tide::mcp::run_stdio_blocking(&EMBEDDED_RUNTIME)?;
             Ok(())
         }
         Some(TideCommand::Lsp { .. }) => {
@@ -11399,22 +12052,29 @@ fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> Strin
 fn checked_compilation_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_compiler_api::pipeline::CheckedCompilation, String> {
+    checked_compilation_with_effects_typed(deep_exprs).map_err(|rejection| rejection.to_string())
+}
+
+fn checked_compilation_with_effects_typed(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<
+    chelis_compiler_api::pipeline::CheckedCompilation,
+    chelis_compiler_api::pipeline::PipelineRejection,
+> {
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs.to_vec(), None);
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
             // chelis#1853 [04-FIT-26]: the shared rejection rendering, one
             // projected line per diagnostic.
-            return Err(
-                chelis_compiler_api::pipeline::PipelineRejection::Type { fitness }.to_string(),
-            );
+            return Err(chelis_compiler_api::pipeline::PipelineRejection::Type { fitness });
         }
     };
     chelis_compiler_api::pipeline::complete_checks(
         analysis,
         chelis_compiler_api::pipeline::SemanticContext::Isolated,
     )
-    .map_err(|rejection| rejection.to_string())
+    .map_err(chelis_compiler_api::pipeline::PipelineRejection::from)
 }
 
 fn checked_program_with_effects(
@@ -11529,22 +12189,14 @@ fn manifest_root_names_from_decls(
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut selected_defs = UnordSet::new();
-    for expr in chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())? {
-        collect_manifest_decl_names(&expr, &mut selected_defs);
-    }
-    let realizability = chelis_effects::realizability::infer_realizability(
-        checked,
-        chelis_compiler_api::target_capability::tensor_capable_prims(target),
+    let entry_defs = entry_def_names(
+        &chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?,
     );
-    Ok(
-        chelis_effects::realizability::compute_root_manifest(checked, &realizability)
-            .entries
-            .into_iter()
-            .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
-            .map(|entry| entry.name)
-            .collect(),
-    )
+    Ok(owed_root_manifest(checked, target, &entry_defs)
+        .entries
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect())
 }
 
 fn collect_manifest_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {
@@ -11632,116 +12284,6 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
-fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
-    match expr.carrier() {
-        DeepExprCarrier::DecodedNode(DeepTag::Def | DeepTag::Defsig, _, children) => {
-            match children.first() {
-                Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Host builtins that the IR evaluator (`chelis eval` / `chelis test`)
-/// supports but the compiled build backends deliberately do not. Kept in
-/// one place so the shared compiler gate and [`drop_unreachable_eval_only_defs`]
-/// stay in agreement.
-// The list itself lives in `chelis_ir::host` and is shared with the
-// public compiler API's `compile_for_execution` gate, so the CLI build
-// pipeline and the chelis-python path cannot drift (chelis#891 review
-// finding 13).
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTINS;
-
-/// Drop top-level decls for any function that can never be lowered into a
-/// compiled artifact and is not reachable from the entry program: one whose
-/// body references an eval-only host builtin ([`EVAL_ONLY_HOST_BUILTINS`]), OR
-/// one that (transitively) references such a dropped def. An unused transitive
-/// dependency module (e.g. chelis-std's `Std.Process`) must not drag them into
-/// the build's lowering target. Both the `def` body and its sibling `defsig`
-/// are removed by name. A reachable eval-only use is preserved so the build
-/// gate still rejects it. chelis#334.
-///
-/// The drop is a transitive closure (chelis#1168): a removed eval-only
-/// definition cannot leave an unreachable wrapper with a dangling reference
-/// in the post-drop program. Build rechecks the retained program after this
-/// transformation when its input changes.
-///
-/// The complete selected program passes its semantic gate before this drop.
-/// A type, effect, or linearity error in an unreachable eval-only-tainted
-/// definition therefore fails the build instead of disappearing here
-/// (chelis#1184). Backend rejection still applies to the retained program.
-fn drop_unreachable_eval_only_defs(exprs: Vec<DeepExpr>, entry_seeds: &[String]) -> Vec<DeepExpr> {
-    use chelis_unord::{UnordMap, UnordSet};
-
-    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_seeds)
-        .iter()
-        .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
-        .collect::<UnordSet<_>>();
-
-    // Reverse index over the UNREACHABLE named defs, borrowing from `exprs` (no
-    // per-def String clones): referenced-name -> the unreachable defs that
-    // reference it, plus the seed worklist of unreachable defs that directly use
-    // an eval-only builtin. Reachable defs are never dropped (a reachable
-    // eval-only use is preserved for the build gate), and reachability is
-    // transitive, so a dropped (unreachable) def is only ever referenced by
-    // another unreachable def — the closure stays within this set.
-    let mut dependents: UnordMap<&str, Vec<&str>> = UnordMap::new();
-    let mut worklist: Vec<&str> = Vec::new();
-    for expr in &exprs {
-        let Some(name) = deep_named_decl_name(expr) else {
-            continue;
-        };
-        if reachable.contains(name) {
-            continue;
-        }
-        let mut direct_eval_only = false;
-        for var in deep_referenced_vars(expr) {
-            if EVAL_ONLY_HOST_BUILTINS.contains(&var) {
-                direct_eval_only = true;
-            }
-            dependents.entry(var).or_default().push(name);
-        }
-        if direct_eval_only {
-            worklist.push(name);
-        }
-    }
-
-    // Transitive closure via the reverse index (O(edges), single pass per node):
-    // a dropped name pulls in every unreachable def that references it. Dropping
-    // only the DIRECT eval-only users would leave an unreachable wrapper with a
-    // dangling reference to a dropped def (see the doc comment).
-    let mut drop_borrowed: UnordSet<&str> = UnordSet::new();
-    while let Some(name) = worklist.pop() {
-        if !drop_borrowed.insert(name) {
-            continue;
-        }
-        if let Some(refs) = dependents.get(name) {
-            worklist.extend(refs.iter().copied());
-        }
-    }
-
-    // Materialize the (typically small) dropped set as owned strings so the
-    // borrows into `exprs` end before the move below.
-    let drop_names: UnordSet<String> = drop_borrowed
-        .into_sorted()
-        .into_iter()
-        .map(String::from)
-        .collect();
-    drop(worklist);
-    drop(dependents);
-
-    exprs
-        .into_iter()
-        .filter(|expr| {
-            deep_named_decl_name(expr)
-                .map(|name| !drop_names.contains(name))
-                .unwrap_or(true)
-        })
-        .collect()
-}
-
 /// The entry program's top-level names, which is the whole of what the build
 /// pruners read from it.
 ///
@@ -11765,13 +12307,6 @@ fn prune_build_program_to_reachable_defs(
     // Delegate to the shared reachable-defs pruner (single source of truth in
     // chelis-compiler-api, also used by the WI-3 graph-extraction producer).
     chelis_compiler_api::prune::prune_to_reachable_seeds(exprs.to_vec(), entry_seeds.to_vec())
-}
-
-/// Every `var` reference name in `expr`. Delegates to the shared traversal in
-/// chelis-compiler-api so the build path and the WI-3 producer agree on what
-/// "references" means.
-fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
-    chelis_compiler_api::prune::deep_referenced_vars(expr)
 }
 
 fn apply_manifest_display_roots(
@@ -12182,31 +12717,6 @@ mod issue_1125_e5e_outer_reader_tests {
     }
 }
 
-/// Run the typed pipeline against a Surf source string (parse, desugar,
-/// macro-expand, type-check, effect-check, linearity-check) and return
-/// `true` iff every stage accepts.
-///
-/// Used by the lint fix driver to gate auto-fixes from rules that opt in
-/// via `Rule::fix_requires_typed_pipeline_check()` — currently only
-/// `redundant-linearity-call`. The spec safety bar in
-/// `spec/01-nomenclature.md` §12 names this exact pipeline: "the proof
-/// requires the type and linearity pipeline, not source-text matching".
-///
-/// Architectural rationale in
-/// `docs/investigations/redundant_linearity_autofix_architecture.md`
-/// (Path 1B).
-fn typed_pipeline_accepts_surf(source: &str) -> bool {
-    matches!(
-        chelis_compiler_api::pipeline::run_source(chelis_compiler_api::pipeline::PipelineRequest {
-            source_kind: chelis_compiler_api::schema::SourceKind::Surf,
-            source,
-            entry: None,
-            goal: chelis_compiler_api::pipeline::PipelineGoal::FullCheck,
-        },),
-        Ok(chelis_compiler_api::pipeline::PipelineOutcome::Checked(_))
-    )
-}
-
 /// `chelis lint` — naming-convention lint per `spec/01-nomenclature.md`.
 ///
 /// Walks each path in `paths` (default: `.`), dispatches to every registered
@@ -12376,9 +12886,8 @@ fn cmd_lint(
     let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
     // Bucket the rendered violation lines by severity instead of
     // printing them inline as targets are walked. A workspace `chelis
-    // lint --check .` can emit several hundred advisory lines (e.g.
-    // `prefer-pipe-operator` across packages/chelis-std/tests/*); when
-    // a handful of blocking ERROR lines are interleaved into that
+    // lint --check .` can emit many advisory lines; when a handful of
+    // blocking ERROR lines are interleaved into that
     // stream they are effectively invisible, and CI failure debugging
     // misreads the cause. The em-dash §8.6 rule has been bitten by
     // exactly this twice. Buckets let the blocking errors be printed
@@ -12402,17 +12911,6 @@ fn cmd_lint(
         let raw_violations = chelis_lint::lint(target, &rules)?;
         let kept = apply_exceptions_opt(&raw_violations, &exceptions, workspace_root.as_deref());
         for v in &kept {
-            // V2-F3 (PR #58): suppress warnings for rules that opt in
-            // to `check_mirrors_fix` when the autofix would silently
-            // decline (or be rejected by the typed-pipeline gate).
-            // Without this filter, `chelis lint --fix` is
-            // non-convergent for those rules: the warning fires, the
-            // autofix declines, and the next `--check` run fires the
-            // same warning again. Inline `keep` directives are
-            // honored separately by `should_suppress_unfixable_violation`.
-            if should_suppress_unfixable_violation(target, &rules, v) {
-                continue;
-            }
             let severity = rule_severity(&rules, &v.rule_id);
             let suffix = if fix_available_for_violation(target, &rules, v) {
                 " [fix]"
@@ -12520,7 +13018,7 @@ fn apply_lint_fixes(
                 source: Some(&source),
                 surface,
             };
-            let mut replacements: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
+            let mut replacements: Vec<chelis_lint::Replacement> = Vec::new();
             for violation in &violations {
                 let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
                     continue;
@@ -12531,56 +13029,30 @@ fn apply_lint_fixes(
                     continue;
                 }
                 if let Some(replacement) = rule.fix(&ctx, violation) {
-                    replacements.push((replacement, rule.fix_requires_typed_pipeline_check()));
+                    replacements.push(replacement);
                 }
             }
-            replacements.sort_by_key(|(replacement, _)| {
+            replacements.sort_by_key(|replacement| {
                 (
                     replacement.end.saturating_sub(replacement.start),
                     replacement.start,
                 )
             });
-            let mut filtered: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
-            for (replacement, needs_check) in replacements {
+            let mut accepted: Vec<chelis_lint::Replacement> = Vec::new();
+            for replacement in replacements {
                 if replacement.start > replacement.end
-                    || filtered.iter().any(|(kept, _)| {
-                        replacement.start < kept.end && kept.start < replacement.end
-                    })
+                    || accepted
+                        .iter()
+                        .any(|kept| replacement.start < kept.end && kept.start < replacement.end)
                 {
                     continue;
-                }
-                filtered.push((replacement, needs_check));
-            }
-            if filtered.is_empty() {
-                continue;
-            }
-            filtered.sort_by_key(|(replacement, _)| replacement.start);
-
-            // Per-replacement typed-pipeline gate for rules that opted in
-            // (Path 1B per
-            // docs/investigations/redundant_linearity_autofix_architecture.md).
-            // We test each verification-required replacement independently
-            // by applying it to the original source and running the typed
-            // pipeline. Independent verification preserves the maximum set
-            // of safe rewrites: one unsafe strip does not block the others.
-            let surface_eligible_for_typed_check =
-                matches!(surface, chelis_lint::Surface::SurfSource);
-            let mut accepted: Vec<chelis_lint::Replacement> = Vec::new();
-            for (replacement, needs_check) in filtered {
-                if needs_check && surface_eligible_for_typed_check {
-                    let mut candidate = source.clone();
-                    candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-                    if !typed_pipeline_accepts_surf(&candidate) {
-                        // Drop this replacement silently; the lint warning
-                        // remains so the user sees the still-flagged copy().
-                        continue;
-                    }
                 }
                 accepted.push(replacement);
             }
             if accepted.is_empty() {
                 continue;
             }
+            accepted.sort_by_key(|replacement| replacement.start);
             let mut edited = source;
             for replacement in accepted.iter().rev() {
                 edited.replace_range(replacement.start..replacement.end, &replacement.text);
@@ -12596,6 +13068,8 @@ fn apply_lint_fixes(
     Ok(total)
 }
 
+/// Whether `violation` carries the `[fix]` marker: its rule proposes a
+/// replacement and no inline `keep` directive pins the occurrence.
 fn fix_available_for_violation(
     target: &Path,
     rules: &[Box<dyn chelis_lint::Rule>],
@@ -12615,88 +13089,13 @@ fn fix_available_for_violation(
     }) {
         return false;
     }
-    fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
-}
-
-/// Does the rule propose a safe fix for `violation` against `source` —
-/// ignoring any `keep` directive on the violation's line?
-///
-/// `fix_available_for_violation` returns `false` when an inline `keep`
-/// directive suppresses the rewrite; that's the correct gate for
-/// printing the `[fix]` marker (no marker on kept-on-purpose
-/// violations) and for `apply_lint_fixes` (no rewrite on kept
-/// violations). The CLI's `check_mirrors_fix` warning suppression
-/// (V2-F3 / PR #58) needs to distinguish "fix unavailable because the
-/// user said keep" (warning should still print) from "fix unavailable
-/// because the rule declined or the typed-pipeline gate rejected"
-/// (warning should be suppressed; `--fix` is non-convergent
-/// otherwise). This helper exposes the latter predicate.
-fn fix_would_apply_for_violation(
-    target: &Path,
-    rule: &dyn chelis_lint::Rule,
-    source: &str,
-    surface: chelis_lint::Surface,
-    violation: &chelis_lint::Violation,
-) -> bool {
     let ctx = chelis_lint::Context {
         root: target,
         path: &violation.path,
-        source: Some(source),
+        source: Some(&source),
         surface,
     };
-    let Some(replacement) = rule.fix(&ctx, violation) else {
-        return false;
-    };
-    if rule.fix_requires_typed_pipeline_check()
-        && matches!(surface, chelis_lint::Surface::SurfSource)
-    {
-        let mut candidate = source.to_string();
-        if replacement.start > candidate.len() || replacement.end > candidate.len() {
-            return false;
-        }
-        candidate.replace_range(replacement.start..replacement.end, &replacement.text);
-        return typed_pipeline_accepts_surf(&candidate);
-    }
-    true
-}
-
-/// Should the CLI suppress this violation's warning because the rule
-/// opted in to `check_mirrors_fix` and the autofix would silently
-/// decline (or be rejected by the typed-pipeline gate)?
-///
-/// V2-F3 (PR #58): a rule whose warning is only actionable when
-/// paired with a safe rewrite should not surface the warning when no
-/// rewrite is on offer; otherwise `chelis lint --fix` is
-/// non-convergent for that rule. The CLI applies this filter at the
-/// final warning-emit path. Explicit `keep` directives are honored:
-/// the user has opted to preserve the source and see the warning, so
-/// suppression does not apply.
-fn should_suppress_unfixable_violation(
-    target: &Path,
-    rules: &[Box<dyn chelis_lint::Rule>],
-    violation: &chelis_lint::Violation,
-) -> bool {
-    let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
-        return false;
-    };
-    if !rule.check_mirrors_fix() {
-        return false;
-    }
-    let Ok(source) = fs::read_to_string(&violation.path) else {
-        return false;
-    };
-    let Some(surface) = chelis_lint::Surface::classify(&violation.path, false) else {
-        return false;
-    };
-    if violation.line.is_some_and(|line| {
-        chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
-    }) {
-        // User explicitly asked to keep this occurrence; the warning
-        // continues to fire (without a `[fix]` marker) so the user
-        // can see the diagnostic they pinned.
-        return false;
-    }
-    !fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
+    rule.fix(&ctx, violation).is_some()
 }
 
 #[cfg(test)]
@@ -12783,93 +13182,6 @@ mod batch_fallback_reason_tests {
         );
         assert_eq!(parse_plain_test_summary("not a summary"), None);
         assert_eq!(parse_plain_test_summary("x passed, 1 failed"), None);
-    }
-}
-
-#[cfg(test)]
-mod eval_only_pruning_tests {
-    use super::{
-        deep_named_decl_name, drop_unreachable_eval_only_defs, entry_seed_names,
-        expanded_desugared_program,
-    };
-
-    fn desugar(src: &str) -> Vec<chelis_deep::ast::Expr> {
-        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-        expanded_desugared_program(&decls).expect("desugar")
-    }
-
-    /// chelis#334: a pure-tensor entry program plus an unused library def
-    /// that uses the eval-only `process_run` builtin (the shape of
-    /// chelis-std's `Std.Process`). The dead eval-only def must be dropped
-    /// so the build gate does not reject a program that never reaches it.
-    #[test]
-    fn drops_unreachable_eval_only_def_but_keeps_entry() {
-        let full = desugar(
-            "def unused_runner(cmd: string, args: List[string]) -> (i64, string, string) = process_run(cmd, args)\n\
-             def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
-        );
-        let entry = desugar(
-            "def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
-        );
-        let kept = drop_unreachable_eval_only_defs(full, &entry_seed_names(&entry));
-        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        assert!(
-            names.contains(&"main"),
-            "entry `main` must survive: {names:?}"
-        );
-        assert!(
-            !names.contains(&"unused_runner"),
-            "unreachable eval-only def must be dropped: {names:?}"
-        );
-    }
-
-    /// Transitive removal includes every caller and each paired `defsig`.
-    /// A one-hop drop would leave `outer` and its signature behind.
-    #[test]
-    fn drops_transitive_eval_only_chain_and_paired_signatures() {
-        let full = desugar(
-            "def runner(cmd: string) -> (i64, string, string) = process_run(cmd, [])\n\
-             def wrapper(cmd: string) -> (i64, string, string) = runner(cmd)\n\
-             def outer(cmd: string) -> (i64, string, string) = wrapper(cmd)\n\
-             def main() -> i32 = cast(0, i32)\n",
-        );
-        let full_names: Vec<&str> = full.iter().filter_map(deep_named_decl_name).collect();
-        for name in ["runner", "wrapper", "outer"] {
-            assert!(
-                full_names
-                    .iter()
-                    .filter(|candidate| **candidate == name)
-                    .count()
-                    >= 2,
-                "fixture needs a def and defsig for {name}: {full_names:?}"
-            );
-        }
-
-        let entry = desugar("def main() -> i32 = cast(0, i32)\n");
-        let kept = drop_unreachable_eval_only_defs(full, &entry_seed_names(&entry));
-        let kept_names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        for name in ["runner", "wrapper", "outer"] {
-            assert!(
-                !kept_names.contains(&name),
-                "removed closure must include {name} and its defsig: {kept_names:?}"
-            );
-        }
-    }
-
-    /// Negative parity: a *reachable* eval-only use is preserved so the
-    /// build gate still rejects it with a clean diagnostic instead of the
-    /// program silently building with a missing function.
-    #[test]
-    fn keeps_reachable_eval_only_def_for_the_gate() {
-        let exprs =
-            desugar("def main() -> (i64, string, string) = process_run(\"echo\", [\"hi\"])\n");
-        let entry = entry_seed_names(&exprs);
-        let kept = drop_unreachable_eval_only_defs(exprs, &entry);
-        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        assert!(
-            names.contains(&"main"),
-            "reachable eval-only def must be preserved for the build gate: {names:?}"
-        );
     }
 }
 

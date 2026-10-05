@@ -2,14 +2,13 @@
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
 //! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
-//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Time and Std.Decimal
-//! are fenced under #2779 and #2778; School provides
+//! Std.Sort, Std.Scan, Std.Process, Std.Test, Std.Datetime,
+//! Std.Datetime.Business, Std.Datetime.Clock, Std.Datetime.Columns,
+//! Std.Datetime.Zone, Std.Decimal). School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here
 //! otherwise surface only when somebody invokes the CLI manually.
-//! The Std.Time and Std.Decimal success tests were removed with their fences;
-//! `std_package_acceptance` checks the errors.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
@@ -26,9 +25,11 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 /// Floor on the retained chelis-std self-test corpus, set below the measured
-/// 117 passing tests after the Time and Decimal suites moved to explicit
-/// rejection checks in std_package_acceptance.
-const MIN_PASSED: u32 = 110;
+/// 301 passing tests, of which 56 are the Std.Datetime suite, 18 the
+/// Std.Datetime.Business suite, 4 the Std.Datetime.Clock suite, 24 the
+/// Std.Datetime.Columns suite, 40 the Std.Datetime.Zone suite, and 42 the
+/// Std.Decimal suite.
+const MIN_PASSED: u32 = 295;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -58,8 +59,8 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // checked-in package on disk and is isolated from any developer-local
     // reef state. `chelis test` resolves `Std.*` imports against the staged
     // package's own `src/`, so no separate `reef publish` step is required —
-    // chelis-std has no external dependencies (verified against
-    // `packages/chelis-std/reef.lock`).
+    // chelis-std declares no dependencies (`pack_runtime_package` refuses a
+    // runtime that does).
     let dir = tempdir().expect("tempdir");
     let pkg = dir.path().join("chelis-std");
     let reef_home = dir.path().join("reef-home");

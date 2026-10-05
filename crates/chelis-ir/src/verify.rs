@@ -274,21 +274,6 @@ fn static_axis_extent(
     }
 }
 
-fn node_shapes_semantically_equivalent(
-    dag: &Dag,
-    left: NodeId,
-    right: NodeId,
-    relevant_shape_sources: &[NodeId],
-) -> bool {
-    let (Some(left_node), Some(right_node)) = (dag.get(left), dag.get(right)) else {
-        return false;
-    };
-    left_node.output_type.dims.len() == right_node.output_type.dims.len()
-        && (0..left_node.output_type.dims.len()).all(|axis| {
-            axis_extents_semantically_equivalent(dag, left, right, axis, relevant_shape_sources)
-        })
-}
-
 /// The origin `left`'s and `right`'s extents on `axis` both resolve to, when
 /// it is one and the same origin.
 pub(crate) fn shared_axis_origin(
@@ -348,20 +333,6 @@ pub(crate) fn axis_extents_semantically_equivalent(
                 relevant_shape_sources,
             ))
             .is_some_and(|(left_extent, right_extent)| left_extent == right_extent)
-}
-
-fn node_types_semantically_equivalent(
-    dag: &Dag,
-    left: NodeId,
-    right: NodeId,
-    relevant_shape_sources: &[NodeId],
-) -> bool {
-    dag.get(left)
-        .zip(dag.get(right))
-        .is_some_and(|(left_node, right_node)| {
-            left_node.output_type.precision == right_node.output_type.precision
-                && node_shapes_semantically_equivalent(dag, left, right, relevant_shape_sources)
-        })
 }
 
 fn has_anonymous_dims(node: &crate::dag::DagNode) -> bool {
@@ -908,18 +879,16 @@ fn random_node_operands(
     }
     let output = graph.dtype(node);
     let float = |prim: Option<Prim>| prim.is_some_and(|prim| prim.is_float());
-    // Whether input `slot` is a control of dtype `draw` (or f32, for a
-    // uniform draw's bound), shaped like a leading part of the key.
-    let control = |slot: usize, draw: Option<Prim>, uniform: bool| {
-        per_row(dims(slot))
-            && dtype(slot).is_some_and(|prim| Some(prim) == draw || (uniform && prim == Prim::F32))
+    // Whether input `slot` is a control of dtype `draw` ([05-OP-8]'s bounds,
+    // [05-OP-37]'s rate), shaped like a leading part of the key.
+    let control = |slot: usize, draw: Option<Prim>| {
+        per_row(dims(slot)) && dtype(slot).is_some_and(|prim| Some(prim) == draw)
     };
     let control_error = || {
         format!(
-            "{at}: random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape"
+            "{at}: random control must be a value of the draw's dtype, shaped like a leading part of its key's shape"
         )
     };
-    let bounds_error = || format!("{at}: uniform_like bounds must share one dtype");
     let same_as = |slot: usize| {
         dtype(slot) == output && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims))
     };
@@ -930,11 +899,8 @@ fn random_node_operands(
                     "{at}: uniform_like must preserve its float template's exact shape and dtype"
                 ));
             }
-            if !control(1, output, true) || !control(2, output, true) {
+            if !control(1, output) || !control(2, output) {
                 errors.push(control_error());
-            }
-            if dtype(1) != dtype(2) {
-                errors.push(bounds_error());
             }
         }
         KeyRole::Dropout | KeyRole::DropoutReplay => {
@@ -943,7 +909,7 @@ fn random_node_operands(
                     "{at}: dropout must preserve its float data input's exact shape and dtype"
                 ));
             }
-            if !control(1, output, false) {
+            if !control(1, output) {
                 errors.push(control_error());
             }
         }
@@ -1294,6 +1260,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Exp
@@ -1303,6 +1270,9 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -1339,7 +1309,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. }
+        | RiscOp::NamedCast { .. }
         | RiscOp::FusedElem { .. }
         // Its dims are symbolic expressions, which name no input.
         | RiscOp::BlasMatmul { .. }
@@ -2208,21 +2178,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 } else if let (Some(lhs), Some(rhs)) =
                     (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
                 {
-                    let shape_participants = [node.inputs[0], node.inputs[1], node.id];
                     if lhs.output_type.precision != rhs.output_type.precision {
                         errors.push(format!(
                             "comparison at node {} has mismatched precision {:?} vs {:?}",
                             node.id.0, lhs.output_type.precision, rhs.output_type.precision
                         ));
                     }
-                    if !node_shapes_semantically_equivalent(
-                        dag,
-                        node.inputs[0],
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if extents_contradict(&lhs.output_type.dims, &rhs.output_type.dims) {
                         errors.push(format!(
-                            "comparison at node {} requires exactly matching operand shape",
+                            "comparison at node {} has contradicting operand shapes",
                             node.id.0
                         ));
                     }
@@ -2258,12 +2222,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         ));
                     }
                     if !anonymous_output_has_input_authority(dag, node)
-                        || !node_shapes_semantically_equivalent(
-                            dag,
-                            node.id,
-                            node.inputs[0],
-                            &shape_participants,
-                        )
+                        || extents_contradict(&node.output_type.dims, &lhs.output_type.dims)
+                        || extents_contradict(&node.output_type.dims, &rhs.output_type.dims)
                     {
                         errors.push(format!(
                             "comparison at node {} output shape must match its operands",
@@ -2283,12 +2243,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         expected
                     ));
                 } else {
-                    let shape_participants = node
-                        .inputs
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(node.id))
-                        .collect::<Vec<_>>();
                     let inputs = node
                         .inputs
                         .iter()
@@ -2302,20 +2256,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 node.id.0
                             ));
                         }
-                        if !anonymous_output_has_input_authority(dag, node)
-                            || !node_shapes_semantically_equivalent(
-                                dag,
-                                input.id,
-                                node.id,
-                                &shape_participants,
-                            )
-                        {
-                            errors.push(format!(
-                                "logical {} at node {} requires exactly matching shape",
-                                kind.surf_name(),
-                                node.id.0
-                            ));
-                        }
+                    }
+                    let shapes = inputs
+                        .iter()
+                        .map(|input| input.output_type.dims.as_slice())
+                        .chain(std::iter::once(node.output_type.dims.as_slice()))
+                        .collect::<Vec<_>>();
+                    if !anonymous_output_has_input_authority(dag, node)
+                        || any_extents_contradict(&shapes)
+                    {
+                        errors.push(format!(
+                            "logical {} at node {} output shape must match its operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
                     }
                     if node.output_type.precision != Prim::Bool {
                         errors.push(format!(
@@ -2388,49 +2342,37 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "where at node {} has {} inputs (expected 3)",
                         node.id.0, arity
                     ));
-                } else if let (Some(condition), Some(then_value), Some(_)) = (
+                } else if let (Some(condition), Some(then_value), Some(else_value)) = (
                     dag.get(node.inputs[0]),
                     dag.get(node.inputs[1]),
                     dag.get(node.inputs[2]),
                 ) {
-                    let shape_participants =
-                        [node.inputs[0], node.inputs[1], node.inputs[2], node.id];
                     if condition.output_type.precision != Prim::Bool {
                         errors.push(format!(
                             "where at node {} condition must be Bool",
                             node.id.0
                         ));
                     }
-                    if !node_types_semantically_equivalent(
-                        dag,
-                        node.inputs[1],
-                        node.inputs[2],
-                        &shape_participants,
-                    ) {
+                    if then_value.output_type.precision != else_value.output_type.precision {
                         errors.push(format!(
-                            "where at node {} branches must have exactly matching type",
+                            "where at node {} branches must have one dtype",
                             node.id.0
                         ));
                     }
-                    if !node_types_semantically_equivalent(
-                        dag,
-                        node.id,
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if node.output_type.precision != then_value.output_type.precision {
                         errors.push(format!(
-                            "where at node {} output must match its branches",
+                            "where at node {} output must have its branches' dtype",
                             node.id.0
                         ));
                     }
-                    if !node_shapes_semantically_equivalent(
-                        dag,
-                        node.inputs[0],
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if any_extents_contradict(&[
+                        &condition.output_type.dims,
+                        &then_value.output_type.dims,
+                        &else_value.output_type.dims,
+                        &node.output_type.dims,
+                    ]) {
                         errors.push(format!(
-                            "where at node {} condition and branches must have exactly matching shape",
+                            "where at node {} has condition, branch and output shapes that contradict",
                             node.id.0
                         ));
                     }
@@ -2462,11 +2404,21 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
 
-                if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
-                    && !node.output_type.precision.is_integer()
+                if matches!(node.op, RiscOp::Bitwise(_)) && !node.output_type.precision.is_integer()
                 {
                     errors.push(format!(
                         "integer binary op at node {} requires an integer dtype",
+                        node.id.0
+                    ));
+                }
+                // [05-OP-64]: `mod` admits the signed integers and the floats
+                // (chelis#626).
+                if matches!(node.op, RiscOp::Mod)
+                    && !(node.output_type.precision.is_integer()
+                        || node.output_type.precision.is_float())
+                {
+                    errors.push(format!(
+                        "mod at node {} requires a signed-integer or float dtype",
                         node.id.0
                     ));
                 }
@@ -2494,7 +2446,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 .any(|(out, input)| !dims_compatible(out, input)))
                     {
                         errors.push(format!(
-                            "integer binary op at node {} output must match its input shape and dtype",
+                            "mod or bitwise op at node {} output must match its input shape and dtype",
                             node.id.0
                         ));
                     }
@@ -2808,6 +2760,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             RiscOp::Neg
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::Recip
             | RiscOp::Exp
             | RiscOp::Log
@@ -2816,6 +2769,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -2834,7 +2790,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
             | RiscOp::Cast { .. }
-            | RiscOp::CastTrunc { .. } => {
+            | RiscOp::NamedCast { .. } => {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
@@ -2978,6 +2934,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
+        if let RiscOp::Softmax { axis } = node.op
+            && (!node.output_type.precision.is_float()
+                || node
+                    .inputs
+                    .first()
+                    .and_then(|id| dag.get(*id))
+                    .is_some_and(|input| input.output_type != node.output_type)
+                || axis >= node.output_type.dims.len())
+        {
+            errors.push(format!(
+                "softmax at node {} requires one same-shape/dtype float input and an in-range axis",
+                node.id.0
+            ));
+        }
         if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
             if !node.output_type.precision.is_float() {
                 errors.push(format!(
@@ -3086,7 +3056,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     && !parameter.is_empty()
                     && dag.get(node.shape_deps[0]).is_some_and(|declared| {
                         matches!(declared.op, RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::Caller,
+                            site: crate::dag::ExtentWitnessSite::Caller
+                                | crate::dag::ExtentWitnessSite::LocalExpand,
                             axis: crate::dag::RtAxis::Lit(observed),
                             ..
                         } if observed == *axis)
@@ -3172,7 +3143,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         .first()
                         .and_then(|required| dag.get(*required));
                     let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
-                    matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
+                    matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller | crate::dag::ExtentWitnessSite::LocalExpand, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
                         && declared.inputs.first() == node.inputs.first()
                         && declared.id.0 < node.id.0
                 });
@@ -3307,7 +3278,29 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         || matches!(
                             crate::axis_sources::same_shape_result_agreement(dag, node.id),
                             Ok(Some(_))
-                        ))
+                        )
+                        // A claim on an output-inferred binder whose first
+                        // site lowers inside the body is captured after the
+                        // value was produced, so it sits on a single-input
+                        // `Copy` carrier of that value; the guard derivation
+                        // observes it through the carrier's input, as for a
+                        // local ascription. Only that claim, whose declaring
+                        // witness is the first site's, may use the carrier.
+                        || matches!(node.op, RiscOp::Copy)
+                            && node.inputs.len() == 1
+                            && dag
+                                .get(*required)
+                                .and_then(|token| token.shape_deps.first())
+                                .and_then(|declared| dag.get(*declared))
+                                .is_some_and(|declared| {
+                                    matches!(
+                                        declared.op,
+                                        RiscOp::ExtentWitness {
+                                            site: crate::dag::ExtentWitnessSite::LocalExpand,
+                                            ..
+                                        }
+                                    )
+                                }))
             });
             if required.0 >= node.id.0 || !supported {
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
@@ -3572,6 +3565,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round => {
@@ -3667,7 +3663,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // C8: Cast validation — dims must not change, output precision must match target.
         // Both ladder rungs share the shape rule; only their element
         // semantics differ.
-        if let RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } = &node.op
+        if let RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } = &node.op
             && arity == 1
         {
             let input = dag.get(node.inputs[0]).unwrap();
@@ -4302,6 +4298,9 @@ fn verify_sparse_batch_prefix(
 /// Inputs are `[target, indices, updates]`; output shape equals
 /// `target`; `updates` shape equals `target.dims[..axis] +
 /// indices.dims + target.dims[axis+1..]`. Indices must be i32/i64.
+/// The runtime compares the update shape with the gathered shape before it
+/// writes anything, so as for scatter-elements only a static contradiction
+/// of that update shape is a structural error (chelis#3029).
 fn verify_scatter_like(
     node: &crate::dag::DagNode,
     dag: &Dag,
@@ -4363,7 +4362,7 @@ fn verify_scatter_like(
             expected_updates.extend_from_slice(&target.output_type.dims[..axis]);
             expected_updates.extend(indices.output_type.dims[batch_rank..].iter().cloned());
             expected_updates.extend_from_slice(&target.output_type.dims[axis + 1..]);
-            if updates.output_type.dims != expected_updates {
+            if extents_contradict(&updates.output_type.dims, &expected_updates) {
                 errors.push(format!(
                     "{label} at node {} has update dims {:?}, expected {:?}",
                     node.id.0, updates.output_type.dims, expected_updates
@@ -4371,6 +4370,38 @@ fn verify_scatter_like(
             }
         }
     }
+}
+
+/// Whether an element-wise scatter's update shape contradicts its index
+/// shape.
+///
+/// The runtime plan compares the observed update shape with the index shape
+/// before any element is read or written ([05-OP-66]), so that comparison is
+/// the guard for an extent the graph cannot prove (runtime_extents.md C2.3).
+/// Only a different rank or two different static sizes on one axis is a
+/// contradiction. Two dimension names prove nothing: independently loaded
+/// runtime tensors carry distinct anonymous names whatever their sizes.
+fn extents_contradict(observed: &[DimInfo], required: &[DimInfo]) -> bool {
+    observed.len() != required.len()
+        || observed.iter().zip(required).any(|(observed, required)| {
+            matches!(
+                (dim_known_size(observed), dim_known_size(required)),
+                (Some(observed), Some(required)) if observed != required
+            )
+        })
+}
+
+/// Whether any two of a same-shape operation's `shapes` contradict
+/// ([`extents_contradict`]). A comparison, a logical operation and `where`
+/// check their operands' agreement before indexing them, as arithmetic does,
+/// so their verifier refuses only a contradiction and leaves an extent the
+/// graph cannot prove to that check (runtime_extents.md C2.3, chelis#2642).
+fn any_extents_contradict(shapes: &[&[DimInfo]]) -> bool {
+    shapes.iter().enumerate().any(|(index, left)| {
+        shapes[index + 1..]
+            .iter()
+            .any(|right| extents_contradict(left, right))
+    })
 }
 
 /// Verify the ONNX `ScatterElements` structural contract
@@ -4416,7 +4447,7 @@ fn verify_scatter_elements(
                 node.id.0
             ));
         }
-        if indices.output_type.dims != updates.output_type.dims {
+        if extents_contradict(&indices.output_type.dims, &updates.output_type.dims) {
             errors.push(format!(
                 "{label} at node {} requires indices.dims == updates.dims, got {:?} vs {:?}",
                 node.id.0, indices.output_type.dims, updates.output_type.dims
@@ -4646,6 +4677,94 @@ mod tests {
         TensorType {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
+        }
+    }
+
+    /// chelis#2907: a scatter's runtime plan compares the observed update
+    /// shape, so only a static contradiction is a structural error. Two
+    /// independently loaded runtime extents prove nothing either way.
+    #[test]
+    fn scatter_update_extents_contradict_only_statically() {
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+        assert!(!extents_contradict(
+            &[named("_anon_dim_2_0")],
+            &[named("_anon_dim_1_0")]
+        ));
+        assert!(!extents_contradict(&[named("n")], &[DimInfo::Lit(3)]));
+        assert!(!extents_contradict(&[DimInfo::Lit(3)], &[DimInfo::Lit(3)]));
+        assert!(!extents_contradict(
+            &[DimInfo::Named("n".into(), Some(3))],
+            &[DimInfo::Lit(3)]
+        ));
+        assert!(extents_contradict(&[DimInfo::Lit(2)], &[DimInfo::Lit(3)]));
+        assert!(extents_contradict(
+            &[DimInfo::Named("n".into(), Some(2))],
+            &[DimInfo::Lit(3)]
+        ));
+        assert!(extents_contradict(&[named("n")], &[named("n"), named("m")]));
+    }
+
+    /// chelis#3029: the gather-shaped scatters refuse only a static
+    /// contradiction of the update shape, as chelis#2907's element-wise
+    /// scatter does, because the runtime compares the update shape with the
+    /// gathered shape before it writes anything.
+    #[test]
+    fn gather_shaped_scatter_update_extents_contradict_only_statically() {
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+        let errors = |op: RiscOp, indices: DimInfo, updates: DimInfo| {
+            let mut dag = Dag::new();
+            let decl = dag.declare("scatter");
+            let i64_tensor = |dim: DimInfo| TensorType {
+                dims: vec![dim],
+                precision: Prim::Int64,
+            };
+            let load = |dag: &mut Dag, name: &str, dim: DimInfo| {
+                dag.add_node(
+                    decl,
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    i64_tensor(dim),
+                    None,
+                )
+            };
+            let base = load(&mut dag, "base", DimInfo::Lit(4));
+            let positions = load(&mut dag, "positions", indices);
+            let values = load(&mut dag, "values", updates);
+            dag.add_node(
+                decl,
+                op,
+                vec![base, positions, values],
+                i64_tensor(DimInfo::Lit(4)),
+                None,
+            );
+            verify(&dag)
+                .into_iter()
+                .filter(|error| error.contains("has update dims"))
+                .collect::<Vec<_>>()
+        };
+        for op in [
+            RiscOp::Scatter {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+        ] {
+            assert!(
+                errors(op.clone(), named("_anon_dim_2_0"), named("_anon_dim_1_0")).is_empty(),
+                "{op:?}: two run-time extents prove nothing"
+            );
+            assert!(
+                errors(op.clone(), DimInfo::Lit(2), DimInfo::Lit(2)).is_empty(),
+                "{op:?}: equal static extents"
+            );
+            assert_eq!(
+                errors(op.clone(), DimInfo::Lit(2), DimInfo::Lit(3)).len(),
+                1,
+                "{op:?}: a static contradiction is refused"
+            );
         }
     }
 
@@ -5408,6 +5527,80 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("shape read") && error.contains("i64")),
             "i32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+        );
+    }
+
+    /// A result claim on a `Copy` carrier is admitted only when the claim's
+    /// declaring witness is an output-inferred binder's first site; a `Copy`
+    /// carrying a claim declared by a parameter's witness is not a producer.
+    fn copy_carried_result_claim_errors(declaring_site: ExtentWitnessSite) -> Vec<String> {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let value = dag.add_node(
+            decl,
+            RiscOp::Load { name: "v".into() },
+            vec![],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        let extent = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let declared = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: declaring_site,
+                parameter: "v".to_string(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![value],
+            extent.clone(),
+            None,
+        );
+        let token = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::ResultClaim {
+                    claim: "h".to_string(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: "v".to_string(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![value],
+            extent,
+            None,
+        );
+        dag.add_shape_dep(token, declared);
+        let carrier = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![value],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        dag.add_shape_dep(carrier, token);
+        dag.add_root(carrier);
+        verify(&dag)
+            .into_iter()
+            .filter(|error| error.contains(&format!("result claim at node {}", carrier.0)))
+            .collect()
+    }
+
+    #[test]
+    fn a_copy_carries_only_a_first_site_result_claim() {
+        assert!(
+            copy_carried_result_claim_errors(ExtentWitnessSite::LocalExpand).is_empty(),
+            "a first site's result claim may sit on a `Copy` carrier"
+        );
+        assert!(
+            !copy_carried_result_claim_errors(ExtentWitnessSite::Caller).is_empty(),
+            "a parameter witness's result claim on a `Copy` must be rejected"
         );
     }
 

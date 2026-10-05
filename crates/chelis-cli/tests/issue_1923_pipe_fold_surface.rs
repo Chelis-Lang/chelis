@@ -1,30 +1,11 @@
-//! What the pipe fold changes about the public CLI surface, and what it does
-//! not.
-//!
-//! `chelis_deep::pipe::fold_pipes` runs over the CHECKER's input
-//! (chelis#1923). Three printed surfaces sit either side of that boundary and
-//! only the middle one moves:
-//!
-//! * `chelis deep` prints the desugarer's output, which is upstream of the
-//!   checker. It still prints `pipe`, and `spec/02-surf-syntax.md` section
-//!   0.1's three laws are stated over exactly this tree, so nothing about
-//!   them moves either.
-//! * `chelis deep --annotate` prints the checker's output. It now prints the
-//!   application the pipe denotes. That is a public-surface change and it is
-//!   honest: the annotated tree is post-inference, and the types it carries
-//!   are the types of that application.
-//! * `chelis surf` resugars Deep back to Surf. It still prints `|>`.
-//!
-//! The pipe resugaring laws themselves are locked in
-//! `issue_1242_pipe_resugaring.rs`, which this change leaves untouched.
+//! Surf pipes normalize before literal typing; Deep and decompiler output use calls.
 
 use assert_cmd::Command;
 use std::fs;
 use std::path::Path;
 use tempfile::{TempDir, tempdir};
 
-/// A pipe chain with both stage shapes: a bare-name stage and a call stage
-/// the desugarer wraps in a synthesized unary lambda.
+/// A first-argument call stage normalized directly to application.
 const PIPED: &str = "def f(x: tensor[3, f32]) -> tensor[f32] = x |> sum(cast(0, i32))\n\
                      out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
@@ -58,20 +39,14 @@ fn deep_of(path: &Path, annotate: bool) -> String {
     }
 }
 
-/// The desugarer's output is upstream of the fold and keeps its `pipe`.
-///
-/// This is the user-visible face of the property that the fold returns a new
-/// tree rather than rewriting its caller's program; the Deep-level assertion
-/// is in `crates/chelis-types/tests/issue_1923_pipe_fold_placement.rs`.
-///
-/// EVIDENTIARY STATUS: disposition lock. Unchanged on `08e46ebe6`.
+/// Desugaring emits applications before the checker runs.
 #[test]
-fn the_unannotated_deep_still_carries_the_pipe() {
+fn the_unannotated_deep_already_contains_applications() {
     let dir = tempdir().expect("tempdir");
     let path = fixture(&dir, "piped.ch", PIPED);
     let printed = deep_of(&path, false);
     assert!(
-        printed.contains("(pipe "),
+        !printed.contains("(pipe "),
         "the desugarer's output is what section 0.1's laws are stated over: {printed}"
     );
 }
@@ -96,18 +71,16 @@ fn the_annotated_deep_prints_the_application_the_pipe_denotes() {
     );
 }
 
-/// Resugaring still prints the pipe, from the same Deep the first row read.
-///
-/// EVIDENTIARY STATUS: disposition lock. Unchanged on `08e46ebe6`.
+/// Resugaring emits the ordinary call represented by Deep.
 #[test]
-fn resugaring_the_deep_still_prints_the_pipe() {
+fn resugaring_the_deep_prints_calls() {
     let dir = tempdir().expect("tempdir");
     let path = fixture(&dir, "piped_resugar.ch", PIPED);
     let deep_path = fixture(&dir, "piped_resugar.dp", &deep_of(&path, false));
     let printed = run(&["surf", deep_path.to_str().unwrap()]);
     assert!(
-        printed.contains("x |> sum(cast(0, i32))"),
-        "the pipe comes back: {printed}"
+        printed.contains("sum(x, cast(0, i32))"),
+        "the pipe decompiles to a call: {printed}"
     );
 }
 
@@ -135,7 +108,7 @@ fn lambda_pipe_stages_preserve_lexical_bindings() {
         ("fn (x) -> {\n x = 9i64\n x\n }", "result", 9),
         ("fn (x: i64) -> add(x, x)", "result", 6),
     ] {
-        for input in [format!("y |> {stage}"), format!("({stage})(y)")] {
+        for input in [format!("y |> ({stage})"), format!("({stage})(y)")] {
             let source = format!(
                 "def f(y: i64) -> i64 = {{\n result = {input}\n {call}\n}}\nout = f(3i64)\n"
             );
@@ -155,7 +128,7 @@ fn lambda_pipe_stages_preserve_lexical_bindings() {
 #[test]
 fn computed_closures_keep_captures_and_eager_arguments() {
     for body in [
-        "{\n later = y |> fn (x: i64) -> fn (y: i64) -> x\n alias = later\n alias(ACTUAL)\n}",
+        "{\n later = y |> (fn (x: i64) -> fn (y: i64) -> x)\n alias = later\n alias(ACTUAL)\n}",
         "((fn (x: i64) -> fn (y: i64) -> x)(y))(ACTUAL)",
         "{\n pair = ((fn (x: i64) -> y), 7i64)\n selected = pair.0\n selected(ACTUAL)\n}",
     ] {
@@ -213,7 +186,7 @@ fn lambda_pipe_stages_evaluate_the_input_before_the_body() {
         ),
     ] {
         for input in [
-            format!("trunc_div(1i64, z) |> {stage}"),
+            format!("trunc_div(1i64, z) |> ({stage})"),
             format!("({stage})(trunc_div(1i64, z))"),
         ] {
             for z in [0, 1] {

@@ -63,8 +63,12 @@ fn contexts() -> [CompiledContext; 2] {
              kind = \"path\"\npath = \"./mylib\"\n"
         ),
     );
-    let context = compile_reef_context(directory.path(), &root)
-        .unwrap_or_else(|error| panic!("context: {error:?}"));
+    let context = compile_reef_context(
+        directory.path(),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_or_else(|error| panic!("context: {error:?}"));
     let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     [context, decoded]
 }

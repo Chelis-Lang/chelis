@@ -6,6 +6,8 @@ Each row names its governing atom.
 
 | Identity | Atom |
 |---|---|
+| `Boundary:clock_monotonic_read:ClockMonotonicRead` | [05-OP-75] |
+| `Boundary:clock_wall_read:ClockWallRead` | [05-OP-75] |
 | `Boundary:debug:DebugRecursive` | [05-OP-60] |
 | `Boundary:fail:FailString` | [05-OP-60] |
 | `Boundary:file_exists:FileExists` | [05-OP-60] |
@@ -105,7 +107,9 @@ Each row names its governing atom.
 | `Numeric:bitor:TableA` | [05-OP-47] |
 | `Numeric:bitxor:TableA` | [05-OP-47] |
 | `Numeric:cast:TableA` | [05-OP-63] |
+| `Numeric:cast_saturate:TableA` | [05-OP-23] |
 | `Numeric:cast_trunc:TableA` | [05-OP-6] |
+| `Numeric:cast_wrap:TableA` | [05-OP-24] |
 | `Numeric:ceil:TableA` | [05-OP-46] |
 | `Numeric:clamp:TableA` | [05-OP-53] |
 | `Numeric:cmplt:TableA` | [05-OP-36] |
@@ -118,6 +122,8 @@ Each row names its governing atom.
 | `Numeric:dropout:TableA` | [05-OP-37] |
 | `Numeric:einsum:TableA` | [05-OP-51] |
 | `Numeric:eq:TableA` | [05-OP-36] |
+| `Numeric:erf:TableA` | [05-OP-46] |
+| `Numeric:erfc:TableA` | [05-OP-46] |
 | `Numeric:exp:TableA` | [05-OP-46] |
 | `Numeric:expand:TableA` | [05-OP-49] |
 | `Numeric:floor:TableA` | [05-OP-46] |
@@ -125,6 +131,7 @@ Each row names its governing atom.
 | `Numeric:fold_in:TableA` | [05-OP-72] |
 | `Numeric:gather:TableA` | [05-OP-52] |
 | `Numeric:gelu:TableA` | [05-OP-48] |
+| `Numeric:gelu_tanh:TableA` | [05-OP-48] |
 | `Numeric:gt:TableA` | [05-OP-36] |
 | `Numeric:gte:TableA` | [05-OP-36] |
 | `Numeric:guarded_fail:TableA` | [05-OP-68] |
@@ -170,6 +177,7 @@ Each row names its governing atom.
 | `Numeric:shrink:TableA` | [05-OP-49] |
 | `Numeric:sigmoid:TableA` | [05-OP-48] |
 | `Numeric:silu:TableA` | [05-OP-48] |
+| `Numeric:standard_normal_cdf:TableA` | [05-OP-48] |
 | `Numeric:sin:TableA` | [05-OP-46] |
 | `Numeric:softmax:TableA` | [05-OP-48] |
 | `Numeric:sort:TableA` | [05-OP-53] |
@@ -180,7 +188,7 @@ Each row names its governing atom.
 | `Numeric:sub:TableA` | [05-OP-41] |
 | `Numeric:sum:TableA` | [05-OP-30] |
 | `Numeric:tan:TableA` | [05-OP-46] |
-| `Numeric:tanh:TableA` | [05-OP-48] |
+| `Numeric:tanh:TableA` | [05-OP-46] |
 | `Numeric:tensor_to_scalar:TableA` | [05-OP-50] |
 | `Numeric:trace:TableA` | [05-OP-53] |
 | `Numeric:trunc_div:TableA` | [05-OP-64] |

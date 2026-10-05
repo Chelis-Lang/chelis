@@ -1,5 +1,9 @@
 //! #1741: checked scalar gradients must also execute in eval and property fuzzing.
+use serde_json::Value;
 use std::process::Command;
+
+#[path = "common/mod.rs"]
+mod common;
 
 const PROPERTY: &str = "module M\n@property exp_grad_positive forall(x: f32)\nwhere x > 0.5, x < 9.5:\n  (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)\n";
 
@@ -65,5 +69,203 @@ fn check_and_eval_agree_for_scalar_gradients_and_reject_real_mixed_surfaces() {
             .output()
             .unwrap();
         assert!(!output.status.success(), "{output:?}");
+    }
+}
+
+// chelis#2993 and chelis#3017: `eval --json` reports the operand dtype, and
+// the emitted gradient code for an f32 program holds no `double` intermediate
+// and no f64 dtype tag. The standing lane-agreement canary below keeps
+// #3017's named witnesses at every float width; the complete 24-input sweep
+// and the narrow-width pass over every exact body are
+// `issue_3017_scalar_gradient_sweep`, run nightly.
+
+include!("support/scalar_gradient_lanes.rs");
+
+/// The #2993 oracle bodies, each `f: T -> T`; `{t}` is the dtype.
+const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
+
+/// #3017's witnesses at their named inputs (summation order across paths,
+/// association along a chain, and the cancellation at `mul(x, sin(x))`),
+/// then one body through each correctly rounded transcendental. Each row is
+/// one `grad` call, and build cost grows with the number of calls.
+const CANARY_ROWS: [(&str, f64); 7] = [
+    ("add(mul(x, x), x)", 0.374),
+    ("mul(x, sqrt(x))", 0.648),
+    ("sqrt(sqrt(x))", 0.1),
+    ("mul(x, sin(x))", 2.018),
+    ("mul(exp(x), log(x))", 0.648),
+    ("div(sin(x), add(cos(x), 2.0{t}))", 2.018),
+    ("tanh(mul(x, sin(x)))", 1.333),
+];
+
+/// One program defining `f0`, `f1`, ... from `rows` and printing each
+/// `grad(f<i>)` at its row's input, so one build covers every row.
+fn rows_program(dtype: &str, rows: &[(&str, f64)]) -> String {
+    let mut source = String::from("module Probe.Case\n");
+    for (index, (body, _)) in rows.iter().enumerate() {
+        let body = body.replace("{t}", dtype);
+        source.push_str(&format!("def f{index}(x: {dtype}) -> {dtype} = {body}\n"));
+    }
+    for (index, (_, input)) in rows.iter().enumerate() {
+        source.push_str(&format!(
+            "r{index} = print(grad(f{index})({input:.3}{dtype}))\n"
+        ));
+    }
+    source
+}
+
+fn eval_dtype(source: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.ch");
+    common::write_file(&path, source);
+    let output = chelis(&["eval", "--json", "--file", path.to_str().unwrap()]);
+    assert!(output.status.success(), "{source}\n{output:?}");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("eval JSON");
+    let root = json["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .find(|root| root["name"] == "out")
+        .unwrap_or_else(|| panic!("an `out` root: {json}"))
+        .clone();
+    root["value"]["value"]["dtype"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a scalar dtype: {root}"))
+        .to_string()
+}
+
+/// The emitted C translation unit for `source`.
+fn emitted_c(source: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.ch");
+    let out = dir.path().join("out");
+    common::write_file(&path, source);
+    let output = chelis(&[
+        "build",
+        path.to_str().unwrap(),
+        "--target",
+        "c",
+        "--emit-c",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{source}\n{output:?}");
+    std::fs::read_to_string(out.join("p.c")).expect("emitted p.c")
+}
+
+/// One emitted C definition, from its signature to its closing brace.
+fn definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    let body = common::host_body_definition(emitted, name);
+    let end = body.find("\n}\n").map_or(body.len(), |end| end + 2);
+    &body[..end]
+}
+
+/// The code that computes and prints `out`: the emitted `main` and every
+/// top-level tensor helper kernel (the reverse-DAG gradient).
+fn gradient_code(emitted: &str) -> Vec<&str> {
+    let mut code = vec![definition(emitted, "main")];
+    let mut index = 0;
+    while emitted.contains(&format!("p__global__tensor_{index}__private(")) {
+        code.push(definition(
+            emitted,
+            &format!("p__global__tensor_{index}__private"),
+        ));
+        index += 1;
+    }
+    assert!(
+        code.len() > 1,
+        "a scalar gradient lowers to a tensor helper:\n{emitted}"
+    );
+    code
+}
+
+#[test]
+fn executable_prints_what_eval_prints_on_the_witness_canary() {
+    for dtype in ["f32", "f64", "f16", "bf16"] {
+        let source = rows_program(dtype, &CANARY_ROWS);
+        let eval = eval_stdout(&source);
+        assert_eq!(
+            eval.lines().count(),
+            2 * CANARY_ROWS.len(),
+            "{source}: one print and one root per row"
+        );
+        let built = common::build_and_run(&source, "p");
+        assert_eq!(built, eval, "{source}");
+    }
+}
+
+#[test]
+fn eval_reports_the_operand_dtype() {
+    for (dtype, tag) in [("f32", "f32"), ("f64", "f64")] {
+        for body in BODIES {
+            let source = width_program(dtype, body, "grad(f)(0.7{t})");
+            assert_eq!(eval_dtype(&source), tag, "{source}");
+        }
+    }
+}
+
+#[test]
+fn emitted_f32_gradient_has_no_double_intermediate_or_f64_tag() {
+    for body in BODIES {
+        let source = width_program("f32", body, "print(grad(f)(0.7{t}))");
+        let emitted = emitted_c(&source);
+        for code in gradient_code(&emitted) {
+            for forbidden in ["double", "CHELIS_DTYPE_F64", "chelis_f64_from_bits"] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{source}: `{forbidden}` in the emitted gradient code:\n{code}"
+                );
+            }
+        }
+        assert!(
+            gradient_code(&emitted)
+                .iter()
+                .all(|code| code.contains("CHELIS_DTYPE_F32")),
+            "{source}"
+        );
+    }
+    // Control: the f64 program does compute in double.
+    let source = width_program("f64", BODIES[0], "print(grad(f)(0.7{t}))");
+    let emitted = emitted_c(&source);
+    assert!(
+        gradient_code(&emitted)
+            .iter()
+            .all(|code| code.contains("CHELIS_DTYPE_F64")),
+        "{source}"
+    );
+}
+
+/// #2995's shapes, each `{t}`-parameterised: nested `grad`, `grad` of a def
+/// calling imported `Std.Scalar` defs, and `grad` of a def calling a local
+/// def, with the gradients eval prints. The C lane once refused the first
+/// two at f32 and f64 only.
+const GRAD_SHAPES: [(&str, &str, &str); 3] = [
+    (
+        "nested",
+        "module Probe.Case\ndef f(x: {t}) -> {t} = mul(mul(x, x), x)\ndef df(x: {t}) -> {t} = grad(f)(x)\nout = print(grad(df)(3.0{t}))\n",
+        "18.0\nout = ()\n",
+    ),
+    (
+        "imported_std",
+        "module Probe.Case\nimport Std.Scalar (abs, max)\ndef f(x: {t}) -> {t} = abs(x)\ndef h(x: {t}, y: {t}) -> {t} = max(x, y)\na = print(grad(f)(-2.0{t}))\nb = print(grad(h)(1.0{t}, 2.0{t}))\n",
+        "-1.0\n(0.0, 1.0)\na = ()\nb = ()\n",
+    ),
+    (
+        "local",
+        "module Probe.Case\ndef sq(x: {t}) -> {t} = mul(x, x)\ndef f(x: {t}) -> {t} = add(sq(x), x)\nout = print(grad(f)(3.0{t}))\n",
+        "7.0\nout = ()\n",
+    ),
+];
+
+#[test]
+fn every_grad_shape_builds_at_every_float_width_and_matches_eval() {
+    for (shape, template, expected) in GRAD_SHAPES {
+        for dtype in ["f16", "bf16", "f32", "f64"] {
+            let source = template.replace("{t}", dtype);
+            let eval = eval_stdout(&source);
+            assert_eq!(eval, expected, "{shape} {dtype}:\n{source}");
+            let built = common::build_and_run(&source, "p");
+            assert_eq!(built, eval, "{shape} {dtype}:\n{source}");
+        }
     }
 }

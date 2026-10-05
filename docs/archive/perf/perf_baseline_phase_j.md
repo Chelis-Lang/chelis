@@ -1,8 +1,7 @@
 # Phase J — Compiled Artifact Caching perf baseline
 
 This document captures the wall-clock measurements taken at the close of Phase J of the
-Compiled Artifact Caching plan (see
-`/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`).
+Compiled Artifact Caching plan (unpublished).
 
 The headline question for Phase J was: does the cache deliver on its core promise of
 running Coral's 63 tests in under 30 seconds, down from the 15-minute pre-cache regime?
@@ -31,7 +30,7 @@ land, the same bench script (`scripts/bench_phase_j.py`) re-runs and the table u
 | Label | Source | Commit | `chelis --version` |
 |---|---|---|---|
 | post-cache | `target/release/chelis` in this worktree | `e3b7ccc` (Phases A–I + RT-G/H/I) | `chelis 0.2.7` |
-| pre-cache | separate worktree at `/home/jeff/Documents/scratch/chelis-phase-j-baseline` | `c13ea7a` ("test(cli): amortize chelis-std publish across integration tests (Layer 1)") | `chelis 0.2.7` |
+| pre-cache | separate worktree at `<pre-cache worktree>` | `c13ea7a` ("test(cli): amortize chelis-std publish across integration tests (Layer 1)") | `chelis 0.2.7` |
 
 The pre-cache commit is the parent of Wave 1 of the cache plan — the last commit before
 any of the AST serde / `CompiledContext` / `compile_reef_context` machinery landed.
@@ -48,7 +47,7 @@ To make Coral build at all on this branch, the bench changes Coral's `reef.toml`
 - `package.compiler = "=0.2.7"`
 - `[dependencies]` rewritten to **path** deps, pointing at the in-monorepo
   `packages/chelis-std/` (compiler `=0.2.7`) and the local Nautilus checkout
-  `/home/jeff/Documents/scratch/nautilus/` (`v0.3.1`, compiler `=0.2.7`)
+  `<nautilus checkout>/` (`v0.3.1`, compiler `=0.2.7`)
 
 These edits are local only; they are not part of the bench harness's checked-in state.
 Until Coral's registry-side deps are re-published against `0.2.7`, the bench has to use
@@ -62,9 +61,10 @@ stdout/stderr tails + parsed pass/fail counts, and emits a JSON summary. Invocat
 
 ```sh
 python3 scripts/bench_phase_j.py \
-  --binary /home/jeff/Documents/scratch/chelis/.claude/worktrees/agent-ac1369283ad281583/target/release/chelis \
+  --binary <post-cache worktree>/target/release/chelis \
   --label post \
-  --chelis-repo /home/jeff/Documents/scratch/chelis/.claude/worktrees/agent-ac1369283ad281583 \
+  --coral-dir <coral checkout> \
+  --chelis-repo <post-cache worktree> \
   --out /tmp/chelis-bench/post.json
 ```
 
@@ -158,7 +158,7 @@ the cache wiring itself (24 MB serialization + worker decode + worker re-runs of
 
 ### 6. Nautilus
 
-Skipped. The Nautilus checkout at `/home/jeff/Documents/scratch/nautilus` does not have
+Skipped. The Nautilus checkout at `<nautilus checkout>` does not have
 a fast self-test entry point distinct from the `chelis test` flow already exercised
 above; the prompt called this bench optional.
 
@@ -256,7 +256,7 @@ Phase J's deliverable is the honest baseline above; the fixes are tracked separa
 Manual (full Coral suite):
 
 ```sh
-cd /home/jeff/Documents/scratch/coral
+cd <coral checkout>
 # (apply the path-dep / =0.2.7 edits to reef.toml as documented above)
 time /path/to/target/release/chelis test tests/
 ```
@@ -267,7 +267,8 @@ Automated harness (one binary at a time, captures everything to JSON):
 python3 scripts/bench_phase_j.py \
   --binary /path/to/target/release/chelis \
   --label post \
-  --chelis-repo /home/jeff/Documents/scratch/chelis/.claude/worktrees/agent-ac1369283ad281583 \
+  --coral-dir <coral checkout> \
+  --chelis-repo <post-cache worktree> \
   --out /tmp/chelis-bench/post.json
 ```
 
@@ -324,7 +325,7 @@ Root-causing the linearity divergence is the only remaining gate.
 Reproduction:
 
 ```sh
-cd /home/jeff/Documents/scratch/chelis/.../packages/chelis-std
+cd <chelis checkout>/packages/chelis-std
 target/release/chelis test tests/tensor/construct.ch --filter test_linspace_endpoints
 # Expected (legacy worker path): PASS
 # In-context worker path: FAIL with `variable 'actual' was already consumed by call to 'pkg__chelis__std__Std__Test__assert_shape' at offset 0`
@@ -362,7 +363,6 @@ the new-code annotation interacting with the cached library type-env.
 
 ## See also
 
-- `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md` — the full phase plan
 - `crates/chelis-compiler-api/src/context.rs` — `CompiledContext` + `save / load_if_fresh`
 - `crates/chelis-cli/src/main.rs` — `cmd_test`, `cmd_internal_test_file`,
   `prepare_eval_in_exec_context` (the line where workers re-enter the legacy pipeline)
