@@ -1159,9 +1159,9 @@ constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
 obligation an `if` condition does, discharged by unifying its type with
 `bool`; [04-PAT-2] states what it does at run time.
 
-Surf pipes normalize to applications before type inference, including contextual
-literal typing, under spec/02 §0.2. The application rule above governs them;
-there is no separate Deep pipe typing rule.
+Surf pipes normalize to applications before type inference, including literal
+dtype selection (§5.6), under spec/02 §0.2. The application rule above governs
+them; there is no separate Deep pipe typing rule.
 
 **Tuple:**
 ```
