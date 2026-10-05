@@ -171,22 +171,24 @@ requires a finite, integral value in range; any other value traps. To narrow
 on purpose, use a named conversion: `cast_trunc` truncates a float toward
 zero, `cast_saturate` clamps to the target's range, and `cast_wrap` wraps a
 signed integer modulo the target width. Integer literals default to
-`i32` and float literals to `f32`, subject to these exact adoption rules:
+`i32` and float literals to `f32`. A literal's dtype is written at its site:
 
 1. A suffix binds a literal to its stated dtype.
-2. Unsuffixed elements of a bare bracket literal adopt the element type of
-   the tensor-typed binding or declared tensor return body that makes it a
-   tensor.
-3. An unsuffixed scalar literal passed directly to `cast` adopts its numeric
-   target dtype.
+2. A declaration states the dtype of a literal that is its whole
+   initializer (`x: f64 = 1.1`), and of every unsuffixed element of a bare
+   bracket literal that its tensor type makes a tensor.
+3. A `cast` binds an unsuffixed literal operand at a numeric target its
+   kind admits; the cast is then the literal itself.
+4. `to_tensor(xs, p)` binds every unsuffixed literal element of a bracket
+   literal `xs` at `p`, and never converts. Without a dtype argument, an
+   unsuffixed literal element is an error.
 
 A bracket literal is a `List`. It becomes a tensor through `to_tensor`, whose
-argument is an ordinary `List` that keeps each element's suffix or default,
-or where its own binding or function result declares a tensor type. A tensor
-parameter or a `cast` never converts a bracket literal, so a tensor argument
-carries its element dtype in suffixes. A list literal and a bare scalar
-passed to an ordinary function do not adopt a callee's dtype. Structural
-lists such as reshape sizes therefore spell their `i64` elements explicitly.
+first argument is an ordinary `List`, or where its own binding or function
+result declares a tensor type. A tensor parameter or a `cast` never converts
+a bracket literal. A list literal and a bare scalar passed to an ordinary
+function never take a callee's dtype. Structural lists such as reshape sizes
+therefore spell their `i64` elements explicitly.
 
 ```chelis-surf-fragment
 -- explicit tensor conversion
@@ -195,10 +197,10 @@ a = cast(x, bf16)
 b = 1.0f64
 -- suffix binds i64; cast(3000000000, i64) binds the same literal the same way
 c = 3000000000i64
--- the scalar binds directly at f64, not at f32 and then widened
+-- the cast is the literal `1.1f64`, never `1.1f32` widened
 d = cast(1.1, f64)
--- suffixed elements bind at f64; `to_tensor` keeps each element's dtype
-e = to_tensor([1.1f64, 2.2f64])
+-- the dtype argument binds the elements at f64
+e = to_tensor([1.1, 2.2], f64)
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with

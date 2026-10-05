@@ -52,7 +52,11 @@ Rules to preserve:
   declare the result as `i32`, pass `accumulator=i64` to `sum` or `einsum`, or narrow
   it with an explicit `cast`.
 - Named dimensions are nominal: `batch` and `seq` do not unify by size.
-- Integer literals default to `i32`; float literals default to `f32`.
+- Integer literals default to `i32`; float literals default to `f32`. A suffix states
+  another dtype, and so does the construct that directly contains the literal: a
+  declaration (`x: f64 = 1.1`), a `cast` (`cast(1.1, f64)` is `1.1f64`), or the dtype
+  argument of `to_tensor` (`to_tensor([1.1, 2.2], f64)`). An unsuffixed `to_tensor`
+  element needs a suffix or the dtype argument.
 - Reduction-style calls need an explicit axis argument.
 
 ## Style Rules for Generated Surf

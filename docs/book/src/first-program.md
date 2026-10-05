@@ -5,7 +5,7 @@ calls that function with three values:
 
 ```chelis-surf
 def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] = x |> relu |> softmax(0)
-result = [-1.0, 0.0, 1.0] |> to_tensor |> relu_then_softmax
+result = [-1.0, 0.0, 1.0] |> to_tensor(f32) |> relu_then_softmax
 ```
 
 The dimension variable `n` lets the function accept a vector of any length.

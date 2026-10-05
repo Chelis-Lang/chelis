@@ -1,5 +1,10 @@
 # Contextual literal-dtype adoption: the #3145 attempt and the single-pass design
 
+chelis#3164 chose option A1 instead: a literal's dtype is written at its site, by
+its suffix, a declaration, a cast, or the dtype argument of `to_tensor`.
+`spec/04-type-system.md` §5.6 states that rule; this record keeps the contextual
+attempt for reference.
+
 This record preserves the contextual dtype-adoption work separated from chelis#3145
 (chelis#3114) on 2026-10-04, so that option C of chelis#3164 can be judged or revived
 from evidence: the rule, what two review rounds found, and the adoption pass designed
