@@ -301,6 +301,12 @@ _ROUNDEVEN_HELPER = re.compile(
     r"^/\* __builtin_roundeven was introduced in gcc 10:\n.*?^#endif\n", re.MULTILINE | re.DOTALL
 )
 _ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+\w*roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
+# The compiler versions that provide the builtin, as CORE-MATH spells the test.
+_ROUNDEVEN_GUARD = (
+    "#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17))"
+    " && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))"
+)
+_ROUNDEVEN_BUILTINS = {"__builtin_roundeven", "__builtin_roundevenf", "__builtin_roundevenl"}
 
 
 def guard_sin_roundeven(text: str, read) -> str:
@@ -317,16 +323,23 @@ def guard_sin_roundeven(text: str, read) -> str:
 
 
 def require_guarded_roundeven(text: str, origin: str) -> None:
-    """Fail unless every `__builtin_roundeven` in `text`'s code is a guarded
-    `roundeven_finite` definition."""
+    """Fail unless every `__builtin_roundeven[fl]` in `text`'s code is the
+    `roundeven_finite` definition in the first arm of the compiler-version guard,
+    with the portable definition in its `#else` arm."""
+    lines = text.split("\n")
     for m in _TOKEN.finditer(text):
-        if m.lastgroup != "ident" or m.group() != "__builtin_roundeven":
+        if m.lastgroup != "ident" or m.group() not in _ROUNDEVEN_BUILTINS:
             continue
-        start = text.rfind("\n", 0, m.start()) + 1
-        end = text.find("\n", m.end())
-        line = text[start : len(text) if end == -1 else end].strip()
-        if not _ROUNDEVEN_DEFINE.fullmatch(line):
-            raise VendorError(f"{origin}: `__builtin_roundeven` outside a guarded roundeven_finite: {line!r}")
+        index = text.count("\n", 0, m.start())
+        line = lines[index].strip()
+        guarded = (
+            _ROUNDEVEN_DEFINE.fullmatch(line) is not None
+            and 0 < index < len(lines) - 1
+            and lines[index - 1].strip() == _ROUNDEVEN_GUARD
+            and lines[index + 1].strip() == "#else"
+        )
+        if not guarded:
+            raise VendorError(f"{origin}: `{m.group()}` outside a guarded roundeven_finite: {line!r}")
 
 
 def _reindent(body: str, indent: str) -> str:

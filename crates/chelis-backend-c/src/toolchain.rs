@@ -732,6 +732,7 @@ mod tests {
         ("CPATH", "/nonexistent-shadow-include"),
         ("C_INCLUDE_PATH", "/nonexistent-shadow-include"),
         ("SDKROOT", "/nonexistent-sdk"),
+        ("DEVELOPER_DIR", "/nonexistent-developer-dir"),
         ("GCC_EXEC_PREFIX", "/nonexistent-gcc/"),
         ("COMPILER_PATH", "/nonexistent-compiler-path"),
     ];
@@ -791,7 +792,8 @@ mod tests {
         ) {
             return;
         }
-        let found = Command::new("/usr/bin/xcrun")
+        // Under the allowlist, so the hostile DEVELOPER_DIR cannot steer the lookup.
+        let found = allowlisted_command("/usr/bin/xcrun")
             .args(["--find", "clang"])
             .output()
             .unwrap();

@@ -141,14 +141,18 @@ class ContractCleanTests(unittest.TestCase):
         vcm.require_guarded_roundeven(text, "amalgamation")
         self.assertIn("chelis_cr_sin__roundeven_finite (invpi * ax)", text)
 
-    def test_bare_roundeven_is_rejected_and_the_guarded_definition_is_not(self):
-        guarded = (
-            "/* __builtin_roundeven was introduced in gcc 10 */\n"
-            "# define roundeven_finite(x) __builtin_roundeven (x)\n"
-        )
-        vcm.require_guarded_roundeven(guarded, "t")
-        with self.assertRaisesRegex(vcm.VendorError, "outside a guarded roundeven_finite"):
-            vcm.require_guarded_roundeven(guarded + "double k = __builtin_roundeven (y);\n", "t")
+    def test_only_the_version_guarded_definition_may_name_roundeven(self):
+        define = "# define roundeven_finite(x) __builtin_roundeven (x)\n"
+        guarded = f"{vcm._ROUNDEVEN_GUARD}\n{define}#else\nstatic double roundeven_finite (double x);\n#endif\n"
+        vcm.require_guarded_roundeven("/* __builtin_roundeven was introduced in gcc 10 */\n" + guarded, "t")
+        for what, text in [
+            ("a bare call", guarded + "double k = __builtin_roundeven (y);\n"),
+            ("the float builtin", guarded + "float k = __builtin_roundevenf (y);\n"),
+            ("an unguarded definition", define),
+            ("a definition under another guard", f"#if 1\n{define}#else\n#endif\n"),
+        ]:
+            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, "outside a guarded roundeven_finite"):
+                vcm.require_guarded_roundeven(text, "t")
 
 
 class RepositoryTests(unittest.TestCase):
