@@ -396,6 +396,12 @@ fn operand_shape_disagreements_trap_in_the_operation() {
             "{LENGTHS}def f(b: tensor[*, f32], u: tensor[*, f32]) -> tensor[*, f32] = scatter(b, to_tensor([0i64, 1i64]), u, 0i32, \"add\")\n\
              out = f(to_tensor(v(4i64)), to_tensor(v({{value}})))\n"
         ),
+        // [04-NUM-9] names the lowered primitive: replace mode is
+        // `scatter_replace` however the program spelled it.
+        format!(
+            "{LENGTHS}def f(b: tensor[*, f32], u: tensor[*, f32]) -> tensor[*, f32] = scatter(b, to_tensor([0i64, 1i64]), u, 0i32, \"replace\")\n\
+             out = f(to_tensor(v(4i64)), to_tensor(v({{value}})))\n"
+        ),
     ];
     let rows = [
         (
@@ -429,6 +435,14 @@ fn operand_shape_disagreements_trap_in_the_operation() {
             "scatter operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
             "scatter",
             "out = tensor(shape=[4], data=[0.0, 2.0, 2.0, 3.0])\n",
+        ),
+        (
+            "scatter_replace_mode_updates",
+            "3i64",
+            "2i64",
+            "scatter_replace operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
+            "scatter_replace",
+            "out = tensor(shape=[4], data=[0.0, 1.0, 2.0, 3.0])\n",
         ),
     ];
     for (source, (name, failing, passing, context, op, passing_out)) in sources.iter().zip(rows) {

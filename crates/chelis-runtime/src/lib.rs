@@ -6322,9 +6322,16 @@ unsafe fn tensor_scatter(
     if add_mode {
         require_signed_integer_or_float_dtype(dtype, "scatter_add base and updates");
     }
-    let axis_i = tensor_normalize_axis(base, axis, "scatter");
+    // [04-NUM-9]: a trap names the lowered primitive, `scatter` for add mode
+    // and `scatter_replace` for replace mode, however the program spelled it.
+    let op = if add_mode {
+        "scatter"
+    } else {
+        "scatter_replace"
+    };
+    let axis_i = tensor_normalize_axis(base, axis, op);
     let expected = chelis_tensor_gather(base, indices, axis);
-    require_same_tensor_shape_validated(expected, updates, "scatter");
+    require_same_tensor_shape_validated(expected, updates, op);
     chelis_tensor_release(expected);
     let out = tensor_clone(base);
     if dtype != updates_dtype {
