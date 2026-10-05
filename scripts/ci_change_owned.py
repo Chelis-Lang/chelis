@@ -64,13 +64,17 @@ STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
 DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
 DEFAULT_DURATION_MILLISECONDS = 30_000
-# chelis#2355: a pull request that adds or directly modifies a target whose
-# change-owned time exceeds this must carry the target's duration row, so the
-# package-expansion planner never weights a heavy target at the default.
+# chelis#2355: a target a pull request adds or directly modifies, with no
+# duration row, whose change-owned run exceeds the collection threshold gets
+# its row collected into the report artifact and a visible warning; above the
+# blocking threshold the report fails until the row is added, so the
+# package-expansion planner never weights a shard-sized target at the default.
+DURATION_ROW_BLOCK_MILLISECONDS = 600_000
 DURATION_ROW_THRESHOLD_MILLISECONDS = 120_000
-# Below the threshold but within this band, an unrowed target is reported as
-# an advisory: run-to-run timing noise can carry it over the threshold.
+# Below the collection threshold but within this band, an unrowed target is
+# reported as an advisory: run-to-run timing noise can carry it over.
 DURATION_ROW_ADVISORY_MILLISECONDS = 60_000
+DURATION_ROW_CANDIDATES_FILE = "duration-row-candidates.json"
 DURATION_ROW_UNDERESTIMATE_RATIO = 3
 DURATION_ROW_SCOPE_KINDS = frozenset(
     {"integration_target_added", "integration_target_directly_modified"}
@@ -4512,10 +4516,13 @@ def duration_row_review(
     documents: Sequence[tuple[Mapping[str, Any], Path]],
     duration_baseline: DurationBaseline,
 ) -> dict[str, list[str]]:
-    """Require a duration row for each heavy target this pull request adds or
-    directly modifies (chelis#2355).
+    """Collect a duration row for each heavy target this pull request adds or
+    directly modifies, and require it for a shard-sized one (chelis#2355).
 
-    Only a target with no row in the candidate's checked-in baseline is judged,
+    An unrowed target that ran over the collection threshold gets a visible
+    warning and its row in `candidates`; over the blocking threshold it is a
+    failure. Only a target with no row in the candidate's checked-in baseline
+    is judged,
     so the rule is sticky: once a row exists the target is never judged again,
     whatever later runs observe. The judged time is the target's test run, not
     its list step's compilation. Receipt time is load-sensitive, so an unrowed
@@ -4535,8 +4542,10 @@ def duration_row_review(
     )
     rows = {identity.canonical: ms for identity, ms in duration_baseline.targets.items()}
     failures: list[str] = []
+    warnings: list[str] = []
     advisories: list[str] = []
     unjudged: list[str] = []
+    candidates: dict[str, dict[str, int]] = {}
     for identity in scope:
         observation = observations.get(identity)
         if observation is None:
@@ -4559,28 +4568,55 @@ def duration_row_review(
         row_text = canonical_json(
             {identity: {"milliseconds": row_value, "samples": 1}}
         ).decode().strip()[1:-1]
+        fix = (
+            f"`python3 scripts/ci_change_owned.py set-duration-row {identity} "
+            f"{row_value}` (it writes {row_text}, its list-plus-run time, into "
+            f"the baseline's targets)"
+        )
+        baseline_path = DURATION_BASELINE_PATH.relative_to(ROOT)
         if observed > DURATION_ROW_THRESHOLD_MILLISECONDS:
+            candidates[identity] = {"milliseconds": row_value, "samples": 1}
+        if observed > DURATION_ROW_BLOCK_MILLISECONDS:
             failures.append(
                 f"duration row required: {identity} ran {observed / 1000:.1f}s in "
                 f"change-owned CI, over the "
-                f"{DURATION_ROW_THRESHOLD_MILLISECONDS // 1000}s threshold, and "
-                f"{DURATION_BASELINE_PATH.relative_to(ROOT)} has no row for it, so "
-                f"package expansion would weight it at the "
-                f"{DEFAULT_DURATION_MILLISECONDS // 1000}s default. Add the row "
-                f"with `python3 scripts/ci_change_owned.py set-duration-row "
-                f"{identity} {row_value}` (it writes {row_text}, its list-plus-run "
-                f"time, into the "
-                f"baseline's targets) and push."
+                f"{DURATION_ROW_BLOCK_MILLISECONDS // 1000}s threshold, and "
+                f"{baseline_path} has no row for it, so package expansion would "
+                f"weight it at the {DEFAULT_DURATION_MILLISECONDS // 1000}s "
+                f"default. Add the row with {fix} and push."
+            )
+        elif observed > DURATION_ROW_THRESHOLD_MILLISECONDS:
+            warnings.append(
+                f"duration row missing: {identity} ran {observed / 1000:.1f}s in "
+                f"change-owned CI and {baseline_path} has no row for it; its "
+                f"row is collected in {DURATION_ROW_CANDIDATES_FILE}, or add it "
+                f"now with {fix}"
             )
         elif observed > DURATION_ROW_ADVISORY_MILLISECONDS:
             advisories.append(
                 f"{identity}: ran {observed / 1000:.1f}s with no duration row; "
                 f"timing noise can carry it over the "
-                f"{DURATION_ROW_THRESHOLD_MILLISECONDS // 1000}s threshold, so "
-                f"consider `python3 scripts/ci_change_owned.py set-duration-row "
-                f"{identity} {row_value}`"
+                f"{DURATION_ROW_THRESHOLD_MILLISECONDS // 1000}s collection "
+                f"threshold, so consider {fix}"
             )
-    return {"failures": failures, "advisories": advisories, "unjudged": unjudged}
+    return {
+        "failures": failures,
+        "warnings": warnings,
+        "advisories": advisories,
+        "unjudged": unjudged,
+        "candidates": candidates,
+    }
+
+
+def write_duration_row_candidates(
+    output: Path, candidates: Mapping[str, Mapping[str, int]]
+) -> None:
+    """The collected rows, in the baseline's own row format, for a refresh to
+    fold in. Written on every change-owned report, empty when none."""
+    output.mkdir(parents=True, exist_ok=True)
+    (output / DURATION_ROW_CANDIDATES_FILE).write_bytes(
+        canonical_json({"version": 1, "targets": dict(sorted(candidates.items()))})
+    )
 
 
 def set_duration_row(path: Path, identity: str, milliseconds: int) -> None:
@@ -5069,6 +5105,7 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
     lines.extend(_classification_counts(report))
     duration_rows = report.get("duration_rows", {})
     for label, key in (
+        ("Duration-row warnings (row collected, not blocking)", "warnings"),
         ("Duration-row advisories", "advisories"),
         ("Not judged for a duration row", "unjudged"),
     ):
@@ -5447,6 +5484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             duration_rows = duration_row_review(
                 plan, documents, load_duration_baseline()
             )
+            write_duration_row_candidates(args.output, duration_rows["candidates"])
             if duration_rows["failures"]:
                 raise ValueError("; ".join(duration_rows["failures"]))
             result["duration_rows"] = duration_rows

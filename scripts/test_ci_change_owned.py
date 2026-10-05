@@ -6624,13 +6624,26 @@ class DurationRowReviewTests(unittest.TestCase):
                 self.baseline(rows or {}),
             )
 
-    def test_heavy_unrowed_target_fails_with_the_row_to_add(self) -> None:
-        result = self.review({self.ADDED: 130.0, self.MODIFIED: 1.0})
+    EMPTY = {"failures": [], "warnings": [], "advisories": [], "unjudged": [], "candidates": {}}
+
+    def test_shard_sized_unrowed_target_fails_with_the_row_to_add(self) -> None:
+        result = self.review({self.ADDED: 700.0})
         self.assertEqual(len(result["failures"]), 1)
         failure = result["failures"][0]
-        self.assertIn(f"duration row required: {self.ADDED} ran 130.0s", failure)
-        self.assertIn(f"set-duration-row {self.ADDED} 130000", failure)
-        self.assertIn('"milliseconds":130000,"samples":1', failure)
+        self.assertIn(f"duration row required: {self.ADDED} ran 700.0s", failure)
+        self.assertIn("over the 600s threshold", failure)
+        self.assertIn(f"set-duration-row {self.ADDED} 700000", failure)
+        self.assertIn('"milliseconds":700000,"samples":1', failure)
+        self.assertEqual(result["candidates"], {self.ADDED: {"milliseconds": 700000, "samples": 1}})
+
+    def test_heavy_unrowed_target_warns_and_its_row_is_collected(self) -> None:
+        result = self.review({self.ADDED: 130.0})
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn(f"duration row missing: {self.ADDED} ran 130.0s", result["warnings"][0])
+        self.assertIn(f"set-duration-row {self.ADDED} 130000", result["warnings"][0])
+        self.assertIn(owned.DURATION_ROW_CANDIDATES_FILE, result["warnings"][0])
+        self.assertEqual(result["candidates"], {self.ADDED: {"milliseconds": 130000, "samples": 1}})
 
     def test_list_step_compilation_is_not_judged_but_the_row_includes_it(self) -> None:
         # A lone change-owned target's list step compiles its crate's test
@@ -6638,38 +6651,50 @@ class DurationRowReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             light = owned.duration_row_review(
                 self.plan(),
-                self.documents(Path(tmp) / "a", {self.ADDED: 10.0, self.MODIFIED: 1.0}, 200.0),
+                self.documents(Path(tmp) / "a", {self.ADDED: 10.0, self.MODIFIED: 1.0}, 700.0),
                 self.baseline({}),
             )
             heavy = owned.duration_row_review(
                 self.plan(),
-                self.documents(Path(tmp) / "b", {self.ADDED: 130.0, self.MODIFIED: 1.0}, 20.0),
+                self.documents(Path(tmp) / "b", {self.ADDED: 610.0, self.MODIFIED: 1.0}, 20.0),
                 self.baseline({}),
             )
-        self.assertEqual(light["failures"], [])
-        self.assertIn(f"set-duration-row {self.ADDED} 150000", heavy["failures"][0])
+        self.assertEqual(light, self.EMPTY)
+        self.assertIn(f"set-duration-row {self.ADDED} 630000", heavy["failures"][0])
 
     def test_heavy_rowed_target_passes(self) -> None:
-        result = self.review({self.ADDED: 130.0}, rows={self.ADDED: 125_000})
-        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+        result = self.review({self.ADDED: 900.0}, rows={self.ADDED: 800_000})
+        self.assertEqual(result, self.EMPTY)
 
     def test_light_unrowed_target_passes_quietly(self) -> None:
         result = self.review({self.ADDED: 30.0, self.MODIFIED: 59.0})
-        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+        self.assertEqual(result, self.EMPTY)
 
-    def test_threshold_boundary_and_its_advisory_band(self) -> None:
-        at = self.review({self.ADDED: 120.0})
+    def test_blocking_boundary(self) -> None:
+        at = self.review({self.ADDED: 600.0})
         self.assertEqual(at["failures"], [])
+        self.assertEqual(len(at["warnings"]), 1)
+        self.assertIn(self.ADDED, at["candidates"])
+        over = self.review({self.ADDED: 600.001})
+        self.assertEqual(len(over["failures"]), 1)
+        self.assertEqual(over["warnings"], [])
+        self.assertIn(self.ADDED, over["candidates"])
+
+    def test_collection_boundary_and_its_advisory_band(self) -> None:
+        at = self.review({self.ADDED: 120.0})
+        self.assertEqual((at["failures"], at["warnings"], at["candidates"]), ([], [], {}))
         self.assertEqual(len(at["advisories"]), 1)
         self.assertIn("timing noise can carry it over", at["advisories"][0])
         over = self.review({self.ADDED: 120.001})
-        self.assertEqual(len(over["failures"]), 1)
+        self.assertEqual(over["failures"], [])
+        self.assertEqual(len(over["warnings"]), 1)
+        self.assertEqual(over["candidates"], {self.ADDED: {"milliseconds": 120001, "samples": 1}})
 
     def test_a_row_makes_the_rule_sticky_and_reports_an_underestimate(self) -> None:
         # Any row ends the judgement, so a rerun at any timing passes; a row
         # the observation exceeds threefold is reported, not failed.
-        result = self.review({self.ADDED: 500.0}, rows={self.ADDED: 1})
-        self.assertEqual(result["failures"], [])
+        result = self.review({self.ADDED: 900.0}, rows={self.ADDED: 1})
+        self.assertEqual((result["failures"], result["warnings"], result["candidates"]), ([], [], {}))
         self.assertEqual(len(result["advisories"]), 1)
         self.assertIn("a baseline refresh will correct it", result["advisories"][0])
 
@@ -6677,7 +6702,7 @@ class DurationRowReviewTests(unittest.TestCase):
         plan = self.plan()
         plan["path_dispositions"] = [plan["path_dispositions"][2]]
         result = self.review({self.ADDED: 900.0}, plan=plan)
-        self.assertEqual(result, {"failures": [], "advisories": [], "unjudged": []})
+        self.assertEqual(result, self.EMPTY)
 
     def test_missing_timing_fails_closed_and_unexecuted_targets_are_listed(self) -> None:
         with self.assertRaisesRegex(ValueError, "change-owned timing is missing"):
@@ -6723,28 +6748,50 @@ class DurationRowReviewTests(unittest.TestCase):
                 code = owned.main(["report", "--plan", str(plan_path), "--lane", "change-owned",
                                    "--receipts-root", str(root / "receipts"),
                                    "--output", str(root / "out"), "--required"])
-            return code, json.loads((root / "out" / "report.json").read_text())
+            report = json.loads((root / "out" / "report.json").read_text())
+            candidates_path = root / "out" / owned.DURATION_ROW_CANDIDATES_FILE
+            candidates = candidates_path.read_bytes()
+            self.assertEqual(candidates, owned.canonical_json(json.loads(candidates)))
+            return code, report, json.loads(candidates)
 
-    def test_required_report_fails_on_a_heavy_unrowed_target(self) -> None:
-        code, report = self.run_report_cli({self.ADDED: 130.0})
+    def test_required_report_blocks_shard_sized_and_collects_heavy_rows(self) -> None:
+        code, report, candidates = self.run_report_cli({self.ADDED: 700.0})
         self.assertEqual(code, 1)
         self.assertFalse(report["success"])
         self.assertIn(f"duration row required: {self.ADDED}", report["failures"][0])
-        code, report = self.run_report_cli({self.ADDED: 10.0})
+        self.assertEqual(
+            candidates,
+            {"version": 1, "targets": {self.ADDED: {"milliseconds": 700000, "samples": 1}}},
+        )
+        code, report, candidates = self.run_report_cli({self.ADDED: 130.0})
         self.assertEqual(code, 0)
-        self.assertEqual(report["duration_rows"]["failures"], [])
+        self.assertEqual(len(report["duration_rows"]["warnings"]), 1)
+        self.assertEqual(
+            candidates,
+            {"version": 1, "targets": {self.ADDED: {"milliseconds": 130000, "samples": 1}}},
+        )
+        code, report, candidates = self.run_report_cli({self.ADDED: 10.0})
+        self.assertEqual(code, 0)
+        self.assertEqual(candidates, {"version": 1, "targets": {}})
 
     def test_summary_lists_advisories_and_unjudged_targets(self) -> None:
         report = {
             "lane": "change-owned", "required": True, "observed_success": True,
             "plan_digest": "d", "covered_targets": [], "manual_gate_targets": [],
             "standing_reused_targets": [], "failures": [], "shard_durations": [],
-            "duration_rows": {"failures": [], "advisories": ["a: advisory"],
-                              "unjudged": ["b: not executed here (manual gate)"]},
+            "duration_rows": {"failures": [], "warnings": ["w: duration row missing"],
+                              "advisories": ["a: advisory"],
+                              "unjudged": ["b: not executed here (manual gate)"],
+                              "candidates": {}},
         }
         with tempfile.TemporaryDirectory() as tmp:
             owned._write_report_files(Path(tmp), report)
             rendered = (Path(tmp) / "summary.md").read_text()
+        self.assertIn(
+            "- Duration-row warnings (row collected, not blocking): 1\n"
+            "  - w: duration row missing",
+            rendered,
+        )
         self.assertIn("- Duration-row advisories: 1\n  - a: advisory", rendered)
         self.assertIn("- Not judged for a duration row: 1", rendered)
 
