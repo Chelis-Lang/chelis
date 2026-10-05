@@ -256,7 +256,7 @@ even when the per-PR SMT lanes are green off the asset.
 Building cvc5 cold begins by pulling the cvc5 source and its dependencies
 over the network, so the release jobs are the only lanes exposed to a
 transient GitHub refusal there. Because `publish-release` has `needs:` on all
-three build jobs, one such failure skips the publish and leaves a pushed tag
+four build jobs, one such failure skips the publish and leaves a pushed tag
 with no GitHub Release. Such failures occur at `cvc5-sys` `build.rs` dependency
 downloads (HTTP 403) and at the source clone, with no change to the tree.
 

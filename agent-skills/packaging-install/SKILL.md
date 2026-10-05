@@ -132,7 +132,8 @@ sync` (if `[chelis-src]`) → `reef doctor` summary.
 - **The guard is compile-time.** chelisup's `install`, `ensure_shim_installed`,
   `uninstall`, and `self_uninstall` are `pub(crate)` (only chelisup's own
   `cli.rs` calls them; the only external uses are the pure asset-naming helpers
-  `detect_slug`, `release_build` and `asset_name`, from `reef_setup.rs`).
+  `detect_slug`, `release_build` and `asset_name`, from `reef_setup.rs`, and
+  `nss::use_builtin_services`, which `chelis`'s `main` calls first).
   Any in-process reference from another crate is an `E0603` build error caught
   by the normal clippy/build/test stages. Do NOT widen that visibility to
   `pub`; keep the call-site comment and the test asserting the shim stays

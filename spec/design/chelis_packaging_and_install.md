@@ -296,15 +296,16 @@ ships, and retire their vendored `install_chelis_toolchain.py`.
 platform, drops it at `~/.chelis/bin/chelisup`, and prompts the user to add
 `~/.chelis/bin` to PATH. The chelis releases page hosts the `chelisup`
 prebuilts alongside the existing toolchain tarballs: `release.yml` publishes
-`chelisup-<slug>` bare executables plus sha256 sidecars (the linux binary is
-built in the glibc-2.31 container job so the first binary a bare machine runs
-loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
-canonical bootstrap URL
+`chelisup-<slug>` bare executables plus sha256 sidecars (the Linux binary comes
+from the static build job, a static-pie executable with no program interpreter
+and no shared library, so the first binary a bare machine runs starts on any
+x86-64 distribution) and `chelisup.sh` itself, making the canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
-For the same reason `chelisup install` takes that job's
-`chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz` on Linux, for every release from
-0.7.24 on; the `linux-x86_64` tarball needs the glibc of the runner that built it,
-and a glibc older than 2.31 runs neither build (chelis#2686).
+On Linux `chelisup install` takes the first build a release publishes, in
+preference order: the static `chelis-v<ver>-linux-x86_64-static.tar.gz`, then,
+for every release from 0.7.24 on, `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
+(chelis#2686); the `linux-x86_64` tarball needs the glibc of the runner that built
+it, and a glibc older than 2.31 runs neither dynamic build.
 **Private-repo caveat:** until chelis releases are public the public release URL
 does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
 an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of
