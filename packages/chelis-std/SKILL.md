@@ -5,9 +5,9 @@ description: Use when writing downstream Chelis Surf or Deep programs, validatin
 
 # Chelis Downstream Skill
 
-Use this skill to write Chelis that works with the current compiler snapshot and to help
-shell authors prepare Reef packages. Keep context small: load deeper specs only when the
-task needs exact grammar, type, CLI, or package semantics.
+Use this skill to write Chelis that works with the current compiler release and to help
+shell authors prepare Reef packages. Keep context small: open the relevant public docs
+when exact grammar, type, CLI, or package semantics matter.
 
 This skill is for writing downstream programs and packages. It does not cover work on
 the Chelis compiler itself.
