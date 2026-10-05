@@ -318,7 +318,6 @@ dependencies = [
  "half",
  "libc",
  "memmap2",
- "num-bigint",
  "sha2",
 ]
 
