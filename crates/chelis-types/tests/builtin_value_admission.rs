@@ -270,6 +270,16 @@ fn returned_builtin_is_refused() {
     assert_rejected_by_name("def pick() = lt\n", "lt");
 }
 
+/// `drop` ends its operand's lifetime ([05-OP-67]), a rule its `a -> unit`
+/// scheme does not state: through an alias, a use after the call would check.
+#[test]
+fn drop_alias_is_refused() {
+    assert_rejected_by_name(
+        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  op = drop\n  _ = op(x)\n  x\n}\n",
+        "drop",
+    );
+}
+
 /// A builtin whose scheme states its whole contract is a value: an `exp`
 /// alias checks exactly as a direct call does, admitting a float operand and
 /// refusing an integer one with the operation's own precision diagnostic.

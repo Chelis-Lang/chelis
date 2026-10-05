@@ -101,7 +101,10 @@ pub use infer::{
     reset_grow_segment_bytes_for_test, resolve_declared_surface, run_on_grown_stack,
     set_grow_segment_bytes_for_test,
 };
-pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use linearity::{
+    LinearityInfo, check_linearity, check_linearity_with_context,
+    param_names as lexical_param_names, pattern_names as lexical_pattern_names,
+};
 pub use observation::{ElementRef, format_element, format_key, format_key_bits};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,

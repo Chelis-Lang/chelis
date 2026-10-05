@@ -911,6 +911,12 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "diagonal",
     "trace",
     "clamp",
+    // Linearity, not a container operation: the explicit one-argument
+    // consume of [05-OP-67], paired with the `copy` keyword. The list
+    // slice that once shared this name is `skip` ([05-OP-54]). Its scheme
+    // states its type but not that it ends the operand's lifetime, so it is
+    // applicable only by name ([04-INF-9]).
+    "drop",
 ];
 
 /// True only when the declared rule is wired to the corresponding closed
@@ -2222,9 +2228,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "drop",
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DropValue),
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,

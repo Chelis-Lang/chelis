@@ -5,7 +5,12 @@
 //! through a library binding that holds nothing but the builtin's own scheme,
 //! which is what a value of the builtin instantiates. The witnesses vary the
 //! operand dtype, the declared result (its dtype and extent), and authored
-//! generic binders, bounded and unbounded. Two properties follow:
+//! generic binders, bounded and unbounded; each operand is also read again
+//! after the call and the call is repeated, so consumption and borrowing are
+//! compared, and the verdict is the type checker's and the linearity pass's
+//! together. Effects are charged from one table for both routes
+//! (`builtin_call_effect`; chelis-effects locks that per builtin). Two
+//! properties follow:
 //!
 //! - an admitted builtin agrees with its direct call on every witness, so a
 //!   value never checks a program its direct call refuses, or the reverse;
@@ -237,10 +242,48 @@ fn route_env(scheme: &Scheme) -> TypeEnv {
     TypeEnv::empty().with_test_binding(ROUTE, scheme.clone())
 }
 
+/// The checker's whole per-program verdict: types, then the linearity pass
+/// that owns consumption, borrowing and use after a consuming call.
 fn verdict(env: &TypeEnv, source: &str) -> Option<bool> {
     let declarations = parse_str(source).ok()?;
     let deep = desugar_program(&declarations).ok()?;
-    Some(crate::check_ir_with_context(env, &deep).is_ok())
+    Some(
+        crate::check_ir_with_context(env, &deep)
+            .is_ok_and(|checked| crate::check_linearity(&checked).is_ok()),
+    )
+}
+
+/// The witness block lines for one instantiation, as `(declared result,
+/// lines)` with `CALL` standing for the application. Beside the lone call,
+/// each operand is read again after the call, and the call is repeated: a rule
+/// about what an operand may do after the call (a consume, a borrow) is
+/// invisible to a lone call.
+fn witness_bodies(result_type: &str, param_types: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = declared_results(result_type)
+        .into_iter()
+        .map(|declared| (declared, vec!["CALL".to_string()]))
+        .collect();
+    for (index, ty) in param_types.iter().enumerate() {
+        out.push((
+            ty.trim_start_matches('&').to_string(),
+            vec!["_ = CALL".to_string(), format!("a{index}")],
+        ));
+    }
+    out.push((
+        result_type.to_string(),
+        vec!["_ = CALL".to_string(), "CALL".to_string()],
+    ));
+    out
+}
+
+/// A function whose block runs `lines`, preceded by `prelude` when given.
+fn block(header: &str, prelude: Option<&str>, lines: &[String], call: &str) -> String {
+    let mut body: Vec<String> = prelude.map(str::to_string).into_iter().collect();
+    body.extend(lines.iter().map(|line| line.replace("CALL", call)));
+    match body.as_slice() {
+        [only] => format!("{header} = {only}\n"),
+        _ => format!("{header} = {{\n  {}\n}}\n", body.join("\n  ")),
+    }
 }
 
 struct Comparison {
@@ -249,9 +292,13 @@ struct Comparison {
     disagreements: Vec<String>,
 }
 
-/// `stop_at_disagreement` ends the comparison at the first disagreement, which
-/// settles a refused builtin; an admitted one is compared on every witness.
-fn compare(name: &str, scheme: &Scheme, stop_at_disagreement: bool) -> Comparison {
+/// An admitted builtin is compared through a real alias, `op = NAME`, which
+/// is the route a program takes, key judgement ([04-LIN-9]) included. A
+/// refused builtin has no such route, so the comparison binds its bare scheme
+/// under a name no builtin route claims; that stops at the first
+/// disagreement, which settles it.
+fn compare(name: &str, scheme: &Scheme, admitted: bool) -> Comparison {
+    let stop_at_disagreement = !admitted;
     let env = route_env(scheme);
     let mut comparison = Comparison {
         accepted_directly: 0,
@@ -286,11 +333,20 @@ fn compare(name: &str, scheme: &Scheme, stop_at_disagreement: bool) -> Compariso
             .map(|(index, ty)| format!("a{index}: {ty}"))
             .collect();
         let arguments: Vec<String> = (0..param_types.len()).map(|i| format!("a{i}")).collect();
-        for declared in declared_results(&result_type) {
+        let call = arguments.join(", ");
+        for (declared, lines) in witness_bodies(&result_type, &param_types) {
             let header = format!("def g{binders}({}) -> {declared}", signature.join(", "));
-            let call = arguments.join(", ");
-            let direct = format!("{header} = {name}({call})\n");
-            let through_value = format!("{header} = {ROUTE}({call})\n");
+            let direct = block(&header, None, &lines, &format!("{name}({call})"));
+            let through_value = if admitted {
+                block(
+                    &header,
+                    Some(&format!("op = {name}")),
+                    &lines,
+                    &format!("op({call})"),
+                )
+            } else {
+                block(&header, None, &lines, &format!("{ROUTE}({call})"))
+            };
             let (Some(direct_ok), Some(value_ok)) =
                 (verdict(&env, &direct), verdict(&env, &through_value))
             else {
@@ -301,7 +357,11 @@ fn compare(name: &str, scheme: &Scheme, stop_at_disagreement: bool) -> Compariso
             } else {
                 comparison.refused_directly += 1;
             }
-            if direct_ok != value_ok {
+            // [04-LIN-10]: a generic value's type variables are key-free, so
+            // a value may refuse a key its direct call admits. Only that
+            // refusal is expected; every other difference is a disagreement.
+            let key_freedom = direct_ok && !value_ok && direct.contains("key");
+            if direct_ok != value_ok && !key_freedom {
                 comparison.disagreements.push(format!(
                     "direct={direct_ok} value={value_ok}: {}",
                     direct.trim()
@@ -324,7 +384,7 @@ fn admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rul
             .lookup(decl.name)
             .expect("registry builtin has a scheme");
         let admitted = builtin_value_contract_carried(decl, scheme);
-        let comparison = compare(decl.name, scheme, !admitted);
+        let comparison = compare(decl.name, scheme, admitted);
         let covered = comparison.accepted_directly > 0 && comparison.refused_directly > 0;
         let reproduces = covered && comparison.disagreements.is_empty();
         if admitted && !comparison.disagreements.is_empty() {
