@@ -21,8 +21,8 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || 'v0.18.12' }}
-  # release.yml dispatch of agent/static-linux-release at 9c7a37f5b.
-  CANDIDATE_RUN: '37233543284'
+  # release.yml dispatch of agent/older-c-compilers (#3195) at 388ea465c.
+  CANDIDATE_RUN: '37251231378'
 
 jobs:
   inputs:
@@ -117,11 +117,11 @@ jobs:
         include:
           - runner: macos-14
             id: macos-14
-          # The install guide's remedy for Xcode 15, the default on macos-14.
+          # Another Xcode's clang named directly, without xcode-select (#3195).
           - runner: macos-14
-            id: macos-14-xcode-16.2
-            label: macos-14 + Xcode 16.2
-            xcode: /Applications/Xcode_16.2.app
+            id: macos-14-cc-xcode-16.2
+            label: macos-14 + CHELIS_CC Xcode 16.2 clang
+            chelis-cc: /Applications/Xcode_16.2.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
           - runner: macos-15
             id: macos-15
           - runner: macos-26
@@ -141,13 +141,6 @@ jobs:
           name: release-e2e-inputs
           path: e2e
       - uses: astral-sh/setup-uv@v8.1.0
-      - name: Select ${{ matrix.xcode }}
-        if: matrix.xcode
-        env:
-          XCODE: ${{ matrix.xcode }}
-        run: |
-          sudo xcode-select --switch "$XCODE"
-          echo "selected $(xcode-select -p): $(clang --version | head -1)"
       - name: Prove the release on this host
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,11 +149,12 @@ jobs:
           TAG: ${{ needs.inputs.outputs.tag }}
           ARCHIVE_LABEL: ${{ needs.inputs.outputs.archive-label }}
           LABEL: ${{ matrix.label || matrix.runner }}
-        run: >-
-          uv run --python 3.11 --no-project python scripts/release_e2e.py run --online
-          --label "$LABEL" --tag "$TAG" --archive-label "$ARCHIVE_LABEL"
-          --source-sha "$SOURCE_SHA" --assets e2e/assets --gates e2e/gates
-          --evidence "$RUNNER_TEMP/evidence"
+          REMEDY_CC: ${{ matrix.chelis-cc }}
+        run: |
+          uv run --python 3.11 --no-project python scripts/release_e2e.py run --online \
+            --label "$LABEL" --tag "$TAG" --archive-label "$ARCHIVE_LABEL" \
+            --source-sha "$SOURCE_SHA" --assets e2e/assets --gates e2e/gates \
+            ${REMEDY_CC:+--chelis-cc "$REMEDY_CC"} --evidence "$RUNNER_TEMP/evidence"
       - if: always()
         uses: actions/upload-artifact@v7
         with:
