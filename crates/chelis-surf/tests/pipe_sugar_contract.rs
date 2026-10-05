@@ -456,6 +456,42 @@ fn migration_requires_node_maps_and_preserves_macro_source_data() {
 }
 
 #[test]
+fn migration_preserves_structural_binder_roles_without_admitting_program_shapes() {
+    let source =
+        "sig identity[pipe: Numeric] : pipe -> pipe\ndef identity(x) = x\nout = 1i32 |> identity\n";
+    let previous = "(defsig {dtype_bounds: {pipe: numeric}} identity (pipe) (t-fn {} (t-var {} pipe) (t-var {} pipe)))\n(def {} identity (fn {} (params {} x) (var {} x)))\n(def {} out (pipe {} (lit {type: (t-prim {} i32)} 1) (var {} identity)))";
+    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    assert_eq!(
+        meaning(&migrated.source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+    );
+    assert!(print_canonical(&migrated.baseline).contains("(pipe)"));
+    for malformed in [
+        previous.replace("pipe: numeric", "pipe: true"),
+        previous.replace("out (pipe {}", "out (pipe true"),
+    ] {
+        assert!(chelis_surf::pipe_migration::prepare(source, &malformed).is_err());
+    }
+    // Quote's Syntax role still contains a program template to normalize.
+    let quoted = chelis_surf::pipe_migration::prepare(
+        "out = quote (x |> f)\n",
+        "(def {} out (quote {} (pipe {} (var {} x) (var {} f))))",
+    )
+    .unwrap();
+    assert_eq!(
+        meaning(&quoted.source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&quoted.baseline).unwrap())
+    );
+    assert!(
+        chelis_surf::pipe_migration::prepare(
+            "out = quote (x |> f)\n",
+            "(def {} out (quote {} (pipe true (var {} x) (var {} f))))",
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn migration_preserves_trailing_lambda_and_conditional_grouping() {
     for (source, previous) in [
         (

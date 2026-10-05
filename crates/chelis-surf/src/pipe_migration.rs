@@ -213,6 +213,24 @@ fn contains_program_nodes(key: &str) -> bool {
     )
 }
 
+fn contains_program_child(parent: Option<DeepTag>, index: usize, arity: usize) -> bool {
+    use chelis_deep::role::{ChildStampRole, child_stamp_role};
+    let Some(parent) = parent else {
+        // Historical macro envelopes and the retired pipe are not current tags.
+        return true;
+    };
+    // Quote reifies a program template; normalize its historical pipe forms.
+    if parent == DeepTag::Quote {
+        return true;
+    }
+    matches!(
+        child_stamp_role(parent, index, arity),
+        ChildStampRole::RuntimeExpr
+            | ChildStampRole::ExplicitInferenceBypass
+            | ChildStampRole::EffectHandler
+    )
+}
+
 fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
     let parent = head(expr).map(str::to_owned);
     if parent.as_deref() == Some("pipe") && map_entries(expr).is_none() {
@@ -220,8 +238,15 @@ fn fold(expr: &mut RawExpr, binding_value: bool) -> Result<(), String> {
     }
     match expr {
         RawExpr::List(items, _) => {
+            let tag = parent.as_deref().and_then(DeepTag::parse);
+            let arity = items.len().saturating_sub(2);
             for (index, item) in items.iter_mut().enumerate() {
-                fold(item, is_bind_value(parent.as_deref(), index))?;
+                if parent.is_none()
+                    || index == 1
+                    || (index >= 2 && contains_program_child(tag, index - 2, arity))
+                {
+                    fold(item, is_bind_value(parent.as_deref(), index))?;
+                }
             }
         }
         RawExpr::Map(entries, _) => {
@@ -330,8 +355,15 @@ fn literal_dtypes(
     }
     match expr {
         RawExpr::List(items, _) => {
+            let tag = head(expr).and_then(DeepTag::parse);
+            let arity = items.len().saturating_sub(2);
             for (index, item) in items.iter().enumerate() {
-                literal_dtypes(item, result, is_bind_value(head(expr), index))?;
+                if head(expr).is_none()
+                    || index == 1
+                    || (index >= 2 && contains_program_child(tag, index - 2, arity))
+                {
+                    literal_dtypes(item, result, is_bind_value(head(expr), index))?;
+                }
             }
         }
         RawExpr::Map(entries, _) => {
