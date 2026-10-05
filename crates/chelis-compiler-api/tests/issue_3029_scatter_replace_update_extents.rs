@@ -124,15 +124,12 @@ fn scatter_replace_updates_of_another_length_fail_in_both_lanes() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        refused.contains("scatter updates must match gathered tensor shape and precision"),
-        "{refused}"
-    );
+    // spec/04 section 4.7: both lanes trap `Domain` in `scatter_replace` with the
+    // same context line (chelis#3107).
+    let failure = "scatter_replace operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\n\
+                   numeric trap: domain in scatter_replace at i64";
+    assert!(refused.contains(failure), "{refused}");
     let generated = ownership_support::emit(LENGTHS_DIFFER.source, LENGTHS_DIFFER.name);
     let stderr = ownership_support::run_failure_stderr(&generated, "");
-    assert!(
-        stderr.contains("Domain: scatter update shape or dtype mismatch")
-            && stderr.contains("numeric trap: domain in scatter_replace"),
-        "{stderr}"
-    );
+    assert!(stderr.contains(failure), "{stderr}");
 }

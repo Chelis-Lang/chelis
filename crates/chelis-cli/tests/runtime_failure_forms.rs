@@ -369,3 +369,138 @@ fn spec_decided_divergences_agree_across_lanes() {
         assert_eq!(run.stdout, expected, "{name}: {run:?}");
     }
 }
+
+/// spec/04-type-system.md section 4.7: operands whose shapes must be
+/// identical, compared at run time, trap `Domain` in the operation with one
+/// context line naming both shapes and the first disagreeing axis, on both
+/// lanes (chelis#3107). The lengths come from a computed List, so only the
+/// run time can compare them.
+#[test]
+fn operand_shape_disagreements_trap_in_the_operation() {
+    const LENGTHS: &str =
+        "def v(n: i64) -> List[f32] = map(fn (i: i64) -> cast(i, f32), range(0i64, n))\n";
+    let sources = [
+        format!(
+            "{LENGTHS}def f(x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = where(gt(x, to_tensor([0.5f32, 0.5f32, 0.5f32])), x, y)\n\
+             out = f(to_tensor(v(3i64)), to_tensor(v({{value}})))\n"
+        ),
+        format!(
+            "{LENGTHS}def f(x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, bool] = cmplt(x, y)\n\
+             out = f(to_tensor(v(3i64)), to_tensor(v({{value}})))\n"
+        ),
+        format!(
+            "{LENGTHS}def f(b: tensor[*, f32], u: tensor[*, f32]) -> tensor[*, f32] = scatter_replace(b, to_tensor([0i64, 1i64]), u, 0i32)\n\
+             out = f(to_tensor(v(4i64)), to_tensor(v({{value}})))\n"
+        ),
+        format!(
+            "{LENGTHS}def f(b: tensor[*, f32], u: tensor[*, f32]) -> tensor[*, f32] = scatter(b, to_tensor([0i64, 1i64]), u, 0i32, \"add\")\n\
+             out = f(to_tensor(v(4i64)), to_tensor(v({{value}})))\n"
+        ),
+    ];
+    let rows = [
+        (
+            "where_branch",
+            "2i64",
+            "3i64",
+            "where operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2",
+            "where",
+            "out = tensor(shape=[3], data=[0.0, 1.0, 2.0])\n",
+        ),
+        (
+            "cmplt_operands",
+            "2i64",
+            "3i64",
+            "cmplt operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2",
+            "cmplt",
+            "out = tensor(shape=[3], data=[false, false, false])\n",
+        ),
+        (
+            "scatter_replace_updates",
+            "3i64",
+            "2i64",
+            "scatter_replace operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
+            "scatter_replace",
+            "out = tensor(shape=[4], data=[0.0, 1.0, 2.0, 3.0])\n",
+        ),
+        (
+            "scatter_add_updates",
+            "3i64",
+            "2i64",
+            "scatter operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3",
+            "scatter",
+            "out = tensor(shape=[4], data=[0.0, 2.0, 2.0, 3.0])\n",
+        ),
+    ];
+    for (source, (name, failing, passing, context, op, passing_out)) in sources.iter().zip(rows) {
+        let trap = format!("numeric trap: domain in {op} at i64");
+        assert_guard(&Guard {
+            name,
+            source,
+            failing,
+            passing,
+            context,
+            trap: &trap,
+            passing_out,
+        });
+    }
+}
+
+/// The class lock behind the rows above: no runtime, emitter or evaluator
+/// source spells an operand-shape failure outside `chelis_abi::failure`.
+#[test]
+fn no_lane_spells_a_legacy_operand_shape_failure() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let legacy = [
+        "expects matching tensor shape",
+        "expects matching tensor rank",
+        "tensor shapes must match",
+        "operand shape mismatch",
+        "shapes must match exactly",
+        "must match gathered tensor shape",
+        "update shape or dtype mismatch",
+        "requires indices.shape == updates.shape",
+    ];
+    let mut sources = Vec::new();
+    for dir in [
+        "crates/chelis-runtime/src",
+        "crates/chelis-runtime/include",
+        "crates/chelis-backend-c/src",
+        "crates/chelis-compiler-api/src/runtime",
+        "crates/chelis-ir/src",
+    ] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).expect("read source directory") {
+                    stack.push(entry.expect("directory entry").path());
+                }
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "h" || ext == "c")
+            {
+                sources.push(path);
+            }
+        }
+    }
+    assert!(
+        sources.len() > 20,
+        "the scan must read the lane sources, found {}",
+        sources.len()
+    );
+    let mut found = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).expect("read source");
+        for (line_number, line) in text.lines().enumerate() {
+            for phrase in legacy {
+                if line.contains(phrase) {
+                    found.push(format!("{}:{}: {phrase}", path.display(), line_number + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "operand-shape failures must render through chelis_abi::failure:\n{}",
+        found.join("\n")
+    );
+}

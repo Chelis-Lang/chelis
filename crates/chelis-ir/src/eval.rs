@@ -1127,6 +1127,18 @@ fn agreement_failure(dag: &Dag, node: &DagNode, lhs: &TensorValue, rhs: &TensorV
     shape_disagreement(crate::grad::risc_op_name(&node.op), lhs, rhs)
 }
 
+/// A scatter's updates disagree at run time with the gathered shape they must
+/// take: a section 4.7 `Domain` trap in the scatter, as compiled C renders it.
+fn sparse_updates_disagreement(op: &str, expected: &[usize], updates: &TensorValue) -> String {
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    chelis_abi::failure::operand_shape_disagreement(op, &exact(expected), &exact(&updates.shape))
+}
+
 fn shape_disagreement(op: &str, lhs: &TensorValue, rhs: &TensorValue) -> String {
     let exact = |shape: &[usize]| {
         shape
@@ -1473,11 +1485,17 @@ fn where_elementwise(
     // an empty condition yields an empty result of its own shape.
     let then_selected = condition_values.iter().any(|selected| *selected != 0);
     let else_selected = condition_values.contains(&0);
-    let shape_error = || "where: condition and branch shapes must match exactly".to_string();
+    // spec/04 section 4.7: a disagreement is a `Domain` trap in `where`,
+    // comparing the condition with a branch as every lane does.
+    let shape_error = |branch: &TensorValue| shape_disagreement("where", condition, branch);
     match (then_selected, else_selected) {
-        (true, false) if condition.shape != then_value.shape => return Err(shape_error()),
+        (true, false) if condition.shape != then_value.shape => {
+            return Err(shape_error(then_value));
+        }
         (true, false) => return Ok(then_value.clone()),
-        (false, true) if condition.shape != else_value.shape => return Err(shape_error()),
+        (false, true) if condition.shape != else_value.shape => {
+            return Err(shape_error(else_value));
+        }
         (false, true) => return Ok(else_value.clone()),
         (false, false) => {
             return Ok(TensorValue::from_storage(
@@ -1487,8 +1505,11 @@ fn where_elementwise(
         }
         (true, true) => {}
     }
-    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
-        return Err(shape_error());
+    if condition.shape != then_value.shape {
+        return Err(shape_error(then_value));
+    }
+    if condition.shape != else_value.shape {
+        return Err(shape_error(else_value));
     }
     let writes = condition_values
         .into_iter()
@@ -1654,7 +1675,13 @@ fn scatter_add(
     let index_rank = indices.shape.len();
     let index_suffix_rank = index_rank - batch_rank;
     let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
-    assert_eq!(updates.shape, expected_updates);
+    if updates.shape != expected_updates {
+        return Err(sparse_updates_disagreement(
+            "scatter",
+            &expected_updates,
+            updates,
+        ));
+    }
 
     // [05-OP-33]: each destination's leaves are its target value, then the
     // targeting updates in row-major update order.
@@ -1708,7 +1735,13 @@ fn scatter_replace(
     let index_rank = indices.shape.len();
     let index_suffix_rank = index_rank - batch_rank;
     let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
-    assert_eq!(updates.shape, expected_updates);
+    if updates.shape != expected_updates {
+        return Err(sparse_updates_disagreement(
+            "scatter_replace",
+            &expected_updates,
+            updates,
+        ));
+    }
 
     let mut writes = Vec::with_capacity(updates.len());
     for update_linear in 0..updates.len() {
@@ -1760,10 +1793,13 @@ fn scatter_elements(
     axis: usize,
 ) -> Result<TensorValue, String> {
     assert!(axis < data.shape.len());
-    assert_eq!(
-        indices.shape, updates.shape,
-        "scatter_elements requires indices.shape == updates.shape"
-    );
+    if indices.shape != updates.shape {
+        return Err(sparse_updates_disagreement(
+            "scatter_elements",
+            &indices.shape,
+            updates,
+        ));
+    }
     assert_eq!(
         indices.shape.len(),
         data.shape.len(),
@@ -5922,10 +5958,18 @@ mod tests {
         let selected = where_elementwise(&condition(&[0, 0, 0]), &two, &three).unwrap();
         assert_eq!(selected.shape, vec![3]);
         assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
-        for flags in [&[1, 1, 1][..], &[0, 0][..]] {
+        // spec/04 section 4.7: the condition disagrees with the one branch
+        // it selects, a `Domain` trap in `where`.
+        for (flags, context) in [
+            (&[1, 1, 1][..], "lhs [3] has 3, rhs [2] has 2"),
+            (&[0, 0][..], "lhs [2] has 2, rhs [3] has 3"),
+        ] {
             assert_eq!(
                 where_elementwise(&condition(flags), &two, &three).unwrap_err(),
-                "where: condition and branch shapes must match exactly",
+                format!(
+                    "where operands disagree at axis 0: {context}\n\
+                     numeric trap: domain in where at i64"
+                ),
                 "{flags:?}"
             );
         }
@@ -5934,7 +5978,8 @@ mod tests {
         assert_eq!(empty.prim(), Prim::F64);
         assert_eq!(
             where_elementwise(&condition(&[1, 0, 1]), &three, &two).unwrap_err(),
-            "where: condition and branch shapes must match exactly"
+            "where operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+             numeric trap: domain in where at i64"
         );
         let mixed = where_elementwise(
             &condition(&[1, 0, 1]),

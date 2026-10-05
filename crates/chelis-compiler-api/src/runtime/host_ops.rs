@@ -2208,8 +2208,12 @@ pub(super) fn tensor_concat_value(
         if tensor.precision != first.precision {
             return Err("concat expects matching tensor precision".to_string());
         }
+        // The checker fixes every part's rank; only an extent can disagree
+        // at run time.
         if tensor.value.shape.len() != first.value.shape.len() {
-            return Err("concat expects matching tensor rank".to_string());
+            return Err(
+                "chelis internal error: concat parts reached eval with different ranks".to_string(),
+            );
         }
         for dim in 0..tensor.value.shape.len() {
             if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
@@ -2440,8 +2444,22 @@ pub(super) fn tensor_scatter_value(
     let mut expected_shape = base.value.shape[..axis].to_vec();
     expected_shape.extend_from_slice(&indices.value.shape);
     expected_shape.extend_from_slice(&base.value.shape[axis + 1..]);
-    if expected_shape != updates.value.shape || base.precision != updates.precision {
-        return Err("scatter updates must match gathered tensor shape and precision".to_string());
+    if base.precision != updates.precision {
+        return Err("scatter updates must match the base precision".to_string());
+    }
+    // spec/04 section 4.7: the updates' run-time shape disagrees with the
+    // gathered shape, a `Domain` trap in the scatter, as compiled C renders it.
+    if expected_shape != updates.value.shape {
+        let op = if mode == "replace" {
+            "scatter_replace"
+        } else {
+            "scatter"
+        };
+        return Err(operand_shape_disagreement(
+            op,
+            &expected_shape,
+            &updates.value.shape,
+        ));
     }
     let index_values = indices
         .value
@@ -2517,8 +2535,14 @@ pub(super) fn tensor_scatter_elements_value(
     if !indices.precision.is_integer() {
         return Err("scatter_elements expects integer tensor indices".to_string());
     }
+    // spec/04 section 4.7: the updates' run-time shape disagrees with the
+    // indices', a `Domain` trap in `scatter_elements`, as compiled C renders it.
     if indices.value.shape != updates.value.shape {
-        return Err("scatter_elements requires indices.shape == updates.shape".to_string());
+        return Err(operand_shape_disagreement(
+            "scatter_elements",
+            &indices.value.shape,
+            &updates.value.shape,
+        ));
     }
     if indices.value.shape.len() != data.value.shape.len() {
         return Err(

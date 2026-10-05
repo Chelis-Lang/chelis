@@ -1977,18 +1977,19 @@ unsafe fn tensor_clone(tensor: *const chelis_tensor) -> *mut chelis_tensor {
     out
 }
 
+/// spec/04-type-system.md section 4.7: two operands of `op` whose shapes must
+/// be identical disagree at run time, a `Domain` trap in `op`, rendered as
+/// every evaluator renders it.
 unsafe fn require_same_tensor_shape_validated(
     lhs: *const chelis_tensor,
     rhs: *const chelis_tensor,
     op: &str,
 ) {
-    if (*lhs).rank() != (*rhs).rank() {
-        runtime_fail!("{op} expects matching tensor rank");
-    }
-    for axis in 0..(*lhs).rank() as usize {
-        if (*lhs).shape()[axis] != (*rhs).shape()[axis] {
-            runtime_fail!("{op} expects matching tensor shape");
-        }
+    if (*lhs).shape() != (*rhs).shape() {
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::operand_shape_disagreement(op, (*lhs).shape(), (*rhs).shape())
+        );
     }
 }
 
@@ -3605,12 +3606,24 @@ pub unsafe extern "C" fn chelis_tensor_sparse_plan(
             );
         }
         let updates_dtype = tensor_metadata_dtype(updates, op);
-        if updates_dtype != base_dtype || (*updates).shape() != metadata.domain().shape() {
+        if updates_dtype != base_dtype {
             affine_result::<()>(
                 Err(MetadataError::Domain(
-                    "scatter update shape or dtype mismatch".into(),
+                    "scatter update dtype mismatch".into(),
                 )),
                 op,
+            );
+        }
+        // The updates take the gathered shape; a run-time disagreement is a
+        // section 4.7 `Domain` trap in the scatter.
+        if (*updates).shape() != metadata.domain().shape() {
+            runtime_fail!(
+                "{}",
+                chelis_abi::failure::operand_shape_disagreement(
+                    op,
+                    metadata.domain().shape(),
+                    (*updates).shape()
+                )
             );
         }
     }
@@ -6041,8 +6054,10 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         std::slice::from_raw_parts((*first).shape().as_ptr(), (*first).rank() as usize).to_vec();
     out_shape[axis_i] = 0;
     for (part, (&tensor, &part_dtype)) in tensors.iter().zip(&dtypes).enumerate() {
+        // The checker fixes every part's rank and dtype; a disagreement here
+        // is a lowering defect, not a program's run-time extent.
         if (*tensor).rank() != (*first).rank() || part_dtype != dtype {
-            runtime_fail!("Domain: concat expects matching tensor rank and dtype");
+            runtime_fail!("chelis internal error: concat parts reached the runtime with different ranks or dtypes");
         }
         for axis2 in 0..(*tensor).rank() as usize {
             if axis2 != axis_i && (*tensor).shape()[axis2] != (*first).shape()[axis2] {
@@ -6486,8 +6501,10 @@ pub unsafe extern "C" fn chelis_tensor_where(
         }
         (false, false) => cond,
         (true, true) => {
+            // Both branches are compared with the condition, as every
+            // evaluator compares them.
             require_same_tensor_shape_validated(cond, then_tensor, "where");
-            require_same_tensor_shape_validated(then_tensor, else_tensor, "where");
+            require_same_tensor_shape_validated(cond, else_tensor, "where");
             then_tensor
         }
     };
