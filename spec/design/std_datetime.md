@@ -1083,9 +1083,9 @@ Every bed package follows the same rules:
   package version.
 - **Spans.** Where the data covers a span of time, the values it produces carry that
   span, and nothing is extrapolated silently.
-- **Sync.** A scheduled workflow re-fetches the upstream and proposes any change as a
-  pull request whose description lists the changed data; a fetch or parse failure
-  fails the run and opens an issue.
+- **Sync.** A scheduled workflow re-fetches the package's upstream sources and proposes
+  any change as a pull request whose description lists the changed data; a fetch or
+  parse failure fails the run and opens an issue.
 
 **meridian (tzdata, S4b):**
 - The generator builds the package from a pinned IANA release, which the package
@@ -1103,8 +1103,12 @@ Every bed package follows the same rules:
   - bank and public holidays: `england_and_wales()`, `us_federal()`, `japan_bank()`,
     `new_south_wales()`, `hong_kong()`;
   - market calendars: `nyse()`, `sifma()`, `target()`.
-- **Horizon.** Each calendar's horizon is the span its source publishes. A query
-  outside it fails `domain`, and the `try_` forms return `None`.
+- **Horizon.** Each calendar's horizon is at most the span its source publishes. It is
+  narrower in two cases: `japan_bank()` starts in 1990, the first full year of
+  Saturday bank closures, although its source lists holidays from 1955; and
+  `us_federal()` ends on 30 December when the next 1 January is a Saturday, since that
+  Friday is observed under a schedule the source does not yet list. A query outside the
+  horizon fails `domain`, and the `try_` forms return `None`.
 - **Rules where the law fixes the days.** TARGET's closing days and New South Wales's
   standard holidays are generated from their rules, and generation fails unless the
   published days equal the rule's plus the days published as one-offs.
@@ -1114,15 +1118,19 @@ Every bed package follows the same rules:
 - **Projections are named, never silent.** Extending a calendar past its published
   years by applying its rules is offered only as a separately named producer,
   `<calendar>_projected(until_year)` with a `try_` form, so a projection is visible in
-  the program text. A projection has no lunar, solar-term or announced holiday, since
-  no rule states one, and each calendar documents what its projection omits.
+  the program text. A projection holds only the days its rules or a stated formula
+  give: it has no lunar or announced holiday, and Hong Kong's projection has no
+  solar-term holiday. Japan's equinox holidays are predicted by formula, so its
+  projection ends by 2099. Each calendar documents what its projection omits.
 - **Provenance.** Each calendar exposes `<calendar>_source()`,
   `<calendar>_source_urls()`, `<calendar>_retrieved()` (the retrieval date of its
   oldest document) and `<calendar>_snapshot_sha256s()`; the package exposes
   `shoreleave_version()`. A generated listing per calendar names every parsed entry
   (holiday, exclusion with its reason, early close with its time), so a regeneration
-  that changes a date shows as a changed line in review. A calendar holds the
-  announced closures published by its retrieval date and no later.
+  that changes a date shows as a changed line in review. A calendar holds at most the
+  announced closures published by its retrieval date. `us_federal()`'s executive-order
+  closures come only from the orders listed in the generator, which a maintainer adds
+  as each is published; the sync re-reads those orders but does not discover new ones.
 - Early closes are business days: `BusinessCalendar` has no half-day kind.
 
 **Versioning.** Under the shell contract each package pins `compiler = "=X.Y.Z"`, so
