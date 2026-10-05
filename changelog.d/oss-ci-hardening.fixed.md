@@ -1,1 +1,0 @@
-CI and Hull candidate jobs use read-only GitHub cache tokens, including base-retarget dispatches. Branch names reach candidate identity and retarget scripts through quoted environment variables. CI and Hull restore existing caches but do not publish new cache entries, including on pushes to main.

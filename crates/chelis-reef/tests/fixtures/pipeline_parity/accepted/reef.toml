@@ -2,6 +2,6 @@ schema = "3"
 [package]
 name = "pipeline-parity"
 version = "1.2.3"
-compiler = "=0.18.12"
+compiler = "=0.18.13"
 module_prefix = "PipelineParity"
 resolver = "2"
