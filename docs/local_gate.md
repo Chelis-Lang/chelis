@@ -144,7 +144,9 @@ conformance skill assets, and the opaque-invariants corpus) and
 `cargo fmt --all`, then `ci_change_owned.py classify-paths` over the changed
 set, `chelis lint --check .`, `scripts/eval_system_guard.py` over the evaluator
 source, `scripts/check_std_bundle_untracked.py` over the index,
-`cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
+`cargo clippy -p <crate> --all-targets -- -D warnings` for each changed crate
+(the targets CI's workspace clippy lints, so a lint that fires only in a
+non-test library or binary build fails locally too),
 one `cargo nextest run` over the drift tripwires (atom
 partition, generated dtype header, compiler pins, opaque corpus,
 loud-unsupported, payload census, bundled std loader, conformance manifest,
