@@ -23,28 +23,18 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-    /// Counts whole-program definition folds on this thread (chelis#2207).
-    /// `prepare_subexpr_lowering_context` folds every definition it admits,
-    /// so this rises once per context prepared, never once per definition.
-    static PROGRAM_DEF_FOLD_PASSES: Cell<u64> = const { Cell::new(0) };
+    /// Counts whole-program context preparations on this thread (chelis#2207).
+    static PROGRAM_CONTEXT_PREPARATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Whole-program definition folds on this thread since the last reset.
-///
-/// Preparing a [`SubexprLoweringContext`] folds the pipes in every definition
-/// it admits (chelis#1923), which is linear in the program. A caller that
-/// lowers many subexpressions against one fixed program should therefore
-/// prepare one context and reuse it; this counter is how a test states that
-/// obligation as a bound rather than as a wall clock, in the shape of
-/// chelis#1835's `host::host_summary_probe_builds`. A counted receipt cannot
-/// flake under machine load.
-pub fn program_def_fold_passes() -> u64 {
-    PROGRAM_DEF_FOLD_PASSES.with(Cell::get)
+/// Context preparations on this thread. Prepare once and share immutable
+/// definitions when lowering many subexpressions of the same program.
+pub fn program_context_preparations() -> u64 {
+    PROGRAM_CONTEXT_PREPARATIONS.with(Cell::get)
 }
 
-/// Reset [`program_def_fold_passes`] for this thread.
-pub fn reset_program_def_fold_passes() {
-    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(0));
+pub fn reset_program_context_preparations() {
+    PROGRAM_CONTEXT_PREPARATIONS.with(|passes| passes.set(0));
 }
 
 pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
@@ -2061,39 +2051,9 @@ pub(crate) fn prepare_subexpr_lowering_context(
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
 ) -> SubexprLoweringContext {
+    PROGRAM_CONTEXT_PREPARATIONS.with(|passes| passes.set(passes.get() + 1));
     assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
-    // chelis#1923, the other half of this ingress: the def bodies the
-    // subexpression inlines are unchecked Deep too, and a pipe in one of them
-    // reaches lowering exactly as a pipe in the subexpression itself would.
-    // Folded here, beside the decode-once assertions, so this boundary
-    // normalizes everything it admits rather than half of it.
-    //
-    // The fold is linear in the program, and a context is a pure function of
-    // the three tables above, so a caller lowering many subexpressions
-    // against one fixed program prepares the context once instead of paying
-    // this per subexpression (chelis#2207, and the free `*_with_context`
-    // entries below). `PROGRAM_DEF_FOLD_PASSES` is how a test holds that
-    // caller to it.
-    //
-    // A table with no pipe in it keeps its `Arc`:
-    // the host runtime prepares a context per `grad` or `vmap` application,
-    // and copying every definition, the standard library's included, on each
-    // one made applications scale with the program (chelis#2434).
-    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(passes.get() + 1));
-    let folded: Vec<(String, Expr)> = program_defs
-        .iter()
-        .filter_map(|(name, body)| {
-            chelis_deep::pipe::fold_pipes_if_changed(body).map(|body| (name.clone(), body))
-        })
-        .collect();
-    let program_defs = if folded.is_empty() {
-        program_defs
-    } else {
-        let mut defs = (*program_defs).clone();
-        defs.extend(folded);
-        Arc::new(defs)
-    };
     let mut program_types: BTreeMap<String, TensorType> = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -2274,16 +2234,6 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     options: SubexprLoweringOptions,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    // chelis#1923: this is the one lowering ingress that receives UNCHECKED
-    // Deep, measured and in use. Every whole-program entry takes a
-    // `CheckedProgram`, whose input the checker folded, but a subexpression
-    // can arrive from a caller that parsed or synthesized it, so the fold
-    // runs here at the boundary rather than leaving a pipe to reach the
-    // fail-closed raise. This is the SAME `fold_pipe`, not a second
-    // derivation of spec/02 §0.1: a boundary that folds its own way is
-    // exactly what this change removed.
-    let folded = chelis_deep::pipe::fold_pipes(expr);
-    let expr = &folded;
     // As above, a failed attempt owns and discards its complete collector.
     catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, _, _) =
@@ -6450,10 +6400,6 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
     }
-    // chelis#569: the pipe spelling of the same read.
-    if tag == DeepTag::Pipe {
-        return pipe_shape_read(kids);
-    }
     if app_var_name_and_args(expr).map(|(name, _)| name) != Some("shape") {
         return None;
     }
@@ -6463,73 +6409,6 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let axis = kids.get(2).and_then(extract_int_for_dim)?;
     let axis = usize::try_from(axis).ok()?;
     Some((operand, axis))
-}
-
-/// Recognize the pipe spelling of a `shape(operand, axis)` read (chelis#569).
-///
-/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, i32)), i64)` into
-/// `x |> shape(cast(0, i32)) |> cast(i64)`; both denote the same extent,
-/// so one recognizer answers for both and the lint cannot turn a building
-/// program into one the lowerer refuses.
-///
-/// `(pipe {} v s1 .. sn)` denotes `sn(..s1(v))`, and each `s` is the
-/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a call
-/// stage. The read is recognized when the FIRST stage reads `shape` off its
-/// own parameter and every later stage only re-types the result, which is
-/// what the trailing `|> cast(ty)` stages do. Any other stage returns `None`:
-/// the operand a later stage would name is a computed value, not the tensor
-/// whose axis supplies the extent.
-fn pipe_shape_read(kids: &[Expr]) -> Option<(&Expr, usize)> {
-    let operand = kids.first()?;
-    let mut axis: Option<usize> = None;
-    for stage in &kids[1..] {
-        let (param, body) = pipe_stage_lambda(stage)?;
-        match axis {
-            None => {
-                let (read_operand, read_axis) = shape_app_operand_axis(body)?;
-                if bare_var_name(strip_cast_wrappers(read_operand))? != param {
-                    return None;
-                }
-                axis = Some(read_axis);
-            }
-            Some(_) => {
-                if bare_var_name(strip_cast_wrappers(body))? != param {
-                    return None;
-                }
-            }
-        }
-    }
-    Some((operand, axis?))
-}
-
-/// The parameter name and body of a synthesized unary pipe-stage lambda,
-/// the `(fn {} (params {} p) body)` shape `parse_pipe_stage` produces.
-fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
-    let kids = match stage.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    let param_kids = match kids.first()?.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return None,
-    };
-    if param_kids.len() != 1 {
-        return None;
-    }
-    let Some(Expr::Atom(Atom::Name(name), _)) = param_kids.first() else {
-        return None;
-    };
-    Some((name.clone(), kids.get(1)?))
 }
 
 /// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
@@ -10853,7 +10732,7 @@ impl<'program> LowerCtx<'program> {
             DeepTag::Var => self.lower_var(meta, kids, span),
             DeepTag::App => self.lower_app(meta, kids, span),
             DeepTag::Fn => self.lower_fn(meta, kids, claim),
-            DeepTag::Pipe => self.lower_pipe(),
+
             DeepTag::Cast => self.lower_cast(meta, kids),
             DeepTag::If => self.lower_if(meta, kids, span),
             DeepTag::Tuple => self.lower_tuple(kids),
@@ -21454,23 +21333,6 @@ impl<'program> LowerCtx<'program> {
         ))
     }
 
-    /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
-    /// A `pipe` must never reach lowering: `chelis_deep::pipe::fold_pipe`
-    /// replaced it with the application `spec/02-surf-syntax.md` §0.1 says it
-    /// denotes, at the checker's input, so every pass after the checker sees
-    /// that application and none of them re-derives the sentence for itself.
-    /// A pipe arriving here means the fold did not run, and lowering one
-    /// anyway is what chelis#1923 and chelis#1791 were: two derivations of one
-    /// sentence that disagreed. So this fails closed rather than keeping a
-    /// second path alive to hide the day the first stops folding.
-    fn lower_pipe(&mut self) -> LoweredValue {
-        raise_malformed_deep(
-            "a pipe reached lowering unfolded",
-            None,
-            self.current_span_id.clone(),
-        )
-    }
-
     /// `(cast {} expr (t-prim {} name))` -- precision cast.
     ///
     /// chelis#730 Phase 1 (census row 13, chelis#744): a cast target that
@@ -23569,7 +23431,7 @@ mod fused_zero_tests {
         for (style, call) in [
             ("direct", "f(x)"),
             ("helper", "apply(f, x)"),
-            ("pipe", "x |> f"),
+            ("pipe", "(x |> f)"),
         ] {
             for dead in [false, true] {
                 let body = if dead {
@@ -24041,7 +23903,7 @@ mod tests {
     /// table that has no pipe to fold. The host runtime prepares one per
     /// `grad` or `vmap` application, so a copy there scales every application
     /// with the whole program, the standard library's definitions included.
-    /// A table with a pipe is still folded.
+    /// Surf pipe bodies reach this context as normalized applications.
     #[test]
     fn a_pipe_free_definition_table_keeps_its_arc() {
         let parse = |source: &str| {
@@ -24069,10 +23931,10 @@ mod tests {
 
         let piped = Arc::new(BTreeMap::from([(
             "f".to_string(),
-            parse("(fn {} (params {} x) (pipe {} (var {} x) (var {} g)))"),
+            parse("(fn {}\n  (params {} x)\n  (app {} (var {} g) (var {} x)))"),
         )]));
         let folded = context_defs(&piped);
-        assert!(!Arc::ptr_eq(&folded, &piped));
+        assert!(Arc::ptr_eq(&folded, &piped));
         let body = chelis_deep::printer::print_expr_flat(&folded["f"]);
         assert!(!body.contains("pipe"), "the pipe must fold: {body}");
     }
@@ -28870,33 +28732,41 @@ mod regression_tests {
     fn pipe_lambda_stage_preserves_tensor_shape_for_following_matmul() {
         let dag = parse_and_lower(
             r#"
-                (def {} x
-                  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
-                (def {} w1
-                  (var {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))} w1))
-                (def {} bias
-                  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))} bias))
-                (def {} w2
-                  (var {type: (t-tensor {} (d-lit {} 128) (d-lit {} 10) (t-prim {} f32))} w2))
-                (def {} h1
-                  (pipe {}
-                    (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
-                      (var {} matmul)
-                      (var {} x)
-                      (var {} w1))
-                    (fn {type: (t-fn {} (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32)) (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32)))}
-                      (params {} p)
-                      (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
-                        (var {} add)
-                        (var {} p)
-                        (var {} bias)))
-                    (var {} relu)))
-                (def {} out
-                  (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 10) (t-prim {} f32))}
-                    (var {} matmul)
-                    (var {} h1)
-                    (var {} w2)))
-            "#,
+(def {}
+  x
+  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
+
+(def {}
+  w1
+  (var {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))} w1))
+
+(def {}
+  bias
+  (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))} bias))
+
+(def {}
+  w2
+  (var {type: (t-tensor {} (d-lit {} 128) (d-lit {} 10) (t-prim {} f32))} w2))
+
+(def {}
+  h1
+  (app {}
+    (var {} relu)
+    (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
+      (var {} add)
+      (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
+        (var {} matmul)
+        (var {} x)
+        (var {} w1))
+      (var {} bias))))
+
+(def {}
+  out
+  (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 10) (t-prim {} f32))}
+    (var {} matmul)
+    (var {} h1)
+    (var {} w2)))
+"#,
         );
         let root = dag
             .roots()
@@ -29792,7 +29662,7 @@ mod regression_tests {
     #[test]
     fn an_unsupported_transform_in_pipe_position_names_the_transform() {
         let exprs = chelis_deep::parser::parse_str(
-            "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
+            "(app {} (grad {} (var {} f)) (lit {type: (t-prim {} f32)} 1.0))",
         )
         .expect("parse failed");
         let err =

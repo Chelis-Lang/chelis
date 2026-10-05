@@ -1,6 +1,6 @@
 xs: List[i64] = [1i64, 2i64, 3i64, 4i64]
 mapped = map(fn (x: i64) -> add(x, 1i64), xs)
-filtered = filter(fn (x: i64) -> x |> mod(2i64) |> eq(0i64), mapped)
+filtered = filter(fn (x: i64) -> (x |> mod(2i64) |> eq(0i64)), mapped)
 total = fold(fn (acc: i64, x: i64) -> add(acc, x), 0i64, filtered)
 scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), 0i64, xs)
 buckets = partition(fn (x: i64) -> gt(x, 2i64), xs)

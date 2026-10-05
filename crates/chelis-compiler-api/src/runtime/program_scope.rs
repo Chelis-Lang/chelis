@@ -439,15 +439,6 @@ impl<'s> ReachWalk<'s> {
                 }
             }
             // Each stage after the first is applied to the running value.
-            DeepTag::Pipe => {
-                for (index, child) in children.iter().enumerate() {
-                    self.expr(child);
-                    if index == 0 {
-                        continue;
-                    }
-                    self.applied(child);
-                }
-            }
             _ => {
                 for child in children {
                     self.expr(child);

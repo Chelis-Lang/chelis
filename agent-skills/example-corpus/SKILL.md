@@ -67,7 +67,7 @@ Spellings that are hard errors, not style:
   (`spec/04` §5.7.1); declare the result as `i32`, pass `accumulator=i64` to
   `sum` or `einsum`, or narrow it with an explicit `cast`.
 - Pipe stages use first-argument insertion: `x |> f(y)` means `f(x, y)`. Use
-  `x |> fn (v) -> f(y, v)` when the piped value belongs in a later position.
+  `x |> (fn (v) -> f(y, v))` when the piped value belongs in a later position.
 
 Style the lint rules enforce:
 

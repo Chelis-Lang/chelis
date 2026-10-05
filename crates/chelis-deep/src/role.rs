@@ -90,7 +90,6 @@ pub fn type_syntax_node_role(tag: DeepTag) -> Option<TypeSyntaxRole> {
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet
@@ -173,7 +172,6 @@ pub fn type_syntax_child_role(tag: DeepTag, index: usize, arity: usize) -> Optio
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet
@@ -410,13 +408,6 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
                 Selector
             }
         }
-        DeepTag::Pipe => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
         DeepTag::TupleGet => {
             if index == 0 {
                 RuntimeExpr
@@ -531,7 +522,6 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::Lit => Fixed(1),            // value
         DeepTag::Record => AtLeast(1),       // type-name + fields
         DeepTag::Access => Fixed(2),         // expr, field
-        DeepTag::Pipe => AtLeast(2),         // input + stages
         DeepTag::Block => AtLeast(1),        // expressions
         DeepTag::Tuple => AtLeast(0),        // elements (unit = empty)
         DeepTag::TupleGet => Fixed(2),       // expr, index
@@ -609,7 +599,6 @@ pub fn is_declaration_tag(tag: DeepTag) -> bool {
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet
@@ -685,7 +674,6 @@ pub fn is_pattern_tag(tag: DeepTag) -> bool {
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet
@@ -733,7 +721,6 @@ pub fn bypass_child_expectation(tag: DeepTag, index: usize) -> BypassExpectation
         DeepTag::Match => RequiresTag(DeepTag::Arm),
         DeepTag::Record | DeepTag::RecordUpdate => RequiresTag(DeepTag::Kv),
         DeepTag::Let => RequiresTag(DeepTag::Bind),
-        DeepTag::Pipe => FormExpecting,
         DeepTag::Arm => RequiresPattern,
         DeepTag::PatCtor => RequiresPattern,
         DeepTag::PatRecord => RequiresTag(DeepTag::Kv),
@@ -997,14 +984,6 @@ mod tests {
         assert_eq!(
             bypass_child_expectation(DeepTag::Match, 1),
             BypassExpectation::RequiresTag(DeepTag::Arm)
-        );
-    }
-
-    #[test]
-    fn pipe_stages_are_form_expecting() {
-        assert_eq!(
-            bypass_child_expectation(DeepTag::Pipe, 1),
-            BypassExpectation::FormExpecting
         );
     }
 

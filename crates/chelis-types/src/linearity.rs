@@ -999,23 +999,6 @@ impl Checker {
                         self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                     }
                     DeepTag::App => self.check_app(expr, children, scope),
-                    // chelis#1923: a pipe cannot reach linearity, which reads the
-                    // checked program, because every checker entry folds it into
-                    // the application it denotes. The arm that used to sit here
-                    // peered through the desugarer's synthesized stage lambda to
-                    // ask the inner callee whether the piped value is borrowed or
-                    // consumed; the folded application puts that callee in callee
-                    // position, so `check_app` asks the same question once. Fail
-                    // closed rather than falling through to the structural walk,
-                    // which would answer silently.
-                    DeepTag::Pipe => self.push_diagnostic(CheckError::new(
-                        CheckErrorKind::MalformedForm,
-                        "a pipe reached linearity unfolded: every checker entry folds a pipe into \
-                         the application it denotes (spec/02-surf-syntax.md section 0.1; \
-                         chelis#1923)"
-                            .to_string(),
-                        vec![],
-                    )),
                     DeepTag::Let => self.check_let(children, scope),
                     DeepTag::Fn => self.check_fn(expr, children, scope),
                     DeepTag::If => self.check_if(children, scope),
@@ -2237,7 +2220,7 @@ impl Checker {
             // for a destructured component is the desugarer's
             // `__chelis_tmpN` — a name that appears nowhere in the
             // user's source and that they cannot act on.
-            self.push_diagnostic(CheckError::new(
+            self.push_diagnostic(located_error(expr, CheckError::new(
                 CheckErrorKind::UseAfterConsume,
                 with_macro_provenance(
                     expr,
@@ -2249,7 +2232,7 @@ impl Checker {
                 vec![format!(
                     "Move the later use before the `drop`, or bind `copy({name})` before it"
                 )],
-            ));
+            )));
             return;
         }
         // A `drop` cannot end an owner that a closure still borrows: the
@@ -2284,7 +2267,7 @@ impl Checker {
                         || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
-                self.push_diagnostic(CheckError::new(
+                self.push_diagnostic(located_error(expr, CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
@@ -2294,7 +2277,7 @@ impl Checker {
                         ),
                     ),
                     vec!["Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()],
-                ));
+                )));
             }
             Some(BindingState::Consumed(consumed_at))
                 if matches!(consumed_at.kind, ConsumeKind::Aliasing)
@@ -2347,7 +2330,7 @@ impl Checker {
                 } else {
                     " (an alias of a destructured binding)"
                 };
-                self.push_diagnostic(CheckError::new(
+                self.push_diagnostic(located_error(expr, CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
@@ -2359,7 +2342,7 @@ impl Checker {
                     vec![format!(
                         "Insert `copy({name})` before the first consuming use if you need to reuse it"
                     )],
-                ));
+                )));
             }
             // A `drop` still ends the owner after an earlier consume: copy
             // insertion gives the earlier use the copy, so a use after
@@ -2430,10 +2413,9 @@ impl Checker {
         );
         let suggestion =
             format!("Insert `copy({name})` before the first consuming use if you need to reuse it");
-        self.push_diagnostic(CheckError::new(
-            CheckErrorKind::UseAfterConsume,
-            message,
-            vec![suggestion],
+        self.push_diagnostic(located_error(
+            expr,
+            CheckError::new(CheckErrorKind::UseAfterConsume, message, vec![suggestion]),
         ));
     }
 
@@ -3017,7 +2999,6 @@ fn is_runtime_expression_tag(tag: DeepTag) -> bool {
             | DeepTag::Lit
             | DeepTag::Record
             | DeepTag::Access
-            | DeepTag::Pipe
             | DeepTag::Block
             | DeepTag::Tuple
             | DeepTag::TupleGet
@@ -3716,7 +3697,23 @@ fn type_metadata(expr: &Expr) -> Option<&Expr> {
 /// grad-helper collision. Prefer the metadata (rendered `at
 /// surf:a..b`, matching `infer.rs::validator_span_suffix`); fall back
 /// to the structural offset only for fully synthesized nodes that
-/// carry no span entry (e.g. desugared pipe-stage lambdas).
+/// carry no span entry.
+fn located_error(expr: &Expr, mut error: CheckError) -> CheckError {
+    if let Some(id) = span_metadata_id(expr) {
+        error.span_id = Some(id.to_string());
+        if let Some(start) = id
+            .strip_prefix("surf:")
+            .and_then(|id| id.split_once(".."))
+            .and_then(|(start, _)| start.parse().ok())
+        {
+            error.span_offset = Some(start);
+        }
+    } else {
+        error.span_offset = Some(expr.span().offset);
+    }
+    error
+}
+
 fn diag_site(expr: &Expr) -> String {
     match span_metadata_id(expr) {
         Some(id) => format!("at {id}"),

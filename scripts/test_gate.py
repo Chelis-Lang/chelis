@@ -770,6 +770,14 @@ class StageUnionTests(unittest.TestCase):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
 
+    def test_core_off_configuration_is_linted_before_closure_is_checked(self):
+        for stage in ("lint-and-unit", "lint-and-unit-nix"):
+            commands = gate.STAGES[stage]
+            self.assertLess(commands.index(gate.CLIPPY_CORE_WITHOUT_MIGRATION),
+                            commands.index(gate.CONFIGURATION_CLOSURE))
+        self.assertNotIn("--workspace", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
+        self.assertIn("--no-default-features", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
+
     def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
         arguments = dict(tests_only=False, support_only=False, partition=None)
         developer = gate.selected_stage_commands("lint-and-unit", **arguments)

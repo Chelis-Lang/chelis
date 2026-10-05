@@ -12,7 +12,8 @@ pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
 /// Bumped to 6 for chelis#2443: [`TypeVariableDomain`] gained an
 /// `ActiveSet` variant, so a shell published by this compiler can carry a
 /// domain a version-5 reader cannot decode.
-pub const SHELL_FORMAT_VERSION: u32 = 6;
+// #3130: Surf stages carry explicit syntax and Deep 0.20 has no Pipe.
+pub const SHELL_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -208,7 +209,12 @@ pub fn decode_shell(bytes: &[u8]) -> Result<ShellPackage, bincode::Error> {
     let version = u32::from_le_bytes(version_bytes);
     if version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}"
+            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            if version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     let payload = &bytes[SHELL_MAGIC.len() + 4..];
@@ -247,8 +253,13 @@ pub fn read_shell(path: &Path) -> Result<ShellPackage, Box<dyn std::error::Error
 pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
     if shell.format_version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}",
-            shell.format_version
+            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            shell.format_version,
+            if shell.format_version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     validate_nonempty_trimmed("package.name", &shell.package.name)?;
@@ -649,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v6_envelope() {
+    fn shell_encoding_has_an_explicit_v7_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -657,7 +668,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        assert_eq!(SHELL_FORMAT_VERSION, 6);
+        assert_eq!(SHELL_FORMAT_VERSION, 7);
     }
 
     #[test]
@@ -681,7 +692,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 6"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 7; regenerate the shell package"
         );
     }
 
@@ -693,7 +704,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 6"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 7; regenerate the shell package"
         );
     }
 
@@ -709,7 +720,19 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 5 is unsupported; expected 6"
+            "invalid shell envelope: shell format version 5 is unsupported; expected 7; regenerate the shell package"
+        );
+    }
+
+    #[test]
+    fn shell_decode_rejects_the_pre_pipe_normalization_version_before_payload_decode() {
+        let mut bytes = b"CHELCHB\0".to_vec();
+        bytes.extend_from_slice(&6_u32.to_le_bytes());
+        let error =
+            decode_shell(&bytes).expect_err("v6 must be refused before reading its payload");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 6 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
         );
     }
 

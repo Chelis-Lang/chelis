@@ -187,10 +187,19 @@ The pipe operator threads its left value as the first argument of the call on it
 hidden = matmul(x, w1) |> add(b1) |> relu
 ```
 
+Use pipes when left-to-right stage order helps review a linear flow. Calls,
+operator sugar and pipes have equal standing. Pipes exist only in Surf: desugaring
+normalizes them before literal typing, and `chelis deep` and `chelis surf` print
+the resulting calls. `chelis fmt` preserves authored pipes.
+
+Explicitly group pipes mixed with another operator or an open-ended form:
+`(a * b) |> f`, `a * (b |> f)`, `(if c then a else b) |> f`, and
+`fn (v) -> (v |> f)` are valid. Ungrouped equivalents are rejected.
+
 When the piped value belongs in a later position, pipe into a lambda:
 
 ```chelis-surf-fragment
-complement = p |> fn (q) -> sub(1.0, q)
+complement = p |> (fn (q) -> sub(1.0, q))
 ```
 
 ## Function application

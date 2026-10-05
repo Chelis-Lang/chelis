@@ -935,8 +935,6 @@ pub(crate) fn build_compiled_library_context_in_session(
     // directly rather than through a checked-program call, so without the
     // fold here a library's pipe would reach `annotated_exprs` unfolded and
     // the lowerer would refuse it.
-    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
-    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
@@ -1091,8 +1089,6 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // directly rather than through a checked-program call, so without the
     // fold here a library's pipe would reach `annotated_exprs` unfolded and
     // the lowerer would refuse it.
-    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
-    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.resume_for_new_check();
@@ -1391,7 +1387,6 @@ pub(crate) fn check_typed_program_in_session(
     let stack_scope = StackExhaustionScope::enter();
     // One tree for inference and annotation: the pipe fold, and nothing else
     // (chelis#1023 pins that the checker's output keeps its input's nodes).
-    let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, errors);
     let stats = product.stats();
     if errors.is_empty() {
@@ -1976,7 +1971,7 @@ pub(super) fn collect_ir_types_with_origins<'a>(
 /// is the checker's output and what the lowerer, linearity, the effect pass
 /// and the caches all read, still carrying the `Pipe` node.
 fn normalize_program_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    chelis_deep::pipe::fold_program_pipes(exprs)
+    exprs.to_vec()
 }
 
 #[cfg(test)]

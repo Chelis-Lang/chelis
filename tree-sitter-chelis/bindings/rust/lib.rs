@@ -132,7 +132,7 @@ mod tests {
             "def explicitly_pure() ! {} = ()\n",
             "different_record_field = Point { x: y }\n",
             "different_record_pattern = match p with { | Point { x: y } => y }\n",
-            "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
+            "later_pipe_argument = x |> (fn (v) -> f(y, v))\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
             "@property bounded forall(x: i32) where x <= 1: true\n",
             "@property grouped_operand forall(x: i32, y: i32) where (x + 1) <= y: true\n",
@@ -261,10 +261,81 @@ mod tests {
     }
 
     #[test]
+    fn pipes_require_explicit_grouping_at_every_operator_family() {
+        for source in [
+            "out = with device(\"cpu\") { x } |> f\n",
+            "out = (with device(\"cpu\") { x }) |> f\n",
+            "out = x |> with device(\"cpu\") { f }\n",
+            "out = x |> (with device(\"cpu\") { f })\n",
+            "out = (r with { a: x }) |> f\n",
+            "out = x |> (r with { a: f })\n",
+            "out = (x |> f) with { a: y }\n",
+            "out = x |> (f.1)\n",
+            "out = (x |> f).1\n",
+            "out = (r.f) |> g\n",
+            "out = (M.f(x)) |> g\n",
+            "out = if c then (x |> f) else y\n",
+            "out = fn (v) -> (v |> f)\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+            let formatted = chelis_surf::format::format_source(source).unwrap();
+            assert_surf_parser_parity(&formatted, true);
+            assert_eq!(
+                chelis_surf::format::format_source(&formatted).unwrap(),
+                formatted
+            );
+        }
+        for source in [
+            "out = r with { a: x } |> f\n",
+            "out = x |> r with { a: f }\n",
+            "out = with device(\"cpu\") { a + b |> f }\n",
+            "out = with device(\"cpu\") x |> f\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+        for op in [
+            "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||",
+        ] {
+            assert_surf_parser_parity(&format!("out = a {op} b |> f\n"), false);
+            assert_surf_parser_parity(&format!("out = (a {op} b) |> f\n"), true);
+            assert_surf_parser_parity(&format!("out = a {op} (b |> f)\n"), true);
+        }
+        for source in [
+            "out = -x |> f\n",
+            "out = !x |> f\n",
+            "out = &x |> f\n",
+            "out = if c then a else b |> f\n",
+            "out = fn (v) -> v |> f\n",
+            "out = match x |> f with { | _ => x }\n",
+            "out = x |> fn (v) -> v\n",
+            "out = x: i32 |> f\n",
+            "out = x |> f: i32\n",
+            "out = x with { a: y } |> f\n",
+            "out = x |> f.1\n",
+            "out = x |> r.f\n",
+            "out = r.f |> g\n",
+            "out = M.f(x) |> g\n",
+            "out = if c then x |> f else y\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+        for source in [
+            "out = (-x) |> f\n",
+            "out = (if c then a else b) |> f\n",
+            "out = x |> (fn (v) -> v)\n",
+            "out = match (x |> f) with { | _ => x }\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+    }
+
+    #[test]
     fn surf_v019_tree_sitter_accepts_cast_pipe_stages() {
         for source in [
             "result = value |> cast(f32)\n",
             "result = value |> cast_trunc(f64)\n",
+            "result = value |> cast_saturate(i8)\n",
+            "result = value |> cast_wrap(i8)\n",
             "result = value |> cast(p)\n",
         ] {
             assert_surf_parser_parity(source, true);
@@ -272,8 +343,12 @@ mod tests {
         for source in [
             "result = value |> cast()\n",
             "result = value |> cast_trunc()\n",
+            "result = value |> cast_saturate()\n",
+            "result = value |> cast_wrap()\n",
             "result = cast(f32)\n",
             "result = cast_trunc(f64)\n",
+            "result = cast_saturate(i8)\n",
+            "result = cast_wrap(i8)\n",
         ] {
             assert_surf_parser_parity(source, false);
         }

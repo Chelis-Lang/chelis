@@ -39,7 +39,7 @@ fn unsafe_call_first_stages_emit_no_substitute_program() {
             .assert()
             .failure()
             .stdout("")
-            .stderr(predicate::str::contains("call-first stage"));
+            .stderr(predicate::str::contains("Deep format 0.20"));
     }
 }
 

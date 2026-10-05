@@ -163,7 +163,7 @@ fn issue_620_eps_fail_guard_body_differentiates() {
     let x = [1.5, -0.5];
     let source = format!(
         "module Repro.Guard620\n\n\
-         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar\n\
+         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else (sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar)\n\
 \n\
          out = grad(loss_guard, wrt=x)(to_tensor([{}]), cast(0.001, f32))\n",
         fmt_f32_list(&x),
@@ -188,7 +188,7 @@ fn issue_620_eps_fail_guard_forward_parity() {
     let x = [1.5, -0.5];
     let source = format!(
         "module Repro.Guard620F\n\n\
-         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar\n\
+         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else (sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar)\n\
 \n\
          out = loss_guard(to_tensor([{}]), cast(0.001, f32))\n",
         fmt_f32_list(&x),
@@ -570,7 +570,7 @@ fn c_agree_body() -> String {
      \x20 | ModeB\n\n\
      def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
      def fwd_cguard(x: tensor[2, f32]) -> f32 = match pick(cast(1.0, f32)) with {\n\
-     \x20   | ModeA => if lte(cast(0.001, f32), cast(0.0, f32)) then fail(\"eps\") else sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar\n\
+     \x20   | ModeA => if lte(cast(0.001, f32), cast(0.0, f32)) then fail(\"eps\") else (sum(mul(&x, &x), cast(0, i32)) |> tensor_to_scalar)\n\
      \x20   | ModeB => cast(0.0, f32)\n\
      }\n"
     .to_string()
@@ -674,7 +674,7 @@ fn issue_620_runtime_cond_adt_branch_rejected_cites_618() {
 fn issue_620_unbounded_recursion_errors_at_unroll_cap() {
     let source = format!(
         "module Repro.Neg620B\n\n\
-         def spin(x: &tensor[2, f32], k: i64) -> f32 = if gte(k, cast(0, i64)) then spin(x, add(k, cast(1, i64))) else sum(x, cast(0, i32)) |> tensor_to_scalar\n\
+         def spin(x: &tensor[2, f32], k: i64) -> f32 = if gte(k, cast(0, i64)) then spin(x, add(k, cast(1, i64))) else (sum(x, cast(0, i32)) |> tensor_to_scalar)\n\
 \n\
          def loss_spin(x: tensor[2, f32]) -> f32 = spin(&x, cast(0, i64))\n\n\
          out = grad(loss_spin)(to_tensor([{}]))\n",

@@ -8,8 +8,11 @@ Deep desugaring shown as **⟹** with the target Deep s-expression.
 
 ### 0.1 Canonical Surf and the bidirectional contract
 
-Canonical Surf is the one repository and output spelling for each grammatical
-construct. The normal parser also accepts the explicitly value-preserving
+Canonical Surf defines the formatting of each grammatical construct, rather
+than one spelling per program. Authored operator sugar, including `|>`, is
+preserved by `fmt`. Deep decompilation prints calls for normalized pipes and
+canonical operator sugar for recognized operator builtins. The
+normal parser also accepts the explicitly value-preserving
 input families in P10-P12: numeric radix/digit-separator/exponent spellings,
 float bodies carrying decimal digits beyond the shortest round-trippable
 spelling, equivalent valid string escapes, whitespace before a parenthesized
@@ -28,6 +31,12 @@ Before replacing any input, the command MUST preflight every path and reject a
 symbolic link or a file with multiple hard links. Each individual replacement
 MUST be atomic. If a later replacement fails, every earlier replacement MUST be
 restored byte-for-byte before the command reports failure.
+For `migrate pipes`, explicit `--keep-going` with `--check` or `--inplace`
+selects independent per-file processing instead: every file MUST receive its
+own complete expanded-Deep preservation proof; a rejected file MUST remain
+unchanged, later files MUST still be attempted, and any failure MUST produce
+a nonzero exit with a per-file failure summary. The default remains a batch
+transaction.
 Migration MUST NOT guess a replacement for an identifier that v0.19 reserves.
 It MUST reject that input with a diagnostic directing the author to rename the
 identifier manually before rerunning migration.
@@ -86,8 +95,8 @@ normalize_deep(desugar(resugar(desugar(surf))))
   = normalize_deep(desugar(surf))
 ```
 
-The formatting law is syntactic: it chooses one repository spelling from any
-parser-accepted Surf input. The third law is the semantic retraction after
+The formatting law is syntactic: it chooses a stable spelling for the authored
+Surf constructs. The third law is the semantic retraction after
 Deep has erased comments, whitespace, and distinctions among equivalent Surf
 sugars; it does not require `resugar(desugar(surf))` to reproduce authored
 bytes. It compares macro programs after expansion, because public Deep is
@@ -101,6 +110,36 @@ well-formed integer selector for a statically resolved callable origin and
 agrees exactly with the ordered metadata names. Contradictory, malformed,
 absent, or dynamically unresolved selectors fail resugaring; the round-trip
 laws do not authorize dropping or reconstructing the operative child.
+
+### 0.2 Pipe sugar and explicit grouping
+
+> **[02-PIPE-1]** `|>` exists only in Surf. Desugaring SHALL normalize
+> `x |> f(y)` to `f(x, y)` before literal dtype selection, with bare `f`
+> meaning `f(x)`. `cast(T)`, each named cast rung (`cast_trunc(T)`,
+> `cast_saturate(T)`, `cast_wrap(T)`), bare `copy`, and bare `realize`
+> stages normalize to their corresponding operand forms. General authored
+> lambdas remain function values applied to the carried expression; no
+> arbitrary beta reduction or capture-prone substitution is permitted.
+
+> **[02-PIPE-2]** Pipes SHALL NOT mix at the same ungrouped expression boundary
+> with non-pipe binary or unary operators, postfix field access or tuple
+> projection (including qualified callees), type ascription, record update,
+> or open-ended `if`, `match`, or lambda forms. This rule is symmetric:
+> a pipe in an ungrouped condition, branch, scrutinee, or lambda body also
+> requires grouping. Parentheses,
+> argument lists, and delimited blocks establish independent expression
+> boundaries. Thus `(a * b) |> f`, `a * (b |> f)`,
+> `(if c then a else b) |> f`, and `x |> (fn (v) -> v + y)` are valid;
+> `a * b |> f`, `-x |> f`, `if c then a else b |> f`, and
+> `x |> fn (v) -> v + y`, `x |> f.1`, and `r.field |> f` are rejected with
+> a grouping diagnostic. `x |> (f.1)`, `(x |> f).1`, `(r.field) |> f`,
+> `if c then (x |> f) else y`, and `fn (v) -> (v |> f)` are valid.
+
+> **[02-PIPE-3]** Formatting SHALL preserve authored pipe sugar and comments,
+> be type-independent and idempotent. Deep SHALL contain only the normalized
+> operation and no pipe spelling-restoration metadata. Diagnostics SHALL
+> refer to authored stage spans and source, not synthesized call text.
+
 
 ---
 
@@ -133,7 +172,7 @@ Final. Binding power from lowest to highest:
 
 | BP | Operators | Assoc | Deep form |
 |----|-----------|-------|-----------|
-| 1 | `\|>` | left | `(pipe {} ...)` |
+| 1 | `\|>` | left | nested `app` (first-argument insertion) |
 | 2 | `\|\|` | left | `(app {} (var {} or) ...)` |
 | 3 | `&&` | left | `(app {} (var {} and) ...)` |
 | 4 | `==` `!=` | none | `eq` / `neq` |
@@ -149,7 +188,7 @@ Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b =
 Every operator row desugars with the authored operand order preserved: an
 application row `a OP b` becomes `(app {} (var {} op) a' b')` with `a'`
 first, no row swaps its operands, and `|>` keeps its stage order in the
-`pipe` node. `a > b` therefore desugars to the `gt` built-in, whose result
+application chain. `a > b` therefore desugars to the `gt` built-in, whose result
 is defined as `cmplt(b, a)` over the already-evaluated operand values
 (`spec/05-risc-primitives.md` §3.2), not to an operand-swapped `cmplt`
 application. Combined with Deep's left-to-right application-argument
@@ -634,7 +673,7 @@ Additional canonical style rules:
 
 - use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
   bindings such as `result = expr`
-- prefer pipe-first composition for eligible linear flows
+- use pipes or calls according to which makes the dataflow clearer
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
 
@@ -1435,6 +1474,8 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 
 # ── Operator expressions ──
 
+# The [02-PIPE-2] grouping guard applies to each expression after parsing.
+# Unparenthesized mixed operators or open-ended forms cannot contain '|>'.
 PipeExpr      <- UpdateExpr (S '|>' S (CastPipeStage / UpdateExpr))*
 CastPipeStage <- ('cast' / 'cast_trunc' / 'cast_saturate' / 'cast_wrap') S '(' S Ident S ')'
 UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
@@ -1722,7 +1763,7 @@ a || b                            ⟹  (app {} (var {} or) a' b')
 !a                                ⟹  (app {} (var {} not) a')
 
 -- Pipe
-x |> f |> g                       ⟹  (pipe {} x' (var {} f) (var {} g))
+x |> f |> g                       ⟹  (app {} (var {} g) (app {} (var {} f) x'))
 
 -- Control flow
 if c then a else b                ⟹  (if {} c' a' b')
@@ -1855,7 +1896,7 @@ After `type Name =`, the parser checks if the next non-whitespace token is `|`. 
 ## 7. Deep Vocabulary Boundary
 
 `typealias`, `record-update`, and `pat-tuple` are active members of the closed
-public Deep vocabulary. The complete 62-tag inventory and its compile-time
+public Deep vocabulary. The complete 61-tag inventory and its compile-time
 totality rule live in `spec/03-deep-syntax.md` §2 and §2.13; this Surf chapter
 does not maintain a second count.
 
@@ -1919,7 +1960,7 @@ def activate(act: Activation, x: tensor[batch, hidden_dim, f32]) -> tensor[batch
 def forward(w1, b1, w2, b2, act, x) = {
   h = matmul(x, w1)
     |> add(b1)
-    |> fn (z) -> activate(act, z)
+    |> (fn (z) -> activate(act, z))
   add(matmul(h, w2), b2)
 }
 ```

@@ -966,7 +966,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V39 (chelis#2647): generalized schemes retain result-equation origins.
 /// Main separately used V39 for #2419's Iota and ordered List DAG layout.
 /// V40 combines both payloads without accepting either V39 encoding.
-const CACHE_FORMAT_VERSION: u32 = 40;
+// Deep 0.20 (#3130) removes Pipe and SurfPipeStage from serialized syntax.
+const CACHE_FORMAT_VERSION: u32 = 41;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1277,7 +1278,12 @@ impl fmt::Display for CacheError {
             CacheError::Corrupt(msg) => write!(f, "cache file is corrupt: {msg}"),
             CacheError::UnsupportedVersion { stored, expected } => write!(
                 f,
-                "cache file format version {stored} not supported by this binary (expects {expected})"
+                "cache file format version {stored} not supported by this binary (expects {expected}); {}regenerate the cache",
+                if (*stored, *expected) == (40, 41) {
+                    "Deep 0.20 removes pipe nodes; "
+                } else {
+                    ""
+                }
             ),
             CacheError::HandoffDigestMismatch { expected, actual } => write!(
                 f,
@@ -1729,9 +1735,38 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn context_version_rejection_names_pipe_removal_only_for_its_predecessor() {
+        for version in [39_u32, 40, 99] {
+            let mut bytes = CACHE_MAGIC.to_vec();
+            bytes.extend_from_slice(&version.to_le_bytes());
+            let error = match CompiledContext::decode(&bytes) {
+                Err(error) => error,
+                Ok(_) => panic!("incompatible version {version} must reject before payload decode"),
+            };
+            let cause = if version == 40 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            };
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 41); {cause}regenerate the cache"
+                )
+            );
+        }
+        let mut current = CACHE_MAGIC.to_vec();
+        current.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+        assert!(
+            CompiledContext::decode(&current).is_err(),
+            "a current header is not a complete payload"
+        );
+    }
+
+    #[test]
     fn cache_format_version_tracks_result_origins_and_ordered_list_operations() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 40);
+        assert_eq!(CACHE_FORMAT_VERSION, 41);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1945,7 +1980,7 @@ mod tests {
         let unversioned = bincode::serialize(&context).expect("raw positional payload");
         let error = CompiledContext::decode(&unversioned).expect_err("no raw fallback");
         assert!(error.contains("magic"), "{error}");
-        for version in [21_u32, 22, 23, 24, 25, 26, 39, CACHE_FORMAT_VERSION + 1] {
+        for version in [21_u32, 22, 23, 24, 25, 26, 39, 40, CACHE_FORMAT_VERSION + 1] {
             let mut truncated = CACHE_MAGIC.to_vec();
             truncated.extend_from_slice(&version.to_le_bytes());
             let error = CompiledContext::decode(&truncated)

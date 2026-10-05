@@ -315,7 +315,10 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 6);
+    assert_eq!(
+        shell_json["format_version"],
+        chelis_shell::SHELL_FORMAT_VERSION
+    );
     assert_eq!(
         exported(&shell_json, "set_bounded", "exports")["type_variable_restrictions"],
         expected_set_domain(),

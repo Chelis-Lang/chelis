@@ -1372,36 +1372,3 @@ fn report_literal_pattern_error(
     }
     errors.push(error);
 }
-
-/// A `pipe` node reached inference.
-///
-/// It cannot, from any checker entry: `chelis_deep::pipe::fold_pipe` states
-/// `spec/02-surf-syntax.md` section 0.1's sentence -- `x |> f(y)` MEANS
-/// `f(x, y)` -- once, over every entry's input, so inference only ever sees
-/// the application. The rule that used to live here typed a stage from the
-/// callee's FUNCTION type instead of as that application, which lost every
-/// rule keyed on an application's arguments: `to_tensor`'s literal shape,
-/// `sum`'s axis, `expand`'s size (chelis#1923, chelis#1791).
-///
-/// So this arm exists to make the class impossible to reintroduce quietly
-/// rather than to handle a case. A pipe arriving here means an entry was
-/// added that does not fold, and saying so is worth more than typing it a
-/// second way.
-pub(super) fn pipe_reached_inference_unfolded(
-    node: &DeepNode,
-    errors: &mut DiagnosticSink<'_>,
-) -> Type {
-    let stages = node.children_slice().len().saturating_sub(1);
-    report(
-        errors,
-        CheckError::new(
-            CheckErrorKind::MalformedForm,
-            format!(
-                "a pipe reached inference unfolded ({stages} stage(s)): every checker entry \
-                 folds a pipe into the application it denotes before inference \
-                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
-            ),
-            vec![],
-        ),
-    )
-}

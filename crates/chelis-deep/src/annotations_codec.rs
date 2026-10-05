@@ -337,7 +337,6 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
         K::SurfDimGroupSize => V::SurfDimGroupSize(PositiveInteger::try_new(
             integer(raw, spelling)?.expression().clone(),
         )?),
-        K::SurfPipeStage => choice!(SurfPipeStage, PipeStageOrigin, string),
         K::SurfLiteralStyle => choice!(SurfLiteralStyle, LiteralStyle, string),
         K::SurfBindingType => choice!(SurfBindingType, BindingTypeOrigin, string),
         K::Lin => choice!(Lin, Linearity, name),
@@ -853,7 +852,6 @@ impl WireExpr {
             ),
             V::InvariantAmenability(v) => atom(Atom::Str(v.value().spelling().into()), span),
             V::SurfDimGroupSize(v) => Self::from_ast(v.expression()),
-            V::SurfPipeStage(v) => atom(Atom::Str(v.value().spelling().into()), span),
             V::SurfLiteralStyle(v) => atom(Atom::Str(v.value().spelling().into()), span),
             V::SurfBindingType(v) => atom(Atom::Str(v.value().spelling().into()), span),
             V::Lin(v) => atom(Atom::Name(v.value().spelling().into()), span),

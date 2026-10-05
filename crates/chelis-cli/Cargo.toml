@@ -26,7 +26,7 @@ chelis-std-bundle.workspace = true
 # (see the shim-corruption guard in cmd_reef_setup).
 chelisup = { path = "../chelisup" }
 chelis-macros.workspace = true
-chelis-surf.workspace = true
+chelis-surf = { workspace = true, features = ["pre-020-pipe-migration"] }
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }

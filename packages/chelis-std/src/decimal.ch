@@ -26,7 +26,7 @@ def dec_padded(value: i64, width: i64) -> string = {
   string_concat(dec_zeros_text(sub(width, string_len(digits))), digits)
 }
 -- Text named in a failure: its first 40 characters, then `...` when longer.
-def dec_shown(text: string) -> string = if text |> string_len |> gt(40i64) then text |> string_slice(0i64, 40i64) |> string_concat("...") else text
+def dec_shown(text: string) -> string = if (text |> string_len |> gt(40i64)) then (text |> string_slice(0i64, 40i64) |> string_concat("...")) else text
 def dec_scale_outside(places: i64) -> bool = places |> lt(0i64) |> or(gt(places, dec_max_scale()))
 def dec_scale_detail(places: i64) -> string = dec_joined(["scale ", to_string(places), " is outside 0..38"])
 def dec_inexact_detail(value: string, places: i64) -> string = dec_joined([value, " is not a multiple of 10^-", to_string(places)])
@@ -79,7 +79,7 @@ def dec_mul_small(xs: List[i64], factor: i64) -> List[i64] = {
 def dec_divmod_small(xs: List[i64], divisor: i64) -> (List[i64], i64) = {
   top = xs |> len |> sub(1i64)
   folded = fold(fn (state: (List[i64], i64), step: i64) -> {
-    current = state.1 |> mul(dec_base()) |> add(dec_limb(xs, sub(top, step)))
+    current = (state.1) |> mul(dec_base()) |> add(dec_limb(xs, sub(top, step)))
     (concat([trunc_div(current, divisor)], state.0), mod(current, divisor))
   }, ([0i64], 0i64), range(0i64, len(xs)))
   (dec_trim(folded.0), folded.1)
@@ -130,10 +130,10 @@ def dec_divmod(num: List[i64], den: List[i64]) -> (List[i64], List[i64]) = {
   if eq(size, 1i64) then {
     (quotient, remainder) = dec_divmod_small(num, dec_limb(den, 0i64))
     (quotient, [remainder])
-  } else num |> dec_trim |> dec_long_divmod(dec_trim(den), size)
+  } else (num |> dec_trim |> dec_long_divmod(dec_trim(den), size))
 }
 -- Trailing decimal zeros of a nonzero limb.
-def dec_limb_trailing_zeros(limb: i64) -> i64 = fold(fn (acc: i64, exponent: i64) -> if limb |> mod(dec_small_pow10(exponent)) |> eq(0i64) then exponent else acc, 0i64, range(1i64, 9i64))
+def dec_limb_trailing_zeros(limb: i64) -> i64 = fold(fn (acc: i64, exponent: i64) -> if (limb |> mod(dec_small_pow10(exponent)) |> eq(0i64)) then exponent else acc, 0i64, range(1i64, 9i64))
 -- Trailing decimal zeros of a nonzero magnitude.
 def dec_trailing_zeros(xs: List[i64]) -> i64 = fold(fn (state: (i64, bool), limb: i64) -> if state.1 then state else if eq(limb, 0i64) then (add(state.0, 9i64), false) else (add(state.0, dec_limb_trailing_zeros(limb)), true), (0i64, false), xs).0
 -- Rounding. `dec_rounds_up` decides whether an inexact magnitude quotient
@@ -186,8 +186,8 @@ def dec_round_to(x: Decimal, places: i64, mode: Rounding) -> (List[i64], i64, bo
 def dec_ok(value: Decimal) -> (string, string, Decimal) = ("", "", value)
 def dec_domain(detail: string) -> (string, string, Decimal) = ("domain", detail, dec_zero())
 def dec_overflow(detail: string) -> (string, string, Decimal) = ("overflow", detail, dec_zero())
-def dec_result(function: string, outcome: (string, string, Decimal)) -> Decimal = if eq(outcome.0, "") then outcome.2 else function |> dec_failure(outcome.0, outcome.1) |> fail
-def dec_try_result(function: string, outcome: (string, string, Decimal)) -> Option[Decimal] = if eq(outcome.0, "") then Some(outcome.2) else if eq(outcome.0, "domain") then None else function |> dec_failure(outcome.0, outcome.1) |> fail
+def dec_result(function: string, outcome: (string, string, Decimal)) -> Decimal = if eq(outcome.0, "") then outcome.2 else (function |> dec_failure(outcome.0, outcome.1) |> fail)
+def dec_try_result(function: string, outcome: (string, string, Decimal)) -> Option[Decimal] = if eq(outcome.0, "") then Some(outcome.2) else if eq(outcome.0, "domain") then None else (function |> dec_failure(outcome.0, outcome.1) |> fail)
 -- Text rendering.
 def dec_digits(xs: List[i64]) -> string = {
   top = xs |> dec_used |> sub(1i64)
@@ -203,14 +203,14 @@ def dec_text(negative: bool, digits: string, scale: i64) -> string = {
 def dec_code(codes: List[i64], idx: i64) -> i64 = if lt(idx, len(codes)) then index(codes, idx) else -1i64
 def dec_is_digit_code(code: i64) -> bool = code |> gte(48i64) |> and(lte(code, 57i64))
 -- The index of the first non-digit at or after `start`.
-def dec_digit_run_end(codes: List[i64], start: i64) -> i64 = fold(fn (acc: i64, pair: (i64, i64)) -> if acc |> eq(pair.0) |> and(dec_is_digit_code(pair.1)) then add(acc, 1i64) else acc, start, enumerate(codes))
+def dec_digit_run_end(codes: List[i64], start: i64) -> i64 = fold(fn (acc: i64, pair: (i64, i64)) -> if (acc |> eq(pair.0) |> and(dec_is_digit_code(pair.1))) then add(acc, 1i64) else acc, start, enumerate(codes))
 def dec_leading_zeros(codes: List[i64]) -> i64 = fold(fn (state: (i64, bool), code: i64) -> if state.1 then state else if eq(code, 48i64) then (add(state.0, 1i64), false) else (state.0, true), (0i64, false), codes).0
 def dec_trailing_zero_codes(codes: List[i64]) -> i64 = fold(fn (acc: i64, code: i64) -> if eq(code, 48i64) then add(acc, 1i64) else 0i64, 0i64, codes)
 def dec_code_slice(codes: List[i64], start: i64, end: i64) -> List[i64] = codes |> skip(start) |> take(sub(end, start))
 -- The magnitude of at most 38 digit codes.
-def dec_digit_magnitude(codes: List[i64]) -> List[i64] = fold(fn (acc: List[i64], code: i64) -> acc |> dec_mul_small(10i64) |> dec_add([sub(code, 48i64)]), [0i64], codes)
+def dec_digit_magnitude(codes: List[i64]) -> List[i64] = fold(fn (acc: List[i64], code: i64) -> (acc |> dec_mul_small(10i64) |> dec_add([sub(code, 48i64)])), [0i64], codes)
 -- The value of at most 4 digit codes.
-def dec_small_digits(codes: List[i64]) -> i64 = fold(fn (acc: i64, code: i64) -> acc |> mul(10i64) |> add(sub(code, 48i64)), 0i64, codes)
+def dec_small_digits(codes: List[i64]) -> i64 = fold(fn (acc: i64, code: i64) -> (acc |> mul(10i64) |> add(sub(code, 48i64))), 0i64, codes)
 -- The value of a well-formed token. An all-zero significand is zero before
 -- the exponent is read; otherwise the significant digits are counted and the
 -- exponent's digit count is compared with 4 before its value is read, so
@@ -222,13 +222,13 @@ def dec_token_value(text: string, negative: bool, significand: List[i64], fracti
     count = sub(sub(len(significand), leading), trailing)
     exponent_leading = dec_leading_zeros(exponent_digits)
     exponent_count = exponent_digits |> len |> sub(exponent_leading)
-    if count |> gt(dec_max_scale()) |> or(gt(exponent_count, 4i64)) then dec_domain(dec_range_detail(dec_shown(text))) else {
+    if (count |> gt(dec_max_scale()) |> or(gt(exponent_count, 4i64))) then dec_domain(dec_range_detail(dec_shown(text))) else {
       exponent_size = exponent_digits |> skip(exponent_leading) |> dec_small_digits
       exponent = if exponent_negative then neg(exponent_size) else exponent_size
       point = exponent |> sub(fraction) |> add(trailing)
-      if point |> lt(neg(dec_max_scale())) |> or(gt(add(point, count), dec_max_scale())) then dec_domain(dec_range_detail(dec_shown(text))) else {
+      if (point |> lt(neg(dec_max_scale())) |> or(gt(add(point, count), dec_max_scale()))) then dec_domain(dec_range_detail(dec_shown(text))) else {
         coefficient = dec_digit_magnitude(take(skip(significand, leading), count))
-        if lt(point, 0i64) then negative |> dec_value(coefficient, neg(point)) |> dec_ok else negative |> dec_value(dec_scale_up(coefficient, point), 0i64) |> dec_ok
+        if lt(point, 0i64) then (negative |> dec_value(coefficient, neg(point)) |> dec_ok) else (negative |> dec_value(dec_scale_up(coefficient, point), 0i64) |> dec_ok)
       }
     }
   }
@@ -237,7 +237,7 @@ def dec_token_value(text: string, negative: bool, significand: List[i64], fracti
 def dec_parse(text: string) -> (string, string, Decimal) = {
   size = string_len(text)
   if gt(size, 1000i64) then dec_domain(dec_joined(["number text has ", to_string(size), " characters, more than 1000"])) else {
-    codes = map(fn (idx: i64) -> text |> string_slice(idx, 1i64) |> char_code, range(0i64, size))
+    codes = map(fn (idx: i64) -> (text |> string_slice(idx, 1i64) |> char_code), range(0i64, size))
     negative = codes |> dec_code(0i64) |> eq(45i64)
     int_start = if negative then 1i64 else 0i64
     int_end = dec_digit_run_end(codes, int_start)
@@ -249,7 +249,7 @@ def dec_parse(text: string) -> (string, string, Decimal) = {
     sign = dec_code(codes, add(frac_end, 1i64))
     signed = and(has_exponent, sign |> eq(43i64) |> or(eq(sign, 45i64)))
     sign_width = if signed then 1i64 else 0i64
-    exp_start = if has_exponent then frac_end |> add(1i64) |> add(sign_width) else frac_end
+    exp_start = if has_exponent then (frac_end |> add(1i64) |> add(sign_width)) else frac_end
     exp_end = if has_exponent then dec_digit_run_end(codes, exp_start) else frac_end
     integer_ok = and(gt(int_end, int_start), or(neq(dec_code(codes, int_start), 48i64), eq(int_end, add(int_start, 1i64))))
     fraction_ok = has_point |> not |> or(gt(frac_end, frac_start))
@@ -259,7 +259,7 @@ def dec_parse(text: string) -> (string, string, Decimal) = {
       |> and(fraction_ok)
       |> and(and(exponent_ok, eq(exp_end, size)))
     significand = concat(dec_code_slice(codes, int_start, int_end), dec_code_slice(codes, frac_start, frac_end))
-    if well_formed then dec_token_value(text, negative, significand, sub(frac_end, frac_start), and(signed, eq(sign, 45i64)), dec_code_slice(codes, exp_start, exp_end)) else ["malformed number text \"", dec_shown(text), "\""] |> dec_joined |> dec_domain
+    if well_formed then dec_token_value(text, negative, significand, sub(frac_end, frac_start), and(signed, eq(sign, 45i64)), dec_code_slice(codes, exp_start, exp_end)) else (["malformed number text \"", dec_shown(text), "\""] |> dec_joined |> dec_domain)
   }
 }
 -- Binary floats. `dec_binary_parts(y)` writes a finite y > 0 as m * 2^e with
@@ -280,7 +280,7 @@ def dec_binary_parts(y: f64) -> (i64, i64) = {
 -- 2^exponent as an f64 for |exponent| < 1023, exact.
 def dec_pow2_f64(exponent: i64) -> f64 = {
   size = if lt(exponent, 0i64) then neg(exponent) else exponent
-  power = fold(fn (acc: f64, step: (i64, f64)) -> if size |> bitand(step.0) |> eq(0i64) then acc else mul(acc, step.1), 1.0f64, dec_two_powers())
+  power = fold(fn (acc: f64, step: (i64, f64)) -> if (size |> bitand(step.0) |> eq(0i64)) then acc else mul(acc, step.1), 1.0f64, dec_two_powers())
   if lt(exponent, 0i64) then div(1.0f64, power) else power
 }
 def dec_is_finite(value: f64) -> bool = value |> sub(value) |> eq(0.0f64)
@@ -295,16 +295,16 @@ def dec_i64_magnitude(value: i64) -> List[i64] = {
 -- 182 is clamped, since m * 10^places < 2^180 keeps the quotient zero and
 -- the remainder below half either way.
 def dec_from_f64_outcome(value: f64, places: i64, mode: Rounding) -> (string, string, Decimal) =
-  if value |> dec_is_finite |> not then dec_domain(string_concat(to_string(value), " is not finite")) else if dec_scale_outside(places) then places |> dec_scale_detail |> dec_domain else if eq(value, 0.0f64) then dec_ok(dec_zero()) else {
+  if (value |> dec_is_finite |> not) then dec_domain(string_concat(to_string(value), " is not finite")) else if dec_scale_outside(places) then (places |> dec_scale_detail |> dec_domain) else if eq(value, 0.0f64) then dec_ok(dec_zero()) else {
     negative = lt(value, 0.0f64)
     parts = value |> abs |> dec_binary_parts
     if gte(parts.1, 75i64) then dec_domain(dec_range_detail(to_string(value))) else {
       num = dec_times_pow2(dec_scale_up(dec_i64_magnitude(parts.0), places), dec_max(parts.1, 0i64))
       den = dec_times_pow2([1i64], dec_min(dec_max(neg(parts.1), 0i64), 182i64))
       rounded = dec_round_quotient(num, den, negative, mode)
-      if rounded.1 |> not |> and(dec_rejects(mode)) then dec_domain(dec_inexact_detail(to_string(value), places)) else {
+      if ((rounded.1) |> not |> and(dec_rejects(mode))) then dec_domain(dec_inexact_detail(to_string(value), places)) else {
         kept = dec_canonical(rounded.0, places)
-        if dec_fits(kept.0, kept.1) then negative |> dec_value(kept.0, kept.1) |> dec_ok else dec_domain(dec_range_detail(to_string(value)))
+        if dec_fits(kept.0, kept.1) then (negative |> dec_value(kept.0, kept.1) |> dec_ok) else dec_domain(dec_range_detail(to_string(value)))
       }
     }
   }
@@ -312,16 +312,16 @@ def dec_from_f64_outcome(value: f64, places: i64, mode: Rounding) -> (string, st
 def dec_binary_fraction(xs: List[i64], scale: i64, shift: i64) -> (List[i64], List[i64]) = if lte(shift, 0i64) then (dec_times_pow2(xs, neg(shift)), dec_pow10(scale)) else (xs, scale |> dec_pow10 |> dec_times_pow2(shift))
 -- Arithmetic outcomes.
 def dec_div_outcome(a: Decimal, b: Decimal, places: i64, mode: Rounding) -> (string, string, Decimal) =
-  if dec_is_zero(b) then dec_domain("division by zero") else if dec_scale_outside(places) then places |> dec_scale_detail |> dec_domain else {
+  if dec_is_zero(b) then dec_domain("division by zero") else if dec_scale_outside(places) then (places |> dec_scale_detail |> dec_domain) else {
     shift = places |> add(b.scale) |> sub(a.scale)
-    num = if gte(shift, 0i64) then a |> dec_magnitude |> dec_scale_up(shift) else dec_magnitude(a)
-    den = if gte(shift, 0i64) then dec_magnitude(b) else b |> dec_magnitude |> dec_scale_up(neg(shift))
+    num = if gte(shift, 0i64) then (a |> dec_magnitude |> dec_scale_up(shift)) else dec_magnitude(a)
+    den = if gte(shift, 0i64) then dec_magnitude(b) else (b |> dec_magnitude |> dec_scale_up(neg(shift)))
     negative = neq(a.negative, b.negative)
     rounded = dec_round_quotient(num, den, negative, mode)
     quotient = dec_joined([decimal_to_string(a), " divided by ", decimal_to_string(b)])
-    if rounded.1 |> not |> and(dec_rejects(mode)) then quotient |> dec_inexact_detail(places) |> dec_domain else {
+    if ((rounded.1) |> not |> and(dec_rejects(mode))) then (quotient |> dec_inexact_detail(places) |> dec_domain) else {
       kept = dec_canonical(rounded.0, places)
-      if dec_fits(kept.0, kept.1) then negative |> dec_value(kept.0, kept.1) |> dec_ok else dec_overflow(dec_range_detail(dec_joined([quotient, " rounded to scale ", to_string(places)])))
+      if dec_fits(kept.0, kept.1) then (negative |> dec_value(kept.0, kept.1) |> dec_ok) else dec_overflow(dec_range_detail(dec_joined([quotient, " rounded to scale ", to_string(places)])))
     }
   }
 def dec_i64_bound(negative: bool) -> List[i64] = if negative then [854775808i64, 223372036i64, 9i64] else [854775807i64, 223372036i64, 9i64]
@@ -329,8 +329,8 @@ def dec_i64_bound(negative: bool) -> List[i64] = if negative then [854775808i64,
 -- negative so the i64 minimum is reached without overflow.
 def dec_to_i64_outcome(x: Decimal, mode: Rounding) -> (string, string, i64) = {
   rounded = dec_round_to(x, 0i64, mode)
-  if rounded.2 |> not |> and(dec_rejects(mode)) then ("domain", x |> decimal_to_string |> dec_inexact_detail(0i64), 0i64) else if rounded.0 |> dec_cmp(dec_i64_bound(x.negative)) |> gt(0i64) then ("overflow", x |> decimal_to_string |> string_concat(" rounds to an integer outside i64"), 0i64) else {
-    lowered = fold(fn (acc: i64, step: i64) -> acc |> mul(dec_base()) |> sub(dec_limb(rounded.0, sub(2i64, step))), 0i64, range(0i64, 3i64))
+  if ((rounded.2) |> not |> and(dec_rejects(mode))) then ("domain", x |> decimal_to_string |> dec_inexact_detail(0i64), 0i64) else if ((rounded.0) |> dec_cmp(dec_i64_bound(x.negative)) |> gt(0i64)) then ("overflow", x |> decimal_to_string |> string_concat(" rounds to an integer outside i64"), 0i64) else {
+    lowered = fold(fn (acc: i64, step: i64) -> (acc |> mul(dec_base()) |> sub(dec_limb(rounded.0, sub(2i64, step)))), 0i64, range(0i64, 3i64))
     ("", "", if x.negative then lowered else neg(lowered))
   }
 }
@@ -358,14 +358,14 @@ def try_decimal(text: string) -> Option[Decimal] = dec_try_result("try_decimal",
 def decimal_to_string(x: Decimal) -> string = dec_text(x.negative, x |> dec_magnitude |> dec_digits, x.scale)
 def decimal_to_fixed_string(x: Decimal, places: i64) -> string =
   if dec_scale_outside(places) then fail(dec_failure("decimal_to_fixed_string", "domain", dec_scale_detail(places))) else if gt(x.scale, places) then fail(dec_failure("decimal_to_fixed_string", "domain", dec_joined([decimal_to_string(x), " has ", to_string(x.scale), " fractional digits, more than ", to_string(places)]))) else {
-    point = if x.scale |> eq(0i64) |> and(gt(places, 0i64)) then "." else ""
+    point = if ((x.scale) |> eq(0i64) |> and(gt(places, 0i64))) then "." else ""
     dec_joined([decimal_to_string(x), point, places |> sub(x.scale) |> dec_zeros_text])
   }
 -- Integers.
 def decimal_from_i64(value: i64) -> Decimal = value |> lt(0i64) |> dec_value(dec_i64_magnitude(value), 0i64)
 def decimal_to_i64(x: Decimal, mode: Rounding) -> i64 = {
   outcome = dec_to_i64_outcome(x, mode)
-  if eq(outcome.0, "") then outcome.2 else "decimal_to_i64" |> dec_failure(outcome.0, outcome.1) |> fail
+  if eq(outcome.0, "") then outcome.2 else ("decimal_to_i64" |> dec_failure(outcome.0, outcome.1) |> fail)
 }
 def try_decimal_to_i64(x: Decimal, mode: Rounding) -> Option[i64] = {
   outcome = dec_to_i64_outcome(x, mode)
@@ -377,7 +377,7 @@ def try_decimal_from_f64(value: f64, places: i64, mode: Rounding) -> Option[Deci
 -- The canonical text is always inside `to_float`'s grammar, which rounds it
 -- correctly once.
 def decimal_to_f64(x: Decimal) -> f64 =
-  match x |> decimal_to_string |> to_float with {
+  match (x |> decimal_to_string |> to_float) with {
     | Some(value) => value
     | None => fail(dec_failure("decimal_to_f64", "domain", dec_joined(["canonical text \"", decimal_to_string(x), "\" is not float text"])))
   }
@@ -397,7 +397,7 @@ def dec_binary_rounded(x: Decimal, precision: i64, lowest: i64) -> f64 =
     magnitude = dec_magnitude(x)
     nearest = false |> dec_value(magnitude, x.scale) |> decimal_to_f64
     shift =
-      dec_binary_parts(nearest).1
+      (dec_binary_parts(nearest).1)
       |> add(sub(53i64, precision))
       |> dec_max(lowest)
     fraction = dec_binary_fraction(magnitude, x.scale, shift)
@@ -419,9 +419,9 @@ def decimal_mul(a: Decimal, b: Decimal) -> Decimal = {
   if dec_fits(kept.0, kept.1) then dec_value(negative, kept.0, kept.1) else fail(dec_failure("decimal_mul", "overflow", dec_range_detail(dec_joined([decimal_to_string(a), " times ", decimal_to_string(b)]))))
 }
 def decimal_round(x: Decimal, places: i64, mode: Rounding) -> Decimal =
-  if dec_scale_outside(places) then "decimal_round" |> dec_failure("domain", dec_scale_detail(places)) |> fail else {
+  if dec_scale_outside(places) then ("decimal_round" |> dec_failure("domain", dec_scale_detail(places)) |> fail) else {
     rounded = dec_round_to(x, places, mode)
-    if rounded.2 |> not |> and(dec_rejects(mode)) then fail(dec_failure("decimal_round", "domain", x |> decimal_to_string |> dec_inexact_detail(places))) else dec_value(x.negative, rounded.0, rounded.1)
+    if ((rounded.2) |> not |> and(dec_rejects(mode))) then fail(dec_failure("decimal_round", "domain", x |> decimal_to_string |> dec_inexact_detail(places))) else dec_value(x.negative, rounded.0, rounded.1)
   }
 def decimal_div(a: Decimal, b: Decimal, places: i64, mode: Rounding) -> Decimal = dec_result("decimal_div", dec_div_outcome(a, b, places, mode))
 def try_decimal_div(a: Decimal, b: Decimal, places: i64, mode: Rounding) -> Option[Decimal] = dec_try_result("try_decimal_div", dec_div_outcome(a, b, places, mode))

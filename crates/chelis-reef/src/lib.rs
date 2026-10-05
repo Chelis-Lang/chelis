@@ -11636,7 +11636,10 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut UnordSet<Stri
             Box::new(rewrite_expr(seed, resolver, locals)),
             stages
                 .iter()
-                .map(|stage| rewrite_expr(stage, resolver, locals))
+                .map(|stage| chelis_surf::ast::PipeStage {
+                    expression: rewrite_expr(stage, resolver, locals),
+                    syntax: stage.syntax,
+                })
                 .collect(),
             *span,
         ),

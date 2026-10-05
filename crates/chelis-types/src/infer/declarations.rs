@@ -530,26 +530,6 @@ pub(super) fn param_has_consuming_use_inner(
                 type_headers,
                 errors,
             ),
-            // chelis#1923: a pipe cannot reach here. Declaration collection
-            // runs on the checker's input, which every entry folds, so the
-            // borrow-arg classifier meets the stage callee in callee position
-            // and `app_consumes_param` above asks the question once. The arm
-            // that used to sit here peered through the desugarer's stage
-            // lambda to ask the same thing a second way. Fail closed.
-            DeepTag::Pipe => {
-                report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::MalformedForm,
-                        "a pipe reached declaration analysis unfolded: every checker entry \
-                         folds a pipe into the application it denotes \
-                         (spec/02-surf-syntax.md section 0.1; chelis#1923)"
-                            .to_string(),
-                        vec![],
-                    ),
-                );
-                true
-            }
             DeepTag::Fn => {
                 let kids = node.children_slice();
                 if kids.len() < 2 {

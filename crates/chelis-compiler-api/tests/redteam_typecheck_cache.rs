@@ -612,8 +612,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 40, "the running binary expects format version 40");
-            assert_ne!(stored, 40, "the forged version must differ from 40");
+            assert_eq!(expected, 41, "the running binary expects format version 41");
+            assert_ne!(stored, 41, "the forged version must differ from 41");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -700,7 +700,7 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 41 (authored
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 42 (authored
     // signatures, checked operation restrictions, checked extent transport,
     // named witness claims, the single node spelling, scoped result origins,
     // and ordered List operations); the
@@ -709,7 +709,7 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(41u32.to_le_bytes());
+        hasher.update(42u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());

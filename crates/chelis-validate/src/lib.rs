@@ -534,7 +534,6 @@ fn validate_tag_shape(
         | DeepTag::Lit
         | DeepTag::Record
         | DeepTag::Access
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::TupleGet

@@ -979,9 +979,9 @@
         "computed_closures_keep_captures_and_eager_arguments",
         "lambda_pipe_stages_evaluate_the_input_before_the_body",
         "lambda_pipe_stages_preserve_lexical_bindings",
-        "resugaring_the_deep_still_prints_the_pipe",
+        "resugaring_the_deep_prints_calls",
         "the_annotated_deep_prints_the_application_the_pipe_denotes",
-        "the_unannotated_deep_still_carries_the_pipe"
+        "the_unannotated_deep_already_contains_applications"
       ],
       "note": "Pipe application semantics include lexical binding and eager input evaluation. Direct-call twins and trapping/agreeing inputs cover those obligations alongside the three printed surfaces."
     },

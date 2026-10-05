@@ -1,8 +1,12 @@
 # spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
+The Deep format profile is `0.20`. Pipes are Surf sugar and have no Deep node
+or spelling-restoration annotation. Versioned transports MUST reject a payload
+from the preceding pipe-node profile before decoding it as this profile.
+
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
-The 62-tag vocabulary documented here is closed. A form outside that vocabulary is not
+The 61-tag vocabulary documented here is closed. A form outside that vocabulary is not
 Deep unless the controlling specification adds it and updates the vocabulary census in
 the same change.
 
@@ -59,7 +63,6 @@ portable across Surf and Reef boundaries.
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
 | `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all`; its ASCII-lowercased value must equal the node's lowered module-path child |
 | `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
-| `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
 | `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
 | `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
@@ -67,7 +70,7 @@ The `surf_*` namespace is closed. A public Deep parser or programmatic
 validator MUST reject an unknown `surf_*` key. Parsing, validation, and resugaring MUST reject a
 known key with any value or placement outside the table above; a standalone
 metadata map or metadata-expression wrapper is not a permitted
-placement. These five keys preserve only surface distinctions that canonical
+placement. These four keys preserve only surface distinctions that canonical
 Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
 the namespace for arbitrary provenance.
 
@@ -476,7 +479,6 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `lit` | `(lit {type: prim-type} value)` | Literal value |
 | `record` | `(record {} TypeName (kv {} k₁ v₁) ...)` | Record construction |
 | `access` | `(access {} expr field-name)` | Field access |
-| `pipe` | `(pipe {} expr₁ expr₂ ... exprₙ)` | Pipeline composition |
 | `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
 | `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
@@ -652,14 +654,14 @@ operative integer selector and the fail-closed consistency checks of
 |---|---|---|
 | Module | 4 | module, import, import-all, export |
 | Declarations | 7 | def, defsig, deftype, typealias, variant, field, defdim |
-| Expressions | 18 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
+| Expressions | 17 | fn, app, let, match, arm, if, var, lit, record, access, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
 | Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 8 | t-prim, t-fn, t-tensor, t-ref, t-adt, t-var, t-unit, t-tuple |
 | Dimensions | 4 | d-name, d-var, d-lit, d-rank |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
 | Helpers | 5 | params, bind, kv, effects, resource |
-| **Total** | **62** | |
+| **Total** | **61** | |
 
 ### 2.11 Vocabulary Extension
 
@@ -778,25 +780,13 @@ orders the argument expressions that produce a primitive's operands.
 
 ---
 
-## 5. Pipe Semantics
+## 5. Surf Composition Sugar
 
-`pipe` is a first-class node, not sugar for nested application:
+Surf `|>` normalizes to applications or dedicated operand forms before
+literal typing, under spec/02 [02-PIPE-1..3]. There is no `pipe` Deep tag and
+no pipe spelling metadata. An authored lambda remains an ordinary `fn`
+applied through `app`.
 
-```scheme
-(pipe {} expr₁ expr₂ expr₃)
-```
-
-Evaluation: `(pipe {} e₁ e₂ e₃)` ≡ `(app {} e₃ (app {} e₂ e₁))`.
-
-`pipe` is preserved in Deep (not desugared to nested `app`) because: (a) it's the primary composition idiom, (b) preserving it enables better Deep → Surf round-tripping, (c) the compiler can reason about dataflow directly.
-
-Each element after the first must be a function (or lambda). Pipes with multi-arg functions use lambdas:
-
-```scheme
-(pipe {} (var {} x)
-  (fn {} (params {} v) (app {} (var {} f) (var {} v) (var {} a)))
-  (var {} g))
-```
 
 ---
 
@@ -835,10 +825,8 @@ None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use 
 ### 6.3.1 Canonical Surf resugaring
 
 Every structurally valid public Deep tag has a canonical Surf representation.
-Deep `pipe` resugars as a pipeline. A Deep `app` chain resugars as that same
-pipeline only when the typed proof from `spec/01-nomenclature.md` §3.6
-establishes a linear first-argument chain; otherwise it remains a flat
-parenthesized call. Later-position insertion retains an explicit lambda.
+Deep application chains resugar as calls; authored pipe spelling is erased.
+
 Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
 notation, while the same builtin name remains a value or pipe stage. A finite
 `Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
@@ -1325,10 +1313,14 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
 
   (def {} forward
     (fn {} (params {} w1 b1 w2 b2 act x)
-      (pipe {} (var {} x)
-        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
-        (fn {} (params {} v) (app {} (var {} activate) (var {} act) (var {} v)))
-        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+      (app {} (var {} add)
+        (app {} (var {} matmul)
+          (app {} (var {} activate) (var {} act)
+            (app {} (var {} add)
+              (app {} (var {} matmul) (var {} x) (var {} w1))
+              (var {} b1)))
+          (var {} w2))
+        (var {} b2)))))
 ```
 
 ### 9.4 ADT with Record Variants

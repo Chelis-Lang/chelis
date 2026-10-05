@@ -341,7 +341,7 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         }
         Expr::Pipe(seed, stages, _) => {
             let mut kids = vec![seed.as_ref()];
-            kids.extend(stages);
+            kids.extend(stages.iter().map(|stage| &stage.expression));
             kids
         }
         Expr::If(condition, then_expr, else_expr, _) => {

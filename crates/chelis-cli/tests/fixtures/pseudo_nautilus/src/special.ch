@@ -29,7 +29,7 @@ def erf_approx_nonneg(x: f32) -> f32 = {
 }
 def erf_approx(x: f32) -> f32 = {
   is_negative = 0.0 |> cast(f32) |> gt(x)
-  abs_x = if is_negative then 0.0 |> cast(f32) |> sub(x) else x
+  abs_x = if is_negative then (0.0 |> cast(f32) |> sub(x)) else x
   positive_value = erf_approx_nonneg(abs_x)
-  if is_negative then 0.0 |> cast(f32) |> sub(positive_value) else positive_value
+  if is_negative then (0.0 |> cast(f32) |> sub(positive_value)) else positive_value
 }

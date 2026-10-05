@@ -102,13 +102,13 @@ def business_select(cal: BusinessCalendar, ordinal: i64) -> i64 = {
   holidays = cal.holidays
   bounds = fold(fn (acc: (i64, i64), step: i64) -> if lt(acc.0, acc.1) then {
     middle = floor_div(add(acc.0, acc.1), 2i64)
-    if week |> mask_select(add(base, middle)) |> lt(index(holidays, middle)) then (acc.0, middle) else (add(middle, 1i64), acc.1)
+    if (week |> mask_select(add(base, middle)) |> lt(index(holidays, middle))) then (acc.0, middle) else (add(middle, 1i64), acc.1)
   } else acc, (0i64, len(holidays)), range(0i64, search_steps(len(holidays))))
   mask_select(week, add(base, bounds.0))
 }
 -- Whether a day of the horizon is a business day.
 def is_business_at(cal: BusinessCalendar, epoch_day: i64) -> bool =
-  if cal.weekmask |> weekmask_flags |> weekmask_has(epoch_day) then {
+  if ((cal.weekmask) |> weekmask_flags |> weekmask_has(epoch_day)) then {
     position = holidays_before(cal.holidays, epoch_day)
     if lt(position, len(cal.holidays)) then neq(index(cal.holidays, position), epoch_day) else true
   } else false
@@ -194,10 +194,10 @@ def sorted_unique(days: List[i64]) -> List[i64] = map(fn (pair: (i64, i64)) -> p
 def repeated_days(days: List[i64]) -> List[i64] = map(fn (pair: (i64, i64)) -> pair.0, filter(fn (pair: (i64, i64)) -> eq(pair.0, pair.1), sorted_pairs(days)))
 def normalized_holidays(weekmask: Weekmask, days: List[i64], valid_from: i64, valid_until: i64) -> List[i64] = {
   flags = weekmask_flags(weekmask)
-  sorted_unique(filter(fn (day: i64) -> if day |> gte(valid_from) |> and(lte(day, valid_until)) then weekmask_has(flags, day) else false, days))
+  sorted_unique(filter(fn (day: i64) -> if (day |> gte(valid_from) |> and(lte(day, valid_until))) then weekmask_has(flags, day) else false, days))
 }
 -- Construction.
-def first_outside(days: List[i64], valid_from: i64, valid_until: i64) -> i64 = fold(fn (acc: (i64, i64), day: i64) -> if gte(acc.1, 0i64) then acc else if day |> gte(valid_from) |> and(lte(day, valid_until)) then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), days).1
+def first_outside(days: List[i64], valid_from: i64, valid_until: i64) -> i64 = fold(fn (acc: (i64, i64), day: i64) -> if gte(acc.1, 0i64) then acc else if (day |> gte(valid_from) |> and(lte(day, valid_until))) then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), days).1
 def calendar_problem(weekmask: Weekmask, days: List[i64], valid_from: i64, valid_until: i64) -> string =
   if eq(set_flags(weekmask_flags(weekmask)), 0i64) then "the weekmask has no business day" else if gt(valid_from, valid_until) then joined(["valid_from ", day_text(valid_from), " is after valid_until ", day_text(valid_until)]) else {
     bad = first_outside(days, valid_from, valid_until)
@@ -207,7 +207,7 @@ def normalized_calendar(weekmask: Weekmask, days: List[i64], valid_from: i64, va
 def business_calendar(weekmask: Weekmask, holidays: List[Date], valid_from: Date, valid_until: Date) -> BusinessCalendar = {
   days = map(fn (d: Date) -> date_epoch_day(d), holidays)
   problem = calendar_problem(weekmask, days, date_epoch_day(valid_from), date_epoch_day(valid_until))
-  if eq(problem, "") then normalized_calendar(weekmask, days, date_epoch_day(valid_from), date_epoch_day(valid_until)) else "business_calendar" |> domain_failure(problem) |> fail
+  if eq(problem, "") then normalized_calendar(weekmask, days, date_epoch_day(valid_from), date_epoch_day(valid_until)) else ("business_calendar" |> domain_failure(problem) |> fail)
 }
 def try_business_calendar(weekmask: Weekmask, holidays: List[Date], valid_from: Date, valid_until: Date) -> Option[BusinessCalendar] = {
   days = map(fn (d: Date) -> date_epoch_day(d), holidays)
@@ -221,7 +221,7 @@ def business_calendar_valid_until(cal: BusinessCalendar) -> Date = date_from_epo
 -- Scalar queries.
 def is_business_day(cal: BusinessCalendar, d: Date) -> bool = {
   day = date_epoch_day(d)
-  if in_horizon(cal, day) then is_business_at(cal, day) else "is_business_day" |> domain_failure(outside_horizon(cal, day)) |> fail
+  if in_horizon(cal, day) then is_business_at(cal, day) else ("is_business_day" |> domain_failure(outside_horizon(cal, day)) |> fail)
 }
 def try_is_business_day(cal: BusinessCalendar, d: Date) -> Option[bool] = {
   day = date_epoch_day(d)
@@ -229,7 +229,7 @@ def try_is_business_day(cal: BusinessCalendar, d: Date) -> Option[bool] = {
 }
 def business_day_roll(cal: BusinessCalendar, d: Date, roll: BusinessDayRoll) -> Date = {
   (problem, day) = roll_of(cal, date_epoch_day(d), roll)
-  if eq(problem, "") then date_from_epoch_day(day) else "business_day_roll" |> domain_failure(problem) |> fail
+  if eq(problem, "") then date_from_epoch_day(day) else ("business_day_roll" |> domain_failure(problem) |> fail)
 }
 def try_business_day_roll(cal: BusinessCalendar, d: Date, roll: BusinessDayRoll) -> Option[Date] = {
   (problem, day) = roll_of(cal, date_epoch_day(d), roll)
@@ -237,7 +237,7 @@ def try_business_day_roll(cal: BusinessCalendar, d: Date, roll: BusinessDayRoll)
 }
 def business_day_offset(cal: BusinessCalendar, d: Date, n: i64, start: NonBusinessStart) -> Date = {
   (problem, day) = offset_of(cal, date_epoch_day(d), n, start)
-  if eq(problem, "") then date_from_epoch_day(day) else "business_day_offset" |> domain_failure(problem) |> fail
+  if eq(problem, "") then date_from_epoch_day(day) else ("business_day_offset" |> domain_failure(problem) |> fail)
 }
 def try_business_day_offset(cal: BusinessCalendar, d: Date, n: i64, start: NonBusinessStart) -> Option[Date] = {
   (problem, day) = offset_of(cal, date_epoch_day(d), n, start)
@@ -245,7 +245,7 @@ def try_business_day_offset(cal: BusinessCalendar, d: Date, n: i64, start: NonBu
 }
 def business_day_count(cal: BusinessCalendar, begin: Date, end: Date) -> i64 = {
   (problem, total) = count_of(cal, date_epoch_day(begin), date_epoch_day(end))
-  if eq(problem, "") then total else "business_day_count" |> domain_failure(problem) |> fail
+  if eq(problem, "") then total else ("business_day_count" |> domain_failure(problem) |> fail)
 }
 def try_business_day_count(cal: BusinessCalendar, begin: Date, end: Date) -> Option[i64] = {
   (problem, total) = count_of(cal, date_epoch_day(begin), date_epoch_day(end))
@@ -273,10 +273,10 @@ def any_calendar(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalendar =
   valid_until = earlier_day(a.valid_until, b.valid_until)
   a_flags = weekmask_flags(a.weekmask)
   b_flags = weekmask_flags(b.weekmask)
-  a_days = filter(fn (day: i64) -> day |> gte(valid_from) |> and(lte(day, valid_until)), a.holidays)
-  b_days = filter(fn (day: i64) -> day |> gte(valid_from) |> and(lte(day, valid_until)), b.holidays)
-  a_only = filter(fn (day: i64) -> b_flags |> weekmask_has(day) |> not, a_days)
-  b_only = filter(fn (day: i64) -> a_flags |> weekmask_has(day) |> not, b_days)
+  a_days = filter(fn (day: i64) -> (day |> gte(valid_from) |> and(lte(day, valid_until))), a.holidays)
+  b_days = filter(fn (day: i64) -> (day |> gte(valid_from) |> and(lte(day, valid_until))), b.holidays)
+  a_only = filter(fn (day: i64) -> (b_flags |> weekmask_has(day) |> not), a_days)
+  b_only = filter(fn (day: i64) -> (a_flags |> weekmask_has(day) |> not), b_days)
   holidays =
     a_only
     |> concat(b_only)
@@ -286,14 +286,14 @@ def any_calendar(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalendar =
 }
 def business_in_all(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalendar = {
   problem = all_problem(a, b)
-  if eq(problem, "") then all_calendar(a, b) else "business_in_all" |> domain_failure(problem) |> fail
+  if eq(problem, "") then all_calendar(a, b) else ("business_in_all" |> domain_failure(problem) |> fail)
 }
-def try_business_in_all(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if a |> all_problem(b) |> eq("") then Some(all_calendar(a, b)) else None
+def try_business_in_all(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if (a |> all_problem(b) |> eq("")) then Some(all_calendar(a, b)) else None
 def business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalendar = {
   problem = horizons_problem(a, b)
-  if eq(problem, "") then any_calendar(a, b) else "business_in_any" |> domain_failure(problem) |> fail
+  if eq(problem, "") then any_calendar(a, b) else ("business_in_any" |> domain_failure(problem) |> fail)
 }
-def try_business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if a |> horizons_problem(b) |> eq("") then Some(any_calendar(a, b)) else None
+def try_business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if (a |> horizons_problem(b) |> eq("")) then Some(any_calendar(a, b)) else None
 -- Vectorized forms. Each is a tensor kernel over the column: weekmask days
 -- are ranked and selected in closed form through the week table, and every
 -- holiday count is a prefix count over the merged sort of the queries and
@@ -469,9 +469,9 @@ def dates_is_business_day[n](cal: BusinessCalendar, ds: Dates[n]) -> tensor[n, b
     |> within(cal.valid_from, cal.valid_until)
     |> to_list
     |> first_false
-  if gte(bad, 0i64) then "dates_is_business_day"
+  if gte(bad, 0i64) then ("dates_is_business_day"
   |> element_failure(bad, outside_horizon(cal, element_at(days, bad)))
-  |> fail else business_ats(cal, days)
+  |> fail) else business_ats(cal, days)
 }
 def dates_business_day_roll[n](cal: BusinessCalendar, ds: Dates[n], roll: BusinessDayRoll) -> Dates[n] = {
   days = dates_epoch_days(ds)
@@ -481,9 +481,9 @@ def dates_business_day_roll[n](cal: BusinessCalendar, ds: Dates[n], roll: Busine
     |> and(within(days, cal.valid_from, cal.valid_until))
     |> to_list
     |> first_false
-  if gte(bad, 0i64) then "dates_business_day_roll"
+  if gte(bad, 0i64) then ("dates_business_day_roll"
   |> element_failure(bad, roll_of(cal, element_at(days, bad), roll).0)
-  |> fail else dates_from_epoch_days(rolled)
+  |> fail) else dates_from_epoch_days(rolled)
 }
 def dates_business_day_offset[n](cal: BusinessCalendar, ds: Dates[n], offsets: &tensor[n, i64], start: NonBusinessStart) -> Dates[n] = {
   days = dates_epoch_days(ds)
@@ -494,9 +494,9 @@ def dates_business_day_offset[n](cal: BusinessCalendar, ds: Dates[n], offsets: &
       |> and(within(days, cal.valid_from, cal.valid_until))
       |> to_list
       |> first_false
-    if gte(bad, 0i64) then "dates_business_day_offset"
+    if gte(bad, 0i64) then ("dates_business_day_offset"
     |> element_failure(bad, offset_of(cal, element_at(days, bad), element_at(offsets, bad), start).0)
-    |> fail else dates_from_epoch_days(moved)
+    |> fail) else dates_from_epoch_days(moved)
   }
 }
 def dates_business_day_count[n](cal: BusinessCalendar, begins: Dates[n], ends: Dates[n]) -> tensor[n, i64] = {
@@ -510,8 +510,8 @@ def dates_business_day_count[n](cal: BusinessCalendar, begins: Dates[n], ends: D
       |> and(within(lasts, cal.valid_from, beyond))
       |> to_list
       |> first_false
-    if gte(bad, 0i64) then "dates_business_day_count"
+    if gte(bad, 0i64) then ("dates_business_day_count"
     |> element_failure(bad, count_of(cal, element_at(firsts, bad), element_at(lasts, bad)).0)
-    |> fail else sub(business_befores(cal, lasts), business_befores(cal, firsts))
+    |> fail) else sub(business_befores(cal, lasts), business_befores(cal, firsts))
   }
 }

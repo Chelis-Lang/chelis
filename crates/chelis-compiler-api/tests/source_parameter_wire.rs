@@ -59,3 +59,77 @@ fn source_parameters_reject_alternate_numeric_encodings_and_overflow() {
             .is_err()
     );
 }
+
+#[test]
+fn pipe_stage_wire_preserves_syntax_without_synthesized_binders() {
+    use chelis_compiler_api::{
+        compiler,
+        schema::{ParseRequest, SourceKind, WireSurfDecl},
+    };
+    let parsed = compiler::parse(ParseRequest {
+        source_kind: SourceKind::Surf,
+        source: "out = x |> f(y) |> cast(f64) |> copy |> realize\n".into(),
+    })
+    .unwrap();
+    let declarations = parsed.surf_ast.unwrap();
+    let WireSurfDecl::LetDef {
+        value: WireSurfExpr::Pipe { stages, .. },
+        ..
+    } = &declarations[0]
+    else {
+        panic!("authored pipe is preserved")
+    };
+    use chelis_compiler_api::schema::WirePipeCastMode as CastMode;
+    use chelis_compiler_api::schema::WirePipeStageSyntax as S;
+    assert_eq!(
+        stages.iter().map(|stage| stage.syntax).collect::<Vec<_>>(),
+        vec![
+            S::CallFirst,
+            S::Cast(CastMode::Checked),
+            S::Copy,
+            S::Realize
+        ]
+    );
+    let json = serde_json::to_value(&declarations).unwrap();
+    assert!(!json.to_string().contains("__chelis_pipe"));
+    let decoded: Vec<WireSurfDecl> = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    assert!(
+        compiler::parse(ParseRequest {
+            source_kind: SourceKind::Surf,
+            source: "out = x + y |> f\n".into()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn pipe_cast_modes_are_wire_owned_and_preserve_every_serialized_rung() {
+    use chelis_compiler_api::schema::{WirePipeCastMode, WirePipeStageSyntax};
+    use chelis_deep::{CastMode, NamedCastMode};
+    for mode in [
+        CastMode::Checked,
+        CastMode::Named(NamedCastMode::Trunc),
+        CastMode::Named(NamedCastMode::Saturate),
+        CastMode::Named(NamedCastMode::Wrap),
+    ] {
+        let wire = WirePipeStageSyntax::from(chelis_surf::ast::PipeStageSyntax::Cast(mode));
+        assert_eq!(
+            wire,
+            WirePipeStageSyntax::Cast(WirePipeCastMode::from(mode))
+        );
+        let expected = json!({"Cast": serde_json::to_value(mode).unwrap()});
+        assert_eq!(serde_json::to_value(wire).unwrap(), expected);
+        let decoded: WirePipeStageSyntax = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(decoded, wire);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
+    for invalid in [
+        json!(42),
+        json!("Future"),
+        json!({"Named":"Future"}),
+        json!({"Named":42}),
+    ] {
+        assert!(serde_json::from_value::<WirePipeStageSyntax>(json!({"Cast":invalid})).is_err());
+    }
+}

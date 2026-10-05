@@ -152,7 +152,7 @@ pub enum TagKeys {
 pub const fn tag_keys(tag: DeepTag) -> TagKeys {
     use KeyAdmission::{Aggregate, Join, Move};
     match tag {
-        DeepTag::App | DeepTag::Pipe => TagKeys::ByCallee,
+        DeepTag::App => TagKeys::ByCallee,
         // A handler region (`with device(..) { .. }`) lowers to its body, so
         // its result moves out as a block's does; its handler is a literal
         // the effects gate admits, never a runtime operand.

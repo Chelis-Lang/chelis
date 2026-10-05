@@ -310,6 +310,12 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--no-default-features",
     "--", "-D", "warnings",
 ]
+# CLI dependency feature unification enables the historical migration reader
+# even in the workspace's no-default row. Compile the ordinary core separately.
+CLIPPY_CORE_WITHOUT_MIGRATION: list[str] = [
+    "cargo", "clippy", "-p", "chelis-deep", "-p", "chelis-surf",
+    "--all-targets", "--no-default-features", "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-cli/ownership-ledger,"
@@ -576,6 +582,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,
         CLIPPY_NO_DEFAULT_FEATURES,
+        CLIPPY_CORE_WITHOUT_MIGRATION,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         STD_BUNDLE_REPRODUCIBILITY,

@@ -363,15 +363,15 @@ fn assert_retraction_law(path: &Path, resugared_path: &Path) {
     );
 }
 
-/// A program nested deeply enough that a pipe stage's empty `params`
+/// A program nested deeply enough that an authored lambda's empty `params`
 /// metadata starts past the Deep printer's line width still obeys the
 /// retraction law, independently of the repository corpus's shapes.
 #[test]
 fn deeply_nested_surf_obeys_the_normalized_deep_retraction_law() {
     let depth = 45;
-    let mut body = String::from("x |> add(1i64)");
+    let mut body = String::from("x |> (fn (v: i64) -> v + 1i64)");
     for level in 0..depth {
-        body = format!("if gt(x, {level}i64) then {body} else 0i64");
+        body = format!("if gt(x, {level}i64) then ({body}) else 0i64");
     }
     let directory = tempdir().expect("tempdir");
     let source = directory.path().join("deeply_nested.ch");

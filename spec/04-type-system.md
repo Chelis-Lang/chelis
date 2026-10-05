@@ -1159,14 +1159,9 @@ constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
 obligation an `if` condition does, discharged by unifying its type with
 `bool`; [04-PAT-2] states what it does at run time.
 
-**Pipe:**
-```
-    Γ ⊢ e₁ : τ₁
-    Γ ⊢ e₂ : τ₁ → τ₂
-    Γ ⊢ e₃ : τ₂ → τ₃
-    ──────────────────────────────────────
-    Γ ⊢ (pipe {} e₁ e₂ e₃) : τ₃
-```
+Surf pipes normalize to applications before type inference, including contextual
+literal typing, under spec/02 §0.2. The application rule above governs them;
+there is no separate Deep pipe typing rule.
 
 **Tuple:**
 ```
@@ -2914,7 +2909,10 @@ the same diagnostics.
 > `kind` vocabulary member, its `message`, and its location as
 > [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
 > own line, in the order the checker reported it, so a rejection carrying
-> `N` diagnostics renders `N` lines. A debug rendering of a
+> `N` diagnostics renders `N` diagnostic summary lines. A renderer MAY
+> accompany them with excerpts of the authored source, identified by path,
+> line and column; an excerpt SHALL NOT show a synthesized expression in
+> place of the authored text. A debug rendering of a
 > producer-internal value is not a conforming rendering: it publishes
 > field names, absent-value markers, and variant spellings that
 > [04-FIT-14] keeps off the published interface. A diagnostic that cannot

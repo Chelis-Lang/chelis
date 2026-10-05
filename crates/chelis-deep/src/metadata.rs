@@ -61,7 +61,6 @@ enum Placement {
     Tag(DeepTag),
     Path,
     BindingValue,
-    PipeStage,
 }
 
 /// The payload role shared by stamping and metadata-preserving transformations.
@@ -115,7 +114,6 @@ rules! {
     "invariant_amenability" => S::Choices(&["linear", "polynomial", "transcendental", "opaque"]), P::Tag(T::Deftype), "a canonical amenability string on an invariant-carrying deftype";
     "surf_path" => S::String, P::Path, "a string on module/import/import-all whose ASCII-lowercased path equals its path child";
     "surf_dim_group_size" => S::PositiveInteger, P::Tag(T::Defdim), "a positive integer on the first member of an adjacent defdim group";
-    "surf_pipe_stage" => S::Choices(&["call-first"]), P::PipeStage, "\"call-first\" on an fn at a non-initial pipe stage";
     "surf_literal_style" => S::Choices(&["unsuffixed", "explicit"]), P::Tag(T::Lit), "\"unsuffixed\" or \"explicit\" on lit";
     "surf_binding_type" => S::Choices(&["inferred", "explicit"]), P::BindingValue, "\"inferred\" or \"explicit\" on a bind value";
     "lin" => S::Names(&["once", "borrow", "unrestricted"]), P::Any, "once, borrow, or unrestricted";
@@ -208,7 +206,6 @@ impl<'a> View<'a> {
                 }
                 V::PropertySourceKind(v) => Self::String(v.value().spelling(), v.span()),
                 V::InvariantAmenability(v) => Self::String(v.value().spelling(), v.span()),
-                V::SurfPipeStage(v) => Self::String(v.value().spelling(), v.span()),
                 V::SurfLiteralStyle(v) => Self::String(v.value().spelling(), v.span()),
                 V::SurfBindingType(v) => Self::String(v.value().spelling(), v.span()),
                 V::Lin(v) => Self::Name(v.value().spelling(), v.span()),
@@ -568,7 +565,6 @@ fn runtime_tag(tag: DeepTag) -> bool {
         | T::Lit
         | T::Record
         | T::Access
-        | T::Pipe
         | T::Block
         | T::Tuple
         | T::TupleGet
@@ -988,12 +984,10 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
 #[derive(Clone, Copy, Default)]
 struct Context {
     binding_value: bool,
-    pipe_stage: bool,
 }
 fn child_context(tag: Option<DeepTag>, index: usize) -> Context {
     Context {
         binding_value: tag == Some(T::Bind) && index % 2 == 1,
-        pipe_stage: tag == Some(T::Pipe) && index > 0,
     }
 }
 fn check_entries(
@@ -1040,7 +1034,6 @@ fn check_entries(
             P::BindingValue => {
                 tag.is_some_and(runtime_tag) && context.is_none_or(|c| c.binding_value)
             }
-            P::PipeStage => tag == Some(T::Fn) && context.is_none_or(|c| c.pipe_stage),
         };
         if !placement || !shape_valid(rule.shape, *v) {
             let mut e = error(key, *v, rule.expected);
@@ -1323,7 +1316,6 @@ fn typed_container_placement(
             P::Declaration => tag.is_some_and(crate::role::is_declaration_tag),
             P::Path => matches!(tag, Some(T::Module | T::Import | T::ImportAll)),
             P::BindingValue => tag.is_some_and(runtime_tag),
-            P::PipeStage => tag == Some(T::Fn),
         };
         if !allowed {
             return Err(crate::annotations::invalid(

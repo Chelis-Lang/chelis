@@ -19,7 +19,6 @@ pub mod node;
 pub mod parser;
 pub mod path;
 mod pattern;
-pub mod pipe;
 pub mod printer;
 pub mod raw;
 pub mod role;
@@ -61,3 +60,7 @@ pub use stamp_to_typed::{
     stamp_runtime_exprs, stamp_to_typed,
 };
 pub use tag::DeepTag;
+
+/// Current Deep grammar: Surf-only pipes, no `pipe` tag or spelling metadata.
+/// Persisted carriers bind their own bumped envelope versions to this grammar.
+pub const DEEP_FORMAT_VERSION: &str = "0.20";

@@ -8442,20 +8442,6 @@ fn lower_host_expr_kind(
         Expr::Node(list, _) if list.tag() == DeepTag::App => {
             lower_app_host_expr(expr, list, program, scope, tensor_helpers, expected_ty)?
         }
-        Expr::Node(list, _) if list.tag() == DeepTag::Pipe => {
-            // A pipe must never reach the host lowerer either. The checker's
-            // input fold (`chelis_deep::pipe::fold_pipe`) replaced it with the
-            // application spec/02-surf-syntax.md §0.1 says it denotes, so the
-            // host emitter sees that application like every other consumer.
-            // This arm existed to beta-reduce the stage itself, which is the
-            // second derivation of one sentence that chelis#1923 and
-            // chelis#1791 came from; it fails closed instead.
-            let _ = list;
-            return Err(host_expr_lowering_error(
-                expr,
-                "a pipe reached lowering unfolded",
-            ));
-        }
         Expr::Node(list, _) if list.tag() == DeepTag::HandleEffect => {
             // `with device(...) { body }` is pure-result from the host
             // emitter's perspective.

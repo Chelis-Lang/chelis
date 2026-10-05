@@ -198,7 +198,6 @@ choices!(PropertySourceKind { User => "user", CEarchin => "bridge:c-earchin" });
 choices!(Amenability { Linear => "linear", Polynomial => "polynomial", Transcendental => "transcendental", Opaque => "opaque" });
 choices!(LiteralStyle { Unsuffixed => "unsuffixed", Explicit => "explicit" });
 choices!(BindingTypeOrigin { Inferred => "inferred", Explicit => "explicit" });
-choices!(PipeStageOrigin { CallFirst => "call-first" });
 choices!(LiteralOrigin { Integer => "integer" });
 
 /// A presence marker, with no representable false payload.
@@ -562,7 +561,6 @@ core_inventory! {
     InvariantAmenability, invariant_amenability, Spanned<Amenability>, "invariant_amenability";
     SurfPath, surf_path, Spanned<String>, "surf_path";
     SurfDimGroupSize, surf_dim_group_size, PositiveInteger, "surf_dim_group_size";
-    SurfPipeStage, surf_pipe_stage, Spanned<PipeStageOrigin>, "surf_pipe_stage";
     SurfLiteralStyle, surf_literal_style, Spanned<LiteralStyle>, "surf_literal_style";
     SurfBindingType, surf_binding_type, Spanned<BindingTypeOrigin>, "surf_binding_type";
     Lin, lin, Spanned<Linearity>, "lin";
@@ -839,7 +837,6 @@ impl Metadata {
                 | MetadataValue::InvariantAmenability(_)
                 | MetadataValue::SurfPath(_)
                 | MetadataValue::SurfDimGroupSize(_)
-                | MetadataValue::SurfPipeStage(_)
                 | MetadataValue::SurfLiteralStyle(_)
                 | MetadataValue::SurfBindingType(_)
                 | MetadataValue::Lin(_)

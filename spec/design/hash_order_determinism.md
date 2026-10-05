@@ -203,6 +203,7 @@ issue it, the hosts it runs on, and its cadence:
 | `default-features` | default features | `scripts/gate.py` | per pull request |
 | `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the two `chelis-types` probe features | `scripts/gate.py` | per pull request |
 | `no-default-features` | every default feature in its off-state | `scripts/gate.py` | per pull request |
+| `core-without-migration` | Deep and Surf without the CLI-enabled `pre-020-pipe-migration` reader | `scripts/gate.py` | per pull request |
 | `cvc5-features` | `smt` for `chelis-cli`, `chelis-prove`, `chelis-tide` | `ci.yml`'s `SMT Feature Build (Linux)`, which already provisions cvc5 | per pull request |
 | `all-features` | every declared feature at once | `smt-full-prove.yml`, the only runner that provisions every solver | nightly |
 
@@ -214,8 +215,14 @@ matrix never lints the off-state of a default feature however many rows it has;
 everything at once. The check therefore requires each declared feature to be
 enabled by some row and disabled by some row.
 
-Which features exist, and which a row actually enables, both come from
-`cargo metadata` rather than from the manifests or the command strings. An
+Which features exist, and which a workspace row actually enables, both come from
+`cargo metadata` rather than from the manifests or the command strings.
+Package-restricted rows use `cargo tree` with the same package and feature
+selection, including normal, build and development dependencies. Only a package
+present in that resolved graph can supply off-state coverage; omitting a package
+does not compile its disabled configuration. The core row is required because
+the CLI enables the migration reader through its Surf dependency even when
+workspace default features are disabled. An
 optional dependency creates an implicit feature of the same name that the
 `[features]` table never lists, and `chelis-cli`'s optional `chelis-prove`
 dependency is exactly that shape and is a *default* feature guarding 25

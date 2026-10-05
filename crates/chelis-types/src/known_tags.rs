@@ -48,7 +48,6 @@ pub const fn deep_tag_lane_contribution(tag: DeepTag) -> LaneContribution {
         | DeepTag::If
         | DeepTag::Var
         | DeepTag::Lit
-        | DeepTag::Pipe
         | DeepTag::Block
         | DeepTag::Tuple
         | DeepTag::RecordUpdate

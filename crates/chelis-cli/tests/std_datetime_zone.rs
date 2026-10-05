@@ -910,7 +910,7 @@ fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
             (
                 format!("tags_{index:03}"),
                 format!(
-                    "assert_eq(fold(fn (acc: string, case: (string, bool)) -> if eq(accepted(case.0), case.1) then acc else acc |> string_concat(\" \") |> string_concat(case.0), \"\", [{}]), \"\", \"texts judged against RFC 9557\")",
+                    "assert_eq(fold(fn (acc: string, case: (string, bool)) -> if eq(accepted(case.0), case.1) then acc else (acc |> string_concat(\" \") |> string_concat(case.0)), \"\", [{}]), \"\", \"texts judged against RFC 9557\")",
                     list.join(", ")
                 ),
             )

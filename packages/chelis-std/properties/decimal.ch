@@ -22,7 +22,7 @@ def digits_of(text: string) -> string =
   fold(fn (acc: string, idx: i64) -> {
     piece = string_slice(text, idx, 1i64)
     code = char_code(piece)
-    if code |> gte(48i64) |> and(lte(code, 57i64)) then string_concat(acc, piece) else acc
+    if (code |> gte(48i64) |> and(lte(code, 57i64))) then string_concat(acc, piece) else acc
   }, "", range(0i64, string_len(text)))
 -- `text` written `copies` times in a row.
 def repeated(text: string, copies: i64) -> string = fold(fn (acc: string, unused: i64) -> string_concat(acc, text), "", range(0i64, copies))

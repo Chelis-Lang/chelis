@@ -6471,7 +6471,12 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             expr: Box::new(wire_expr(inner)?),
             stages: stages
                 .iter()
-                .map(wire_expr)
+                .map(|stage| {
+                    Ok(crate::schema::WireSurfPipeStage {
+                        syntax: stage.syntax.into(),
+                        expression: wire_expr(stage)?,
+                    })
+                })
                 .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },

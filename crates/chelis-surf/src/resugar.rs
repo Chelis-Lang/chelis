@@ -2201,7 +2201,6 @@ fn surface_metadata_expectation(key: &str) -> &'static str {
             "a string on a module or import whose ASCII-lowercased value equals its lowered path child"
         }
         "surf_dim_group_size" => "a positive integer on the first `defdim` in a group",
-        "surf_pipe_stage" => "`\"call-first\"` on a function used as a pipe stage",
         "surf_literal_style" => "`\"unsuffixed\"` or `\"explicit\"` on a literal",
         "surf_binding_type" => "`\"inferred\"` or `\"explicit\"` on a bind value",
         _ => unreachable!("unknown surface metadata handled separately"),
@@ -2747,18 +2746,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            // Binder adoption re-applies on re-desugaring; only concrete
-            // targets can require an explicit default suffix.
-            let precision_target = primitive_type_name(&node.children[1]);
-            let operand = if let Ok(literal) = node_ref(&node.children[0])
-                && literal.tag == DeepTag::Lit
-                && let Some(precision) = precision_target
-                && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
-            {
-                resugar_literal_with_default_suffix(literal)?
-            } else {
-                resugar_expression_inner(&node.children[0])?
-            };
+            let operand = resugar_cast_operand(&node.children[0], target)?;
             Ok(Expr::Cast(
                 Box::new(operand),
                 target.to_string(),
@@ -2829,17 +2817,6 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             Ok(Expr::TupleGet(
                 Box::new(resugar_expression_inner(&node.children[0])?),
                 index,
-                node.span,
-            ))
-        }
-        T::Pipe => {
-            at_least(&node, 2)?;
-            Ok(Expr::Pipe(
-                Box::new(resugar_expression_inner(&node.children[0])?),
-                node.children[1..]
-                    .iter()
-                    .map(resugar_pipe_stage)
-                    .collect::<Result<Vec<_>, _>>()?,
                 node.span,
             ))
         }
@@ -2973,9 +2950,6 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
 enum SuffixSpelling {
     /// The literal's own `surf_literal_style` decides.
     Authored,
-    /// The position re-derives a non-default dtype, so a default `i32` or
-    /// `f32` suffix is semantic and prints.
-    DefaultSemantic,
     /// The position re-derives a dtype the literal does not have, so every
     /// suffix prints, even on a literal authored unsuffixed elsewhere.
     Every,
@@ -2983,10 +2957,6 @@ enum SuffixSpelling {
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     resugar_literal_impl(node, SuffixSpelling::Authored)
-}
-
-fn resugar_literal_with_default_suffix(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, SuffixSpelling::DefaultSemantic)
 }
 
 fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<Expr, ResugarError> {
@@ -3032,6 +3002,11 @@ fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<E
         ));
     }
     let literal = match (&node.children[0], suffix) {
+        (DeepExpr::Atom(Atom::Int(value), _), Some(suffix))
+            if integer_literal_source(node.meta) && spelling == SuffixSpelling::Every =>
+        {
+            Literal::TypedInt(*value, suffix)
+        }
         (DeepExpr::Atom(Atom::Int(value), _), Some(_)) if suppress_suffix => Literal::Int(*value),
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) if suffix.is_float() => {
             let rounded = round_integer_at_float_width(*value, suffix);
@@ -3111,24 +3086,40 @@ fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
     }
 }
 
-fn default_literal_suffix_is_semantic_in_cast(
-    node: &NodeRef<'_>,
-    precision: &str,
-) -> Result<bool, ResugarError> {
-    let suffix = literal_suffix(node.meta)?;
-    let numeric_target = matches!(
-        precision,
-        "f32" | "f64" | "bf16" | "f16" | "i8" | "i16" | "i32" | "i64"
-    );
-    Ok(match (&node.children[0], suffix) {
-        (DeepExpr::Atom(Atom::Float(_), _), Some(LiteralSuffix::F32)) => {
-            matches!(precision, "f64" | "bf16" | "f16")
+fn resugar_cast_operand(expr: &DeepExpr, target: &str) -> Result<Expr, ResugarError> {
+    if let Ok(node) = node_ref(expr) {
+        if node.tag == DeepTag::Lit
+            && literal_suffix(node.meta)?.is_some_and(|dtype| dtype.as_str() != target)
+        {
+            // A direct (possibly signed) literal would adopt the cast target
+            // on rereading. Its original width is semantic, including when a
+            // macro authored it unsuffixed or the target is a dtype binder.
+            return resugar_literal_impl(node, SuffixSpelling::Every);
         }
-        (DeepExpr::Atom(Atom::Int(_), _), Some(LiteralSuffix::I32)) => {
-            numeric_target && precision != "i32"
+        if node.tag == DeepTag::App
+            && node.children.len() == 2
+            && let Ok(callee) = node_ref(&node.children[0])
+            && callee.tag == DeepTag::Var
+            && name_child(&callee, 0)? == "neg"
+            && let Ok(literal) = node_ref(&node.children[1])
+            && literal.tag == DeepTag::Lit
+        {
+            let spelling =
+                if literal_suffix(literal.meta)?.is_some_and(|dtype| dtype.as_str() != target) {
+                    SuffixSpelling::Every
+                } else {
+                    SuffixSpelling::Authored
+                };
+            // Keep the authored neg call as an operation. A signed literal
+            // would also collapse this operation during contextual typing.
+            return Ok(Expr::Apply(
+                Box::new(Expr::Var("neg".into(), callee.span)),
+                vec![resugar_literal_impl(literal, spelling)?],
+                node.span,
+            ));
         }
-        _ => false,
-    })
+    }
+    resugar_expression_inner(expr)
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
@@ -3704,211 +3695,6 @@ fn resugar_kv_pattern(expr: &DeepExpr) -> Result<(String, Pattern), ResugarError
         name_child(&node, 0)?.to_string(),
         resugar_pattern(&node.children[1])?,
     ))
-}
-
-fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
-    let node = node_ref(expr)?;
-    if node.meta.surf_pipe_stage().is_none() {
-        return resugar_expression_inner(expr);
-    }
-    let lambda = resugar_expression_inner(expr)?;
-    let Expr::Lambda(params, body, span) = lambda else {
-        unreachable!("validated fn resugars to lambda")
-    };
-    let [param] = params.as_slice() else {
-        return Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 0,
-            expected: "a one-parameter call-first stage",
-        });
-    };
-    if let Some(stage) = resugar_call_first_stage_application(&node.children[1], &param.name)? {
-        return Ok(stage);
-    }
-    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
-    match *body {
-        special @ (Expr::Realize(_, _) | Expr::Copy(_, _) | Expr::Cast(_, _, _, _)) => {
-            let carries_first = match &special {
-                Expr::Realize(argument, _)
-                | Expr::Copy(argument, _)
-                | Expr::Cast(argument, _, _, _) => is_param(argument),
-                _ => unreachable!("outer pattern restricts variants"),
-            };
-            if !carries_first {
-                return Err(ResugarError::InvalidChild {
-                    tag: node.tag.as_str(),
-                    index: 1,
-                    expected: "a call-first stage body using its parameter",
-                });
-            }
-            Ok(Expr::Lambda(params, Box::new(special), span))
-        }
-        _ => Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 1,
-            expected: "a call-first stage body using its parameter as the first argument",
-        }),
-    }
-}
-
-/// Rebuild the `|> f(args)` stage sugar from the Deep application a
-/// call-first stage was desugared from, holding the operator and
-/// finite-list sugars back at that one position.
-///
-/// Those sugars rewrite an `app` into `Binary`, `Unary`, or `List`, and
-/// none of the three can carry the stage sugar, so a stage calling an
-/// operator-named primitive or `Cons` would otherwise fail closed on Deep
-/// the desugarer itself emits (chelis#1197). Operands are resugared
-/// normally and keep their operator spelling.
-///
-/// `None` means the application cannot carry the stage sugar. Only the
-/// explicit `realize`/`copy`/`cast` cases remain available; an ordinary
-/// application must fail closed rather than bypass this guard. Two
-/// conditions have to hold.
-///
-/// The stage parameter must lead an application that still has a further
-/// argument. Stripping it from a lone-argument application would produce
-/// `f()`, which desugars back to a bare zero-argument call rather than to
-/// this stage.
-///
-/// No free occurrence of the stage parameter may remain in the application.
-/// The sugar drops the binder along with the leading occurrence, so a
-/// surviving reference would be captured by whatever `param` names in the
-/// enclosing scope: `fn (p) -> add(p, p)` applied to `3.0` would print as
-/// `3.0 |> add(p)`, which is a different program wherever an outer `p`
-/// exists.
-///
-/// `deep_mentions_free_name` reads the Deep children rather than their
-/// resugared forms, because resugaring is exactly what can hide the
-/// occurrence it looks for. The operator and finite-list sugars erase the
-/// callee name, so a parameter named `mul` reused as the callee of
-/// `(app {} (var {} mul) a b)` in an operand survives a Surf-side test: that
-/// operand comes back as `(a * b)`, mentioning no `mul` at all, and the
-/// stage prints as `x |> add((a * b))` with the second occurrence silently
-/// rebound to the builtin.
-fn resugar_call_first_stage_application(
-    body: &DeepExpr,
-    param: &str,
-) -> Result<Option<Expr>, ResugarError> {
-    let Ok(application) = node_ref(body) else {
-        return Ok(None);
-    };
-    if application.tag != DeepTag::App || application.children.len() < 3 {
-        return Ok(None);
-    }
-    let Expr::Var(carried, _) = resugar_expression_inner(&application.children[1])? else {
-        return Ok(None);
-    };
-    if carried != param {
-        return Ok(None);
-    }
-    if deep_mentions_free_name(&application.children[0], param)
-        || application.children[2..]
-            .iter()
-            .any(|argument| deep_mentions_free_name(argument, param))
-    {
-        return Ok(None);
-    }
-    let function = resugar_expression_inner(&application.children[0])?;
-    let arguments = application.children[2..]
-        .iter()
-        .map(resugar_expression_inner)
-        .collect::<Result<Vec<_>, _>>()?;
-    let call = Expr::Apply(Box::new(function), arguments, application.span);
-    Ok(Some(match application.meta.accumulator() {
-        Some(accumulator) => {
-            let precision = primitive_type_name(accumulator.expression()).ok_or(
-                ResugarError::InvalidSurfaceMetadata {
-                    key: "accumulator".to_string(),
-                    expected: "a `(t-prim {} precision)` dtype",
-                },
-            )?;
-            Expr::Accumulate(Box::new(call), precision.to_string(), application.span)
-        }
-        None => call,
-    }))
-}
-
-/// Report whether `name` occurs free anywhere in `expr` as a Deep name atom.
-///
-/// `resugar_call_first_stage_application` is asking whether deleting a binder
-/// would strand a reference to it, so the answer leans pessimistic: every
-/// name position counts, patterns and names carried in metadata included, and
-/// a false positive only costs a stage its sugar while a false negative
-/// prints a program that means something else.
-///
-/// `fn` is the one binder the walk models, because it is the one the
-/// desugarer can put in the way. Nested pipe stages each mint a parameter
-/// through `fresh_pipe_param_name`, which only avoids the names visible in
-/// the Surf stage handed to it, so an inner stage desugared separately
-/// reuses the same `__chelis_pipe` spelling. Those inner occurrences are
-/// bound by the inner `fn` and are not the outer stage's to strand. A binder
-/// this does not model, or a `params` child it cannot read, leaves the walk
-/// searching rather than assuming a binding it never confirmed.
-fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
-    if let Ok(node) = node_ref(expr)
-        && node.tag == DeepTag::Fn
-        && node.children.len() == 2
-        && params_bind_name(&node.children[0], name)
-    {
-        return meta_mentions_free_name(node.meta, name);
-    }
-    match expr {
-        DeepExpr::Atom(Atom::Name(found), _) => found == name,
-        DeepExpr::Atom(..) => false,
-        DeepExpr::Node(node, _) => {
-            meta_mentions_free_name(node.meta(), name)
-                || node
-                    .children_slice()
-                    .iter()
-                    .any(|child| deep_mentions_free_name(child, name))
-        }
-        DeepExpr::Map(meta, _) => meta_mentions_free_name(meta, name),
-        DeepExpr::MetaExpr(meta, _) => {
-            meta_mentions_free_name(&meta.metadata, name)
-                || deep_mentions_free_name(&meta.expr, name)
-        }
-        DeepExpr::BareList(items, _) => {
-            items.iter().any(|item| deep_mentions_free_name(item, name))
-        }
-        DeepExpr::UnknownForm(data) => {
-            meta_mentions_free_name(&data.meta, name)
-                || data
-                    .children
-                    .iter()
-                    .any(|child| deep_mentions_free_name(child, name))
-        }
-    }
-}
-
-/// Report whether `name` occurs free in any metadata value.
-///
-/// Keys are drawn from a closed vocabulary rather than from the program, so
-/// a key that happens to spell the parameter is not an occurrence of it.
-fn meta_mentions_free_name(metadata: &Metadata, name: &str) -> bool {
-    metadata.any_syntax(&mut |value| deep_mentions_free_name(value, name))
-}
-
-/// Report whether a Deep `params` child binds `name`.
-///
-/// A parameter is either a bare name atom or a `MetaExpr` carrying the name
-/// alongside its type, matching what `resugar_param` accepts. Anything else
-/// is not a binding this can vouch for, so it reports `false` and the walk
-/// keeps searching.
-fn params_bind_name(params: &DeepExpr, name: &str) -> bool {
-    let Ok(params) = node_ref(params) else {
-        return false;
-    };
-    if params.tag != DeepTag::Params {
-        return false;
-    }
-    params.children.iter().any(|child| {
-        let bound = match child {
-            DeepExpr::MetaExpr(meta, _) => atom_name(&meta.expr),
-            other => atom_name(other),
-        };
-        bound == Some(name)
-    })
 }
 
 fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
