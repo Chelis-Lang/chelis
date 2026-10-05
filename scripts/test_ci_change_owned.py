@@ -6714,24 +6714,114 @@ class DurationRowReviewTests(unittest.TestCase):
             result = owned.duration_row_review(plan, documents, self.baseline({}))
         self.assertEqual(result["unjudged"], [f"{self.ADDED}: not executed here (manual gate)"])
 
-    def test_set_duration_row_writes_a_canonical_row_the_loader_accepts(self) -> None:
+    def baseline_file(self, root: Path, targets: dict | None = None) -> Path:
+        path = root / "durations.json"
+        path.write_bytes(owned.canonical_json({
+            "version": owned.DURATION_BASELINE_VERSION,
+            "default_milliseconds": owned.DEFAULT_DURATION_MILLISECONDS,
+            "sources": [{"candidate_sha": "a" * 40, "plan_digest": "b" * 64}],
+            "targets": targets or {"p::t": {"milliseconds": 5, "samples": 1}},
+        }))
+        return path
+
+    def set_row_cli(self, path: Path, *extra: str) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return owned.main(["set-duration-row", *extra, "--baseline", str(path)])
+
+    def test_set_duration_row_writes_a_canonical_single_sample_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "durations.json"
-            path.write_bytes(owned.canonical_json({
-                "version": owned.DURATION_BASELINE_VERSION,
-                "default_milliseconds": owned.DEFAULT_DURATION_MILLISECONDS,
-                "sources": [{"candidate_sha": "a" * 40, "plan_digest": "b" * 64}],
-                "targets": {"p::t": {"milliseconds": 5, "samples": 1}},
-            }))
-            self.assertEqual(
-                owned.main(["set-duration-row", self.ADDED, "130000", "--baseline", str(path)]),
-                0,
-            )
+            path = self.baseline_file(Path(tmp))
+            self.assertEqual(self.set_row_cli(path, self.ADDED, "130000"), 0)
             baseline = owned.load_duration_baseline(path)
             self.assertEqual(baseline.targets[owned.Identity.parse(self.ADDED)], 130_000)
-            self.assertEqual(path.read_bytes(), owned.canonical_json(json.loads(path.read_text())))
+            data = json.loads(path.read_text())
+            self.assertEqual(data["targets"][self.ADDED], {"milliseconds": 130000, "samples": 1})
+            self.assertEqual(path.read_bytes(), owned.canonical_json(data))
 
-    def run_report_cli(self, seconds: dict) -> tuple[int, dict]:
+    def test_set_duration_row_rejects_bad_identities_and_guards_multi_sample_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.baseline_file(Path(tmp), {"p::t": {"milliseconds": 5, "samples": 2}})
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "invalid package-qualified target identity"):
+                self.set_row_cli(path, "not-a-target", "1000")
+            with self.assertRaisesRegex(ValueError, "from 2 samples"):
+                self.set_row_cli(path, "p::t", "1000")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(self.set_row_cli(path, "p::t", "1000", "--replace"), 0)
+            self.assertEqual(
+                json.loads(path.read_text())["targets"]["p::t"],
+                {"milliseconds": 1000, "samples": 1},
+            )
+            # Only the form is checked: a well-formed name the workspace lacks
+            # is accepted, and the planner never looks its row up.
+            self.assertEqual(self.set_row_cli(path, "chelis-cli::no_such_target", "1000"), 0)
+
+    def test_set_duration_row_runs_with_no_cargo_on_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.baseline_file(Path(tmp))
+            empty = Path(tmp) / "bin"
+            empty.mkdir()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(owned.ROOT / "scripts" / "ci_change_owned.py"),
+                    "set-duration-row",
+                    self.ADDED,
+                    "130000",
+                    "--baseline",
+                    str(path),
+                ],
+                env={**os.environ, "PATH": str(empty)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                json.loads(path.read_text())["targets"][self.ADDED],
+                {"milliseconds": 130000, "samples": 1},
+            )
+
+    def test_directly_modified_and_cargo_added_targets_are_judged(self) -> None:
+        result = self.review({self.ADDED: 1.0, self.MODIFIED: 700.0})
+        self.assertEqual(len(result["failures"]), 1)
+        self.assertIn(self.MODIFIED, result["failures"][0])
+        # A target added by a `[[test]]` entry appears only in target_dispositions.
+        plan = self.plan()
+        plan["path_dispositions"] = [plan["path_dispositions"][1]]
+        plan["target_dispositions"] = [
+            {"identity": self.ADDED, "kind": "integration_target_added", "src_path": "x.rs"}
+        ]
+        result = self.review({self.ADDED: 700.0}, plan=plan)
+        self.assertIn(self.ADDED, result["failures"][0])
+
+    def test_standing_coverage_is_listed_unjudged(self) -> None:
+        plan = self.plan()
+        plan["standing_coverage_reuse"] = [self.ADDED]
+        with tempfile.TemporaryDirectory() as tmp:
+            documents = self.documents(Path(tmp), {self.MODIFIED: 1.0})
+            result = owned.duration_row_review(plan, documents, self.baseline({}))
+        self.assertEqual(result["unjudged"], [f"{self.ADDED}: not executed here (standing coverage)"])
+
+    def test_an_in_scope_target_absent_from_every_receipt_fails_closed(self) -> None:
+        # Not executed, and neither a manual gate nor standing coverage.
+        with tempfile.TemporaryDirectory() as tmp:
+            documents = self.documents(Path(tmp), {self.MODIFIED: 1.0})
+            with self.assertRaisesRegex(ValueError, f"timing is missing for {self.ADDED}"):
+                owned.duration_row_review(self.plan(), documents, self.baseline({}))
+
+    def test_milliseconds_round_up(self) -> None:
+        result = self.review({self.ADDED: 120.0004})
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertEqual(result["candidates"][self.ADDED]["milliseconds"], 120001)
+        with tempfile.TemporaryDirectory() as tmp:
+            documents = self.documents(Path(tmp), {self.ADDED: 130.0, self.MODIFIED: 1.0}, 0.0004)
+            result = owned.duration_row_review(self.plan(), documents, self.baseline({}))
+        self.assertEqual(result["candidates"][self.ADDED]["milliseconds"], 130001)
+
+    def run_report_cli(
+        self, seconds: dict, *, validation_error: str | None = None, baseline_error: bool = False
+    ) -> tuple[int, dict, dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_path = root / "plan.json"
@@ -6739,11 +6829,17 @@ class DurationRowReviewTests(unittest.TestCase):
             documents = self.documents(root / "receipts", {self.MODIFIED: 1.0, **seconds})
             passing = {"version": 1, "lane": "change-owned", "required": True,
                        "success": True, "observed_success": True, "plan_digest": "d",
-                       "covered_targets": [], "manual_gate_targets": [],
+                       "covered_targets": [self.ADDED, self.MODIFIED], "manual_gate_targets": [],
                        "standing_reused_targets": [], "shard_durations": [], "failures": []}
+            validate = mock.Mock(return_value=passing)
+            if validation_error is not None:
+                validate.side_effect = ValueError(validation_error)
+            baseline = mock.Mock(return_value=self.baseline({}))
+            if baseline_error:
+                baseline.side_effect = ValueError("duration baseline schema keys mismatch")
             with mock.patch.object(owned, "load_receipt_documents", return_value=documents), \
-                    mock.patch.object(owned, "validate_change_owned_report", return_value=passing), \
-                    mock.patch.object(owned, "load_duration_baseline", return_value=self.baseline({})), \
+                    mock.patch.object(owned, "validate_change_owned_report", validate), \
+                    mock.patch.object(owned, "load_duration_baseline", baseline), \
                     contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
                 code = owned.main(["report", "--plan", str(plan_path), "--lane", "change-owned",
                                    "--receipts-root", str(root / "receipts"),
@@ -6752,10 +6848,45 @@ class DurationRowReviewTests(unittest.TestCase):
             candidates_path = root / "out" / owned.DURATION_ROW_CANDIDATES_FILE
             candidates = candidates_path.read_bytes()
             self.assertEqual(candidates, owned.canonical_json(json.loads(candidates)))
-            return code, report, json.loads(candidates)
+            summary = (root / "out" / "summary.md").read_text()
+            return code, report, json.loads(candidates), summary
+
+    def test_candidates_file_is_written_when_validation_or_the_baseline_fails(self) -> None:
+        code, report, candidates, summary = self.run_report_cli(
+            {self.ADDED: 700.0}, validation_error="receipt shard 0 test failed"
+        )
+        self.assertEqual(code, 1)
+        blocked = f"duration row required: {self.ADDED}"
+        self.assertEqual(report["failures"][0], "receipt shard 0 test failed")
+        self.assertEqual(len(report["failures"]), 2)
+        self.assertIn(blocked, report["failures"][1])
+        # The block reaches the summary too, so the author sees it this run.
+        self.assertIn(f"- Findings: 2\n  - receipt shard 0 test failed\n  - {blocked}", summary)
+        self.assertEqual(
+            candidates,
+            {"version": 1, "targets": {self.ADDED: {"milliseconds": 700000, "samples": 1}}},
+        )
+        code, report, candidates, summary = self.run_report_cli({self.ADDED: 700.0}, baseline_error=True)
+        self.assertEqual(code, 1)
+        self.assertIn("duration baseline schema keys mismatch", report["failures"][0])
+        self.assertEqual(candidates, {"version": 1, "targets": {}})
+
+    def test_a_blocked_report_keeps_coverage_and_other_targets_warnings(self) -> None:
+        code, report, candidates, summary = self.run_report_cli({self.ADDED: 700.0, self.MODIFIED: 130.0})
+        self.assertEqual(code, 1)
+        self.assertFalse(report["success"])
+        self.assertEqual(report["covered_targets"], [self.ADDED, self.MODIFIED])
+        self.assertEqual(len(report["duration_rows"]["warnings"]), 1)
+        self.assertIn(self.MODIFIED, report["duration_rows"]["warnings"][0])
+        self.assertEqual(sorted(candidates["targets"]), sorted([self.ADDED, self.MODIFIED]))
+        # The blocking finding sits under Findings, not the non-blocking list.
+        findings, warnings = summary.split("- Duration-row warnings (row collected, not blocking)")
+        self.assertIn(f"- Findings: 1\n  - duration row required: {self.ADDED}", findings)
+        self.assertNotIn(self.ADDED, warnings)
+        self.assertIn(self.MODIFIED, warnings)
 
     def test_required_report_blocks_shard_sized_and_collects_heavy_rows(self) -> None:
-        code, report, candidates = self.run_report_cli({self.ADDED: 700.0})
+        code, report, candidates, summary = self.run_report_cli({self.ADDED: 700.0})
         self.assertEqual(code, 1)
         self.assertFalse(report["success"])
         self.assertIn(f"duration row required: {self.ADDED}", report["failures"][0])
@@ -6763,14 +6894,14 @@ class DurationRowReviewTests(unittest.TestCase):
             candidates,
             {"version": 1, "targets": {self.ADDED: {"milliseconds": 700000, "samples": 1}}},
         )
-        code, report, candidates = self.run_report_cli({self.ADDED: 130.0})
+        code, report, candidates, summary = self.run_report_cli({self.ADDED: 130.0})
         self.assertEqual(code, 0)
         self.assertEqual(len(report["duration_rows"]["warnings"]), 1)
         self.assertEqual(
             candidates,
             {"version": 1, "targets": {self.ADDED: {"milliseconds": 130000, "samples": 1}}},
         )
-        code, report, candidates = self.run_report_cli({self.ADDED: 10.0})
+        code, report, candidates, summary = self.run_report_cli({self.ADDED: 10.0})
         self.assertEqual(code, 0)
         self.assertEqual(candidates, {"version": 1, "targets": {}})
 

@@ -4464,11 +4464,17 @@ def validate_change_owned_report(
 
 
 def duration_row_scope(plan: Mapping[str, Any]) -> list[str]:
-    """The targets this pull request adds or directly modifies, from the plan."""
+    """The targets this pull request adds or directly modifies, from the plan.
+
+    An added target is a workspace target the candidate has and the base does
+    not (`target_dispositions`), which includes one added or renamed by a
+    `[[test]]` entry; a directly modified target is one whose own source file
+    changed (`path_dispositions`)."""
     return sorted(
         {
             row["identity"]
-            for row in plan["path_dispositions"]
+            for key in ("path_dispositions", "target_dispositions")
+            for row in plan.get(key, [])
             if row.get("kind") in DURATION_ROW_SCOPE_KINDS
         }
     )
@@ -4619,16 +4625,28 @@ def write_duration_row_candidates(
     )
 
 
-def set_duration_row(path: Path, identity: str, milliseconds: int) -> None:
+def set_duration_row(
+    path: Path, identity: str, milliseconds: int, *, replace: bool = False
+) -> None:
     """Write one reviewed row into the duration baseline, keeping its canonical
-    form, so the row a duration-row failure prints is one command away."""
+    form, so the row a duration-row report prints is one command away.
+
+    Offline: it reads only the baseline and checks the identity's
+    `package::target` form, not that the target exists; the planner never
+    looks up a row for an absent target. A row measured over several samples
+    is a refresh's work and is replaced only with `replace`."""
     Identity.parse(identity)
     _positive_int(milliseconds, "duration row milliseconds")
     load_duration_baseline(path)
     data = _strict_json_object(path)
+    existing = data["targets"].get(identity)
+    if existing is not None and existing["samples"] > 1 and not replace:
+        raise ValueError(
+            f"{identity} has a row from {existing['samples']} samples; pass "
+            f"--replace to overwrite it"
+        )
     data["targets"][identity] = {"milliseconds": milliseconds, "samples": 1}
     path.write_bytes(canonical_json(data))
-    load_duration_baseline(path)
 
 
 def shard_durations(
@@ -5092,6 +5110,7 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
+    lines.extend(f"  - {finding}" for finding in report["failures"])
     if report["lane"] == "change-owned":
         manual_gates = report.get("manual_gate_targets", [])
         lines.append(f"- Manual gates, not executed in PR CI: {len(manual_gates)}")
@@ -5121,8 +5140,6 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
             f"- Shard {row['shard']}: took {actual_text} "
             f"(balancing weight {weight:.3f}s)"
         )
-    for finding in report["failures"]:
-        lines.append(f"  - {finding}")
     lines.extend(_classification_lines(report))
     (output / "summary.md").write_text("\n".join(lines) + "\n")
 
@@ -5274,6 +5291,11 @@ def build_parser() -> argparse.ArgumentParser:
     duration_row.add_argument("identity", help="package::target")
     duration_row.add_argument("milliseconds", type=int)
     duration_row.add_argument("--baseline", type=Path, default=DURATION_BASELINE_PATH)
+    duration_row.add_argument(
+        "--replace",
+        action="store_true",
+        help="overwrite a row measured over several samples",
+    )
 
     run_shard = subparsers.add_parser("run-shard", help="execute one plan shard")
     run_shard.add_argument("--plan", type=Path, required=True)
@@ -5399,7 +5421,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "set-duration-row":
-        set_duration_row(args.baseline, args.identity, args.milliseconds)
+        set_duration_row(
+            args.baseline, args.identity, args.milliseconds, replace=args.replace
+        )
         print(f"DURATION ROW: {args.identity} = {args.milliseconds} ms")
         return 0
     if args.command == "run-shard":
@@ -5469,6 +5493,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     plan = load_json(args.plan)
     if args.lane == "change-owned":
+        candidates: Mapping[str, Mapping[str, int]] = {}
+        duration_rows: dict[str, Any] | None = None
         try:
             documents = load_receipt_documents(args.receipts_root)
             standing_coverage = (
@@ -5476,18 +5502,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.standing_coverage is not None
                 else None
             )
+            # The duration review runs before validation so its collected
+            # rows reach the artifact even when a test or a receipt fails.
+            review_error: Exception | None = None
+            try:
+                duration_rows = duration_row_review(
+                    plan, documents, load_duration_baseline()
+                )
+                candidates = duration_rows["candidates"]
+            except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+                review_error = error
             result = validate_change_owned_report(
                 plan,
                 [receipt for receipt, _ in documents],
                 standing_coverage,
             )
-            duration_rows = duration_row_review(
-                plan, documents, load_duration_baseline()
-            )
-            write_duration_row_candidates(args.output, duration_rows["candidates"])
-            if duration_rows["failures"]:
-                raise ValueError("; ".join(duration_rows["failures"]))
-            result["duration_rows"] = duration_rows
+            if review_error is not None:
+                raise review_error
         except (
             ValueError,
             KeyError,
@@ -5507,8 +5538,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "standing_reused_targets": [],
                 "failures": [str(error)],
             }
+            if duration_rows is not None:
+                result["duration_rows"] = duration_rows
+                result["failures"].extend(duration_rows["failures"])
+            write_duration_row_candidates(args.output, candidates)
             _write_report_files(args.output, result)
             print(f"CHANGE-OWNED REPORT: FAIL: {error}", file=sys.stderr)
+            return 1
+        assert duration_rows is not None
+        result["duration_rows"] = duration_rows
+        write_duration_row_candidates(args.output, candidates)
+        if duration_rows["failures"]:
+            # A blocked report keeps its coverage and the other targets'
+            # warnings and advisories; only the verdict changes.
+            result["success"] = False
+            result["failures"] = list(duration_rows["failures"])
+            _write_report_files(args.output, result)
+            print(
+                "CHANGE-OWNED REPORT: FAIL: " + "; ".join(duration_rows["failures"]),
+                file=sys.stderr,
+            )
             return 1
     else:
         try:
