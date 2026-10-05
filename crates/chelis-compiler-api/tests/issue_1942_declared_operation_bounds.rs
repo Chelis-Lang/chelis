@@ -6,11 +6,10 @@ use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{check_ir_with_context, errors::CheckErrorKind};
 
 #[test]
-fn checked_library_round_trips_preserve_generic_and_primitive_function_values() {
+fn checked_library_round_trips_preserve_generic_function_values() {
     let declarations = parse_str(
         "def average[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
-         def middle[q: Float](x: tensor[3, q]) -> tensor[q] = average(x)\n\
-         primitive_average = mean\n",
+         def middle[q: Float](x: tensor[3, q]) -> tensor[q] = average(x)\n",
     )
     .unwrap();
     let stdlib = build_stdlib_context(&declarations).unwrap();
@@ -35,7 +34,6 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
             for expression in [
                 format!("middle(to_tensor({values}))"),
                 format!("{{ f = average\n f(to_tensor({values})) }}"),
-                format!("primitive_average(to_tensor({values}), 0i32)"),
             ] {
                 let source = format!("out: tensor[{dtype}] = {expression}\n");
                 let verdict = check_ir_with_context(
@@ -60,67 +58,26 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
     }
 }
 
+/// [04-INF-9] (chelis#3149): a builtin whose rule its scheme does not carry
+/// is applicable only by name, so a library cannot publish one as a value.
+/// That covers the window reductions and `mean`, whose shape and dtype rules
+/// run only at a direct application.
 #[test]
-fn checked_library_round_trips_preserve_window_reduction_contracts() {
-    let declarations = parse_str(
-        "window_mean = reduce_window_mean\n\
-         window_sum = reduce_window_sum\n",
-    )
-    .unwrap();
-    let stdlib = build_stdlib_context(&declarations).unwrap();
-    let stdlib_decoded: StdLibContext =
-        bincode::deserialize(&bincode::serialize(&stdlib).unwrap()).unwrap();
+fn checked_libraries_refuse_builtins_applicable_only_by_name() {
     let empty = build_stdlib_context(&[]).unwrap();
-    let dependency = build_library_context(&empty, &declarations)
-        .unwrap()
-        .unwrap();
-    let dependency_decoded: LibraryContext =
-        bincode::deserialize(&bincode::serialize(&dependency).unwrap()).unwrap();
-    for env in [
-        stdlib.type_env(),
-        stdlib_decoded.type_env(),
-        dependency.type_env(),
-        dependency_decoded.type_env(),
+    for source in [
+        "window_mean = reduce_window_mean\n",
+        "window_sum = reduce_window_sum\n",
+        "primitive_average = mean\n",
     ] {
-        for (source, accepted) in [
-            (
-                "out: tensor[2, f32] = window_mean(\
-                   to_tensor([1.0f32, 2.0f32, 3.0f32]), [2i64], [1i64])\n",
-                true,
-            ),
-            (
-                "out: tensor[2, i32] = window_mean(\
-                   to_tensor([1i32, 2i32, 3i32]), [2i64], [1i64])\n",
-                false,
-            ),
-            (
-                "out: tensor[2, i32] = window_sum(\
-                   to_tensor([1i32, 2i32, 3i32]), [2i64], [1i64])\n",
-                true,
-            ),
-            (
-                "out: tensor[2, bool] = window_sum(\
-                   to_tensor([true, false, true]), [2i64], [1i64])\n",
-                false,
-            ),
-        ] {
-            let verdict = check_ir_with_context(
-                env,
-                &desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar"),
-            );
-            if accepted {
-                verdict.unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
-            } else {
-                let errors = verdict.expect_err("an imported window contract must reject");
-                assert!(
-                    errors
-                        .errors
-                        .iter()
-                        .any(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
-                    "{source}: {errors:?}"
-                );
-            }
-        }
+        let declarations = parse_str(source).unwrap();
+        assert!(build_stdlib_context(&declarations).is_err(), "{source}");
+        assert!(
+            build_library_context(&empty, &declarations)
+                .unwrap()
+                .is_none(),
+            "{source}"
+        );
     }
 }
 
@@ -133,7 +90,7 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
         ("def make() = fn (x) -> sin(x)\n", false),
         ("def g(x: f32) -> f32 = sin(x)\n", true),
         ("def make() = fn (x: f32) -> sin(x)\n", true),
-        ("primitive = sin\n", true),
+        ("primitive = sin\n", false),
         (
             "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() = source()\n",
             false,
@@ -142,7 +99,7 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
             "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() -> f32 = source()\n",
             true,
         ),
-        ("def source() = sin\ndef make() = source()\n", true),
+        ("def source() = sin\ndef make() = source()\n", false),
         ("def less[p](x: p, y: p) -> bool = lt(x, y)\n", false),
         (
             "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\n",

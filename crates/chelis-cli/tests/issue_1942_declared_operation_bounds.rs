@@ -167,7 +167,6 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
     for source in [
         "def g(x: f32) -> f32 = sin(x)\n",
         "def make() = fn (x: f32) -> sin(x)\n",
-        "primitive = sin\n",
     ] {
         let path = dir.path().join("accepted.ch");
         fs::write(&path, source).unwrap();
@@ -181,6 +180,18 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
         assert_eq!(report["score"].as_f64(), Some(1.0));
         assert!(report["errors"].as_array().unwrap().is_empty());
     }
+    // [04-INF-9] (chelis#3149): `sin` owes a direct-call rule its scheme does
+    // not carry, so naming it as a value is refused by name.
+    let path = dir.path().join("primitive.ch");
+    fs::write(&path, "primitive = sin\n").unwrap();
+    let checked = cli("check", &path, &dir.path().join("out"));
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stdout)
+            .contains("builtin `sin` is applicable only by name"),
+        "{}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
     let path = dir.path().join("comparison.ch");
     for (source, accepted) in [
         (
@@ -264,6 +275,9 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                     true,
                 ),
             ] {
+                // [04-INF-9] (chelis#3149): a window reduction is applicable
+                // only by name, so every alias is refused by name.
+                let accepted = accepted && !alias;
                 fs::write(&path, &source).unwrap();
                 let checked = cli("check", &path, &dir.path().join("window-out"));
                 assert_eq!(
@@ -278,6 +292,17 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                 if accepted {
                     assert_eq!(report["score"].as_f64(), Some(1.0), "{source}: {report}");
                     assert!(report["errors"].as_array().unwrap().is_empty());
+                } else if alias {
+                    let refusal = format!("builtin `{operation}` is applicable only by name");
+                    assert!(
+                        report["errors"].as_array().unwrap().iter().any(|error| {
+                            error["kind"] == "TypeMismatch"
+                                && error["message"]
+                                    .as_str()
+                                    .is_some_and(|message| message.contains(&refusal))
+                        }),
+                        "{source}: {report}"
+                    );
                 } else {
                     assert!(
                         report["errors"]

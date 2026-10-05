@@ -3,7 +3,8 @@ use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{
-    check_ir_program, check_typed_program,
+    builtin_decl, builtin_env, builtin_value_contract_carried, check_ir_program,
+    check_typed_program,
     errors::{CheckError, CheckErrorKind},
 };
 
@@ -55,6 +56,45 @@ fn both_ingress_diagnostics(source: &str) -> Vec<CheckError> {
          typed={typed:?}\nir={ir:?}"
     );
     typed
+}
+
+/// [04-INF-9] (chelis#3149): a builtin is a function value only when its
+/// scheme carries its whole rule, so an alias of any other builtin is refused
+/// by name before any admission check. The alias witnesses below decide which
+/// verdict applies from the registry, never from a list here.
+fn carried(builtin: &str) -> bool {
+    let (env, _) = builtin_env();
+    let decl = builtin_decl(builtin).expect("registry builtin");
+    builtin_value_contract_carried(decl, env.lookup(builtin).expect("builtin scheme"))
+}
+
+fn assert_refused_by_name(source: &str, builtin: &str, errors: &[CheckError]) {
+    let refusal = format!("builtin `{builtin}` is applicable only by name");
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch) && error.message.contains(&refusal)
+        }),
+        "`{builtin}` named as a value must be refused by name:\n{source}\n{errors:?}"
+    );
+}
+
+fn check_alias(source: &str, builtin: &str, accepted: bool) {
+    if carried(builtin) {
+        return check(source, accepted);
+    }
+    let program = desugar_program(&parse_str(source).expect("valid source"))
+        .expect("Surf fixture must desugar");
+    let Err(report) = check_typed_program(&program) else {
+        panic!("`{builtin}` named as a value must be refused by name: {source}");
+    };
+    assert_refused_by_name(source, builtin, &report.errors);
+}
+
+fn check_alias_both_ingresses(source: &str, builtin: &str, accepted: bool) {
+    if carried(builtin) {
+        return check_both_ingresses(source, accepted);
+    }
+    assert_refused_by_name(source, builtin, &both_ingress_diagnostics(source));
 }
 
 fn check_both_ingresses(source: &str, accepted: bool) {
@@ -224,20 +264,22 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
                         String::new()
                     };
                     let callee = if alias { "op" } else { operation };
-                    check(
-                        &format!(
-                            "{prefix}def g[{binder}](x: tensor[3, p]) -> {result} = {callee}({args})\n"
-                        ),
-                        binder == "p: Numeric",
+                    let source = format!(
+                        "{prefix}def g[{binder}](x: tensor[3, p]) -> {result} = {callee}({args})\n"
                     );
+                    if alias {
+                        check_alias(&source, operation, binder == "p: Numeric");
+                    } else {
+                        check(&source, binder == "p: Numeric");
+                    }
                 }
             }
         }
     }
     // [05-OP-30] with spec/04 §5.7.1: `sum` returns sum_result(p, default(p)),
     // which is one type across `Float` but not across `Numeric`, whose i8
-    // member sums to i32 (#3009). Only the direct call is covered: an aliased
-    // reduction's result is not checked by its arm at all.
+    // member sums to i32 (#3009). An aliased reduction is refused by name
+    // (chelis#3149), so only the direct call reaches this rule.
     check(
         "def g[p: Float](x: tensor[3, p]) -> tensor[p] = sum(x, 0i32)\n",
         true,
@@ -249,9 +291,10 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
         assert!(check_typed_program(&program).is_err(), "{source}");
     }
     // Negative control: an aliased `sum` over an unbounded binder stays
-    // rejected by the operand contract.
-    check(
+    // rejected.
+    check_alias(
         "op = sum\ndef g[p](x: tensor[3, p]) -> tensor[p] = op(x, 0i32)\n",
+        "sum",
         false,
     );
     // [05-OP-64], [05-OP-47]: `mod` admits the numeric dtypes (chelis#626),
@@ -265,10 +308,13 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
                     String::new()
                 };
                 let callee = if alias { "op" } else { operation };
-                check(
-                    &format!("{prefix}def g[{binder}](x: p) -> p = {callee}(x, x)\n"),
-                    binder == "p: Int" || (operation == "mod" && binder == "p: Numeric"),
-                );
+                let source = format!("{prefix}def g[{binder}](x: p) -> p = {callee}(x, x)\n");
+                let accepted = binder == "p: Int" || (operation == "mod" && binder == "p: Numeric");
+                if alias {
+                    check_alias(&source, operation, accepted);
+                } else {
+                    check(&source, accepted);
+                }
             }
         }
         check(&format!("def g(x) = {operation}(x, x)\n"), false);
@@ -322,13 +368,15 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
                     String::new()
                 };
                 let callee = if alias { "window_op" } else { operation };
-                check_both_ingresses(
-                    &format!(
-                        "{prefix}def g[{binder}](x: tensor[3, p]) -> tensor[2, p] = \
+                let source = format!(
+                    "{prefix}def g[{binder}](x: tensor[3, p]) -> tensor[2, p] = \
                          {callee}(x, [2i64], [1i64])\n"
-                    ),
-                    accepted,
                 );
+                if alias {
+                    check_alias_both_ingresses(&source, operation, accepted);
+                } else {
+                    check_both_ingresses(&source, accepted);
+                }
             }
         }
         for (dtype, accepted) in [(invalid_dtype, false), (valid_dtype, true)] {
@@ -339,13 +387,15 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
                     String::new()
                 };
                 let callee = if alias { "window_op" } else { operation };
-                check_both_ingresses(
-                    &format!(
-                        "{prefix}def g(x: tensor[3, {dtype}]) -> tensor[2, {dtype}] = \
+                let source = format!(
+                    "{prefix}def g(x: tensor[3, {dtype}]) -> tensor[2, {dtype}] = \
                          {callee}(x, [2i64], [1i64])\n"
-                    ),
-                    accepted,
                 );
+                if alias {
+                    check_alias_both_ingresses(&source, operation, accepted);
+                } else {
+                    check_both_ingresses(&source, accepted);
+                }
             }
         }
     }
@@ -461,9 +511,10 @@ fn omitted_signatures_do_not_publish_inferred_dtype_contracts() {
     );
     check(&format!("{factory}def make() = source()\n"), false);
     check(&format!("{factory}def make() = (source(), 1i32)\n"), false);
-    check("def source() = sin\ndef make() = source()\n", true);
-    check(
+    check_alias("def source() = sin\ndef make() = source()\n", "sin", true);
+    check_alias(
         "type Box[a] =\n | Box { value: a }\ndef source() = Box { value: sin }\ndef make() = source()\n",
+        "sin",
         true,
     );
     check("def g() -> tensor[0, f32] = sin(to_tensor([]))\n", true);
@@ -530,7 +581,7 @@ fn inferred_family_lambdas_bind_monomorphically_within_the_declaration() {
 
 #[test]
 fn contract_transport_and_unconstrained_inference_remain_polymorphic() {
-    check("def make() = sin\n", true);
+    check_alias("def make() = sin\n", "sin", true);
     check(
         "def apply[p: Float](x: p) -> p = {\n h = fn (t) -> sin(t)\n h(x)\n}\n",
         true,
@@ -543,11 +594,16 @@ fn contract_transport_and_unconstrained_inference_remain_polymorphic() {
         "def identity(x) = x\na = identity(1i32)\nb = identity(true)\n",
         true,
     );
-    check(
+    check_alias(
         "def use() -> f64 = {\n op = sin\n _ = op(1.0f32)\n op(1.0f64)\n}\n",
+        "sin",
         true,
     );
-    check("def use() -> i32 = {\n op = sin\n op(1i32)\n}\n", false);
+    check_alias(
+        "def use() -> i32 = {\n op = sin\n op(1i32)\n}\n",
+        "sin",
+        false,
+    );
 }
 
 #[test]
@@ -575,16 +631,18 @@ fn arithmetic_and_matmul_require_their_operand_families() {
 #[test]
 fn a_primitive_function_value_carries_its_admission_requirement() {
     for dtype in ["i32", "f32"] {
-        check(
+        check_alias(
             &format!(
                 "def apply_it(f: &tensor[3, {dtype}] -> i32 -> tensor[{dtype}], x: tensor[3, {dtype}]) -> tensor[{dtype}] = f(x, 0i32)\ndef g(x: tensor[3, {dtype}]) -> tensor[{dtype}] = apply_it(mean, x)\n"
             ),
+            "mean",
             dtype == "f32",
         );
-        check(
+        check_alias(
             &format!(
                 "def g(x: tensor[3, {dtype}]) -> tensor[{dtype}] = {{\n op = mean\n op(x, 0i32)\n}}\n"
             ),
+            "mean",
             dtype == "f32",
         );
     }
@@ -633,19 +691,21 @@ fn every_family_primitive_alias_preserves_its_requirement() {
         ("recip", "x", "tensor[3, p]"),
     ] {
         for binder in ["p", "p: Float"] {
-            check(
+            check_alias(
                 &format!(
                     "def g[{binder}](x: tensor[3, p]) -> {output} = {{\n op = {operation}\n op({args})\n}}\n"
                 ),
+                operation,
                 binder == "p: Float",
             );
         }
     }
     for binder in ["p", "p: Int"] {
-        check(
+        check_alias(
             &format!(
                 "def g[{binder}](x: tensor[3, p]) -> tensor[3, p] = {{\n op = trunc_div\n op(x, x)\n}}\n"
             ),
+            "trunc_div",
             binder == "p: Int",
         );
     }

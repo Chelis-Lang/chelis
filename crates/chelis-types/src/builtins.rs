@@ -2441,6 +2441,20 @@ pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
     BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// [04-INF-9]: a builtin is a function value exactly when its whole
+/// operation contract travels with the value. Either the reviewed
+/// declaration says the scheme states that contract completely
+/// (`GenericAccepted`), or the scheme carries the operation's checked
+/// operand/result relation: a collection or key relation (`constraints`) or
+/// a result-origin equation (`result_origin`, as `fold` and `scan` carry).
+/// Every other builtin owes a rule that only its direct application runs, so
+/// it is applicable only by name until its scheme carries that rule.
+pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bool {
+    matches!(decl.inference, InferenceDisposition::GenericAccepted { .. })
+        || !scheme.constraints.is_empty()
+        || scheme.result_origin.is_some()
+}
+
 pub fn axis_argument_layout(name: &str) -> Option<AxisArgumentLayout> {
     match builtin_decl(name)?.axis_arguments {
         AxisArgumentLayout::NoAxes => None,
