@@ -121,7 +121,8 @@ compiles with the same profile: `runtime_toolchain` and the strict-reference
 constructor share one constructor, and differ only in that the product build adds
 OpenMP for a compiler that ships it (the generated parallel loops are element-wise, so
 thread count changes throughput, not values). The product build also spawns its tools
-with an allowlisted environment (`PATH`, `TMPDIR`) and refuses a compiler whose
+with an allowlisted environment (`PATH`, `TMPDIR`, and on macOS the selected Xcode's
+`SDKROOT`, which the build sets itself) and refuses a compiler whose
 predefined macros show the profile was changed; `spec/design/correctly_rounded_math.md`
 describes the profile. The gate still owns the pinned compiler identity, the Nix
 closure, and the single-thread run. A constructor-only unit test is insufficient for N1:

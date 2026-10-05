@@ -26,7 +26,9 @@ What changes for existing programs:
   -fno-fast-math`, and `-march=native` is gone. Native tools run with a cleared
   environment that keeps only `PATH` and `TMPDIR`, so `CFLAGS`, `CPATH`,
   `CCC_OVERRIDE_OPTIONS`, `NIX_CFLAGS_COMPILE`, `SDKROOT`, and the like no
-  longer change a build. A compiler named in `CHELIS_CC`, a wrapper script
+  longer change a build. On macOS the build sets `SDKROOT` itself, to the SDK of
+  the `xcode-select` default, so naming another Xcode's `clang` in `CHELIS_CC`
+  selects that compiler. A compiler named in `CHELIS_CC`, a wrapper script
   included, that does not honor the profile (for example one adding `-O0` or
   `-ffast-math`) fails the build with a diagnostic
   ([#2962](https://github.com/Chelis-Lang/chelis/issues/2962)).

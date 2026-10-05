@@ -1207,12 +1207,13 @@ REVIEWED: tuple[Row, ...] = (
             'if digest(output / "libchelis_runtime.a") != archive:',
             'expected = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
             'if report["installed_export_sha256"] != inventory["lib/libchelis_runtime.a"]:',
-            'installed / "lib/libchelis_runtime.a", "-lm",',
-            'installed / "lib/libchelis_runtime.a", "-lm", "-o", binary])',
+            'installed / "lib/libchelis_runtime.a", *link_flags,',
+            'installed / "lib/libchelis_runtime.a", *link_flags, "-o", binary])',
+            'if len(words) < 2 or not words[1].endswith("libchelis_runtime.a"):',
         ),
         disposition="not-lookup",
         reason=(
-            "compares the installed archive with its compiler's exact export and the staged archive/receipt, then links the checked installed archive by path for native execution"
+            "compares the installed archive with its compiler's exact export and the staged archive/receipt, then links the checked installed archive by path for native execution with the link requirements the build reported, after checking that line names the runtime archive"
         ),
     ),
     Row(
@@ -1489,10 +1490,11 @@ REVIEWED: tuple[Row, ...] = (
             'sealed = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
             '"archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",',
             '(output / "libchelis_runtime.a").write_bytes(b"swapped")',
+            '"\'out dir/libchelis_runtime.a\' -lm -lpthread -ldl\\n"',
         ),
         disposition="not-lookup",
         reason=(
-            "constructs a coherent compiler export and package, crosses each public header and the archive to prove rejection, and tests the canary's installed/staged archive checks"
+            "constructs a coherent compiler export and package, crosses each public header and the archive to prove rejection, tests the canary's installed/staged archive checks, and feeds its link-requirements parser a build line that names the archive"
         ),
     ),
     Row(

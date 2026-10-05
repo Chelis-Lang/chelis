@@ -263,8 +263,11 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   (driver intermediates). The compiler is selected by its path, not through the
   environment. `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CCC_OVERRIDE_OPTIONS`,
   `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`, locale and OpenMP variables are not on it, and on
-  macOS neither are `SDKROOT` nor `DEVELOPER_DIR`: the SDK follows the `xcode-select`
-  default, and another Xcode is chosen by naming its compiler in `CHELIS_CC`.
+  macOS neither are the caller's `SDKROOT` nor `DEVELOPER_DIR`. On macOS the build sets
+  `SDKROOT` itself to the SDK of the `xcode-select` default (`xcrun --show-sdk-path`
+  under the allowlist), the one the `/usr/bin` shims choose. Another Xcode is chosen
+  by naming its `clang` in `CHELIS_CC`; that compiler has no SDK of its own, and it
+  compiles against this one.
 - The profile is `-O2 -ffp-contract=off -fno-fast-math` plus the target's required
   flags, the same strict profile `cross_lane_gate.md` PD2 defines, now the product
   default.
@@ -275,7 +278,13 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   (`__OPTIMIZE__`). The amalgamation's `#error` guards refuse the same two modes and
   excess-precision evaluation (`FLT_EVAL_METHOD` other than 0) when the canary compiles.
   The canary then runs, and any bit it prints that differs from the profile refuses the
-  compiler, naming each broken obligation, its spec text, and its first broken row.
+  compiler, naming each broken obligation, its spec text, and its first broken row. A
+  compiler that cannot build the canary at all is refused with its own diagnostic and
+  without the claim that something added flags: the canary carries every kernel, so a
+  builtin a kernel calls unconditionally would make every native build fail on a
+  compiler without it. `scripts/vendor_core_math.py` therefore routes each
+  `__builtin_roundeven` through a `roundeven_finite` that uses the builtin only where
+  the compiler version has it.
 
 **The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
 holds a closed list of the profile's obligations, each tied to the text it enforces:

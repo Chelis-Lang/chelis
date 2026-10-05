@@ -156,6 +156,26 @@ class ContractCleanTests(unittest.TestCase):
         self.assertLessEqual(includes, vcm.CONTRACT_INCLUDES)
         self.assertNotRegex(text, r"#[ \t]*pragma[ \t]+STDC")
 
+    def test_checked_in_amalgamation_reaches_roundeven_only_through_its_guard(self):
+        # GCC 9 and Clang 16 lack `__builtin_roundeven`; one bare call in any kernel
+        # breaks every native build on them, because the compiler canary carries all.
+        text = vcm.AMALGAMATION.read_text(encoding="utf-8")
+        vcm.require_guarded_roundeven(text, "amalgamation")
+        self.assertIn("chelis_cr_sin__roundeven_finite (invpi * ax)", text)
+
+    def test_only_the_version_guarded_definition_may_name_roundeven(self):
+        define = "# define roundeven_finite(x) __builtin_roundeven (x)\n"
+        guarded = f"{vcm._ROUNDEVEN_GUARD}\n{define}#else\nstatic double roundeven_finite (double x);\n#endif\n"
+        vcm.require_guarded_roundeven("/* __builtin_roundeven was introduced in gcc 10 */\n" + guarded, "t")
+        for what, text in [
+            ("a bare call", guarded + "double k = __builtin_roundeven (y);\n"),
+            ("the float builtin", guarded + "float k = __builtin_roundevenf (y);\n"),
+            ("an unguarded definition", define),
+            ("a definition under another guard", f"#if 1\n{define}#else\n#endif\n"),
+        ]:
+            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, "outside a guarded roundeven_finite"):
+                vcm.require_guarded_roundeven(text, "t")
+
 
 class RepositoryTests(unittest.TestCase):
     def test_checked_in_amalgamation_is_current(self):

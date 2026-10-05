@@ -146,14 +146,24 @@ fn pinned_toolchain(
 ///   output, and sandboxed builds (Nix, macOS app sandboxes) need it.
 ///
 /// Locale variables are deliberately absent so diagnostics are stable. On
-/// macOS, `SDKROOT` and `DEVELOPER_DIR` are absent too: the SDK follows the
-/// `xcode-select` default, and a different Xcode is selected by naming its
-/// compiler in `CHELIS_CC`.
+/// macOS the caller's `SDKROOT` and `DEVELOPER_DIR` are absent too; instead
+/// [`tool_command`] sets `SDKROOT` to the SDK of the `xcode-select` default
+/// ([`selected_sdk`]), the one the `/usr/bin` shims choose. A compiler named
+/// directly in `CHELIS_CC`, such as another Xcode's `clang`, has no SDK of its
+/// own, so that is how it finds the system headers and libraries.
 pub const TOOL_ENVIRONMENT: &[&str] = &["PATH", "TMPDIR"];
 
 /// A command for a native build tool with the environment cleared except
-/// for [`TOOL_ENVIRONMENT`].
+/// for [`TOOL_ENVIRONMENT`], plus `SDKROOT` on macOS ([`selected_sdk`]).
 pub fn tool_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = allowlisted_command(program);
+    if let Some(sdk) = selected_sdk() {
+        command.env("SDKROOT", sdk);
+    }
+    command
+}
+
+fn allowlisted_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
     for name in TOOL_ENVIRONMENT {
@@ -163,6 +173,30 @@ pub fn tool_command(program: impl AsRef<OsStr>) -> Command {
     }
     command
 }
+
+/// On macOS, the SDK of the `xcode-select` default: what `xcrun --show-sdk-path`
+/// prints under [`TOOL_ENVIRONMENT`] alone, so the caller's `SDKROOT` and
+/// `DEVELOPER_DIR` cannot choose it. `None` elsewhere, or when `xcrun` finds no
+/// SDK; a compile then fails with the compiler's own diagnostic.
+fn selected_sdk() -> Option<&'static OsStr> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    SELECTED_SDK.as_deref()
+}
+
+static SELECTED_SDK: std::sync::LazyLock<Option<std::ffi::OsString>> =
+    std::sync::LazyLock::new(|| {
+        let output = allowlisted_command("/usr/bin/xcrun")
+            .arg("--show-sdk-path")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let path = String::from_utf8(output.stdout).ok()?;
+        let path = path.trim();
+        (output.status.success() && !path.is_empty()).then(|| path.into())
+    });
 
 /// The compiler a build used, recorded in the build output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,11 +514,18 @@ fn canary_mismatches(
         .output()
         .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
     if !compiled.status.success() || !program.is_file() {
-        return Err(refuse(format!(
-            "it did not build the floating-point canary ({}): {}",
+        // Not building is not evidence of added flags, so this refusal does not
+        // blame a wrapper; the compiler's own diagnostic names what failed, such
+        // as a missing builtin or the amalgamation's `#error` guards.
+        return Err(format!(
+            "native compiler `{}` did not build the floating-point canary, which \
+             compiles every correctly rounded kernel under the pinned profile ({}); \
+             set CHELIS_CC to a C compiler that builds it ({}): {}",
+            path.display(),
+            compile_flags.join(" "),
             compiled.status,
             String::from_utf8_lossy(&compiled.stderr).trim()
-        )));
+        ));
     }
     use std::io::Write as _;
     let mut child = Command::new(&program)
@@ -691,6 +732,7 @@ mod tests {
         ("CPATH", "/nonexistent-shadow-include"),
         ("C_INCLUDE_PATH", "/nonexistent-shadow-include"),
         ("SDKROOT", "/nonexistent-sdk"),
+        ("DEVELOPER_DIR", "/nonexistent-developer-dir"),
         ("GCC_EXEC_PREFIX", "/nonexistent-gcc/"),
         ("COMPILER_PATH", "/nonexistent-compiler-path"),
     ];
@@ -718,18 +760,49 @@ mod tests {
         }
         let output = tool_command("/usr/bin/env").output().unwrap();
         assert!(output.status.success());
-        let names: Vec<String> = String::from_utf8(output.stdout)
+        let variables: Vec<(String, String)> = String::from_utf8(output.stdout)
             .unwrap()
             .lines()
-            .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_string()))
+            .filter_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                Some((name.to_string(), value.to_string()))
+            })
             .collect();
-        assert!(!names.is_empty() || std::env::var_os("PATH").is_none());
-        for name in &names {
+        assert!(!variables.is_empty() || std::env::var_os("PATH").is_none());
+        for (name, value) in &variables {
+            if name == "SDKROOT" {
+                // The xcode-select default's SDK, never the caller's.
+                assert_eq!(Some(OsStr::new(value)), selected_sdk(), "{variables:?}");
+                continue;
+            }
             assert!(
                 TOOL_ENVIRONMENT.contains(&name.as_str()),
-                "tool environment leaked {name}: {names:?}"
+                "tool environment leaked {name}: {variables:?}"
             );
         }
+    }
+
+    /// `/usr/bin/clang` is a shim that hands the compiler it runs an SDK; that
+    /// compiler named directly, as `CHELIS_CC` may name another Xcode's, has none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn verify_compiler_accepts_an_xcode_clang_named_directly() {
+        if in_hostile_child(
+            "toolchain::tests::verify_compiler_accepts_an_xcode_clang_named_directly",
+        ) {
+            return;
+        }
+        // Under the allowlist, so the hostile DEVELOPER_DIR cannot steer the lookup.
+        let found = allowlisted_command("/usr/bin/xcrun")
+            .args(["--find", "clang"])
+            .output()
+            .unwrap();
+        assert!(found.status.success(), "xcrun --find clang failed");
+        let clang = String::from_utf8(found.stdout).unwrap().trim().to_string();
+        assert_ne!(clang, "/usr/bin/clang", "xcrun named the shim itself");
+        let toolchain = test_toolchain(CodegenRequirements::default());
+        verify_compiler(&clang, &toolchain.compile_flags, &toolchain.link_flags)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     #[test]

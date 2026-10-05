@@ -260,6 +260,21 @@ class ProcessTests(unittest.TestCase):
                 "import sys; print('expected', file=sys.stderr); sys.exit(1)"],
                 expected_failure="expected")
 
+    def test_consumer_links_with_the_reported_requirements(self) -> None:
+        # glibc before 2.34 needs -lpthread -ldl as well as -lm; the canary must
+        # link with whatever the build tells consumers, not a flag list of its own.
+        stdout = (
+            "Wrote out/callable.c\n"
+            "Link requirements (after module archive): cc "
+            "'out dir/libchelis_runtime.a' -lm -lpthread -ldl\n"
+        )
+        self.assertEqual(canary.reported_link_flags(stdout), ["-lm", "-lpthread", "-ldl"])
+        for broken in ("Wrote out/callable.c\n",
+                       "Link requirements (after module archive): cc out/libother.a -lm\n",
+                       stdout + stdout):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                canary.reported_link_flags(broken)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_release_waits_for_downloaded_two_platform_canary(self) -> None:
