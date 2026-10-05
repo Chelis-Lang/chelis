@@ -3417,14 +3417,17 @@ impl<'a> DesugarCtx<'a> {
             literal_sites::declaration_site(declared, init, &self.is_type_binder())
         });
         match site {
-            // A literal declared at its own default keeps the Deep it has
-            // without the declaration.
+            // A negated literal folds into one signed literal at the stated
+            // primitive, whether or not it repeats the primitive's suffix. An
+            // unnegated literal that would take the stated primitive anyway,
+            // by its suffix or its default, keeps the Deep it has without
+            // the declaration.
             Some(DeclarationSite::Scalar {
                 literal,
                 stated: StatedDtype::Primitive(primitive),
-            }) if literal.is_unsuffixed()
-                && literal.admits(primitive)
-                && primitive != literal.default_dtype() =>
+            }) if literal.binds_at(primitive)
+                && (literal.is_negated()
+                    || (literal.is_unsuffixed() && primitive != literal.default_dtype())) =>
             {
                 attach_span_metadata(bound_literal(&literal, primitive), expr_span(init))
             }
@@ -3487,7 +3490,7 @@ impl<'a> DesugarCtx<'a> {
         local_fn_params: &[String],
     ) -> deep::Expr {
         if let Some(literal) = literal_sites::numeric_literal(item)
-            && literal.is_unsuffixed()
+            && (literal.is_unsuffixed() || (literal.is_negated() && literal.binds_at(prec_name)))
         {
             return bound_literal(&literal, prec_name);
         }
@@ -3518,12 +3521,17 @@ fn signed_literal_value(literal: &NumericLiteral<'_>) -> Literal {
     }
 }
 
-/// An unsuffixed literal that a declaration or dtype argument binds at
-/// `prec_name`, marked unsuffixed.
+/// A literal that a declaration or dtype argument binds at `prec_name`,
+/// marked unsuffixed; a suffix it carries already names `prec_name`.
 fn bound_literal(literal: &NumericLiteral<'_>, prec_name: &str) -> deep::Expr {
     let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
     let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
-    match signed_literal_value(literal) {
+    let value = match signed_literal_value(literal) {
+        Literal::TypedInt(value, _) => Literal::Int(value),
+        Literal::TypedFloat(value, _) => Literal::Float(value),
+        other => other,
+    };
+    match value {
         Literal::Int(value) => {
             let meta = if float_typed {
                 meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
@@ -3541,7 +3549,7 @@ fn bound_literal(literal: &NumericLiteral<'_>, prec_name: &str) -> deep::Expr {
             numeric_literal_meta(ty, LiteralStyle::Unsuffixed),
             vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
         ),
-        _ => unreachable!("only an unsuffixed literal binds at a stated dtype"),
+        _ => unreachable!("only a numeric literal binds at a stated dtype"),
     }
 }
 

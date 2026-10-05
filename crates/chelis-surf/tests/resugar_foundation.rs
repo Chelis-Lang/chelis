@@ -35,7 +35,8 @@ fn cast_resugars_through_the_canonical_surf_ast_printer() {
     let surf_ast = resugar_expression(&deep).expect("valid Deep cast resugars");
     let surf = format_expression(&surf_ast);
 
-    assert_eq!(surf, "cast(1.0, f32)");
+    // A cast's literal operand keeps its suffix (spec/03 §6.3.1).
+    assert_eq!(surf, "cast(1.0f32, f32)");
     let redesugared = redesugar_expression(&surf);
     assert!(
         redesugared.contains("(cast {"),

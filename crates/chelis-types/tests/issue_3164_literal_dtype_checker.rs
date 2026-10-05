@@ -372,10 +372,11 @@ enum Site {
     PipeCast,
     PipeDtypeArgument,
     PipeNoDtypeArgument,
+    MacroCast,
 }
 
 impl Site {
-    const ALL: [Site; 18] = [
+    const ALL: [Site; 19] = [
         Site::Plain,
         Site::Declared,
         Site::SigDeclared,
@@ -394,6 +395,7 @@ impl Site {
         Site::PipeCast,
         Site::PipeDtypeArgument,
         Site::PipeNoDtypeArgument,
+        Site::MacroCast,
     ];
 
     fn uses_dtype(self) -> bool {
@@ -436,6 +438,10 @@ impl Site {
                 format!("x = [{literal}, {literal}] |> to_tensor({dtype})\n")
             }
             Site::PipeNoDtypeArgument => format!("x = [{literal}, {literal}] |> to_tensor\n"),
+            // The macro body's literal is not the cast's operand in the
+            // source, so the expanded cast converts a literal whose default
+            // has no `explicit` marker: the printer must keep its suffix.
+            Site::MacroCast => format!("macro m() = {literal}\nx = cast(m(), {dtype})\n"),
         })
     }
 }
@@ -486,7 +492,7 @@ fn expected(site: Site, literal: &str, dtype: &str) -> Expected {
     match site {
         Site::Plain | Site::NegCall | Site::CallArgument => own_literals(1, 0),
         Site::ListElement => own_literals(2, 0),
-        Site::NamedCast => own_literals(1, 1),
+        Site::NamedCast | Site::MacroCast => own_literals(1, 1),
         Site::Declared
         | Site::SigDeclared
         | Site::DefResult
@@ -581,7 +587,7 @@ fn every_site_gives_its_literal_the_stated_dtype_and_survives_resugaring() {
             }
         }
     }
-    assert!(cases > 1000, "the matrix shrank to {cases} cases");
+    assert!(cases > 1300, "the matrix shrank to {cases} cases");
     assert!(
         failures.is_empty(),
         "{} of {cases} cases failed:\n\n{}",

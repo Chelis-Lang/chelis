@@ -51,6 +51,21 @@ impl NumericLiteral<'_> {
     pub(crate) fn is_unsuffixed(&self) -> bool {
         self.suffix.is_none()
     }
+
+    /// Whether a construct stating `primitive` binds the literal there: an
+    /// unsuffixed literal whose kind admits it, or a literal already
+    /// suffixed with it. Both spellings denote one literal, so the desugarer
+    /// gives them one Deep form and the printer may drop such a suffix.
+    pub(crate) fn binds_at(&self, primitive: &str) -> bool {
+        match self.suffix {
+            None => self.admits(primitive),
+            Some(suffix) => suffix.t_prim_name() == primitive,
+        }
+    }
+
+    pub(crate) fn is_negated(&self) -> bool {
+        matches!(self.expr, Expr::Unary(UnaryOp::Neg, _, _))
+    }
 }
 
 /// The literal at `expr`, when `expr` is a numeric literal or its negation.

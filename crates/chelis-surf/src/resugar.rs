@@ -193,7 +193,9 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::default());
-    resugar_expression_inner(expr)
+    let mut expression = resugar_expression_inner(expr)?;
+    strip_redundant_expression_suffixes(&mut expression);
+    Ok(expression)
 }
 
 fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
@@ -228,9 +230,109 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
         reject_extensions(expr)?;
     }
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
-    let declarations = resugar_declaration_sequence(exprs)?;
+    let mut declarations = resugar_declaration_sequence(exprs)?;
+    strip_redundant_suffixes(&mut declarations);
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
+}
+
+thread_local! {
+    /// The spans of the `explicit`-style literals one resugaring prints. A
+    /// suffix the author wrote at the default is kept; a span shared with
+    /// another literal can only keep one more suffix, which is always safe.
+    static EXPLICIT_LITERAL_SPANS: std::cell::RefCell<BTreeSet<(usize, usize)>> =
+        std::cell::RefCell::default();
+}
+
+fn record_explicit_literal(span: chelis_deep::Span) {
+    EXPLICIT_LITERAL_SPANS.with(|spans| spans.borrow_mut().insert((span.offset, span.len)));
+}
+
+fn take_explicit_literal_spans() -> BTreeSet<(usize, usize)> {
+    EXPLICIT_LITERAL_SPANS.with(|spans| std::mem::take(&mut *spans.borrow_mut()))
+}
+
+/// spec/03 §6.3.1: a printed literal goes bare only where re-reading it binds
+/// the same dtype, decided on the printed Surf by the site rule desugaring
+/// applies (`literal_sites`): outside every dtype-stating construct when its
+/// suffix is the token default, and in a declaration or under a dtype
+/// argument when its suffix is the stated primitive. A cast operand and a
+/// dtype-less `to_tensor` element always keep their suffix.
+fn strip_redundant_suffixes(declarations: &mut [Decl]) {
+    let mut redundant = RedundantSuffixes {
+        explicit: take_explicit_literal_spans(),
+        ..RedundantSuffixes::default()
+    };
+    crate::literal_sites::visit_program(declarations, &mut redundant);
+    let tokens = redundant.tokens;
+    crate::pipe_sugar::visit_program_mut(declarations, &mut |expr| strip_suffix(expr, &tokens));
+}
+
+fn strip_redundant_expression_suffixes(expression: &mut Expr) {
+    let mut redundant = RedundantSuffixes {
+        explicit: take_explicit_literal_spans(),
+        ..RedundantSuffixes::default()
+    };
+    crate::literal_sites::visit_expression(expression, &mut redundant);
+    let tokens = redundant.tokens;
+    crate::pipe_sugar::visit_expr_mut(expression, &mut |expr| strip_suffix(expr, &tokens));
+}
+
+/// The printed literal tokens whose suffix is redundant, by node address. The
+/// tree is not mutated between collecting and stripping, so each address
+/// still names its node.
+#[derive(Default)]
+struct RedundantSuffixes {
+    tokens: BTreeSet<usize>,
+    explicit: BTreeSet<(usize, usize)>,
+}
+
+impl<'a> crate::literal_sites::SiteVisitor<'a> for RedundantSuffixes {
+    fn literal(
+        &mut self,
+        literal: crate::literal_sites::NumericLiteral<'a>,
+        site: crate::literal_sites::Site<'a>,
+    ) {
+        use crate::literal_sites::{Site, StatedDtype};
+        let Some(suffix) = literal.suffix else {
+            return;
+        };
+        if let Expr::Lit(_, span) = literal.token
+            && self.explicit.contains(&(span.offset, span.len))
+        {
+            return;
+        }
+        let redundant = match site {
+            Site::Ordinary => suffix.as_str() == literal.default_dtype(),
+            Site::Declaration {
+                stated: Some(StatedDtype::Primitive(primitive)),
+                ..
+            }
+            | Site::DtypeArgument(Some(StatedDtype::Primitive(primitive))) => {
+                suffix.as_str() == primitive && literal.admits(primitive)
+            }
+            Site::Declaration { .. }
+            | Site::DtypeArgument(_)
+            | Site::Cast
+            | Site::MissingDtype { .. } => false,
+        };
+        if redundant {
+            self.tokens.insert(literal.token as *const Expr as usize);
+        }
+    }
+}
+
+fn strip_suffix(expr: &mut Expr, tokens: &BTreeSet<usize>) {
+    if !tokens.contains(&(expr as *const Expr as usize)) {
+        return;
+    }
+    if let Expr::Lit(literal, _) = expr {
+        *literal = match *literal {
+            Literal::TypedInt(value, _) => Literal::Int(value),
+            Literal::TypedFloat(value, _) => Literal::Float(value),
+            ref other => other.clone(),
+        };
+    }
 }
 
 pub fn validate_grad_selector_consistency(exprs: &[DeepExpr]) -> Result<(), ResugarError> {
@@ -2720,10 +2822,24 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 return Ok(operator);
             }
             let function = resugar_expression_inner(&node.children[0])?;
-            let arguments = node.children[1..]
+            // spec/03 §6.4: `to_tensor(xs, p)` carries its dtype argument as a
+            // type node, which prints in the dtype position (§P9).
+            let dtype_argument = (node.children.len() == 3
+                && variable_name(&node.children[0]) == Some("to_tensor"))
+            .then(|| cast_target_name(&node.children[2]))
+            .flatten();
+            let value_arguments = if dtype_argument.is_some() {
+                &node.children[1..2]
+            } else {
+                &node.children[1..]
+            };
+            let mut arguments = value_arguments
                 .iter()
                 .map(resugar_expression_inner)
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some(dtype) = dtype_argument {
+                arguments.push(Expr::Var(dtype.to_string(), node.span));
+            }
             Ok(Expr::Apply(Box::new(function), arguments, node.span))
         }
         T::Cast => {
@@ -2746,7 +2862,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            let operand = resugar_cast_operand(&node.children[0], target)?;
+            let operand = resugar_cast_operand(&node.children[0])?;
             Ok(Expr::Cast(
                 Box::new(operand),
                 target.to_string(),
@@ -2944,52 +3060,41 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
         })
 }
 
-/// How a literal's suffix prints, given the dtype its position re-derives for
-/// an unsuffixed literal.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SuffixSpelling {
-    /// The literal's own `surf_literal_style` decides.
-    Authored,
-    /// The position re-derives a dtype the literal does not have, so every
-    /// suffix prints, even on a literal authored unsuffixed elsewhere.
-    Every,
-}
-
+/// Prints a literal with every suffix its `type` has (`spec/03-deep-syntax.md`
+/// §6.3.1); an untyped numeric literal has its token default. Which suffixes
+/// are redundant is decided afterwards on the printed Surf, by the site rule
+/// desugaring applies ([`strip_redundant_suffixes`]). The `surf_literal_style`
+/// marker never removes a suffix: an `explicit` one keeps it.
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, SuffixSpelling::Authored)
-}
-
-fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
-    let suffix = literal_suffix(node.meta)?;
-    let style = node.meta.surf_literal_style().map(|v| *v.value());
-    let suppress_suffix =
-        spelling != SuffixSpelling::Every && style == Some(LiteralStyle::Unsuffixed);
-    let preserve_default_suffix =
-        spelling != SuffixSpelling::Authored || style == Some(LiteralStyle::Explicit);
+    let suffix = match (
+        literal_suffix(node.meta)?,
+        &node.children[0],
+        node.meta.ty(),
+    ) {
+        (None, DeepExpr::Atom(Atom::Int(_), _), None) => Some(LiteralSuffix::I32),
+        (None, DeepExpr::Atom(Atom::Float(_), _), None) => Some(LiteralSuffix::F32),
+        (suffix, _, _) => suffix,
+    };
+    if node.meta.surf_literal_style().map(|v| *v.value()) == Some(LiteralStyle::Explicit) {
+        record_explicit_literal(node.span);
+    }
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && *value == i64::MIN
         && suffix == Some(LiteralSuffix::I64)
     {
-        let literal = if suppress_suffix {
-            Literal::Int(*value)
-        } else {
-            Literal::TypedInt(*value, LiteralSuffix::I64)
-        };
-        return Ok(Expr::Lit(literal, node.span));
+        return Ok(Expr::Lit(
+            Literal::TypedInt(*value, LiteralSuffix::I64),
+            node.span,
+        ));
     }
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && integer_minimum(suffix) == Some(*value)
     {
         let maximum = -(value + 1);
-        let literal = |value| {
-            Expr::Lit(
-                surface_integer_literal(value, suffix, preserve_default_suffix, suppress_suffix),
-                node.span,
-            )
-        };
+        let literal = |value| Expr::Lit(surface_integer_literal(value, suffix), node.span);
         return Ok(Expr::Binary(
             BinOp::Sub,
             Box::new(Expr::Unary(
@@ -3001,47 +3106,21 @@ fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<E
             node.span,
         ));
     }
+    // spec/03 §6.3.2: an integer atom at a float type prints its float value.
     let literal = match (&node.children[0], suffix) {
-        (DeepExpr::Atom(Atom::Int(value), _), Some(suffix))
-            if integer_literal_source(node.meta) && spelling == SuffixSpelling::Every =>
-        {
-            Literal::TypedInt(*value, suffix)
-        }
-        (DeepExpr::Atom(Atom::Int(value), _), Some(_)) if suppress_suffix => Literal::Int(*value),
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) if suffix.is_float() => {
             let rounded = round_integer_at_float_width(*value, suffix);
             if !rounded.is_finite() {
                 return Err(ResugarError::NonFiniteFloat);
             }
-            if suffix == LiteralSuffix::F32 && !preserve_default_suffix {
-                Literal::Float(rounded)
-            } else {
-                Literal::TypedFloat(rounded, suffix)
-            }
-        }
-        (DeepExpr::Atom(Atom::Int(value), _), Some(LiteralSuffix::I32))
-            if preserve_default_suffix =>
-        {
-            Literal::TypedInt(*value, LiteralSuffix::I32)
-        }
-        (DeepExpr::Atom(Atom::Int(value), _), None | Some(LiteralSuffix::I32)) => {
-            Literal::Int(*value)
+            Literal::TypedFloat(rounded, suffix)
         }
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) => Literal::TypedInt(*value, suffix),
-        (DeepExpr::Atom(Atom::Float(value), _), Some(_)) if suppress_suffix => {
-            Literal::Float(*value)
-        }
-        (DeepExpr::Atom(Atom::Float(value), _), Some(LiteralSuffix::F32))
-            if preserve_default_suffix =>
-        {
-            Literal::TypedFloat(*value, LiteralSuffix::F32)
-        }
-        (DeepExpr::Atom(Atom::Float(value), _), None | Some(LiteralSuffix::F32)) => {
-            Literal::Float(*value)
-        }
+        (DeepExpr::Atom(Atom::Int(value), _), None) => Literal::Int(*value),
         (DeepExpr::Atom(Atom::Float(value), _), Some(suffix)) if suffix.is_float() => {
             Literal::TypedFloat(*value, suffix)
         }
+        (DeepExpr::Atom(Atom::Float(value), _), None) => Literal::Float(*value),
         (DeepExpr::Atom(Atom::Str(value), _), None) => Literal::Str(value.clone()),
         (DeepExpr::Atom(Atom::Bool(value), _), None) => Literal::Bool(*value),
         (DeepExpr::BareList(items, _), None) if items.is_empty() => {
@@ -3058,20 +3137,9 @@ fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<E
     Ok(Expr::Lit(literal, node.span))
 }
 
-fn surface_integer_literal(
-    value: i64,
-    suffix: Option<LiteralSuffix>,
-    preserve_default_suffix: bool,
-    suppress_suffix: bool,
-) -> Literal {
-    if suppress_suffix {
-        return Literal::Int(value);
-    }
+fn surface_integer_literal(value: i64, suffix: Option<LiteralSuffix>) -> Literal {
     match suffix {
-        Some(LiteralSuffix::I32) if preserve_default_suffix => {
-            Literal::TypedInt(value, LiteralSuffix::I32)
-        }
-        None | Some(LiteralSuffix::I32) => Literal::Int(value),
+        None => Literal::Int(value),
         Some(suffix) => Literal::TypedInt(value, suffix),
     }
 }
@@ -3086,38 +3154,23 @@ fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
     }
 }
 
-fn resugar_cast_operand(expr: &DeepExpr, target: &str) -> Result<Expr, ResugarError> {
-    if let Ok(node) = node_ref(expr) {
-        if node.tag == DeepTag::Lit
-            && literal_suffix(node.meta)?.is_some_and(|dtype| dtype.as_str() != target)
-        {
-            // A direct (possibly signed) literal would adopt the cast target
-            // on rereading. Its original width is semantic, including when a
-            // macro authored it unsuffixed or the target is a dtype binder.
-            return resugar_literal_impl(node, SuffixSpelling::Every);
-        }
-        if node.tag == DeepTag::App
-            && node.children.len() == 2
-            && let Ok(callee) = node_ref(&node.children[0])
-            && callee.tag == DeepTag::Var
-            && name_child(&callee, 0)? == "neg"
-            && let Ok(literal) = node_ref(&node.children[1])
-            && literal.tag == DeepTag::Lit
-        {
-            let spelling =
-                if literal_suffix(literal.meta)?.is_some_and(|dtype| dtype.as_str() != target) {
-                    SuffixSpelling::Every
-                } else {
-                    SuffixSpelling::Authored
-                };
-            // Keep the authored neg call as an operation. A signed literal
-            // would also collapse this operation during contextual typing.
-            return Ok(Expr::Apply(
-                Box::new(Expr::Var("neg".into(), callee.span)),
-                vec![resugar_literal_impl(literal, spelling)?],
-                node.span,
-            ));
-        }
+fn resugar_cast_operand(expr: &DeepExpr) -> Result<Expr, ResugarError> {
+    if let Ok(node) = node_ref(expr)
+        && node.tag == DeepTag::App
+        && node.children.len() == 2
+        && let Ok(callee) = node_ref(&node.children[0])
+        && callee.tag == DeepTag::Var
+        && name_child(&callee, 0)? == "neg"
+        && let Ok(literal) = node_ref(&node.children[1])
+        && literal.tag == DeepTag::Lit
+    {
+        // Keep the authored neg call as an operation: a negated literal
+        // operand would fold into one signed literal on rereading.
+        return Ok(Expr::Apply(
+            Box::new(Expr::Var("neg".into(), callee.span)),
+            vec![resugar_literal(literal)?],
+            node.span,
+        ));
     }
     resugar_expression_inner(expr)
 }
@@ -3830,9 +3883,9 @@ fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepEx
 }
 
 /// Resugars the items of a tensor value's element chain for the explicit
-/// `to_tensor([...])` spelling. An unsuffixed element of a `to_tensor` call
-/// binds at the §5.3 default (`spec/04-type-system.md` §5.6), so a literal of
-/// any other dtype prints every suffix, and a negative literal prints as the
+/// `to_tensor([...])` spelling. An element of a `to_tensor` call without a
+/// dtype argument has no default (`spec/04-type-system.md` §5.6), so every
+/// literal element keeps its suffix, and a negative literal prints as the
 /// negated literal that the round-trip law equates with it.
 fn resugar_explicit_tensor_items(chain: &DeepExpr) -> Result<Option<Vec<Expr>>, ResugarError> {
     let Some(items) = untyped_chain_items(chain, false) else {
@@ -3848,17 +3901,7 @@ fn resugar_explicit_tensor_items(chain: &DeepExpr) -> Result<Option<Vec<Expr>>, 
 fn resugar_explicit_tensor_item(item: &DeepExpr) -> Result<Expr, ResugarError> {
     let node = node_ref(item)?;
     if node.tag == DeepTag::Lit {
-        let default = match node.children {
-            [DeepExpr::Atom(Atom::Int(_), _)] => "i32",
-            [DeepExpr::Atom(Atom::Float(_), _)] => "f32",
-            _ => return resugar_literal(node),
-        };
-        let literal_type = node.meta.ty().map(|v| v.expression()).and_then(type_name);
-        return if literal_type == Some(default) {
-            resugar_literal(node)
-        } else {
-            resugar_literal_impl(node, SuffixSpelling::Every)
-        };
+        return resugar_literal(node);
     }
     if node.tag == DeepTag::App
         && let Some(items) = resugar_explicit_tensor_items(item)?
