@@ -4185,10 +4185,15 @@ path even though bare `round` under `grad` remains a structural
 > call has no other observable effect and produces no output.
 >
 > Failure: Any arity other than one is a type error naming the expected
-> arity. Consuming an already-consumed or currently-borrowed value is the
-> ownership rejection of spec/04 section 8.3; a second consume is never
-> silently accepted. `drop` has no List-count form: a two-argument call is
-> an arity error, not a prefix removal.
+> arity, and a borrowed operand is a type error (Domain). A `drop` after
+> an earlier ordinary consume, as spec/04 section 8.3 defines it, is
+> consuming fan-out repaired by a copy inserted at the earlier use; a
+> `drop` after any other earlier consume is the ownership rejection. A
+> `drop` of an owner that a closure borrows is
+> the ownership rejection of [04-LIN-2], and every use of an owner after
+> its `drop` is the ownership rejection of [04-LIN-11]. `drop` has no
+> List-count form: a two-argument call is an arity error, not a prefix
+> removal.
 >
 > Adjoint: Explicit lifetime consumption follows spec/06's structural drop
 > rule. The consumed value receives no cotangent and the call contributes

@@ -2,7 +2,7 @@
 
 **Status:** Implemented verified ownership lowering over the `copy-drop` foundation.
 Its conservative scope-end lifetime strategy is superseded as a target contract by
-`compiled_value_ownership.md`; that plan retains last-use release as successor work.
+`compiled_value_ownership.md`, whose Phase 3 owns last-use reclamation.
 **Owning specs:** `spec/03-deep-syntax.md`, `spec/04-type-system.md`,
 `spec/05-risc-primitives.md`, and `spec/design/borrow_typed_primitives.md`.
 
@@ -65,6 +65,14 @@ owned terminal operation.
 The compiler inserts `Copy` for source-level consuming fan-out: a value used in more
 than one non-borrow consuming position. Copies are inserted for all consume sites before
 the final consume site; the final consume site takes the original.
+
+A `drop` is a terminal consume site ([04-LIN-11]). When it follows earlier ordinary
+consumes (spec/04 section 8.3 defines the term), the copies go to those earlier sites
+and the `drop` takes the original, so such a `drop` is ordinary fan-out, and no use
+after a `drop` can be repaired by a copy. A tuple projection or field access outside a destructuring `let` moves its
+component out of the parent: an ordinary consume of that component is fan-out the
+same way, while a `drop` of it ends the component, so the parent is unusable as a
+whole afterwards and only the disjoint components remain usable.
 
 Borrows do not count as fan-out. Multiple `&T` uses share the same source. A value
 passed once to a consuming function after any number of borrows is not fan-out and does
@@ -213,6 +221,10 @@ The following remain errors:
 - invalid borrow syntax, including borrowing non-variables where a direct variable
   borrow is required
 - storing, returning, or capturing borrows where borrow escape is disallowed
+- any use of an owner after its `drop`, and any use of a parent, or of a projection
+  overlapping the dropped component, after a `drop` of a projection ([04-LIN-11])
+- a `drop` of an owner that a closure created earlier borrows, whether or not the
+  closure is called again ([04-LIN-2]); capturing a `copy` is the repair
 - passing `&T` to an owned `T` parameter without an explicit or inserted copy
 - impossible branch or loop ownership states where a single terminal path cannot be
   established
