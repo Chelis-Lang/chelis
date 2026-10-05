@@ -419,6 +419,29 @@ fn infer_app_inner(
                 arg_tys.len()
             ));
         }
+        // The operand is owned, so a borrowed one is a type error rather
+        // than an implicit consume of its owner.
+        let operand = subst.apply(&arg_tys[0]);
+        if matches!(operand, Type::Ref(_)) {
+            return_with_collection_cleanup!(report_at_check_site(
+                errors,
+                CheckError::with_types(
+                    CheckErrorKind::TypeMismatch,
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "drop argument 1: expected an owned value, got borrowed `{operand}`; \
+                             `drop` ends its operand's lifetime and cannot take a borrow \
+                             ([05-OP-67])"
+                        ),
+                    ),
+                    "an owned value".to_string(),
+                    operand.to_string(),
+                    vec!["Drop the owner itself: write `drop(x)`, not `drop(&x)`".to_string()],
+                ),
+                CheckSite::Expr(expr),
+            ));
+        }
         return_with_collection_cleanup!(Type::Unit);
     }
 

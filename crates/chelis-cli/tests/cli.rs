@@ -6228,6 +6228,32 @@ fn check_refuses_a_move_after_drop() {
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }
 
+/// chelis#3180: the operand of `drop` is owned ([05-OP-67]), so `drop(&x)` is a
+/// type error rather than an implicit consume of `x`.
+#[test]
+fn check_refuses_a_borrowed_drop_operand() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("drop_borrow.ch");
+    write_file(
+        &path,
+        "module M.Main\ndef f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  c = drop(&x)\n  x\n}\ndef xs() -> List[f32] = [1.5, 2.5, 3.5]\nout = f(to_tensor(xs()))\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("TypeMismatch")
+                && error["expected"].as_str() == Some("an owned value")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("drop argument 1"))
+        }),
+        "expected a TypeMismatch for the borrowed drop operand; got {errors:?}"
+    );
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
 #[test]
 fn check_reports_macro_provenance_for_type_errors() {
     let dir = tempdir().expect("tempdir");
