@@ -154,3 +154,35 @@ fn positional_construction_and_by_name_patterns_keep_their_results() {
         ],
     );
 }
+
+#[test]
+fn a_vmap_forward_over_an_out_of_order_record_binds_declared_positions() {
+    // Per row, `sum(w - b)` with `w = x`, `b = x * x`: `[2, 1]` gives
+    // `3 - 5 = -2` and `[1, 0]` gives `0`. Binding by written order makes the
+    // vectorized FORWARD value `[2, 0]`.
+    let source = format!(
+        "{PAIR}def h(x: tensor[2, f32]) -> f32 = match P {{ b: mul(&x, &x), w: x }} with {{\n  \
+         | P(w, b) => tensor_to_scalar(sum(sub(&w, &b), 0i32))\n}}\n\
+         rows = to_tensor([[2.0f32, 1.0f32], [1.0f32, 0.0f32]])\nout = vmap(h)(rows)\n"
+    );
+    assert_lanes_print(
+        &source,
+        "vmap_forward",
+        &[
+            "rows = tensor(shape=[2, 2], data=[2.0, 1.0, 1.0, 0.0])",
+            "out = tensor(shape=[2], data=[-2.0, 0.0])",
+        ],
+    );
+}
+
+#[test]
+fn grad_with_respect_to_a_record_parameter_built_out_of_order() {
+    // `loss(S(lo, hi)) = lo * lo - 3 * hi` at `lo = 2`, `hi = 1`: gradient
+    // `S(2 * lo, -3) = S(4, -3)`. Compiled C bound written order and
+    // printed `S(2.0, -3.0)`.
+    let source = "type S =\n  | S { lo: f32, hi: f32 }\n\
+         def loss(s: S) -> f32 = match s with {\n  \
+         | S(lo, hi) => sub(mul(lo, lo), mul(3.0f32, hi))\n}\n\
+         g = grad(loss)(S { hi: 1.0f32, lo: 2.0f32 })\n";
+    assert_lanes_print(source, "record_param_grad", &["g = S(4.0, -3.0)"]);
+}

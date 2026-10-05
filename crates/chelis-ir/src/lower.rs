@@ -22670,7 +22670,7 @@ impl<'program> LowerCtx<'program> {
     /// compile-time facts; only the field values are lowered.
     ///
     /// Field expressions lower in written order, which is their evaluation
-    /// order (spec/03-deep-syntax.md §6.2), and the slots are then stored in
+    /// order (spec/03-deep-syntax.md §4.4), and the slots are then stored in
     /// the constructor's declared order, which positional patterns read
     /// ([04-PAT-3], chelis#3230). Without a unique declaration the slots keep
     /// written order under [`AdtLayout::Written`], which only by-name readers
