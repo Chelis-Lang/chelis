@@ -307,15 +307,20 @@ impl<'a> EvalContext<'a> {
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        // The lowering universe of a routed reduction is the program's own
-        // type environment and definition table, both fixed for this
-        // evaluation context. Lowering used to hand those two tables to a
-        // free `try_lower_*` entry, which sorted them, deep-cloned them and
-        // folded the pipes in every definition -- all of `chelis-std`
-        // included -- once per routed reduction (chelis#2207). The scope
-        // prepares that context once; cloning it here is four `Arc` bumps and
-        // releases the borrow on `self` that the input provider below needs.
-        let lowering_context = self.program.routing_lowering_context();
+        // A routed call is lowered from the checker-owned program artifact,
+        // including its local ascription sites and authored signatures. Type
+        // metadata alone cannot reconstruct either obligation (chelis#3092).
+        // The scope caches the prepared context, preserving the bounded
+        // whole-program fold cost of chelis#2207.
+        let checked = self.session.as_ref().ok_or_else(|| {
+            NamedAxisRouteError::Fatal(
+                "named-axis routing requires a checked program with local extent claims"
+                    .to_string(),
+            )
+        })?;
+        let lowering_context = self
+            .program
+            .routing_lowering_context(checked.program(), &self.declared_signatures);
         let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
             routed_expr,
             scoped_types,

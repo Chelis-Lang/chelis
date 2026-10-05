@@ -11241,8 +11241,9 @@ impl<'program> LowerCtx<'program> {
         let id = ascription.id().get();
         let mut claims = Vec::with_capacity(pending.len());
         for (axis, token) in pending {
+            let realized_axis = self.realized_local_ascription_axis(ascription, axis);
             if let Some(token) = token {
-                claims.push((axis, token));
+                claims.push((realized_axis, token));
                 continue;
             }
             let claim = ascription
@@ -11275,7 +11276,7 @@ impl<'program> LowerCtx<'program> {
                         site: crate::dag::ExtentWitnessSite::LocalExpand,
                         parameter: binding.to_string(),
                         axis: RtAxis::Lit(
-                            i32::try_from(axis).expect("checked tensor rank fits int32"),
+                            i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
                         ),
                         requirements: Vec::new(),
                         claims: Vec::new(),
@@ -11305,9 +11306,46 @@ impl<'program> LowerCtx<'program> {
             {
                 *recorded = Some(token);
             }
-            claims.push((axis, token));
+            claims.push((realized_axis, token));
         }
         claims
+    }
+
+    /// Translate the checker's axis in an authored `tensor[..r, h, ...]`
+    /// into the activation's axis after each preceding rank spread expands.
+    /// The checked record keeps the authored slot so its identity and label
+    /// remain stable across calls with different ranks.
+    fn realized_local_ascription_axis(
+        &self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        axis: usize,
+    ) -> usize {
+        let slots = tensor_formal_dim_slots(ascription.authored_type())
+            .expect("checked local tensor ascription has tensor type");
+        assert!(
+            axis < slots.len(),
+            "checked local claim names an authored axis"
+        );
+        slots[..axis]
+            .iter()
+            .map(|slot| match slot {
+                DimSlot::Spread(name) => self
+                    .rank_substitutions
+                    .get(name)
+                    .map(Vec::len)
+                    .unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "local tensor ascription `{}` cannot resolve rank spread `{name}` in this activation",
+                                ascription.binding_name()
+                            ),
+                            Some(ascription.ascription_span()),
+                            None,
+                        )
+                    }),
+                DimSlot::Named(_) | DimSlot::DimVar(_) | DimSlot::Other => 1,
+            })
+            .sum()
     }
 
     /// Whether `claim` names a binder that no witness declares yet: an
@@ -11487,11 +11525,14 @@ impl<'program> LowerCtx<'program> {
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> NodeId {
         let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        let realized_axis = self.realized_local_ascription_axis(ascription, claim.axis());
         let site = crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
             ascription_id: ascription.id().get(),
             binding: ascription.binding_name().to_string(),
             claim: label.clone(),
-            axis: RtAxis::Lit(i32::try_from(claim.axis()).expect("checked tensor rank fits int32")),
+            axis: RtAxis::Lit(
+                i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
+            ),
         };
         let scalar = TensorType {
             dims: Vec::new(),
@@ -11516,7 +11557,7 @@ impl<'program> LowerCtx<'program> {
                         site,
                         parameter: String::new(),
                         axis: RtAxis::Lit(
-                            i32::try_from(claim.axis()).expect("checked tensor rank fits int32"),
+                            i32::try_from(realized_axis).expect("checked tensor rank fits int32"),
                         ),
                         requirements: vec![value],
                         claims: Vec::new(),

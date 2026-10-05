@@ -1095,19 +1095,12 @@ fn an_agreeing_arm_site_of_a_non_tensor_result_binder_executes() {
     );
 }
 
-/// Known gap, pinned rather than fixed: with a rank-polymorphic signature
-/// `chelis eval` runs the call through its named-axis path (chelis#338),
-/// which never claims a later site, so it prints the first site's value
-/// exactly as before first sites existed. Compiled C claims the later site
-/// and traps, which is the section 4.4.1 answer. When eval claims it, this
-/// row must become an identical-trap row.
+/// Under a rank-polymorphic signature, the named-axis evaluation route must
+/// retain both local sites and check the later one against the first.
 #[test]
-fn a_rank_polymorphic_later_site_is_claimed_only_by_compiled_c() {
-    let stem = "rankpoly_two_sites";
-    let dir = tempdir().expect("tempdir");
-    let path = write_fixture(
-        &dir,
-        stem,
+fn a_rank_polymorphic_later_site_traps_on_both_lanes() {
+    assert_lanes_trap_identically(
+        "rankpoly_two_sites",
         &format!(
             "def f[r, h](v: &tensor[..r, f32], k: i64) -> tensor[..r, h, f32] = {{\n\
              \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
@@ -1117,21 +1110,101 @@ fn a_rank_polymorphic_later_site_is_claimed_only_by_compiled_c() {
              }}\n\
              out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
         ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
     );
-    assert!(check(&path).status.success(), "{stem}: check accepts");
-    let evaluated = eval(&path);
-    let eval_out = combined(&evaluated);
-    assert!(
-        evaluated.status.success()
-            && eval_out.contains("out = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])"),
-        "{stem}: eval does not claim the later site yet: {eval_out}"
+}
+
+/// A later site that agrees must still execute through the named-axis route.
+#[test]
+fn rank_polymorphic_agreeing_sites_execute_on_both_lanes() {
+    assert_lanes_agree(
+        "rankpoly_agreeing_sites",
+        &format!(
+            "def f[r, h](v: &tensor[..r, f32], k: i64) -> tensor[..r, h, f32] = {{\n\
+             \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 b: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 _ = b\n\
+             \x20 a\n\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        ),
+        "out = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])",
     );
-    let compiled = build_and_run(&dir, stem, &path);
-    let c_out = combined(&compiled);
-    assert!(
-        !compiled.status.success()
-            && c_out.contains("extent `h`: claimed = 3, insert axis 1 = 4")
-            && c_out.contains(INSERT_TRAP),
-        "{stem}: C claims the later site: {c_out}"
+}
+
+/// A cached lowering context carries the sites, while each call specializes
+/// its own rank spread. The second call has another input rank.
+#[test]
+fn rank_polymorphic_first_sites_are_isolated_per_call() {
+    assert_lanes_agree(
+        "rankpoly_separate_calls",
+        "def f[r, h](v: &tensor[..r, f32]) -> tensor[..r, h, f32] = {\n\
+             \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 b: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 _ = b\n\
+             \x20 a\n\
+             }\n\
+             first = f(to_tensor([1.0f32, 2.0f32]))\n\
+             second = f(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n",
+        "first = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])\nsecond = tensor(shape=[2, 2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0])",
     );
+}
+
+/// Keep the data small while changing the rank of `..r`. The final input
+/// axis is 4, earlier axes are 2 or 1, and the inserted `h` axis is 3, so
+/// observing the authored slot rather than the realized axis cannot pass.
+fn rank_polymorphic_input(rank: usize) -> String {
+    assert!((1..=7).contains(&rank));
+    let mut inner = "[1.0f32, 2.0f32, 3.0f32, 4.0f32]".to_string();
+    if rank > 1 {
+        for _ in 2..rank {
+            inner = format!("[{inner}]");
+        }
+        inner = format!("[{inner}, {inner}]");
+    }
+    format!("to_tensor({inner})")
+}
+
+fn rank_polymorphic_two_site_source(rank: usize, later_size: usize) -> String {
+    let input = rank_polymorphic_input(rank);
+    format!(
+        "def f[r, h](v: &tensor[..r, f32]) -> tensor[..r, h, f32] = {{\n\
+         \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+         \x20 b: tensor[..r, h, f32] = insert(v, h, {later_size}i64)\n\
+         \x20 _ = b\n\
+         \x20 a\n\
+         }}\n\
+         out = f({input})\n"
+    )
+}
+
+#[test]
+fn rank_polymorphic_sites_agree_at_realized_ranks_one_two_three_four_and_seven() {
+    for rank in [1usize, 2, 3, 4, 7] {
+        let mut shape = if rank == 1 { vec![4] } else { vec![2] };
+        shape.extend(std::iter::repeat_n(1, rank.saturating_sub(2)));
+        if rank > 1 {
+            shape.push(4);
+        }
+        shape.push(3);
+        assert_lanes_agree(
+            &format!("rankpoly_agree_rank_{rank}"),
+            &rank_polymorphic_two_site_source(rank, 3),
+            &format!("out = tensor(shape={shape:?}"),
+        );
+    }
+}
+
+#[test]
+fn rank_polymorphic_sites_disagree_at_realized_ranks_one_two_three_four_and_seven() {
+    for rank in [1usize, 2, 3, 4, 7] {
+        assert_lanes_trap_identically(
+            &format!("rankpoly_disagree_rank_{rank}"),
+            &rank_polymorphic_two_site_source(rank, 4),
+            &[
+                &format!("extent `h`: claimed = 3, insert axis {rank} = 4"),
+                INSERT_TRAP,
+            ],
+        );
+    }
 }
