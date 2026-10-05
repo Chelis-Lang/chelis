@@ -290,7 +290,7 @@ class ListAnnotationTests(unittest.TestCase):
         self.assertEqual(lines[-2], gate.FAST_DYNAMIC_NOTE)
         self.assertTrue(lines[-2].startswith("# --fast runs"))
         self.assertIn("regen_all.py --tier 0", lines[-2])
-        self.assertIn("cargo clippy -p <crate> --tests", lines[-2])
+        self.assertIn("cargo clippy -p <crate> --all-targets", lines[-2])
         # Exactly the two trailing notes; every other line is a command.
         self.assertEqual(
             [ln for ln in lines if ln.startswith("#")],

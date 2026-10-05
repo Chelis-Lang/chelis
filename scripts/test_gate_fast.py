@@ -141,13 +141,34 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(
             clippy,
             [
-                ["cargo", "clippy", "-p", "chelis-cli", "--tests", "--", "-D", "warnings"],
-                ["cargo", "clippy", "-p", "chelis-surf", "--tests", "--", "-D", "warnings"],
+                ["cargo", "clippy", "-p", "chelis-cli", "--all-targets", "--", "-D", "warnings"],
+                ["cargo", "clippy", "-p", "chelis-surf", "--all-targets", "--", "-D", "warnings"],
             ],
         )
         self.assertLess(
             commands.index(clippy[-1]), commands.index(gate.FAST_TRIPWIRE_NEXTEST)
         )
+
+    def test_per_crate_clippy_lints_the_targets_ci_lints(self):
+        # chelis#3126: `--tests` builds only the `cfg(test)` configuration, so
+        # an item used only by tests passed `--fast` and failed CI's
+        # `cargo clippy --workspace --all-targets` as dead code in the
+        # non-test binary. The per-crate row must lint the same targets.
+        self.assertIn("--all-targets", gate.CLIPPY_WORKSPACE)
+        clippy = [
+            command
+            for command in gate.fast_command_list(
+                ["chelis-cli"], std_changed=False, changed_paths=[]
+            )
+            if command[:3] == ["cargo", "clippy", "-p"]
+        ]
+        expected = [
+            "-p" if part == "--workspace" else part for part in gate.CLIPPY_WORKSPACE
+        ]
+        expected.insert(expected.index("-p") + 1, "chelis-cli")
+        self.assertEqual(clippy, [expected])
+        self.assertIn("--all-targets", clippy[0])
+        self.assertNotIn("--tests", clippy[0])
 
     def test_std_bundle_legs_appear_only_when_std_paths_changed(self):
         self.assertTrue(gate.std_paths_changed(["packages/chelis-std/src/x.ch"]))
@@ -554,7 +575,7 @@ class SummaryTests(unittest.TestCase):
             self.assertIsNone(stage["launch_error"])
         self.assertTrue(
             any(
-                "cargo clippy -p chelis-cli --tests -- -D warnings"
+                "cargo clippy -p chelis-cli --all-targets -- -D warnings"
                 in stage["command"]
                 for stage in summary["stages"]
             )
