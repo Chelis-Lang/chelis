@@ -1,1 +1,0 @@
-`chelis check --show-inferred` now includes effects from imported functions. The Rust `check_layered` API requires an `EffectRowReporting` argument, and `LayeredCheck` outcomes include optional effect rows.

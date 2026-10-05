@@ -1,1 +1,0 @@
-For export-capable releases, `chelisup install` now rejects duplicate JSON keys anywhere in the compiler's live `chelis runtime export` receipt before placing the toolchain, including keys inside nested header records. An ambiguous receipt can no longer conceal a conflicting runtime identity. See [#2396](https://github.com/Chelis-Lang/chelis/issues/2396).

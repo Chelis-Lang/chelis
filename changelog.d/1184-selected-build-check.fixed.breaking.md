@@ -1,1 +1,0 @@
-`chelis build` now checks type, effect, and linearity errors throughout its selected source or linked Reef target before dropping unreachable eval-only definitions. Builds that previously emitted code despite a dormant error now fail with that error; files outside the selected target remain excluded. See [#1184](https://github.com/Chelis-Lang/chelis/issues/1184).
