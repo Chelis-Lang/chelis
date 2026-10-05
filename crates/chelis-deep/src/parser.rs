@@ -506,6 +506,7 @@ fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExp
 
 /// Quarantined previous-pipe reader for explicit, baseline-checked migration.
 /// The caller removes retired forms and metadata before current stamping.
+#[cfg(feature = "pre-020-pipe-migration")]
 pub fn parse_pipe_migration_raw(source: &str) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = crate::lexer::lex(source)?;
     parse_raw_syntax(&tokens, Some(source))

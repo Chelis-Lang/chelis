@@ -77,6 +77,7 @@ pub fn format_source(source: &str) -> Result<String, FormatError> {
     Ok(format_decls_with_comments(&decls, &comments))
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 pub(crate) fn format_pipe_migration_source(
     source: &str,
     decls: &[Decl],

@@ -88,6 +88,7 @@ struct Parser {
 enum ParseMode {
     Canonical,
     LegacyV018,
+    #[cfg(feature = "pre-020-pipe-migration")]
     PipeMigration,
 }
 
@@ -222,6 +223,7 @@ pub fn parse_canonical_source_tokens(
 
 /// Parse the previous canonical pipe grammar solely for explicit migration.
 /// All normal parser entry points enforce the new grouping contract.
+#[cfg(feature = "pre-020-pipe-migration")]
 pub(crate) fn parse_pipe_migration(source: &str) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
     validate_literal_spellings(source, &tokens)?;

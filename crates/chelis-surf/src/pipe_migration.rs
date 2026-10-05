@@ -1,5 +1,6 @@
-//! Explicit migration from the previous pipe grammar. This is the only reader
-//! of retired raw `pipe` forms; it never admits them to normal Deep ingress.
+//! Explicit migration of pre-0.20, pre-A1 receipts, available only through the
+//! opt-in `pre-020-pipe-migration` feature. This is the only reader of retired raw
+//! `pipe` forms; core consumers must use normal Deep ingress, which rejects them.
 use crate::{ast::*, pipe_sugar};
 use chelis_deep::annotations::{Metadata, MetadataValue};
 use chelis_deep::{Atom, DeepTag, ExprCarrier, RawAtom, RawExpr, Span};

@@ -114,3 +114,16 @@ changed Deep, or comments the formatter cannot preserve reject the migration.
 Use the command on shell and downstream sources before switching compiler versions.
 A file rejected by the previous compiler needs separate diagnosis, rather than an
 assumed default dtype.
+
+Retain **both** compilers for this migration, even when A1 (#3164) lands in the
+same release. The baseline must precede pipe normalization and A1; the compiler
+running `migrate pipes` must include pipe normalization and precede A1. A later
+compiler cannot prove an unchanged whole-file graph after unrelated A1 typing
+changes. Pin source revisions and retain the corresponding binaries together.
+The tested pair is baseline
+`c5e4d116c3852c318bdb415fb052add73efbff6d` and migration tool
+`f633ca513bf4b1002525f3490f72f66a3c4f80a7`; build each revision's `chelis-cli`
+in its own checkout and preserve those executables rather than a moving default.
+The historical reader is available only through the non-default
+`pre-020-pipe-migration` feature; the CLI opts in for this explicit command.
+Normal Deep parsing and stamping still reject retired pipe receipts.

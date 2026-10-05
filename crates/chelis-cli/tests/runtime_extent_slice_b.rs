@@ -5733,7 +5733,7 @@ const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecor
      type Inputs = | Inputs { q: tensor[batch, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = \
-     { a_dim = inp.q |> shape(cast(0, i32)) |> cast(i64)\n\
+     { a_dim = (inp.q) |> shape(cast(0, i32)) |> cast(i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 

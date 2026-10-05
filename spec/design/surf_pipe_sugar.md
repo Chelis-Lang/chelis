@@ -46,7 +46,10 @@ the command attempts all paths, reports success/failure counts and exits
 nonzero on any failure. The default remains a complete batch transaction.
 Historical normalization retains authored lambda stages as applied values:
 the old compiler marked some authored lambdas like its synthesized wrappers,
-so their source spans distinguish them. The old reader is quarantined to migration;
+so their source spans distinguish them. The old reader and its legacy grammar are
+quarantined behind the non-default `pre-020-pipe-migration` Cargo feature in Surf
+and Deep; only the explicit CLI migration consumer opts in. Core consumers must
+not call this historical reader. Its receipt scope is pre-0.20, pre-A1 Deep;
 normal parser/stamper entry points reject retired `pipe` nodes, with Deep 0.20
 named in the diagnostic.
 
@@ -64,7 +67,7 @@ version field; retired forms are rejected with the Deep format version and cause
 ## Acceptance oracle
 
 ```console
-cargo test -p chelis-surf --test pipe_sugar_contract
+cargo test -p chelis-surf --features pre-020-pipe-migration --test pipe_sugar_contract
 cargo test -p chelis-cli --test issue_3130_pipe_sugar --test issue_1923_pipe_fold_surface --test issue_1242_pipe_resugaring
 cargo test -p tree-sitter-chelis pipes_require_explicit_grouping_at_every_operator_family
 ```
