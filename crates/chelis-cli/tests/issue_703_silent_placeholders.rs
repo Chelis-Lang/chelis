@@ -340,24 +340,13 @@ fn atan_on_integer_tensor_is_not_silently_zeroed() {
 }
 
 // ===========================================================================
-// #705: tensor_scan - a guard that exists, is documented, and never runs.
+// #705: tensor_scan once compiled to a silent stub.
 // ===========================================================================
 
-/// `reject_host_only_builtins` (`crates/chelis-compiler-api/src/compiler.rs:2232`,
-/// over `HOST_ONLY_BUILTINS = &["tensor_scan"]` at `:2230`) exists specifically
-/// to stop this. It is only called from `compiler::compile()` at `compiler.rs:748`.
-/// `chelis-cli` calls that function ZERO times - `cmd_build` runs its own
-/// pipeline straight to `codegen_host_program`, screened only by its own
-/// `EVAL_ONLY_HOST_BUILTINS = &["process_run"]` (`main.rs:8133`).
-///
-/// `spec/05-risc-primitives.md:849-855` asserts the guard means "the C/HIP
-/// emitters never see a `tensor_scan` call". Verified false: the emitted C
-/// contains `/* unsupported builtin tensor_scan */ 0` verbatim, which is the
-/// exact string that paragraph says can no longer occur.
-/// Un-ignored by chelis#730 Phase 1: the stub arm is a loud rejection, so
-/// `chelis build` on tensor_scan now fails cleanly (the emitter channel
-/// speaks even though the CLI never calls reject_host_only_builtins; the
-/// gate-dedup half of chelis#705 stays Phase 3, census rows 17/18).
+/// The compiled lane once emitted `/* unsupported builtin tensor_scan */ 0`
+/// for this program. `tensor_scan` now compiles through the host lane's
+/// list `scan` (chelis#1297); whatever the build does, it never leaves the
+/// stub marker.
 #[test]
 fn tensor_scan_does_not_silently_compile_to_a_stub() {
     if !c_toolchain_available() {

@@ -703,6 +703,11 @@ fn matches_collection_rejection(
                 && error.expected.as_deref() == Some("i32")
                 && error.got.as_deref() == Some("i64")
         }
+        "uniform_like (non-tensor template)" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.message.starts_with("type mismatch: tensor[")
+                && error.message.ends_with(" vs i32")
+        }
         "stride step" => {
             error.kind.diagnostic_name() == "TypeMismatch"
                 && error.expected.as_deref() == Some("i64")
@@ -740,7 +745,10 @@ fn run_cell(cell: &Cell) {
     let late = check(late_invalid).expect_err(&format!(
         "{route}: an invalid call over a late-bound operand must be rejected"
     ));
-    if matches!(*route, "add" | "mean" | "sqrt" | "softmax" | "shl" | "shr") {
+    if matches!(
+        *route,
+        "add" | "mean" | "sqrt" | "softmax" | "shl" | "shr" | "uniform_like (non-float template)"
+    ) {
         assert_family_error(
             &late,
             match *route {
@@ -1052,7 +1060,7 @@ fn run_dtype_cell(row: &DtypeCell) {
     let late = check(row.cell.late_invalid).expect_err("checked by run_cell");
     if matches!(
         row.cell.route,
-        "sqrt" | "add" | "mean" | "softmax" | "shl" | "shr"
+        "sqrt" | "add" | "mean" | "softmax" | "shl" | "shr" | "uniform_like (non-float template)"
     ) {
         // The operation's checked family now travels with the inferred lambda.
         // Its use owns the error; no body replay recreates the direct spelling.
@@ -1070,6 +1078,13 @@ fn run_dtype_cell(row: &DtypeCell) {
                 _ => "i32",
             },
         );
+        return;
+    }
+    // The scheme types a non-tensor template's mismatch against a tensor
+    // whose precision variable the two spellings resolve at different points,
+    // so their renderings differ only in that variable; `run_cell` matched both.
+    if row.cell.route == "uniform_like (non-tensor template)" {
+        assert_eq!(late.len(), eager.len(), "{}", summary(&late));
         return;
     }
     assert_eq!(
@@ -1151,17 +1166,17 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
             },
             resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = softmax(x, 0i32)\n",
         },
-        // `reject_inadmissible_operand_dtypes`. `uniform_like`'s template
-        // parameter is a bare type variable in the builtin scheme, so a
-        // late-bound operand REACHES the route still unresolved rather than
-        // being bound by signature unification first.
+        // [05-OP-8]: `uniform_like`'s template and bounds share one
+        // `ActiveFloat`-restricted precision variable in the builtin scheme,
+        // so the family requirement travels with an inferred lambda over it,
+        // as `sqrt`'s does.
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-float template)",
-                resolved_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
-                late_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
-                diagnostic: "uniform_like expects a float tensor template",
+                resolved_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = uniform_like(k, x, 0i32, 1i32)\n",
+                late_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (j, t, lo, hi) -> uniform_like(j, t, lo, hi)\n  g(k, x, 0i32, 1i32)\n}\n",
+                late_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (j, t, lo, hi) -> uniform_like(j, t, lo, hi)\n  g(k, x, 0.0f32, 1.0f32)\n}\n",
+                diagnostic: "dtype family `Float`",
             },
             resolved_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
         },
@@ -1171,7 +1186,7 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
                 resolved_invalid: "def f(k: key, x: i32) -> i32 = uniform_like(k, x, 0.0f32, 1.0f32)\n",
                 late_invalid: "def f(k: key, x: i32) -> i32 = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
                 late_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
-                diagnostic: "uniform_like expects tensor template input",
+                diagnostic: "uniform_like (non-tensor template)",
             },
             resolved_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
         },
@@ -1229,10 +1244,11 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 ///
 /// New unresolved Float/Int requirements cannot become implicit generic
 /// contracts. An operation outside this family mechanism whose operand never
-/// binds is decided at an arbitrary type (chelis#2518): `uniform_like` requires
-/// a float tensor, so an unapplied lambda over it is rejected, and the
-/// annotated twin is accepted. An unused lambda whose operations hold at every
-/// type stays accepted.
+/// binds is decided at an arbitrary type (chelis#2518). `uniform_like`'s
+/// template and bounds share one Float-restricted precision ([05-OP-8]), so an
+/// unapplied lambda whose bounds leave it open is rejected like `sqrt`'s, and
+/// the annotated twin is accepted. An unused lambda whose operations hold at
+/// every type stays accepted.
 #[test]
 fn never_bound_dtype_operands_are_decided_at_the_boundary() {
     for (route, program, explicit) in [
@@ -1255,13 +1271,13 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
         // tensor operand is undetermined.
         (
             "uniform_like",
-            "def f() -> i32 = {\n  g = fn (j: key, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
-            "def f() -> i32 = {\n  g = fn (j: key, t: tensor[3, f32]) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t, lo) -> uniform_like(j, t, lo, lo)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t: tensor[3, f32], lo: f32) -> uniform_like(j, t, lo, lo)\n  1i32\n}\n",
         ),
     ] {
-        if matches!(route, "sqrt" | "mod" | "shl") {
+        if matches!(route, "sqrt" | "mod" | "shl" | "uniform_like") {
             let family = match route {
-                "sqrt" => "Float",
+                "sqrt" | "uniform_like" => "Float",
                 // [05-OP-64]: `mod` admits integers and floats (chelis#626).
                 "mod" => "Numeric",
                 _ => "Int",

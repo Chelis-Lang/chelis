@@ -486,7 +486,11 @@ fn where_refuses_a_uniform_condition_shaped_unlike_its_selected_branch() {
             .expect("run where child");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success() && stderr.contains("where expects matching tensor shape"),
+            !output.status.success()
+                && stderr.contains(
+                    "where operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+                     numeric trap: domain in where at i64"
+                ),
             "where case `{case}` was not refused with the shape trap:\n{stderr}"
         );
     }

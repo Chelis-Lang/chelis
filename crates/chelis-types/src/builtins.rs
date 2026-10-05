@@ -160,7 +160,6 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
     // column accessors over List[Dict[string,string]].
-    // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
     "parse_csv",
     "to_csv",
     "csv_f64s",
@@ -1886,7 +1885,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
+    // ─── Host-lane CSV I/O (chelis#903, HostOnly) ─────────
     BuiltinDecl {
         name: "parse_csv",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ParseCsv),
@@ -2902,24 +2901,26 @@ pub fn builtin_env() -> (Env, VarGen) {
     }
 
     fn tensor_with_bounds(name: &str, env: &mut Env, vg: &mut VarGen) {
-        let input = vg.fresh_tvar();
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let template = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         let scheme = Scheme {
             result_origin: None,
             constraints: vec![],
-            tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvars: vec![precision],
+            tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
-            rvars: vec![],
+            rvars: vec![rank],
             // [05-OP-8]: the key comes first and is consumed; the template
-            // is borrowed.
+            // is borrowed; `low` and `high` have the template's dtype `p`.
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::Key),
-                    borrowed(Type::Var(input)),
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::F32),
+                    borrowed(template.clone()),
+                    Type::Var(precision),
+                    Type::Var(precision),
                 ],
-                Box::new(Type::Var(input)),
+                Box::new(template),
             ),
         };
         env.bind(name.to_string(), scheme);

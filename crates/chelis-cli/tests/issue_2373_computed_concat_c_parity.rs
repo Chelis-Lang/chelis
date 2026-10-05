@@ -396,7 +396,7 @@ fn empty_list_fails_in_linked_c() {
     assert!(gcc_available(), "this oracle requires a linked C binary");
     let stem = "computed_concat_empty";
     let source = "parts: List[tensor[2, 2, f32]] = []\noutput = concat(parts, 1i32)\n";
-    let expected = "concat expects at least one tensor part";
+    let expected = "concat received no tensor parts\nnumeric trap: domain in concat at i64\n";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
     let out_dir = dir.path().join(format!("{stem}-out"));
@@ -408,10 +408,7 @@ fn empty_list_fails_in_linked_c() {
         .output()
         .expect("eval");
     assert!(!eval.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&eval.stderr),
-        "error: concat expects at least one tensor part\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&eval.stderr), expected);
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")

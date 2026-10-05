@@ -1,60 +1,23 @@
-//! Release inventory: executable witnesses distinguish each refusal scope.
+//! Release inventory: host-runtime operations carry no whole-program or
+//! live-only refusal scope; reachable and unreachable calls build alike
+//! (chelis#1297).
 #[path = "common/mod.rs"]
 mod common;
 
-use assert_cmd::Command;
-use std::fs;
-use tempfile::tempdir;
-
-fn rejection(source: &str) -> String {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("scope.ch");
-    fs::write(&path, source).unwrap();
-    let output = Command::cargo_bin("chelis")
-        .unwrap()
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "--target", "c", "--emit-c", "--output"])
-        .arg(dir.path().join("out"))
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("unsupported:"), "{stderr}");
-    assert!(!dir.path().join("out/scope.c").exists());
-    stderr
+#[test]
+fn unreachable_host_runtime_calls_build() {
+    let source = "def dead(seed: f32) -> tensor[3, f32] = tensor_scan(seed, fn (previous: f32, i: i64) -> add(previous, 1.0f32), 3i64)\n\
+                  def dead_clock() -> (i64, i64) = clock_wall_read()\n\
+                  out = print(7i32)\n";
+    assert_eq!(common::build_and_run(source, "scope"), "7\nout = ()\n");
 }
 
 #[test]
-fn whole_program_gates_reject_even_unreachable_calls() {
-    let scan = rejection(
-        "def dead() -> tensor[3, f32] = tensor_scan(0.0f32, fn (previous: f32, i: i64) -> add(previous, 1.0f32), 3i64)\nout = print(7i32)\n",
+fn live_and_unreachable_assertions_both_compile() {
+    assert_eq!(
+        common::build_and_run("out = test_assert(true, \"live\")\n", "scope"),
+        "out = ()\n"
     );
-    assert!(scan.contains("host emission (codegen:c)"), "{scan}");
-    assert!(
-        scan.contains("tensor_scan") && scan.contains("[05-HOST-1]"),
-        "{scan}"
-    );
-    let clock = rejection("def dead() -> (i64, i64) = clock_wall_read()\nout = print(7i32)\n");
-    assert!(
-        clock
-            .contains("compiled targets (the host interpreter's eval/test lanes only) (codegen:c)"),
-        "{clock}"
-    );
-    assert!(
-        clock.contains("clock_wall_read") && clock.contains("[05-HOST-2]"),
-        "{clock}"
-    );
-}
-
-#[test]
-fn live_assertion_refuses_but_unreachable_assertion_does_not() {
-    let live = rejection("out = test_assert(true, \"live\")\n");
-    assert!(
-        live.contains("host emission (codegen:c)") && live.contains("[04-TOT-2]"),
-        "{live}"
-    );
-    assert!(live.contains("test_assert"), "{live}");
     let source = "def dead() -> unit = test_assert(false, \"unreachable\")\nout = print(7i32)\n";
     assert_eq!(common::build_and_run(source, "scope"), "7\nout = ()\n");
 }

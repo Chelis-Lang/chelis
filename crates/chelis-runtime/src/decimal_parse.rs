@@ -36,7 +36,7 @@ pub(crate) enum Rounded {
     Overflow { negative: bool },
 }
 
-fn rounded_quotient(numerator: BigUint, denominator: BigUint) -> BigUint {
+pub(crate) fn rounded_quotient(numerator: BigUint, denominator: BigUint) -> BigUint {
     let quotient = &numerator / &denominator;
     let remainder = numerator % &denominator;
     let twice_remainder = remainder << 1usize;
@@ -198,9 +198,30 @@ pub(crate) fn round_decimal(
         } => (negative, numerator, denominator),
         DecimalValue::Overflow { negative } => return Some(Rounded::Overflow { negative }),
     };
+    Some(ratio_to_ieee_bits(
+        negative,
+        numerator,
+        denominator,
+        exponent_bits,
+        mantissa_bits,
+        bias,
+    ))
+}
+
+/// The exact rational `±numerator / denominator` rounded once, to nearest
+/// with ties to even, at the given IEEE binary layout, or overflow past the
+/// largest finite value.
+pub(crate) fn ratio_to_ieee_bits(
+    negative: bool,
+    numerator: BigUint,
+    denominator: BigUint,
+    exponent_bits: u32,
+    mantissa_bits: u32,
+    bias: i32,
+) -> Rounded {
     let sign = u64::from(negative) << (exponent_bits + mantissa_bits);
     if numerator == BigUint::from(0u8) {
-        return Some(Rounded::Bits(sign));
+        return Rounded::Bits(sign);
     }
 
     let minimum_exponent = 1 - bias;
@@ -217,13 +238,11 @@ pub(crate) fn round_decimal(
             exponent += 1;
         }
         if exponent > maximum_exponent {
-            return Some(Rounded::Overflow { negative });
+            return Rounded::Overflow { negative };
         }
         let exponent_field = (exponent + bias) as u64;
         let fraction = significand - (1u64 << mantissa_bits);
-        return Some(Rounded::Bits(
-            sign | (exponent_field << mantissa_bits) | fraction,
-        ));
+        return Rounded::Bits(sign | (exponent_field << mantissa_bits) | fraction);
     }
 
     let subnormal = to_u64(&scaled_round(
@@ -231,11 +250,11 @@ pub(crate) fn round_decimal(
         &denominator,
         mantissa_bits as i32 - minimum_exponent,
     ));
-    Some(Rounded::Bits(if subnormal == 1u64 << mantissa_bits {
+    Rounded::Bits(if subnormal == 1u64 << mantissa_bits {
         sign | (1u64 << mantissa_bits)
     } else {
         sign | subnormal
-    }))
+    })
 }
 
 #[cfg(test)]

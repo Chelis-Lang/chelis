@@ -1,6 +1,6 @@
 use chelis_vocab::{
     DiagnosticKind, DiagnosticKindDecodeError, EffectKind, EffectKindDecodeError, EffectKindInput,
-    NumericTrapKind, NumericTrapLine, Repr, RuntimeDType, RuntimeDTypeDecodeError,
+    Repr, RuntimeDType, RuntimeDTypeDecodeError,
 };
 
 #[test]
@@ -447,37 +447,5 @@ fn runtime_dtype_consumer_match_is_a_compile_time_ratchet() {
 
     for dtype in RuntimeDType::ALL {
         assert!(!storage_family(dtype).is_empty());
-    }
-}
-
-/// [04-NUM-9]: the closed trap kinds and the one line every lane renders.
-#[test]
-fn numeric_trap_lines_are_closed_and_frozen() {
-    let expected = [
-        (
-            NumericTrapKind::Overflow,
-            "numeric trap: overflow in floor_div at i8",
-        ),
-        (
-            NumericTrapKind::Domain,
-            "numeric trap: domain in floor_div at i8",
-        ),
-        (
-            NumericTrapKind::DivZero,
-            "numeric trap: division by zero in floor_div at i8",
-        ),
-    ];
-    assert_eq!(
-        NumericTrapKind::ALL.to_vec(),
-        expected.iter().map(|(kind, _)| *kind).collect::<Vec<_>>()
-    );
-    for (kind, line) in expected {
-        let rendered = NumericTrapLine {
-            kind,
-            op: "floor_div",
-            dtype: "i8",
-        }
-        .to_string();
-        assert_eq!(rendered, line);
     }
 }

@@ -147,6 +147,24 @@ const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
 /// derived flags are necessary but never sufficient: the complete family,
 /// kind, canonical identity, and flag vector must match one of these rows.
 const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_elementwise_shape_trap ( const char * op , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_matmul_product_trap ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
+        &[],
+    ),
     // A closed diagnostic identity; no extent, width, dtype, or payload is encoded.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -730,6 +748,139 @@ macro_rules! final_numeric_row {
 }
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
+        &[],
+        "[05-OP-38]",
+        "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
+        &[],
+        "[05-OP-38]",
+        "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_eq_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_test_assert_close_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_scalar tolerance , chelis_string label ) ;",
+        &[],
+        "[05-OP-38]",
+        "`test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_clock_monotonic_read ( void ) ;",
+        &[],
+        "[05-OP-75]",
+        "Both halves come from one host reading"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_process_run ( chelis_string program , const chelis_list * args ) ;",
+        &[],
+        "[05-OP-38]",
+        "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
+        &[],
+        "[05-OP-1]",
+        "performs decimal rounding at"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_parse_csv ( chelis_string text ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_to_csv ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-5]",
+        "`to_csv(table: List[Dict[string,string]]) -> string` returns the serialized"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_cols ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_nrows ( const chelis_list * table ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_strs ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_f64s ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_csv_ints ( const chelis_list * table , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_csv_str ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-61]",
+        "Signature: `parse_csv(text:string)->List[Dict[string,string]]`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_f64 ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_scalar chelis_csv_int ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+        &[],
+        "[05-OP-3]",
+        "The exact numeric CSV identities and argument order are:"
+    ),
     final_numeric_row!(
         "header-export",
         "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
@@ -3380,6 +3531,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-33]",
         authority_anchor: "Padding follows [05-OP-9..10] exactly",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_pad_sequences_to_require_width ( int64_t width ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-10]",
+        authority_anchor: "`width` SHALL be non-negative",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

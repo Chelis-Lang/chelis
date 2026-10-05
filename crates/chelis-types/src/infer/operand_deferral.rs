@@ -377,7 +377,6 @@ pub(super) fn replay_dtype_admissibility(
         node,
         Some(func_name),
         arg_tys,
-        env,
         subst,
         errors,
         &mut route_observed,

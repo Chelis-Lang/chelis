@@ -1028,8 +1028,9 @@ failure.
   read, so the two halves cannot tear.
 - Each needs an atom in spec/05, a row in `builtin_semantic_identities.md`, and
   `generate_rejection_registries.py --write`. It changes no published C header.
-- Compiled host execution of IO builtins follows chelis#1297. S5 delivers the eval lane
-  and names #1297 for the compiled lane.
+- Both lanes call one runtime definition of each read (`chelis-runtime`'s
+  `host_clock`): the evaluator through its policy-checked system port, and compiled C
+  through the `chelis_clock_wall_read` and `chelis_clock_monotonic_read` exports.
 
 **Builtins (decided in S5).** The builtins are `clock_wall_read()` and
 `clock_monotonic_read()`, under the atom [05-OP-75].

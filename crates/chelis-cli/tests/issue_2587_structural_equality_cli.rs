@@ -278,13 +278,20 @@ fn host_lane_tensor_equality_of_different_lengths_fails_in_both_lanes() {
                  f([1.0f32, 2.0f32], [1.0f32, 2.0f32, 3.0f32])\n"
             ),
         );
+        // spec/04-type-system.md section 4.7: a `Domain` trap in the
+        // comparison, rendered identically by both lanes.
+        let trap = format!(
+            "{operation} operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\n\
+             numeric trap: domain in {operation} at i64"
+        );
         let eval = eval_app(&reef_home, &app);
         let stderr = String::from_utf8_lossy(&eval.stderr);
-        assert!(!eval.status.success(), "{operation}: eval accepted");
-        assert!(
-            stderr.contains("tensor comparison expects matching tensor shape"),
+        assert_eq!(
+            eval.status.code(),
+            Some(1),
             "{operation}: eval said {stderr}"
         );
+        assert!(stderr.contains(&trap), "{operation}: eval said {stderr}");
         let out_dir = app.join("out");
         let build = Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -304,9 +311,13 @@ fn host_lane_tensor_equality_of_different_lengths_fails_in_both_lanes() {
             .output()
             .expect("run the compiled program");
         let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success(), "{operation}: compiled C accepted");
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{operation}: compiled C said {stderr}"
+        );
         assert!(
-            stderr.contains("elementwise operand shape mismatch"),
+            stderr.contains(&trap),
             "{operation}: compiled C said {stderr}"
         );
     }

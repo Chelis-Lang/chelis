@@ -303,7 +303,7 @@ pub(super) fn finish_conversion_app(
                                 return Some(report(errors, te.into()));
                             }
                             match subst.apply(&inner_args[0]) {
-                                Type::Prim(precision) if precision.is_numeric() => {
+                                Type::Prim(precision) if precision.is_data_element_dtype() => {
                                     return Some(Type::Tensor(
                                         vec![Dim::Wildcard, Dim::Wildcard],
                                         TensorPrec::Concrete(precision),
@@ -326,7 +326,7 @@ pub(super) fn finish_conversion_app(
                                             with_node_provenance(
                                                 node,
                                                 format!(
-                                                    "pad_sequences expects numeric nested lists, got {other}"
+                                                    "pad_sequences expects nested lists of a data element dtype, got {other}"
                                                 ),
                                             ),
                                             vec![],
@@ -415,7 +415,7 @@ pub(super) fn finish_conversion_app(
                                 return Some(report(errors, te.into()));
                             }
                             match subst.apply(&inner_args[0]) {
-                                Type::Prim(precision) if precision.is_numeric() => {
+                                Type::Prim(precision) if precision.is_data_element_dtype() => {
                                     return Some(Type::Tensor(
                                         vec![Dim::Wildcard, width_dim],
                                         TensorPrec::Concrete(precision),
@@ -438,7 +438,7 @@ pub(super) fn finish_conversion_app(
                                             with_node_provenance(
                                                 node,
                                                 format!(
-                                                    "pad_sequences_to expects numeric nested lists, got {other}"
+                                                    "pad_sequences_to expects nested lists of a data element dtype, got {other}"
                                                 ),
                                             ),
                                             vec![],

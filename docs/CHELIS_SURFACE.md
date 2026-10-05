@@ -279,12 +279,13 @@ implemented for selected paths, with wider semantics specified by
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval supports scalar state; compiled execution and transform coverage are incomplete. |
+| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval and compiled C run scalar and tensor states; transform coverage is incomplete. |
 
 `tensor_scan` stacks successive states into a tensor; list `scan` (§3.3)
-returns a `List`. Its spec includes float-state AD and `vmap` rules. Build
-paths reject unsupported `tensor_scan` forms
-(`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
+returns a `List`. Its spec includes float-state AD and `vmap` rules.
+Compiled C runs it as the list `scan` over `range(0, n)` stacked at the
+state's own dtype; a tensor state stacks against the initial state, so
+`n = 0` keeps every state extent.
 
 ### 3.3 Higher-order list / sequence combinators
 
@@ -329,9 +330,9 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 | Name | Signature | Notes |
 |---|---|---|
 | `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
-| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; CLI and compiler API reject compiled builds. |
-| `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval/test runs it; compiled builds reject it. [05-OP-75] |
-| `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval/test runs it; compiled builds reject it. [05-OP-75] |
+| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval and compiled C run it; a signal reports `-1`, and a capture that is not UTF-8 traps `IO`. |
+| `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval and compiled C run it. [05-OP-75] |
+| `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval and compiled C run it. [05-OP-75] |
 
 String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
 preserves valid names exactly, without normalization; on conversion failure its
@@ -363,29 +364,31 @@ until it can gate their checks. Shifts use declared-width
 two's-complement semantics; counts at or above the width fully shift out
 the value, while negative counts trap ([04-NUM-13]).
 
-### 3.8 Decimal rounding — Eval/test availability
+### 3.8 Decimal rounding
 
-The registered `round_to(x: f64|f32, places: int) -> f64|f32`
-performs ties-to-even decimal rounding on the operand's exact binary
-value ([05-OP-1], [04-NUM-8]). It preserves the operand dtype and accepts
-`places` in 0..=100 at any integer width; f16/bf16 calls currently reject.
-The controlling [05-OP-1] contract admits all four float dtypes and the
-complete signed-integer `places` domain, so those limits are implementation
-gaps.
+`round_to(x: f64|f32|f16|bf16, places: int) -> same dtype` rounds the
+operand's exact binary value to the nearest multiple of `10^(-places)`,
+ties to the even coefficient, and finalizes once at the operand's own width
+([05-OP-1], [04-NUM-8]). `places` is any signed integer: a negative count
+rounds left of the decimal point, a count finer than the value is the
+identity, a zero result keeps the operand's sign, and a result past the
+largest finite value is the signed infinity. Non-finite operands pass
+through unchanged. Eval and compiled C share one definition.
 Eval/test execute it; compiled builds reject it through the shared
 eval-only gate. [05-HOST-2] requires compiled-host support.
 
 The source-defined `Std.Io.Json` module (§11) provides JSON values with
 distinct `JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
 
-### 3.9 CSV I/O — Eval/test availability
+### 3.9 CSV I/O
 
 The builtin CSV carrier is exactly `List[Dict[string,string]]`: the input's
 first record supplies the column names, the carrier contains only data rows,
 and parsing keeps every cell as text. Numeric meaning enters only through an
 explicit `csv_int*` or `csv_f64*` accessor ([05-OP-2..3]).
 Every operation validates the carrier and fails loudly; no cell is silently
-coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
+coerced or defaulted. Eval and compiled C share one definition of every
+operation. The separate source-defined module is `Std.Io.Csv` (§11).
 
 | Name | Signature | Notes |
 |---|---|---|

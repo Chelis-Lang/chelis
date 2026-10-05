@@ -114,7 +114,6 @@ pub(super) fn finish_unified_app(
         node,
         func_name.as_deref(),
         &arg_tys,
-        env,
         subst,
         errors,
         &mut checked_route_observed,
@@ -1823,7 +1822,8 @@ pub(super) fn finish_unified_app(
                 return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "tensor_scan" => {
-                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
+                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64)
+                //     -> tensor[n, ..state_shape(T), element(T)]`.
                 //
                 // Issue #257: host-runtime scan that produces a tensor
                 // directly, sidestepping the right-recursive list build
@@ -1887,12 +1887,20 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
-                // Element type must be a concrete scalar Prim once
-                // unified. If it's still a Var the call site is
-                // under-constrained; if it's a Tensor/Adt/Fn the call
-                // is invalid. We only allow primitive scalars so the
-                // host-runtime arm can determine precision.
+                // [05-OP-38]: the state `T` is a scalar or a tensor;
+                // `state_shape(T)` is empty for a scalar and the full
+                // tensor shape otherwise, and `element(T)` is the scalar
+                // dtype or the tensor precision. The result stacks the `n`
+                // states along a new leading axis. If `T` is still a Var
+                // the call site is under-constrained; an Adt/Fn state is
+                // invalid.
                 let resolved_elem = subst.apply(&elem_ty);
+                if let Type::Tensor(state_shape, precision) = &resolved_elem {
+                    let mut dims = Vec::with_capacity(state_shape.len() + 1);
+                    dims.push(Dim::Wildcard);
+                    dims.extend(state_shape.iter().cloned());
+                    return Type::Tensor(dims, precision.clone());
+                }
                 let precision = match &resolved_elem {
                     Type::Prim(p) => TensorPrec::Concrete(*p),
                     Type::Var(tv) => {
@@ -1912,7 +1920,7 @@ pub(super) fn finish_unified_app(
                                 with_node_provenance(
                                     node,
                                     format!(
-                                        "tensor_scan element type must be a scalar primitive, got {other}"
+                                        "tensor_scan state must be a scalar or a tensor, got {other}"
                                     ),
                                 ),
                                 vec![],
@@ -1939,9 +1947,8 @@ pub(super) fn finish_unified_app(
                 return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "mmap_len" => return Type::Prim(Prim::Int64),
-            // Hull Phase 0a: `process_run(cmd, args)` returns
-            // `(exit_code, stdout, stderr)`. Eval/test-only; the build
-            // backends reject it (see `reject_eval_only_builtins_host`).
+            // spec/05 §2.6: `process_run(cmd, args)` returns
+            // `(exit_code, stdout, stderr)`.
             "process_run" => {
                 return Type::Tuple(vec![
                     Type::Prim(Prim::Int64),

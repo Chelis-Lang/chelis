@@ -318,6 +318,30 @@ pub(super) fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// spec/04-type-system.md section 4.7 over the host interpreter's `usize`
+/// shapes: the shared rendering every lane reports for operands of `op` whose
+/// shapes disagree.
+fn operand_shape_disagreement(op: &str, lhs: &[usize], rhs: &[usize]) -> String {
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    chelis_abi::failure::operand_shape_disagreement(op, &exact(lhs), &exact(rhs))
+}
+
+/// [05-SPARSE-1]: the shared `Domain` rendering for an index outside the
+/// selected axis.
+fn sparse_index_failure(op: &str, index: i64, axis: usize, extent: usize) -> String {
+    chelis_abi::failure::sparse_index_out_of_bounds(
+        op,
+        index,
+        axis,
+        i64::try_from(extent).unwrap_or(i64::MAX),
+    )
+}
+
 fn tensor_result(
     template: &RuntimeTensorValue,
     storage: chelis_types::TensorStorage,
@@ -355,9 +379,16 @@ pub(super) fn numeric_binop(
         }
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             if lhs.value.shape != rhs.value.shape {
-                return Err(format!(
-                    "tensor shapes must match for elementwise op, got {:?} vs {:?}",
-                    lhs.value.shape, rhs.value.shape
+                // spec/04-type-system.md section 4.7: a `Domain` trap in the
+                // operation, which every float form names when it has one.
+                let op = float_op
+                    .map(FloatBinOp::name)
+                    .or(int_op.map(IntBinOp::name))
+                    .ok_or("numeric op names no kernel")?;
+                return Err(operand_shape_disagreement(
+                    op,
+                    &lhs.value.shape,
+                    &rhs.value.shape,
                 ));
             }
             let storage = if lhs.precision.is_integer() && rhs.precision.is_integer() {
@@ -492,15 +523,13 @@ pub(super) fn bitwise_binop(
         // chelis#2076, [05-OP-47]: two same-shaped tensors of one signed
         // integer dtype, element by element with the scalar rule.
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            // spec/04 section 4.7: a run-time disagreement traps `Domain` in
+            // the operation, rendered as compiled C renders it (chelis#3107).
             if lhs.value.shape != rhs.value.shape {
-                let render = |shape: &[usize]| {
-                    let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
-                    format!("[{}]", extents.join(", "))
-                };
-                return Err(format!(
-                    "tensor shapes must match for elementwise op, got {} vs {}",
-                    render(&lhs.value.shape),
-                    render(&rhs.value.shape)
+                return Err(operand_shape_disagreement(
+                    op.name(),
+                    &lhs.value.shape,
+                    &rhs.value.shape,
                 ));
             }
             let storage =
@@ -533,12 +562,15 @@ fn comparison_scalar(value: &RuntimeValue) -> Option<ScalarValue> {
 }
 
 pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    compare_runtime(args, CompareOp::Eq)
+    compare_runtime(args, CompareOp::Eq, "eq")
 }
 
+/// `name` is the builtin the program called, which a trap names; `lt` and
+/// `cmplt` share one kernel.
 pub(super) fn compare_runtime(
     args: &[RuntimeValue],
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(lhs), Some(rhs))
@@ -558,7 +590,7 @@ pub(super) fn compare_runtime(
             _ => Err("ordered comparison does not accept string args".to_string()),
         },
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-            tensor_compare_value(lhs, rhs, op).map(RuntimeValue::Tensor)
+            tensor_compare_value(lhs, rhs, op, name).map(RuntimeValue::Tensor)
         }
         // A scalar beside a tensor. These two arms used to broadcast the
         // scalar and return a `tensor[D, bool]`. chelis#1506 makes the form a
@@ -595,17 +627,23 @@ fn mixed_comparison_surface_error() -> String {
 pub(super) fn ordered_compare(
     args: &[RuntimeValue],
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeValue, String> {
-    compare_runtime(args, op)
+    compare_runtime(args, op, name)
 }
 
 pub(super) fn tensor_compare_value(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
     op: CompareOp,
+    name: &str,
 ) -> Result<RuntimeTensorValue, String> {
     if lhs.value.shape != rhs.value.shape {
-        return Err("tensor comparison expects matching tensor shape".to_string());
+        return Err(operand_shape_disagreement(
+            name,
+            &lhs.value.shape,
+            &rhs.value.shape,
+        ));
     }
     let storage = compare_tensors(op, lhs.value.storage(), rhs.value.storage())
         .map_err(|error| error.to_string())?;
@@ -652,6 +690,7 @@ pub(super) fn bool_unop(
 pub(super) fn tensor_bool_binop(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
+    name: &str,
     op: impl Fn(bool, bool) -> bool,
 ) -> Result<RuntimeTensorValue, String> {
     if lhs.precision != Prim::Bool || rhs.precision != Prim::Bool {
@@ -662,9 +701,10 @@ pub(super) fn tensor_bool_binop(
         ));
     }
     if lhs.value.shape != rhs.value.shape {
-        return Err(format!(
-            "tensor bool op expects matching shapes, got {:?} vs {:?}",
-            lhs.value.shape, rhs.value.shape
+        return Err(operand_shape_disagreement(
+            name,
+            &lhs.value.shape,
+            &rhs.value.shape,
         ));
     }
     let data = lhs
@@ -940,10 +980,20 @@ pub(super) fn nested_list_to_tensor_data(
         nested_list_to_tensor_data(inner, precision, inner_extents)
     });
     let (inner_shape, mut data) = rows.next().expect("nonempty List checked above")?;
-    for row in rows {
+    for (child, row) in rows.enumerate() {
         let (shape, row_data) = row?;
         if shape != inner_shape {
-            return Err("to_tensor requires uniform inner shape".into());
+            let exact = |shape: &[usize]| {
+                shape
+                    .iter()
+                    .map(|extent| i64::try_from(*extent).unwrap_or(i64::MAX))
+                    .collect::<Vec<_>>()
+            };
+            return Err(chelis_abi::failure::to_tensor_ragged(
+                &exact(&inner_shape),
+                child + 1,
+                &exact(&shape),
+            ));
         }
         data.extend(row_data)?;
     }
@@ -1066,7 +1116,8 @@ pub(super) fn tensor_to_list_values(
 }
 
 /// Shared row collector for the `pad_sequences*` family: the pad scalar fixes
-/// the exact output dtype, every non-empty row must carry that same dtype,
+/// the exact output dtype, any active data element dtype including `bool`
+/// ([05-OP-9]), every non-empty row must carry that same dtype,
 /// and the padded row-major data stays in a wide ingress buffer until final
 /// storage construction (chelis#729 Phase 1, section C3).
 fn pad_sequences_rows(
@@ -1080,11 +1131,15 @@ fn pad_sequences_rows(
         {
             payload.dtype()
         }
+        RuntimeValue::Bool(_) => Prim::Bool,
         other => {
-            return Err(format!("{op} expects numeric pad value, got {other:?}"));
+            return Err(format!(
+                "{op} expects a data element pad value, got {other:?}"
+            ));
         }
     };
-    let pad_is_int = pad_precision.is_integer();
+    // Bools travel as 0/1 in the exact integer family ([`list_to_tensor_data`]).
+    let pad_is_int = !pad_precision.is_float();
     let mut rows = Vec::with_capacity(sequences.len());
     let mut lens = Vec::with_capacity(sequences.len());
     for sequence in sequences {
@@ -1134,8 +1189,10 @@ pub(super) fn pad_sequences_to_value(
     pad: &RuntimeValue,
 ) -> Result<(Prim, ListTensorData, usize), String> {
     if width < 0 {
-        return Err(format!(
-            "pad_sequences_to requires non-negative width, got {width}"
+        return Err(chelis_abi::failure::negative_target_extent(
+            "pad_sequences_to",
+            1,
+            width,
         ));
     }
     let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences_to")?;
@@ -1154,14 +1211,17 @@ fn pad_rows(
     pad: &RuntimeValue,
     batch: usize,
 ) -> Result<ListTensorData, String> {
-    let RuntimeValue::Scalar(payload) = pad else {
-        return Err(format!(
-            "pad_sequences expects numeric pad value, got {pad:?}"
-        ));
-    };
     match rows {
         ListTensorData::Int(flat) => {
-            let pad_value = payload.as_i64();
+            let pad_value = match pad {
+                RuntimeValue::Scalar(payload) => payload.as_i64(),
+                RuntimeValue::Bool(value) => i64::from(*value),
+                other => {
+                    return Err(format!(
+                        "pad_sequences expects a data element pad value, got {other:?}"
+                    ));
+                }
+            };
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
             for &len in lens {
@@ -1173,6 +1233,9 @@ fn pad_rows(
             Ok(ListTensorData::Int(out))
         }
         ListTensorData::Float(flat) => {
+            let RuntimeValue::Scalar(payload) = pad else {
+                return Err("pad_sequences expects a float pad value for float rows".into());
+            };
             let pad_value = payload.value();
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
@@ -1248,13 +1311,14 @@ pub(super) fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, 
 pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, String> {
     values
         .iter()
-        .map(|value| match value {
+        .enumerate()
+        .map(|(index, value)| match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
                 let v = payload.as_i64();
                 if v >= 0 {
                     Ok(v as usize)
                 } else {
-                    Err(format!("{op} expects non-negative sizes, got {v}"))
+                    Err(chelis_abi::failure::negative_list_entry(op, index, v))
                 }
             }
             other => Err(format!("{op} expects i64 sizes, got {other:?}")),
@@ -1292,10 +1356,11 @@ pub(super) fn tensor_reduce_host(
     let rank = tensor.value.shape.len();
     let axis = normalize_axis(rank, axis, "reduction")?;
     let mut out_shape: Vec<usize> = tensor.value.shape.clone();
+    // An empty axis reaches the kernels: spec/05 section 2.3 gives `sum` and
+    // `prod` their identity there, and an extremum or arg-extremum, which has
+    // none, traps `Domain` in its lowered primitive ([04-NUM-9]), as compiled
+    // C does.
     let axis_len = out_shape.remove(axis);
-    if axis_len == 0 {
-        return Err("reduction over empty axis is undefined".to_string());
-    }
     let out_numel = tensor_numel(&out_shape);
     let mut groups = Vec::with_capacity(out_numel);
     for out_linear in 0..out_numel {
@@ -1411,17 +1476,16 @@ pub(super) fn tensor_matmul_host(
     if lhs.precision != rhs.precision || !lhs.precision.is_float() {
         return Err("matmul requires one matching active float dtype".to_string());
     }
-    if a[a.len() - 1] != b[b.len() - 2] {
-        return Err("matmul shared-axis mismatch".to_string());
-    }
-    for (&a_extent, &b_extent) in a[..a.len() - 2]
-        .iter()
-        .rev()
-        .zip(b[..b.len() - 2].iter().rev())
-    {
-        if a_extent != b_extent && a_extent != 1 && b_extent != 1 {
-            return Err("matmul batch-axis mismatch".to_string());
-        }
+    // spec/04-type-system.md section 4.7: a shared- or batch-axis
+    // disagreement is a `Domain` trap in `matmul`.
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    if let Some(failure) = chelis_abi::failure::matmul_operand_disagreement(&exact(a), &exact(b)) {
+        return Err(failure);
     }
     let mut dag = Dag::new();
     let decl = dag.declare("matmul");
@@ -1513,8 +1577,8 @@ pub(super) fn tensor_insert_host(
 /// fires at the operation because the host interpreter has no entry at which
 /// to hoist it.
 ///
-/// The trap renders through [`NumericTrap`], so the line is
-/// `numeric trap: domain in expand at i64` verbatim: the guarded result is
+/// The trap renders through `chelis_abi::failure`, context line first, so
+/// the trap line is `numeric trap: domain in expand at i64`: the guarded result is
 /// an extent under [05-DIM-1] and not a tensor element, which is why the
 /// dtype slot is `i64` rather than the tensor's precision
 /// (`spec/04-type-system.md` section 4.7).
@@ -1533,14 +1597,12 @@ pub(super) fn tensor_expand_host(
         ));
     }
     if in_shape[axis] != 1 {
-        let trap = NumericTrap::Domain {
-            op: "expand",
-            prim: Prim::Int64,
-        };
         let observed = in_shape[axis];
-        return Err(format!(
-            "{trap}\n  {builtin} claims the operand's extent at axis {axis} is 1, observed \
-             {observed}"
+        return Err(chelis_abi::failure::domain_guard(
+            "expand",
+            &format!(
+                "{builtin} claims the operand's extent at axis {axis} is 1, observed {observed}"
+            ),
         ));
     }
 
@@ -1575,23 +1637,30 @@ pub(super) fn tensor_reduce_window_host(
     op_name: &str,
 ) -> Result<RuntimeTensorValue, String> {
     if window_shape.len() != strides.len() {
-        return Err(format!(
-            "{op_name} window_shape (len {}) and strides (len {}) must agree",
-            window_shape.len(),
-            strides.len()
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!(
+                "{op_name} window_shape (len {}) and strides (len {}) must agree",
+                window_shape.len(),
+                strides.len()
+            ),
         ));
     }
     let in_shape = &tensor.value.shape;
     let n = window_shape.len();
     if n == 0 {
-        return Err(format!(
-            "{op_name} requires a non-empty window_shape and strides"
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!("{op_name} requires a non-empty window_shape and strides"),
         ));
     }
     if in_shape.len() < n {
-        return Err(format!(
-            "{op_name} window arity {n} exceeds tensor rank {}",
-            in_shape.len()
+        return Err(chelis_abi::failure::domain_guard(
+            op_name,
+            &format!(
+                "{op_name} window arity {n} exceeds tensor rank {}",
+                in_shape.len()
+            ),
         ));
     }
     let leading = in_shape.len() - n;
@@ -1600,16 +1669,25 @@ pub(super) fn tensor_reduce_window_host(
         let w = window_shape[i];
         let s = strides[i];
         if w == 0 {
-            return Err(format!("{op_name} window_shape[{i}] must be >= 1"));
+            return Err(chelis_abi::failure::domain_guard(
+                op_name,
+                &format!("{op_name} window_shape[{i}] must be >= 1"),
+            ));
         }
         if s == 0 {
-            return Err(format!("{op_name} strides[{i}] must be >= 1"));
+            return Err(chelis_abi::failure::domain_guard(
+                op_name,
+                &format!("{op_name} strides[{i}] must be >= 1"),
+            ));
         }
         let in_dim = in_shape[leading + i];
         if in_dim < w {
-            return Err(format!(
-                "{op_name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
-                leading + i
+            let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+            return Err(chelis_abi::failure::window_exceeds_extent(
+                op_name,
+                leading + i,
+                exact(w),
+                exact(in_dim),
             ));
         }
         out_shape.push((in_dim - w) / s + 1);
@@ -1733,15 +1811,14 @@ pub(super) fn tensor_shrink_host(
         ));
     }
     let mut out_shape = Vec::with_capacity(in_shape.len());
-    for (axis, ((start, end), in_dim)) in bounds.iter().zip(in_shape.iter()).enumerate() {
-        if start >= end {
-            return Err(format!(
-                "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
-            ));
-        }
-        if *end > *in_dim {
-            return Err(format!(
-                "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {in_dim}"
+    // spec/05 section 2.4.1: equal endpoints select an empty axis
+    // (chelis#1795); an inverted or overshooting range traps `Domain` in
+    // `shrink`, rendered as the IR evaluator and the C runtime render it.
+    for ((start, end), in_dim) in bounds.iter().zip(in_shape.iter()) {
+        if start > end || end > in_dim {
+            return Err(chelis_abi::failure::domain_guard(
+                "shrink",
+                "Domain: shrink bounds outside input extent",
             ));
         }
         out_shape.push(end - start);
@@ -1845,9 +1922,9 @@ pub(super) fn extract_bounds_pair_list(
                         return Err(format!("{op} axis {axis} expects int end, got {other:?}"));
                     }
                 };
-                if start < 0 || end < 0 {
-                    return Err(format!(
-                        "{op} axis {axis} bound [{start}, {end}] has negative endpoint"
+                if let Some(negative) = [start, end].into_iter().find(|bound| *bound < 0) {
+                    return Err(chelis_abi::failure::negative_movement_bound(
+                        op, axis, negative,
                     ));
                 }
                 Ok((start as usize, end as usize))
@@ -1891,9 +1968,8 @@ pub(super) fn tensor_softmax_host(
         a
     };
 
-    if tensor.value.shape[axis_usize] == 0 {
-        return Err("softmax axis has size 0".to_string());
-    }
+    // An empty axis reaches the lowered `max_reduce`, which traps `Domain`
+    // under [04-NUM-9]'s lowered-primitive rule, as compiled C reports it.
     eval_composed_unary(tensor, |dag, decl, x, ty| {
         tier2::lower_softmax(decl.into(), dag, x, axis_usize, ty, None)
     })
@@ -2115,7 +2191,7 @@ pub(super) fn tensor_concat_value(
         .collect::<Result<Vec<_>, _>>()?;
     let first = tensors
         .first()
-        .ok_or_else(|| "concat expects at least one tensor part".to_string())?;
+        .ok_or_else(chelis_abi::failure::concat_without_parts)?;
     // chelis#368/#522: accept a negative concat axis (`-1` = last axis),
     // matching the negative-axis convention every other axis-taking op follows
     // (reductions, softmax) AND the IR `concat` lowering (`lower_tensor_concat`
@@ -2128,17 +2204,25 @@ pub(super) fn tensor_concat_value(
     // `-1` -> `2`). One offset, then the shared bounds check.
     let rank = first.value.shape.len();
     let axis = normalize_axis(rank, axis, "concat")?;
-    for tensor in &tensors[1..] {
+    for (part, tensor) in tensors.iter().enumerate().skip(1) {
         if tensor.precision != first.precision {
             return Err("concat expects matching tensor precision".to_string());
         }
+        // The checker fixes every part's rank; only an extent can disagree
+        // at run time.
         if tensor.value.shape.len() != first.value.shape.len() {
-            return Err("concat expects matching tensor rank".to_string());
+            return Err(
+                "chelis internal error: concat parts reached eval with different ranks".to_string(),
+            );
         }
         for dim in 0..tensor.value.shape.len() {
             if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
-                return Err(format!(
-                    "numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes; axis {dim} differed"
+                let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+                return Err(chelis_abi::failure::concat_extent_disagreement(
+                    dim,
+                    exact(first.value.shape[dim]),
+                    part,
+                    exact(tensor.value.shape[dim]),
                 ));
             }
         }
@@ -2227,16 +2311,29 @@ pub(super) fn tensor_reshape_value(
     tensor: &RuntimeTensorValue,
     shape: &[RuntimeValue],
 ) -> Result<RuntimeTensorValue, String> {
+    // spec/04-type-system.md section 4.7: a negative target extent fails the
+    // non-negativity guard, a `Domain` trap in `reshape`.
+    for (axis, value) in shape.iter().enumerate() {
+        if let RuntimeValue::Scalar(payload) = value
+            && payload.dtype().is_integer()
+            && payload.as_i64() < 0
+        {
+            return Err(chelis_abi::failure::negative_target_extent(
+                "reshape",
+                axis,
+                payload.as_i64(),
+            ));
+        }
+    }
     let new_shape = expect_int_list(shape, "reshape")?;
     let expected = new_shape
         .iter()
         .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
         .ok_or_else(|| "reshape target shape overflows usize".to_string())?;
     if expected != tensor.value.len() {
-        return Err(format!(
-            "reshape expects {} elements but tensor has {}",
-            expected,
-            tensor.value.len()
+        return Err(chelis_abi::failure::reshape_element_count_disagreement(
+            u64::try_from(expected).unwrap_or(u64::MAX),
+            u64::try_from(tensor.value.len()).unwrap_or(u64::MAX),
         ));
     }
     // reuse_* contract: reshape is element-preserving (section C3); the
@@ -2256,9 +2353,11 @@ pub(super) fn tensor_split_value(
     let sizes = expect_int_list(sizes, "split")?;
     let total: usize = sizes.iter().sum();
     if total != tensor.value.shape[axis] {
-        return Err(format!(
-            "split sizes sum to {total}, expected {}",
-            tensor.value.shape[axis]
+        let exact = |extent: usize| i64::try_from(extent).unwrap_or(i64::MAX);
+        return Err(chelis_abi::failure::split_sizes_disagreement(
+            exact(total),
+            axis,
+            exact(tensor.value.shape[axis]),
         ));
     }
     let mut parts = Vec::with_capacity(sizes.len());
@@ -2309,7 +2408,12 @@ pub(super) fn tensor_gather_value(
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
         let value = index_values[index_linear];
         if value < 0 || value as usize >= tensor.value.shape[axis] {
-            return Err(format!("gather index {value} out of bounds at axis {axis}"));
+            return Err(sparse_index_failure(
+                "gather",
+                value,
+                axis,
+                tensor.value.shape[axis],
+            ));
         }
         src_index.push(value as usize);
         src_index.extend_from_slice(&out_index[axis + indices.value.shape.len()..]);
@@ -2340,8 +2444,22 @@ pub(super) fn tensor_scatter_value(
     let mut expected_shape = base.value.shape[..axis].to_vec();
     expected_shape.extend_from_slice(&indices.value.shape);
     expected_shape.extend_from_slice(&base.value.shape[axis + 1..]);
-    if expected_shape != updates.value.shape || base.precision != updates.precision {
-        return Err("scatter updates must match gathered tensor shape and precision".to_string());
+    if base.precision != updates.precision {
+        return Err("scatter updates must match the base precision".to_string());
+    }
+    // spec/04 section 4.7: the updates' run-time shape disagrees with the
+    // gathered shape, a `Domain` trap in the scatter, as compiled C renders it.
+    if expected_shape != updates.value.shape {
+        let op = if mode == "replace" {
+            "scatter_replace"
+        } else {
+            "scatter"
+        };
+        return Err(operand_shape_disagreement(
+            op,
+            &expected_shape,
+            &updates.value.shape,
+        ));
     }
     let index_values = indices
         .value
@@ -2357,8 +2475,16 @@ pub(super) fn tensor_scatter_value(
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
         let value = index_values[index_linear];
         if value < 0 || value as usize >= base.value.shape[axis] {
-            return Err(format!(
-                "scatter index {value} out of bounds at axis {axis}"
+            let op = if mode == "replace" {
+                "scatter_replace"
+            } else {
+                "scatter"
+            };
+            return Err(sparse_index_failure(
+                op,
+                value,
+                axis,
+                base.value.shape[axis],
             ));
         }
         out_index.push(value as usize);
@@ -2409,8 +2535,14 @@ pub(super) fn tensor_scatter_elements_value(
     if !indices.precision.is_integer() {
         return Err("scatter_elements expects integer tensor indices".to_string());
     }
+    // spec/04 section 4.7: the updates' run-time shape disagrees with the
+    // indices', a `Domain` trap in `scatter_elements`, as compiled C renders it.
     if indices.value.shape != updates.value.shape {
-        return Err("scatter_elements requires indices.shape == updates.shape".to_string());
+        return Err(operand_shape_disagreement(
+            "scatter_elements",
+            &indices.value.shape,
+            &updates.value.shape,
+        ));
     }
     if indices.value.shape.len() != data.value.shape.len() {
         return Err(
@@ -2426,8 +2558,11 @@ pub(super) fn tensor_scatter_elements_value(
     for (linear, &value) in index_values.iter().enumerate() {
         let coord = linear_to_indices(linear, &updates.value.shape);
         if value < 0 || value as usize >= data.value.shape[axis] {
-            return Err(format!(
-                "scatter_elements index {value} out of bounds at axis {axis}"
+            return Err(sparse_index_failure(
+                "scatter_elements",
+                value,
+                axis,
+                data.value.shape[axis],
             ));
         }
         let mut out_index = coord.clone();
@@ -2464,12 +2599,19 @@ pub(super) fn tensor_where_value(
     // selects. A branch selected nowhere is neither read nor shape-checked.
     let then_selected = cond_mask.iter().any(|flag| *flag != 0);
     let else_selected = cond_mask.contains(&0);
-    let shape_error =
-        || "where expects condition and both branches to have identical shape".to_string();
+    // spec/04-type-system.md section 4.7: a disagreement is a `Domain` trap
+    // in `where`, comparing the condition with a branch as the C guard does.
+    let shape_error = |branch: &RuntimeTensorValue| {
+        operand_shape_disagreement("where", &cond.value.shape, &branch.value.shape)
+    };
     match (then_selected, else_selected) {
-        (true, false) if cond.value.shape != then_tensor.value.shape => return Err(shape_error()),
+        (true, false) if cond.value.shape != then_tensor.value.shape => {
+            return Err(shape_error(then_tensor));
+        }
         (true, false) => return Ok(then_tensor.clone()),
-        (false, true) if cond.value.shape != else_tensor.value.shape => return Err(shape_error()),
+        (false, true) if cond.value.shape != else_tensor.value.shape => {
+            return Err(shape_error(else_tensor));
+        }
         (false, true) => return Ok(else_tensor.clone()),
         (false, false) => {
             return Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
@@ -2479,10 +2621,11 @@ pub(super) fn tensor_where_value(
         }
         (true, true) => {}
     }
-    if cond.value.shape != then_tensor.value.shape
-        || then_tensor.value.shape != else_tensor.value.shape
-    {
-        return Err(shape_error());
+    if cond.value.shape != then_tensor.value.shape {
+        return Err(shape_error(then_tensor));
+    }
+    if cond.value.shape != else_tensor.value.shape {
+        return Err(shape_error(else_tensor));
     }
     // reuse_* contract: `where` selects existing elements from the two
     // branches (section C3, element-preserving). Start from the then
@@ -2827,21 +2970,28 @@ pub(super) fn tensor_clamp_value(
     if tensor.precision != lo.precision || tensor.precision != hi.precision {
         return Err("clamp expects matching tensor precision".to_string());
     }
-    if !scalar_or_match(lo) || !scalar_or_match(hi) {
-        return Err(
-            "clamp expects scalar tensor bounds or matching-shape tensor bounds".to_string(),
-        );
+    let exact = |shape: &[usize]| {
+        shape
+            .iter()
+            .map(|extent| i64::try_from(*extent).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>()
+    };
+    for (bound, name) in [(lo, "lower"), (hi, "upper")] {
+        if !scalar_or_match(bound) {
+            return Err(chelis_abi::failure::clamp_bound_shape(
+                name,
+                &exact(&bound.value.shape),
+                &exact(&tensor.value.shape),
+            ));
+        }
     }
     // [05-OP-33]: per row-major position, a NaN bound or `lower > upper`
     // fails at the first offending position before any selection there;
     // otherwise the result is the bound the stored input crosses, or the
     // exact stored input. Comparisons run at the stored dtype, as in
-    // `chelis_tensor_clamp`, whose failure lines these are: the [04-NUM-9]
-    // domain trap at the operand dtype, then the position detail.
-    let clamp_domain = NumericTrap::Domain {
-        op: "clamp",
-        prim: tensor.precision,
-    };
+    // `chelis_tensor_clamp`, and both lanes render the failure through
+    // `chelis_abi::failure`: the position, then the [04-NUM-9] domain trap
+    // at the operand dtype.
     let bound = |bound: &RuntimeTensorValue, linear: usize| {
         let index = if bound.value.shape.is_empty() {
             0
@@ -2861,15 +3011,15 @@ pub(super) fn tensor_clamp_value(
         if !compare(CompareOp::Eq, lo_value, lo_value)?
             || !compare(CompareOp::Eq, hi_value, hi_value)?
         {
-            return Err(format!(
-                "{}\nclamp bound is NaN at row-major position {linear}",
-                clamp_domain
+            return Err(chelis_abi::failure::clamp_bound_nan(
+                linear,
+                tensor.precision.name(),
             ));
         }
         if compare(CompareOp::Gt, lo_value, hi_value)? {
-            return Err(format!(
-                "{}\nclamp lower bound exceeds upper bound at row-major position {linear}",
-                clamp_domain
+            return Err(chelis_abi::failure::clamp_bounds_inverted(
+                linear,
+                tensor.precision.name(),
             ));
         }
         let value = tensor.value.storage().scalar_at(linear);
@@ -3405,7 +3555,7 @@ mod uniform_like_affine_tests {
     const KEY_BITS: u64 = 42;
 
     fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
-        let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
+        let bound = |value| scalar_from_f64("test", template.precision, value).unwrap();
         let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
         let key = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 42).unwrap()).unwrap();
         uniform_like_value(template, &prepared, key).unwrap()

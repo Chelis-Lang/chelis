@@ -18,13 +18,14 @@
 //!    expected positions.
 //! 3. **Axis-1 mixed duplicates** through Gather on a wider table → exact
 //!    per-column counts.
-//! 4. **Out-of-range gather indices at FORWARD eval time** must panic with
-//!    an "out of bounds" message, NOT silently wrap or zero. This locks the
-//!    fail-closed evaluator contract from `eval.rs::gather`.
-//! 5. **Out-of-range scatter_add indices at FORWARD eval time** must panic
-//!    with "out of bounds". Locks the eval contract.
+//! 4. **Out-of-range gather indices at FORWARD eval time** must fail with
+//!    the [05-SPARSE-1] `Domain` trap, NOT silently wrap or zero, and never
+//!    panic ([04-NUM-10]). This locks the fail-closed evaluator contract from
+//!    `eval.rs::gather`.
+//! 5. **Out-of-range scatter_add indices at FORWARD eval time** must fail
+//!    with the same trap in `scatter`. Locks the eval contract.
 //! 6. **Out-of-range scatter (replace) indices at FORWARD eval time** must
-//!    panic with "out of bounds". Locks the eval contract.
+//!    fail with the same trap in `scatter_replace`. Locks the eval contract.
 //! 7. **Scatter AD ignoring `wrt`**: `grad_dag_checked` returns the structured
 //!    error regardless of which inputs are passed as `wrt`.
 //! 8. **Display of structured AD error**: the rendered string for the
@@ -290,12 +291,11 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     }
 }
 
-/// Out-of-range gather index at FORWARD eval time must panic with
-/// "out of bounds" — NOT silently wrap or produce zeros. Locks the
-/// fail-closed eval contract at `eval.rs::gather:362`.
+/// Out-of-range gather index at FORWARD eval time must fail with the
+/// sparse-index `Domain` trap — NOT silently wrap or produce zeros. Locks the
+/// fail-closed eval contract at `eval.rs::gather`.
 #[test]
-#[should_panic(expected = "out of bounds")]
-fn gather_eval_out_of_bounds_index_panics_fail_closed() {
+fn gather_eval_out_of_bounds_index_traps_fail_closed() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let table = dag.add_node(
@@ -337,13 +337,17 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         "indices".to_string(),
         TensorValue::from_vec(vec![2], vec![1.0, 5.0]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let err = eval_tensor_with(&dag, |n| inputs.get(n).cloned())
+        .expect_err("an index outside the axis must fail, never wrap or zero");
+    assert!(
+        err.contains("out of bounds") && err.ends_with("numeric trap: domain in gather at i64"),
+        "{err}"
+    );
 }
 
-/// Negative gather indices must also panic fail-closed.
+/// Negative gather indices must also trap fail-closed.
 #[test]
-#[should_panic(expected = "out of bounds")]
-fn gather_eval_negative_index_panics_fail_closed() {
+fn gather_eval_negative_index_traps_fail_closed() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let table = dag.add_node(
@@ -384,12 +388,16 @@ fn gather_eval_negative_index_panics_fail_closed() {
         "indices".to_string(),
         TensorValue::from_vec(vec![2], vec![0.0, -1.0]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let err = eval_tensor_with(&dag, |n| inputs.get(n).cloned())
+        .expect_err("an index outside the axis must fail, never wrap or zero");
+    assert!(
+        err.contains("out of bounds") && err.ends_with("numeric trap: domain in gather at i64"),
+        "{err}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "out of bounds")]
-fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
+fn scatter_add_eval_out_of_bounds_index_traps_fail_closed() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let target = dag.add_node(
@@ -443,12 +451,16 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let err = eval_tensor_with(&dag, |n| inputs.get(n).cloned())
+        .expect_err("an index outside the axis must fail, never wrap or zero");
+    assert!(
+        err.contains("out of bounds") && err.ends_with("numeric trap: domain in scatter at i64"),
+        "{err}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "out of bounds")]
-fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
+fn scatter_replace_eval_out_of_bounds_index_traps_fail_closed() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let target = dag.add_node(
@@ -502,7 +514,13 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let err = eval_tensor_with(&dag, |n| inputs.get(n).cloned())
+        .expect_err("an index outside the axis must fail, never wrap or zero");
+    assert!(
+        err.contains("out of bounds")
+            && err.ends_with("numeric trap: domain in scatter_replace at i64"),
+        "{err}"
+    );
 }
 
 /// Scatter AD must reject regardless of `wrt`. The brief specifies the

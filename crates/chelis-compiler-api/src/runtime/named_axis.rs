@@ -331,7 +331,7 @@ impl<'a> EvalContext<'a> {
         let prepared =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
                 .map_err(|err| {
-                    if provider_failed {
+                    if provider_failed || super::transforms::is_numeric_trap_failure(&err) {
                         NamedAxisRouteError::Fatal(err)
                     } else {
                         NamedAxisRouteError::Fatal(format!(
@@ -347,7 +347,7 @@ impl<'a> EvalContext<'a> {
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.
-            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+            if super::transforms::is_numeric_trap_failure(&err) {
                 return NamedAxisRouteError::Fatal(err);
             }
             NamedAxisRouteError::Fatal(format!(

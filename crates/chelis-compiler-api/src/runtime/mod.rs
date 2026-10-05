@@ -22,7 +22,6 @@ use frame::ResultProducer;
 mod host_ops;
 mod invariant;
 mod named_axis;
-mod numeric_text;
 mod program_scope;
 mod shared_values;
 #[cfg(test)]

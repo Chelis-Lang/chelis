@@ -817,6 +817,39 @@ pub fn lower_matmul(
     }
 }
 
+/// Whether `node` is the product [`lower_matmul`] synthesizes: a `Mul` of the
+/// left operand expanded along the trailing column axis and the right operand
+/// expanded along the row axis, all three lowered from one `matmul` call and
+/// so carrying its one span (both expands carry it, and the product carries
+/// it unless a later pass rebuilt it without one). A disagreement between this product's operands
+/// is a disagreement between matmul's operands, so a lane reports it as a
+/// `Domain` trap in `matmul` (spec/04-type-system.md section 4.7) through
+/// `chelis_abi::failure::matmul_product_disagreement`. An authored
+/// `mul(expand(..), expand(..))` has one span per expand call and stays a
+/// `mul`.
+///
+/// `get` reads a node by id from whichever view of the graph the caller
+/// holds.
+pub fn is_matmul_product<'a>(
+    node: &crate::dag::DagNode,
+    get: impl Fn(NodeId) -> Option<&'a crate::dag::DagNode>,
+) -> bool {
+    let rank = node.output_type.dims.len();
+    if !matches!(node.op, RiscOp::Mul) || node.inputs.len() != 2 || rank < 3 {
+        return false;
+    }
+    let (Some(lhs), Some(rhs)) = (get(node.inputs[0]), get(node.inputs[1])) else {
+        return false;
+    };
+    matches!(lhs.op, RiscOp::Expand { axis, .. } if axis == rank - 1)
+        && matches!(rhs.op, RiscOp::Expand { axis, .. } if axis == rank - 3)
+        && lhs.span_id.is_some()
+        && lhs.span_id == rhs.span_id
+        // A later pass may rebuild the product without its span; it never
+        // gives it another call's.
+        && (node.span_id.is_none() || node.span_id == lhs.span_id)
+}
+
 fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
     let len = lhs.len().max(rhs.len());
     let mut out = Vec::with_capacity(len);
@@ -1960,6 +1993,76 @@ mod tests {
         assert_eq!(result_node.output_type.dims.len(), 2);
         assert_eq!(result_node.output_type.dims[0], DimInfo::Lit(2));
         assert_eq!(result_node.output_type.dims[1], DimInfo::Lit(4));
+    }
+
+    /// The product `lower_matmul` synthesizes is recognized as matmul's, so a
+    /// lane names `matmul` in its trap; an authored `mul` of two expands with
+    /// the same axes is not, because each authored call has its own span.
+    #[test]
+    fn only_the_lowered_matmul_product_is_recognized_as_matmul() {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let (a_ty, b_ty) = (matrix_2x3(), matrix_3x4());
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "A".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "B".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, Some("surf:0..12"));
+        let product = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Mul))
+            .expect("the lowered product");
+        assert!(is_matmul_product(product, |id| dag.get(id)));
+
+        // The same shape authored call by call: three spans, so a `mul`.
+        let mut authored = Dag::new();
+        let owner = Owner::from(authored.declare("test"));
+        let expanded = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let a = authored.add_node(owner, RiscOp::Load { name: "A".into() }, vec![], a_ty, None);
+        let b = authored.add_node(owner, RiscOp::Load { name: "B".into() }, vec![], b_ty, None);
+        let lhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 2,
+                size: RtDim::Lit(4),
+            },
+            vec![a],
+            expanded.clone(),
+            Some("surf:0..5".into()),
+        );
+        let rhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(2),
+            },
+            vec![b],
+            expanded.clone(),
+            Some("surf:6..11".into()),
+        );
+        let product = authored.add_node(
+            owner,
+            RiscOp::Mul,
+            vec![lhs, rhs],
+            expanded,
+            Some("surf:12..20".into()),
+        );
+        let product = authored.get(product).expect("authored product");
+        assert!(!is_matmul_product(product, |id| authored.get(id)));
     }
 
     #[test]

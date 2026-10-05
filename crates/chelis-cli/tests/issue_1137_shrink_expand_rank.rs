@@ -269,20 +269,40 @@ out = f(to_tensor([[cast(11.0, f32), cast(22.0, f32)], [cast(33.0, f32), cast(44
 
 #[test]
 fn invalid_shrink_bounds_still_fail_loudly() {
-    let source = "out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[cast(1, i64), cast(1, i64)]])\n";
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("invalid_bounds.ch");
-    fs::write(&path, source).expect("write source");
-    let output = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().expect("UTF-8 source path")])
-        .output()
-        .expect("run eval");
-    assert!(!output.status.success(), "empty shrink must not execute");
+    let run = |bounds: &str| {
+        let source =
+            format!("out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[{bounds}]])\n");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("bounds.ch");
+        fs::write(&path, source).expect("write source");
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().expect("UTF-8 source path")])
+            .output()
+            .expect("run eval")
+    };
+    // An inverted literal range is outside `0 <= start <= end <= input`.
+    let inverted = run("cast(1, i64), cast(0, i64)");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("empty or inverted"),
+        !inverted.status.success(),
+        "inverted shrink must not execute"
+    );
+    assert!(
+        String::from_utf8_lossy(&inverted.stderr).contains("(inverted)"),
         "rejection must name the invalid bound: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&inverted.stderr)
+    );
+    // Equal endpoints select an empty axis (spec/05 section 2.4.1,
+    // chelis#1795), the passing twin.
+    let empty = run("cast(1, i64), cast(1, i64)");
+    assert!(
+        empty.status.success(),
+        "an empty span executes: {}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&empty.stdout),
+        "out = tensor(shape=[0], data=[])\n"
     );
 }

@@ -2424,7 +2424,7 @@ impl DagNode {
     /// under its activation ([`TrapSeeds::is_claim_sized`]) is gated whatever
     /// its class, and where its activation is false it produces zeros of its
     /// declared type. Every same-shape producer's operand agreement (the
-    /// evaluator's "tensor shapes must match" and the C lane's
+    /// evaluator's `Domain` trap of spec/04 section 4.7 and the C lane's
     /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
     /// the kernel, not a gated check: a false activation leaves it in place,
     /// except at a claim-sized node, which then reads no operand. A result's
@@ -3139,7 +3139,7 @@ impl Dag {
                 };
                 !matches!(
                     (start.as_lit(), end, extent(axis)),
-                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                    (Some(start), Some(end), Some(extent)) if start <= end && end <= extent
                 )
             }),
             RiscOp::Stride { strides } => strides

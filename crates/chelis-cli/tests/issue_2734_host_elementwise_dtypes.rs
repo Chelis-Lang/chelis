@@ -119,7 +119,8 @@ fn derived_activations_over_a_run_time_extent_run_at_every_float_dtype() {
 
 /// The negative twin: an activation's result keeps its input's extent, so
 /// combining it with a tensor of another run-time length still fails on both
-/// lanes before any element is read.
+/// lanes before any element is read, with the same spec/04 section 4.7 trap
+/// (chelis#3107).
 #[test]
 fn an_activation_of_one_length_beside_another_still_fails_on_both_lanes() {
     for dtype in ["f16", "f64"] {
@@ -138,10 +139,8 @@ fn an_activation_of_one_length_beside_another_still_fails_on_both_lanes() {
         );
         let stderr = String::from_utf8_lossy(&evaluated.stderr);
         assert!(!evaluated.status.success(), "{dtype}: eval accepted");
-        assert!(
-            stderr.contains("tensor shapes must match for elementwise op"),
-            "{dtype}: eval: {stderr}"
-        );
+        let failure = "add operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3\nnumeric trap: domain in add at i64";
+        assert!(stderr.contains(failure), "{dtype}: eval: {stderr}");
         let out = app.join("out");
         let built = chelis(
             &reef_home,
@@ -163,10 +162,7 @@ fn an_activation_of_one_length_beside_another_still_fails_on_both_lanes() {
         let ran = StdCommand::new(out.join("main")).output().unwrap();
         let stderr = String::from_utf8_lossy(&ran.stderr);
         assert!(!ran.status.success(), "{dtype}: the executable accepted");
-        assert!(
-            stderr.contains("elementwise operand shape mismatch"),
-            "{dtype}: executable: {stderr}"
-        );
+        assert!(stderr.contains(failure), "{dtype}: executable: {stderr}");
     }
 }
 

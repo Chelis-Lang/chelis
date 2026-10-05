@@ -145,7 +145,6 @@ pub(super) fn reject_inadmissible_operand_dtypes(
     node: &DeepNode,
     func_name: Option<&str>,
     arg_tys: &[Type],
-    env: &Env,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     checked_route_observed: &mut bool,
@@ -172,10 +171,11 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         if let Some(first_arg) = arg_tys.get(1) {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
-                Type::Tensor(_, prim)
-                    if prim.is_float()
-                        || (matches!(prim, TensorPrec::Var(_))
-                            && env.exact_stdlib_expected_result().is_some()) => {}
+                // The scheme binds the template's precision to the bounds'
+                // `ActiveFloat`-restricted variable, so a precision not yet
+                // resolved carries that restriction wherever it is decided, as
+                // `dropout`'s input does.
+                Type::Tensor(_, prim) if prim.is_float() || matches!(prim, TensorPrec::Var(_)) => {}
                 Type::Tensor(_, _) => {
                     return reject(
                         errors,
@@ -221,10 +221,20 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
+        // [05-OP-8]: `low` and `high` have the template's dtype `p`.
+        let template_prim =
+            arg_tys
+                .get(1)
+                .and_then(|ty| match type_for_readonly_check(ty, subst) {
+                    Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                    _ => None,
+                });
         for arg_ty in arg_tys.iter().skip(2).take(2) {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
-                Type::Prim(Prim::F32) => {}
+                Type::Prim(prim)
+                    if prim.is_float()
+                        && template_prim.is_none_or(|template| template == *prim) => {}
                 // chelis#1512: the bound has no dtype YET.
                 Type::Var(_) => {
                     if let Some(site) = suspension {
@@ -240,7 +250,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                             with_node_provenance(
                                 node,
                                 format!(
-                                    "uniform_like expects f32 bounds for args 3-4, got {}",
+                                    "uniform_like bounds must have the template's active float dtype, got {}",
                                     resolved
                                 ),
                             ),

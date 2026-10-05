@@ -47,7 +47,14 @@ enum Expected {
     ExactTargetDivisionByZero,
     EntryShapeMismatch(&'static str),
     Reject(&'static str),
-    RejectReductionAxisBounds { rank: usize, axis: i64 },
+    RejectReductionAxisBounds {
+        rank: usize,
+        axis: i64,
+    },
+    /// spec/04 section 4.7: the checker accepts, and every lane rejects the
+    /// program before execution because literals visible only after inlining
+    /// prove the violation.
+    LiteralProof,
 }
 
 fn vector(n: usize) -> Input {
@@ -1016,6 +1023,12 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     )
                     .as_ref()
                         == Some(&(shape.clone(), data.clone()))
+            }
+            Expected::LiteralProof => {
+                run["success"] == false
+                    && stdout.is_empty()
+                    && stderr.contains("DimensionMismatch:")
+                    && stderr.contains("(extents fixed by literals after inlining)")
             }
             Expected::Domain(op, context) => {
                 run["stage"] == "execute"
@@ -3126,12 +3139,21 @@ fn checked_extent_transforms_contract() {
                     )
                 };
                 for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                    // chelis#3115: under `def main`, inlining the gradient fixes
+                    // the unit claim's operand to the 2-element literal, so
+                    // section 4.7 rejects the program before execution.
+                    let expected =
+                        if !good && family == "unit" && transform != "vmap" && form == "main" {
+                            Expected::LiteralProof
+                        } else {
+                            expected.clone()
+                        };
                     let case = Case {
                         id: format!("transform.{family}.{transform}.{form}.{good}"),
                         issue: 1277,
                         source: format!("{definition}\n{extra}{prefix} {call}\n"),
                         signature: Some(signature),
-                        expected: expected.clone(),
+                        expected,
                         exported: None,
                     };
                     let observation = observe(&case);

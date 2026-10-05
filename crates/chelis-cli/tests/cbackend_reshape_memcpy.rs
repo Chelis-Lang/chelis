@@ -276,7 +276,7 @@ int main(int argc, char **argv) {{
         (2, "Overflow:"),
         (3, "Overflow:"),
         (4, "Domain:"),
-        (5, "Domain:"),
+        (5, "numeric trap: domain in reshape at i64"),
     ] {
         let output = StdCommand::new(&binary)
             .arg(case.to_string())

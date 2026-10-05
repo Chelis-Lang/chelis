@@ -3581,6 +3581,18 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
 /// function-value diagnostic. Keeping the split in the marker itself
 /// means a plain callable bug is never misdescribed as an AD failure
 /// just because an unrelated transform exists elsewhere in the program.
+/// The internal host builtin that stacks `tensor_scan`'s tensor states,
+/// `(states: List[tensor[..s, p]], template: tensor[..s, p]) ->
+/// tensor[n, ..s, p]`. The leading `#` cannot appear in a Surf or Deep
+/// identifier, so no user definition can collide with it.
+pub const TENSOR_SCAN_STACK: &str = "#chelis-tensor-scan-stack";
+
+/// The internal host builtin that checks one `tensor_scan` callback
+/// application's returned state against the initial state's copy,
+/// `(state: tensor[..s, p], template: tensor[..s, p]) -> unit`, trapping
+/// `Domain` in `tensor_scan` when the shapes differ ([05-HOST-1]).
+pub const TENSOR_SCAN_STATE: &str = "#chelis-tensor-scan-state";
+
 pub const HOST_UNRESOLVED_CALLABLE_MARKER: &str = "#chelis-unresolved-callable";
 pub const HOST_UNRESOLVED_TRANSFORM_MARKER: &str = "#chelis-unresolved-transform";
 
@@ -3637,60 +3649,6 @@ fn host_program_call_name_sites<T>(
     out
 }
 
-/// Builtins available only under `chelis eval` / `chelis test` (the host
-/// evaluator) and deliberately absent from every compiled backend:
-/// emitting the C codegen catch-all for them would produce a silent wrong
-/// value (the chelis#734 class). Both public build entry points -- the CLI
-/// build pipeline and `chelis-compiler-api::compile_for_execution` (the
-/// chelis-python path) -- reject them via
-/// [`find_eval_only_host_builtin`], sharing this one list so the two
-/// gates cannot drift (chelis#891 review finding 13).
-pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
-    "process_run",
-    // [05-OP-75] clock reads: compiled host execution is chelis#1297.
-    "clock_wall_read",
-    "clock_monotonic_read",
-    "round_to",
-    // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
-    // carrier is evaluator-only. Compiled structured I/O lives in the
-    // source-defined Std.Io modules instead.
-    "parse_csv",
-    "to_csv",
-    "csv_f64s",
-    "csv_ints",
-    "csv_strs",
-    "csv_nrows",
-    "csv_cols",
-    "csv_f64",
-    "csv_int",
-    "csv_str",
-];
-
-/// First eval/test-only builtin applied anywhere in the lowered host
-/// program, if any (see [`EVAL_ONLY_HOST_BUILTINS`]).
-pub fn find_eval_only_host_builtin<T>(program: &HostProgram<T>) -> Option<&'static str> {
-    EVAL_ONLY_HOST_BUILTINS
-        .iter()
-        .copied()
-        .find(|builtin| host_program_uses_builtin(program, builtin))
-}
-
-/// Returns `true` if any global binding or function body in `program`
-/// applies the named builtin. Used by the build backends to reject
-/// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
-/// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
-/// fallthrough in C codegen.
-pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> bool {
-    program
-        .globals
-        .iter()
-        .any(|binding| host_body_uses_builtin(&binding.value, builtin))
-        || program
-            .functions
-            .iter()
-            .any(|function| host_body_uses_builtin(&function.body, builtin))
-}
-
 /// Find a direct application of one of `builtins` in checked Deep before host
 /// expression lowering descends into its arguments. Target frontends use this
 /// to preserve the owning builtin rejection when an argument (such as an
@@ -3743,113 +3701,6 @@ fn find_direct_builtin_call_in_expr(expr: &Expr, builtins: &[&str]) -> Option<St
             })
         }
         ExprCarrier::Atom(_) => None,
-    }
-}
-
-fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
-    match &callback.kind {
-        HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
-        HostCallbackKind::Named { .. } => false,
-    }
-}
-
-fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
-    match &expr.kind {
-        HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
-        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
-            host_body_uses_builtin(value, builtin)
-        }
-        HostExprKind::Builtin { name, args, .. } => {
-            name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::Call { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::SignatureEntry { args, lists, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-                || lists
-                    .iter()
-                    .any(|entry| host_body_uses_builtin(&entry.value, builtin))
-        }
-        HostExprKind::TensorCall { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::AdtConstruct { fields, .. } => {
-            fields.iter().any(|f| host_body_uses_builtin(f, builtin))
-        }
-        HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => {
-            items.iter().any(|i| host_body_uses_builtin(i, builtin))
-        }
-        HostExprKind::AdtFieldAccess { base, .. } => host_body_uses_builtin(base, builtin),
-        HostExprKind::Let { bindings, body, .. }
-        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            bindings
-                .iter()
-                .any(|b| host_body_uses_builtin(&b.value, builtin))
-                || host_body_uses_builtin(body, builtin)
-        }
-        HostExprKind::If {
-            cond,
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            host_body_uses_builtin(cond, builtin)
-                || host_body_uses_builtin(then_expr, builtin)
-                || host_body_uses_builtin(else_expr, builtin)
-        }
-        HostExprKind::MatchOption {
-            scrutinee,
-            some_expr,
-            none_expr,
-            ..
-        } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || host_body_uses_builtin(some_expr, builtin)
-                || host_body_uses_builtin(none_expr, builtin)
-        }
-        HostExprKind::MatchAdt {
-            scrutinee,
-            arms,
-            default_expr,
-            ..
-        } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || arms
-                    .iter()
-                    .any(|arm| host_body_uses_builtin(&arm.expr, builtin))
-                || default_expr
-                    .as_ref()
-                    .is_some_and(|d| host_body_uses_builtin(d, builtin))
-        }
-        HostExprKind::Map { callback, list, .. }
-        | HostExprKind::Filter { callback, list, .. }
-        | HostExprKind::Partition { callback, list, .. }
-        | HostExprKind::FlatMap { callback, list, .. } => {
-            host_callback_uses_builtin(callback, builtin) || host_body_uses_builtin(list, builtin)
-        }
-        HostExprKind::Fold {
-            callback,
-            init,
-            list,
-            ..
-        }
-        | HostExprKind::Scan {
-            callback,
-            init,
-            list,
-            ..
-        } => {
-            host_callback_uses_builtin(callback, builtin)
-                || host_body_uses_builtin(init, builtin)
-                || host_body_uses_builtin(list, builtin)
-        }
-        HostExprKind::Int(_)
-        | HostExprKind::Float(_)
-        | HostExprKind::Bool(_)
-        | HostExprKind::String(_)
-        | HostExprKind::Var(_, _)
-        | HostExprKind::Unit => false,
     }
 }
 
@@ -11758,16 +11609,30 @@ fn try_lower_general_list_grad_app(
                 });
                 let cond = HostExpr::new(HostExprKind::Builtin {
                     name: "lt".to_string(),
-                    args: vec![value, HostExpr::new(HostExprKind::Int(0))],
+                    args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                     ty: HostTypeTerm::Bool,
+                });
+                // The shared rendering's prefix, then the value: every lane
+                // reports the same text ([05-OP-54]).
+                let message = HostExpr::new(HostExprKind::Builtin {
+                    name: "string_concat".to_string(),
+                    args: vec![
+                        HostExpr::new(HostExprKind::String(
+                            chelis_abi::failure::list_argument_negative_prefix(operation, argument),
+                        )),
+                        HostExpr::new(HostExprKind::Builtin {
+                            name: "to_string".to_string(),
+                            args: vec![value],
+                            ty: HostTypeTerm::String,
+                        }),
+                    ],
+                    ty: HostTypeTerm::String,
                 });
                 body = HostExpr::new(HostExprKind::If {
                     cond: Box::new(cond),
                     then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
                         name: "fail".to_string(),
-                        args: vec![HostExpr::new(HostExprKind::String(format!(
-                            "{operation} requires non-negative {argument}"
-                        )))],
+                        args: vec![message],
                         ty: result_ty.clone(),
                     })),
                     else_expr: Box::new(body),
@@ -11797,7 +11662,9 @@ fn try_lower_general_list_grad_app(
                 let message = HostExpr::new(HostExprKind::Builtin {
                     name: "string_concat".to_string(),
                     args: vec![
-                        HostExpr::new(HostExprKind::String("index ".to_string())),
+                        HostExpr::new(HostExprKind::String(
+                            chelis_abi::failure::LIST_INDEX_PREFIX.to_string(),
+                        )),
                         HostExpr::new(HostExprKind::Builtin {
                             name: "string_concat".to_string(),
                             args: vec![
@@ -11810,7 +11677,7 @@ fn try_lower_general_list_grad_app(
                                     name: "string_concat".to_string(),
                                     args: vec![
                                         HostExpr::new(HostExprKind::String(
-                                            " out of bounds for list of len ".to_string(),
+                                            chelis_abi::failure::LIST_INDEX_LEN_INFIX.to_string(),
                                         )),
                                         HostExpr::new(HostExprKind::Builtin {
                                             name: "to_string".to_string(),
@@ -12205,6 +12072,142 @@ fn lower_app_host_expr(
             callback,
             init: Box::new(init_expr),
             list: Box::new(list_expr),
+            ty,
+        }));
+    }
+    // [05-HOST-1]: `tensor_scan(initial, fn, n)` composes the list `scan` of
+    // `fn` over `range(0, n)` with `to_tensor` at the state's exact dtype.
+    // `initial` and then `n` are bound first, in argument order; a negative
+    // `n` fails before any callback runs, and `n = 0` invokes nothing.
+    if active_compiler_name == Some("tensor_scan") && kids.len() == 4 {
+        let callback =
+            lower_host_callback(&kids[2], program, scope, tensor_helpers)?.ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "`tensor_scan` requires a lowerable callback")
+            })?;
+        let init_expr = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
+        let length_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
+        let state_ty = host_expr_type(&init_expr);
+        let ty = expr_host_type(app_expr, program, scope);
+        let mut names = HostMatchNameSupply::new(app_expr, scope);
+        names.avoid_lowered(&init_expr);
+        names.avoid_lowered(&length_expr);
+        let init_name = names.fresh("__chelis_tensor_scan_initial");
+        let length_name = names.fresh("__chelis_tensor_scan_length");
+        let length = || HostExpr::new(HostExprKind::Var(length_name.clone(), HostTypeTerm::Int64));
+        let index_list_ty = HostTypeTerm::List(Box::new(HostTypeTerm::Int64));
+        // The shared rendering's prefix, the value, then its trap line:
+        // every lane reports the same text (spec/04-type-system.md section
+        // 4.7's non-negativity guard).
+        let context = HostExpr::new(HostExprKind::Builtin {
+            name: "string_concat".to_string(),
+            args: vec![
+                HostExpr::new(HostExprKind::String(
+                    chelis_abi::failure::negative_length_prefix("tensor_scan"),
+                )),
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "to_string".to_string(),
+                    args: vec![length()],
+                    ty: HostTypeTerm::String,
+                }),
+            ],
+            ty: HostTypeTerm::String,
+        });
+        let negative_length = HostExpr::new(HostExprKind::Builtin {
+            name: "fail".to_string(),
+            args: vec![HostExpr::new(HostExprKind::Builtin {
+                name: "string_concat".to_string(),
+                args: vec![
+                    context,
+                    HostExpr::new(HostExprKind::String(format!(
+                        "\n{}",
+                        chelis_abi::failure::domain_trap_line_at_i64("tensor_scan")
+                    ))),
+                ],
+                ty: HostTypeTerm::String,
+            })],
+            ty: index_list_ty.clone(),
+        });
+        let indices = HostExpr::new(HostExprKind::If {
+            cond: Box::new(HostExpr::new(HostExprKind::Builtin {
+                name: "lt".to_string(),
+                args: vec![length(), HostExpr::new(HostExprKind::Int(0))],
+                ty: HostTypeTerm::Bool,
+            })),
+            then_expr: Box::new(negative_length),
+            else_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
+                name: "range".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Int(0)), length()],
+                ty: index_list_ty.clone(),
+            })),
+            ty: index_list_ty,
+        });
+        // A tensor state is checked against a copy of the initial state,
+        // taken before the scan consumes it, as each callback application
+        // returns ([05-HOST-1]'s shape invariance), and the states stack
+        // against the same copy, so `n = 0` keeps every state extent.
+        let template_name = matches!(state_ty, HostTypeTerm::Tensor(_))
+            .then(|| names.fresh("__chelis_tensor_scan_template"));
+        let callback = match &template_name {
+            Some(template) => {
+                let next = names.fresh("__chelis_tensor_scan_state");
+                let checked = names.fresh("__chelis_tensor_scan_checked");
+                checked_tensor_scan_callback(callback, &state_ty, template, next, checked)
+            }
+            None => callback,
+        };
+        let states_ty = HostTypeTerm::List(Box::new(state_ty.clone()));
+        let states = HostExpr::new(HostExprKind::Scan {
+            callback,
+            init: Box::new(HostExpr::new(HostExprKind::Var(
+                init_name.clone(),
+                state_ty.clone(),
+            ))),
+            list: Box::new(indices),
+            ty: states_ty,
+        });
+        let binding = |name: String, ty: HostTypeTerm, value: HostExpr| HostBinding {
+            name,
+            display_name: None,
+            display_roots: Vec::new(),
+            ty,
+            value,
+        };
+        let mut bindings = vec![
+            binding(init_name.clone(), state_ty.clone(), init_expr),
+            binding(length_name, HostTypeTerm::Int64, length_expr),
+        ];
+        // A scalar state stacks through `to_tensor`.
+        let body = if let Some(template_name) = template_name {
+            bindings.push(binding(
+                template_name.clone(),
+                state_ty.clone(),
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "copy".to_string(),
+                    args: vec![HostExpr::new(HostExprKind::Var(
+                        init_name,
+                        state_ty.clone(),
+                    ))],
+                    ty: state_ty.clone(),
+                }),
+            ));
+            HostExpr::new(HostExprKind::Builtin {
+                name: TENSOR_SCAN_STACK.to_string(),
+                args: vec![
+                    states,
+                    HostExpr::new(HostExprKind::Var(template_name, state_ty)),
+                ],
+                ty: ty.clone(),
+            })
+        } else {
+            HostExpr::new(HostExprKind::Builtin {
+                name: "to_tensor".to_string(),
+                args: vec![states],
+                ty: ty.clone(),
+            })
+        };
+        return Ok(HostExpr::new(HostExprKind::Let {
+            bindings,
+            body: Box::new(body),
             ty,
         }));
     }
@@ -12623,7 +12626,7 @@ fn lower_app_host_expr(
     } else {
         infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
-    let args = if matches!(name.as_str(), "eq" | "neq") {
+    let args = if matches!(name.as_str(), "eq" | "neq" | "test_assert_eq") {
         conform_equality_operands(args)
     } else {
         args
@@ -12631,11 +12634,12 @@ fn lower_app_host_expr(
     Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
 }
 
-/// [05-OP-36]: `eq` and `neq` compare two operands of one static type, so an
-/// operand whose host type is still unresolved, such as `None` or an empty
-/// list, takes the other operand's resolved type.
+/// [05-OP-36]: `eq`, `neq`, and `test_assert_eq` compare two leading
+/// operands of one static type, so an operand whose host type is still
+/// unresolved, such as `None` or an empty list, takes the other operand's
+/// resolved type.
 fn conform_equality_operands(mut args: Vec<HostExpr>) -> Vec<HostExpr> {
-    if let [lhs, rhs] = args.as_mut_slice() {
+    if let [lhs, rhs, ..] = args.as_mut_slice() {
         let (lhs_ty, rhs_ty) = (host_expr_type(lhs), host_expr_type(rhs));
         match (lhs_ty.is_unresolved(), rhs_ty.is_unresolved()) {
             (true, false) => *lhs = force_host_expr_type(lhs.clone(), rhs_ty),
@@ -16328,6 +16332,66 @@ fn checker_type_has_erased_adt_variable(
     }
 }
 
+/// `callback` with each application's returned state checked against the
+/// `template` variable through [`TENSOR_SCAN_STATE`] before it becomes the
+/// next state. A named callback becomes an inline one that calls it, so the
+/// check runs at the same point for both kinds.
+fn checked_tensor_scan_callback(
+    callback: HostCallback,
+    state_ty: &HostTypeTerm,
+    template: &str,
+    next: String,
+    checked: String,
+) -> HostCallback {
+    let HostCallback { kind, ret_ty } = callback;
+    let (params, body) = match kind {
+        HostCallbackKind::Inline { params, body } => (params, *body),
+        HostCallbackKind::Named { function, params } => {
+            let args = params
+                .iter()
+                .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
+                .collect();
+            let body = HostExpr::new(HostExprKind::Call {
+                function,
+                args,
+                arg_tys: params.iter().map(|param| param.ty.clone()).collect(),
+                ty: ret_ty.clone(),
+            });
+            (params, body)
+        }
+    };
+    let binding = |name: String, ty: HostTypeTerm, value: HostExpr| HostBinding {
+        name,
+        display_name: None,
+        display_roots: Vec::new(),
+        ty,
+        value,
+    };
+    let check = HostExpr::new(HostExprKind::Builtin {
+        name: TENSOR_SCAN_STATE.to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(next.clone(), ret_ty.clone())),
+            HostExpr::new(HostExprKind::Var(template.to_string(), state_ty.clone())),
+        ],
+        ty: HostTypeTerm::Unit,
+    });
+    let body = HostExpr::new(HostExprKind::Let {
+        bindings: vec![
+            binding(next.clone(), ret_ty.clone(), body),
+            binding(checked, HostTypeTerm::Unit, check),
+        ],
+        body: Box::new(HostExpr::new(HostExprKind::Var(next, ret_ty.clone()))),
+        ty: ret_ty.clone(),
+    });
+    HostCallback {
+        kind: HostCallbackKind::Inline {
+            params,
+            body: Box::new(body),
+        },
+        ret_ty,
+    }
+}
+
 fn lower_host_callback(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
@@ -19904,6 +19968,8 @@ fn conform_builtin_arguments(
                 ("copy" | "debug", _, 0) => Some(result_ty.clone()),
                 ("append", HostTypeTerm::List(_), 0) => Some(result_ty.clone()),
                 ("append", HostTypeTerm::List(inner), 1) => Some((**inner).clone()),
+                // spec/05 §2.6: argv is `List[string]`, even when empty.
+                ("process_run", _, 1) => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
                 ("dict_of", HostTypeTerm::Dict(key, value), 0) => {
                     Some(HostTypeTerm::List(Box::new(HostTypeTerm::Tuple(vec![
                         (**key).clone(),
@@ -20602,46 +20668,22 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(HostTypeTerm::Tensor(_)) => Some(fresh_host_inference()),
             _ => Some(fresh_host_inference()),
         },
-        "pad_sequences" => match arg_tys.first() {
+        // [05-OP-9], [05-OP-10]: the result's dtype is the nested lists'
+        // element dtype, any active data element dtype, moved exactly.
+        "pad_sequences" | "pad_sequences_to" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => match &**inner {
                 HostTypeTerm::List(nested) => match **nested {
-                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::Int64,
-                    })),
-                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::F32,
-                    })),
-                    _ => Some(fresh_host_inference()),
-                },
-                _ => Some(fresh_host_inference()),
-            },
-            _ => Some(fresh_host_inference()),
-        },
-        "pad_sequences_to" => match arg_tys.first() {
-            Some(HostTypeTerm::List(inner)) => match &**inner {
-                HostTypeTerm::List(nested) => match **nested {
-                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::Int64,
-                    })),
-                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
-                        dims: vec![
-                            crate::dag::DimInfo::Named("batch".to_string(), None),
-                            crate::dag::DimInfo::Named("seq".to_string(), None),
-                        ],
-                        precision: chelis_types::types::Prim::F32,
-                    })),
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision))
+                        if precision.is_data_element_dtype() =>
+                    {
+                        Some(HostTypeTerm::Tensor(TensorType {
+                            dims: vec![
+                                crate::dag::DimInfo::Named("batch".to_string(), None),
+                                crate::dag::DimInfo::Named("seq".to_string(), None),
+                            ],
+                            precision,
+                        }))
+                    }
                     _ => Some(fresh_host_inference()),
                 },
                 _ => Some(fresh_host_inference()),
@@ -20657,15 +20699,13 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "mmap_file" => Some(HostTypeTerm::MappedFile),
         "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "mmap_len" => Some(HostTypeTerm::Int64),
-        // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
-        // Eval/test-only; the C/HIP build backends reject it before codegen
-        // (see `host_program_uses_builtin` / `reject_eval_only_builtins_host`).
+        // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         "process_run" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,
             HostTypeTerm::String,
             HostTypeTerm::String,
         ])),
-        // [05-OP-75]: `(seconds, nanoseconds)`; eval/test-only like `process_run`.
+        // [05-OP-75]: `(seconds, nanoseconds)`.
         "clock_wall_read" | "clock_monotonic_read" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,
             HostTypeTerm::Int64,
@@ -20680,14 +20720,17 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "csv_f64s" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Float64))),
         "csv_ints" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "csv_strs" | "csv_cols" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
-        // `round_to` preserves its operand's float dtype ([05-OP-1]: f64 or
-        // f32, decided by the checker); an unresolved operand stays an
-        // inference hole rather than advertising a width this table cannot
-        // know.
+        // `round_to` preserves its operand's float dtype ([05-OP-1]: every
+        // active float dtype, decided by the checker); an unresolved operand
+        // stays an inference hole rather than advertising a width this table
+        // cannot know.
         "round_to" => match arg_tys.first() {
             Some(
                 term @ HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
-                    chelis_types::types::Prim::F64 | chelis_types::types::Prim::F32,
+                    chelis_types::types::Prim::F64
+                    | chelis_types::types::Prim::F32
+                    | chelis_types::types::Prim::F16
+                    | chelis_types::types::Prim::Bf16,
                 )),
             ) => Some(term.clone()),
             _ => Some(fresh_host_inference()),
@@ -24088,32 +24131,6 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         assert!(
             error.message.contains("unresolved host inference variable"),
             "{error:?}"
-        );
-    }
-
-    #[test]
-    fn host_program_uses_builtin_detects_process_run() {
-        // Hull subprocess exec: a global binding that applies process_run is
-        // detected so the build backends can reject it before codegen.
-        let checked = surf_check("result = process_run(\"echo\", [\"hi\"])\n");
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must detect a process_run global binding"
-        );
-    }
-
-    #[test]
-    fn host_program_uses_builtin_is_false_without_process_run() {
-        // Negative parity: a program that uses only file IO must not report
-        // process_run usage, so the positive assertion is not vacuous.
-        let checked = surf_check("contents = read_file(\"dataset.txt\")\n");
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            !host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must be false for a read_file-only program"
         );
     }
 

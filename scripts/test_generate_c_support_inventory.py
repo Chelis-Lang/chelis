@@ -1,4 +1,4 @@
-"""The published C exclusions follow executable rosters, not copied names."""
+"""The published C support inventory follows the source, not copied names."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,16 +28,6 @@ class SourceRosterTests(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 inventory.literal_roster(source, "ITEMS")
 
-    def test_new_exclusion_needs_reviewed_route_metadata(self):
-        with self.assertRaisesRegex(ValueError, "metadata"):
-            inventory.route_metadata("future_builtin")
-
-    def test_csv_route_is_not_a_drop_in_numeric_document_conversion(self):
-        route = inventory.route_metadata("csv_f64s")
-        self.assertIn("Std.Io.Csv.read_csv", route)
-        self.assertIn("string", route)
-        self.assertIn("explicit", route)
-
 
 class PublishedInventoryTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
@@ -46,32 +36,19 @@ class PublishedInventoryTests(unittest.TestCase):
         expected = inventory.render(self.root)
         self.assertEqual((self.root / inventory.OUTPUT).read_text(), expected)
 
-    def test_each_source_row_has_one_route_and_both_lane_verdicts(self):
-        rows = inventory.exclusions(self.root)
-        names = [row[0] for row in rows]
-        self.assertEqual(len(names), len(set(names)))
-        for name, scope, alternative in rows:
-            with self.subTest(name=name):
-                self.assertTrue(scope)
-                self.assertTrue(alternative)
-                line = next(line for line in inventory.render(self.root).splitlines()
-                            if line.startswith(f"| `{name}` |"))
-                self.assertIn("builtin", line)
-                self.assertIn("Available", line)
-                self.assertIn("Rejected", line)
+    def test_host_runtime_operations_have_no_build_gate(self):
+        text = inventory.render(self.root)
+        for name in ["tensor_scan", "process_run", "round_to"]:
+            self.assertIn(f"`{name}`", text)
+            self.assertNotIn(f"| `{name}` |", text)
+        self.assertNotIn("Rejected", text)
 
-    def test_kernel_routing_roster_is_not_published_as_exclusions(self):
-        names = {row[0] for row in inventory.exclusions(self.root)}
-        self.assertNotIn("print", names)
-        self.assertNotIn("string_concat", names)
-
-    def test_test_assertions_are_live_scoped_implementation_gaps(self):
+    def test_test_assertions_are_compiled_host_operations(self):
         text = inventory.render(self.root)
         self.assertIn("[05-HOST-3]", text)
-        self.assertIn("implementation gap", text)
         for name in ["test_assert", "test_assert_eq", "test_assert_close_tensor", "test_assert_eq_tensor"]:
-            self.assertIn(f"| `{name}` | builtin | Available | Rejected where live", text)
-
+            self.assertIn(f"`{name}`", text)
+            self.assertNotIn(f"| `{name}` |", text)
 
 if __name__ == "__main__":
     unittest.main()

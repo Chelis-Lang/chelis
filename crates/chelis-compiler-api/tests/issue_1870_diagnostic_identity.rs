@@ -92,31 +92,25 @@ fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
 }
 
 #[test]
-fn tensor_scan_exposes_its_rendered_supported_alternative_as_typed_data() {
-    let source = "def gen() -> tensor[5, f32] = \
-                  tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), \
-                  cast(5, i64))\n\
-                  out = gen()\n";
+fn par_exposes_its_rendered_supported_alternative_as_typed_data() {
+    let source = "def g() -> f32 = par { 1.0f32; 2.0f32 }\nout = g()\n";
     let error = compile(CompileRequest {
         source_kind: SourceKind::Surf,
         source: source.into(),
         target: CompileTarget::C,
         entry_name: None,
     })
-    .expect_err("compiled targets must reject tensor_scan");
+    .expect_err("every target refuses `par`");
     let diagnostic = error.errors.first().expect("one diagnostic");
     let identity = diagnostic
         .unsupported_identity()
-        .expect("the production tensor_scan rejection retains typed identity");
+        .expect("the production `par` rejection retains typed identity");
     assert_eq!(
         identity.payload.what,
-        UnsupportedKind::Builtin("tensor_scan".into())
+        UnsupportedKind::Construct("`par` expression".into())
     );
     assert_eq!(
         identity.payload.supported_alternative.as_deref(),
-        Some(
-            "run under `chelis eval` or `chelis test`, or rewrite the caller to use \
-             tensor-lane primitives"
-        )
+        Some("use `do { ... }` when sequential evaluation is intended")
     );
 }

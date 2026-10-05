@@ -2538,7 +2538,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("numel mismatch"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the chelis#616 numel abort: {out}"
     );
 }
@@ -2592,7 +2592,7 @@ fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval() {
         "section 4.7's context line carries the claim and each observed value: {out}"
     );
     assert!(
-        !out.contains("reshape expects"),
+        !out.contains("elements but the tensor has"),
         "the extent guard is observed before the evaluator's own numel check: {out}"
     );
 }
@@ -4584,35 +4584,20 @@ fn empty_span_source(len: usize) -> String {
     )
 }
 
-/// An empty span: the two lanes disagree about WHICH failure it is, and the
-/// numbered spec says the compiled lane is right.
+/// An empty span selects an extent-0 axis on both lanes (chelis#1795).
 ///
 /// `spec/05-risc-primitives.md` section 2.4.1 lists the runtime-bound errors
 /// as a negative bound, a shrink range overshoot, a non-positive stride step
-/// and the two reshape errors. An empty span is not among them, and
-/// `spec/04-type-system.md` section 4.7.2 makes only a NEGATIVE size an error.
-/// So `start == end` should produce an extent-0 result, and an extent-0 result
-/// under a declared `tensor[2, f32]` is a claim mismatch: C's
-/// `claimed = 2, shrink axis 0 = 0` is the conforming diagnostic. The
-/// evaluator instead rejects the span under chelis#616's operation-level
-/// admission rule, which the numbered spec does not require.
+/// and the two reshape errors. An empty span is not among them, and the
+/// runtime metadata rule says equal endpoints describe an empty axis. So
+/// `start == end` produces an extent-0 result, and an extent-0 result under a
+/// declared `tensor[2, f32]` is a claim mismatch: both lanes report
+/// `claimed = 2, shrink axis 0 = 0`.
 ///
-/// Round 1 read this the other way round and asked for C to be reordered
-/// behind the evaluator. That change was made, then the atom was checked, and
-/// it was taken out: it would have moved the conforming lane onto the
-/// non-conforming one. The divergence is an operation-level admission rule
-/// against section 2.4.1's closed list; it predates this slice, and mere
-/// discovery during review does not bring it into scope. Tracked by
-/// chelis#1795, and chelis#1481 asks for the opposite direction on a premise
-/// chelis#1795 questions.
-///
-/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
-/// Both assertions describe the behaviour on the reviewed head `cab086ef4` and
-/// on this one. The row exists so the divergence is recorded with its spec
-/// citation rather than rediscovered, and so that changing either lane has to
-/// update it.
+/// EVIDENTIARY STATUS: regression test on both lanes. Before chelis#1795 eval
+/// rejected the span itself as "empty or inverted".
 #[test]
-fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
+fn an_empty_shrink_span_is_an_extent_zero_axis_on_both_lanes() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -4621,21 +4606,18 @@ fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
     let source = empty_span_source(4);
     let (eval_ok, eval_out) = eval_result(&dir, "empty_span.ch", &source);
     let (c_ok, c_out) = c_run_result(&dir, "empty_span_c", &source);
-    assert!(
-        !eval_ok,
-        "an empty span does not produce a value: {eval_out}"
-    );
-    assert!(!c_ok, "an empty span does not produce a value: {c_out}");
-    assert!(
-        eval_out.contains("shrink axis 0 bound [4, 4] is empty or inverted"),
-        "eval rejects the span itself (chelis#616): {eval_out}"
-    );
-    assert!(
-        c_out.contains("extent `2`: claimed = 2, shrink axis 0 = 0")
-            && c_out.contains(&domain_trap_line("shrink")),
-        "C reports the claim the extent-0 result refutes, which is what \
-         section 2.4.1's closed error list implies: {c_out}"
-    );
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the refuted claim produces no value: {out}");
+        assert!(
+            out.contains("extent `2`: claimed = 2, shrink axis 0 = 0")
+                && out.contains(&domain_trap_line("shrink")),
+            "{lane}: reports the claim the extent-0 result refutes: {out}"
+        );
+        assert!(
+            !out.contains("empty or inverted"),
+            "{lane}: and never rejects the span itself: {out}"
+        );
+    }
 }
 
 /// chelis#1797's reproducer: a `shrink` whose runtime end overshoots the
@@ -4788,26 +4770,15 @@ fn an_overshooting_shrink_span_reports_the_domain_error_on_c() {
     }
 }
 
-/// Negative parity for the pair above, and the boundary of what chelis#1797
-/// repairs: a span that overshoots AND selects nothing is still refused by
-/// chelis#616's operation-level admission rule, which runs before the operand's
-/// shape is consulted.
+/// chelis#1797's reproducer with an empty span: a `shrink` whose runtime end
+/// overshoots the operand's extent. The overshoot is section 2.4.1's error,
+/// so `shrink` traps `Domain` in the compiled lane's words on eval too
+/// (chelis#1795).
 ///
-/// `[shape(x, 0) + 3, shape(x, 0) + 3)` is `[7, 7)` over an operand of four, so
-/// it is out of domain by the same three elements as the rows above and empty
-/// as well. The `RiscOp::Shrink` arm rejects `start >= end` first and never
-/// reaches `eval::shrink`, so this spelling keeps the admission rule's wording
-/// while the compiled lane keeps saying `Domain: shrink bounds outside input
-/// extent`. That divergence is chelis#1795's, whose reproducer is the same
-/// empty span without the overshoot, and repairing it would change text this
-/// change does not own.
-///
-/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
-/// `6abca2406`. The row exists so the overshoot claim above is read as bounded
-/// to spans that select something, rather than as covering every out-of-domain
-/// bound.
+/// EVIDENTIARY STATUS: regression test, eval lane; the C lane's text is
+/// unchanged.
 #[test]
-fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
+fn an_overshooting_empty_span_traps_in_shrink_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = format!(
         "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
@@ -4817,34 +4788,21 @@ fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
     );
     let (code, out) = eval_code(&dir, "overshoot_empty.ch", &source);
     assert_eq!(
-        out, "error: shrink axis 0 bound [7, 7] is empty or inverted (start >= end)\n",
-        "the admission rule reports the span, not the overshoot (chelis#1795)"
+        out,
+        overshoot_eval_rendering(),
+        "the overshoot is the error (chelis#1795)"
     );
     assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
 }
 
-/// The other non-selecting shape, for the same reason: a span that overshoots
-/// AND is INVERTED. Without this row the bound above is pinned for one of the
-/// two ways a span can select nothing, which would read as if the inverted one
-/// had been repaired.
+/// The other non-selecting shape: a span that overshoots AND is INVERTED,
+/// `[7, 1)` over an operand of four. An inverted range is outside the
+/// `0 <= start <= end <= input` domain, so it traps in `shrink` with the
+/// compiled lane's words (chelis#1795).
 ///
-/// `[shape(x, 0) + 3, 1)` is `[7, 1)` over an operand of four. Both of
-/// chelis#616's conditions hold, and its `start >= end` rejection is the one
-/// that fires, so this lane keeps the admission rule's wording where the
-/// compiled lane says `Domain: shrink bounds outside input extent`. The
-/// evaluator's own `SHRINK_DOMAIN_TRAP` branch would give the compiled lane's
-/// words for an inverted bound, and it is unreachable from source precisely
-/// because this rejection precedes it.
-///
-/// Cited to chelis#1795 like the empty row, and for the same reason: the
-/// divergence is that operation-level admission rule, which the numbered spec
-/// does not require and which chelis#1797 does not own.
-///
-/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
-/// `6abca2406`, where this spelling took the same rejection before reaching the
-/// former `assert!`.
+/// EVIDENTIARY STATUS: regression test, eval lane.
 #[test]
-fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() {
+fn an_overshooting_inverted_span_traps_in_shrink_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = format!(
         "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
@@ -4854,8 +4812,9 @@ fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() 
     );
     let (code, out) = eval_code(&dir, "overshoot_inverted.ch", &source);
     assert_eq!(
-        out, "error: shrink axis 0 bound [7, 1] is empty or inverted (start >= end)\n",
-        "the admission rule reports the span, not the overshoot (chelis#1795)"
+        out,
+        overshoot_eval_rendering(),
+        "an inverted range is outside the domain (chelis#1795)"
     );
     assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
 }
@@ -6261,26 +6220,16 @@ fn a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval() {
 }
 
 /// A computed size that goes NEGATIVE traps before allocation on BOTH lanes,
-/// which is what `spec/04-type-system.md` section 4.7.2 requires of a runtime
-/// negative size. What the two lanes do NOT share is the rendering, and this
-/// row and its C twin below exist as a pair so that divergence is visible
-/// rather than implied by one lane's text.
+/// which is what `spec/04-type-system.md` section 4.7 requires of a runtime
+/// negative size: the non-negativity guard of the owning `insert`, a
+/// `Domain` trap rendered by `chelis_abi::failure::negative_target_extent`
+/// with a context line naming the axis and the value (chelis#1802). The
+/// operation's own guard precedes the result claim on its extent, because a
+/// negative number is not an extent the claim could compare.
 ///
-/// Eval reports through the `RtDim::Node` carrier it shares with `stride` and
-/// `slice` bounds, so it says "movement bound" about an `insert` size and never
-/// renders [04-NUM-9]'s form. C renders [04-NUM-9]'s form with section 4.7's
-/// context line and never renders the movement-bound message. Under a free
-/// result dim C says "Domain: expansion axis or extent outside domain" instead
-/// of the claim line, while eval's text does not change at all. Newly reachable
-/// through chelis#1379's admission, because the only node-valued sizes before
-/// it came from extent witnesses, which carry real axis extents and are never
-/// negative. Tracked by chelis#1802; repairing it would change text shared with
-/// rows this change does not own, so both lanes are locked here and that issue
-/// has to update both locks.
-///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
-/// reached a negative extent at all.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering. On
+/// `fc5b6aa99` the program was refused at lowering, so no lane reached a
+/// negative extent at all.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -6292,7 +6241,10 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let (ok, out) = eval_result(&dir, "arith_negative.ch", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains("must be a non-negative integer, got -3"),
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
         "the negative extent is reported with the value it computed: {out}"
     );
     assert!(
@@ -6301,13 +6253,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     );
 }
 
-/// The C twin of the negative-extent row, and the half that makes chelis#1802 a
-/// LANE DIVERGENCE rather than a wording problem: this lane renders
-/// [04-NUM-9]'s form with section 4.7's context, and the words "movement bound"
-/// appear nowhere in it.
+/// The C twin of the negative-extent row: the same context line and trap line
+/// as eval (chelis#1802), never the claim line, since the guard precedes the
+/// claim.
 ///
-/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
-/// the trap. Measured on this head; on `6dbbbf2bc` the program did not build.
+/// EVIDENTIARY STATUS: regression test on the trap and its rendering.
+/// Measured on this head; on `6dbbbf2bc` the program did not build.
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     if !gcc_available() {
@@ -6322,14 +6273,15 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     let (ok, out) = c_run_result(&dir, "arith_negative_c", source);
     assert!(!ok, "an extent of -3 must not produce a value: {out}");
     assert!(
-        out.contains(&domain_trap_line("insert"))
-            && out.contains("extent `n`: claimed = 2, insert axis 0 = -3"),
-        "C renders [04-NUM-9]'s form with section 4.7's context: {out}"
+        out.contains(&format!(
+            "insert target extent at axis 0 is negative: -3\n{}",
+            domain_trap_line("insert")
+        )),
+        "C renders eval's context line and [04-NUM-9]'s form: {out}"
     );
     assert!(
-        !out.contains("movement bound"),
-        "and never the movement-bound message eval uses for the same program \
-         (chelis#1802 is a lane divergence, not one wording): {out}"
+        !out.contains("movement bound") && !out.contains("claimed = 2"),
+        "and neither evaluator plumbing nor the claim line: {out}"
     );
     assert!(
         !out.contains("shape=["),
@@ -6337,14 +6289,12 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
     );
 }
 
-/// The same negative extent under a FREE result dim, where C loses the claim
-/// line and falls back to the operation's own domain message while eval's text
-/// is unchanged. Without this row the divergence above could be read as "C
-/// always names the claim", which is not what either lane does.
+/// The same negative extent under a FREE result dim renders identically on
+/// both lanes: the guard does not depend on the claim shape (chelis#1802).
 ///
-/// EVIDENTIARY STATUS: disposition lock, both lanes. Measured on this head.
+/// EVIDENTIARY STATUS: regression test, both lanes. Measured on this head.
 #[test]
-fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
+fn a_negative_computed_size_under_a_free_result_dim_agrees_by_lane() {
     if !gcc_available() {
         return;
     }
@@ -6360,14 +6310,17 @@ fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
         !c_ok && !eval_ok,
         "neither lane produces a value: {c_out} {eval_out}"
     );
-    assert!(
-        c_out.contains("Domain: expansion axis or extent outside domain")
-            && c_out.contains(&domain_trap_line("insert")),
-        "with no claim to name, C reports the operation's own domain: {c_out}"
+    let expected = format!(
+        "insert target extent at axis 0 is negative: -3\n{}",
+        domain_trap_line("insert")
     );
     assert!(
-        eval_out.contains("must be a non-negative integer, got -3"),
-        "eval's rendering does not change with the claim shape: {eval_out}"
+        c_out.contains(&expected) && eval_out.contains(&expected),
+        "both lanes render the shared guard: {c_out} {eval_out}"
+    );
+    assert!(
+        !c_out.contains("Domain: expansion axis or extent outside domain"),
+        "and C no longer falls back to the runtime metadata message: {c_out}"
     );
 }
 
@@ -8428,6 +8381,12 @@ cast(p64, f32)\n\
 }\n\
 out = prices(to_tensor([1.0f32, 2.0f32, 3.0f32]), 5.0f32)\n";
 
+/// A reshape whose target and input disagree on the element count is a
+/// `Domain` trap in `reshape` (spec/04-type-system.md section 4.7), rendered
+/// identically by both lanes.
+const RESHAPE_COUNT_TRAP: &str =
+    "reshape target has 6 elements but the tensor has 3\nnumeric trap: domain in reshape at i64";
+
 /// staged.dynamic_to_tensor.vmap_column.{eval,c}
 ///
 /// EVIDENTIARY STATUS: regression test on both lanes. On `08e46ebe6`
@@ -8461,14 +8420,11 @@ fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
         .replace("tensor[1, f64]", "tensor[2, f64]");
     let (eval_ok, eval_error) = eval_result(&dir, "invalid_column.ch", &invalid);
     assert!(
-        !eval_ok && eval_error.contains("reshape expects 6 elements but tensor has 3"),
+        !eval_ok && eval_error.contains(RESHAPE_COUNT_TRAP),
         "{eval_error}"
     );
     let (c_ok, c_error) = c_run_result(&dir, "invalid_column_c", &invalid);
-    assert!(
-        !c_ok && c_error.contains("Domain: chelis_tensor_check_reshape reshape numel mismatch: target 6 but tensor has 3 elements"),
-        "{c_error}"
-    );
+    assert!(!c_ok && c_error.contains(RESHAPE_COUNT_TRAP), "{c_error}");
 }
 
 // ---------------------------------------------------------------------------

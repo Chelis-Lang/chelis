@@ -1163,18 +1163,19 @@ fn seeded_uniform_like(
         rank0(Prim::Int64),
         None,
     );
+    // [05-OP-8]: the bounds have the template's dtype.
     let low = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, 2.0),
+        RiscOp::synth_const(ty.precision, 2.0),
         vec![],
-        rank0(Prim::F32),
+        rank0(ty.precision),
         None,
     );
     let high = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, 5.0),
+        RiscOp::synth_const(ty.precision, 5.0),
         vec![],
-        rank0(Prim::F32),
+        rank0(ty.precision),
         None,
     );
     let key = dag.add_node(
@@ -1243,7 +1244,7 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
-    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F64, value).unwrap();
     let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 8, bound(2.0), bound(5.0))
         .unwrap()
         .apply(key)

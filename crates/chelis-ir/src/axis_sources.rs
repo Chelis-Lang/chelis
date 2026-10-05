@@ -2872,11 +2872,12 @@ pub enum ComputedAxisExtent {
     /// rather than re-derived from the site key, so a consumer reading this
     /// variant needs nothing but the variant.
     ///
-    /// A span whose `start` is not below its `end` computes no extent. The
-    /// operation's own domain rejection owns that failure on both lanes and
-    /// runs first (the C runtime's movement plan rejects it before the guard
-    /// site is reached), so the guard yields nothing rather than comparing a
-    /// fabricated number.
+    /// Equal endpoints compute the real extent zero (spec/05 section 2.4.1,
+    /// chelis#1795). A span whose `start` is above its `end` computes no
+    /// extent. The operation's own domain rejection owns that failure on both
+    /// lanes and runs first (the C runtime's movement plan rejects it before
+    /// the guard site is reached), so the guard yields nothing rather than
+    /// comparing a fabricated number.
     ShrinkSpan {
         start: RtDim,
         end: RtDim,
@@ -2905,13 +2906,10 @@ pub enum ComputedAxisExtent {
     /// own allocation owns that failure, so the guard yields rather than
     /// comparing a wrapped number.
     ///
-    /// There is deliberately NO `> 0` filter here, where [`Self::ShrinkSpan`]
-    /// has one, and the asymmetry is the two quantities rather than an
-    /// oversight. A shrink span of zero selects nothing and computes no
-    /// extent, so the operation's own domain rejection owns it; a pad extent
-    /// of zero is a real extent, and a claim of some other number over it is
-    /// a mismatch the guard still owes. Filtering it would be a silent hole
-    /// rather than parity.
+    /// There is deliberately NO `> 0` filter here, as there is none on
+    /// [`Self::ShrinkSpan`]: a pad extent of zero is a real extent, and a
+    /// claim of some other number over it is a mismatch the guard still
+    /// owes. Filtering it would be a silent hole rather than parity.
     ///
     /// Measured, and the zero extent is REACHABLE, which is what decides it.
     /// A runtime bound resolving to zero is guarded correctly today:

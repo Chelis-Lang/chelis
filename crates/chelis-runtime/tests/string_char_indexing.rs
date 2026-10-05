@@ -140,6 +140,12 @@ fn invalid_unicode_string_boundary_child() {
             let bytes = [0xff_u8];
             let _ = chelis_string_from_utf8(bytes.as_ptr(), 1);
         },
+        "slice-negative-start" => {
+            let _ = slice("日本語", -1, 1);
+        }
+        "slice-negative-length" => {
+            let _ = slice("日本語", 0, -1);
+        }
         "char-code-empty" => unsafe {
             let value = make("");
             let _ = chelis_char_code(value);
@@ -179,24 +185,32 @@ fn invalid_unicode_string_boundaries_fail_closed_with_domain_diagnostics() {
             "Domain: chelis_string_from_utf8 requires valid UTF-8",
         ),
         (
+            "slice-negative-start",
+            "string_slice start is negative: -1\nnumeric trap: domain in string_slice at i64",
+        ),
+        (
+            "slice-negative-length",
+            "string_slice length is negative: -1\nnumeric trap: domain in string_slice at i64",
+        ),
+        (
             "char-code-empty",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 0 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char-code-multiple",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 2 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char-from-code-negative",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code -1 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char-from-code-surrogate",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 55296 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char-from-code-too-large",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 1114112 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
     ] {
         let output = Command::new(&test_binary)
@@ -295,9 +309,7 @@ fn slice_boundary_and_out_of_range_behavior_is_unchanged() {
     // A length past the end truncates to the remaining characters.
     assert_eq!(slice("日本語", 1, 99), "本語");
     assert_eq!(slice("café", 2, 1000), "fé");
-    // Negative arguments are empty.
-    assert_eq!(slice("日本語", -1, 1), "");
-    assert_eq!(slice("日本語", 0, -1), "");
+    // Negative arguments trap; see the invalid boundary cases.
     // Saturating, not wrapping, at the extremes.
     assert_eq!(slice("日本語", 0, i64::MAX), "日本語");
     assert_eq!(slice("日本語", i64::MAX, 1), "");

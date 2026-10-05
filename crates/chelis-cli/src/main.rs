@@ -1776,6 +1776,10 @@ fn compiled_host_lowering_error_for_cli(diagnostic: chelis_ir::lower::LowerDiagn
     });
     if is_cross_lane_nonliteral_window {
         diagnostic.to_string()
+    } else if diagnostic.is_dimension_mismatch() {
+        // spec/04-type-system.md section 4.7: a type error proven from
+        // literals after inlining; its rendering names the checker's kind.
+        diagnostic.to_string()
     } else {
         format!("Lowering error: {diagnostic}")
     }
@@ -2261,8 +2265,7 @@ fn copy_cost_for_file(
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let check_deep_exprs = if linked_program {
         let entry_seeds = entry_seed_names(&entry_deep_exprs);
-        let live_deep_exprs = drop_unreachable_eval_only_defs(deep_exprs.clone(), &entry_seeds);
-        prune_build_program_to_reachable_defs(&live_deep_exprs, &entry_seeds)
+        prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds)
     } else {
         deep_exprs.clone()
     };
@@ -4028,56 +4031,29 @@ fn cmd_build(
         None => checked_compilation_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?,
     };
-    // This gate covers tensor_scan in the selected program independently of
-    // the later backend checks on the retained emission program.
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            selected_checked.program(),
-            target,
-        ),
-    )?;
 
-    // Both transformations only remove definitions. Compare lengths to know
-    // whether the checked program still represents the exact emission input.
+    // Pruning only removes definitions. Compare lengths to know whether the
+    // checked program still represents the exact emission input.
     let selected_len = full_deep_exprs.len();
-    let eval_pruned_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_seeds);
-    let eval_drop_fired = eval_pruned_deep_exprs.len() != selected_len;
-    let pruned_deep_exprs =
-        prune_build_program_to_reachable_defs(&eval_pruned_deep_exprs, &entry_seeds);
-    let pruning_fired = pruned_deep_exprs.len() != eval_pruned_deep_exprs.len();
+    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_seeds);
+    let pruning_fired = pruned_deep_exprs.len() != selected_len;
 
     // Loose C sources preserve authored host-library definitions when the
-    // post-drop program needs the host backend. Do not let a removed eval-only
-    // definition select this path.
-    let post_drop_checked =
-        if prepared.is_none() && target == BuildTarget::C && pruning_fired && eval_drop_fired {
-            Some(
-                checked_compilation_with_effects(&eval_pruned_deep_exprs)
-                    .map_err(|e| format!("Check errors: {e}"))?,
-            )
-        } else {
-            None
-        };
-    let preserve_host_library_surface =
-        prepared.is_none() && target == BuildTarget::C && pruning_fired && {
-            let checked = post_drop_checked.as_ref().unwrap_or(&selected_checked);
-            execution_host_requires_host_backend(checked.program(), &entry_defs)?
-        };
+    // program needs the host backend.
+    let preserve_host_library_surface = prepared.is_none()
+        && target == BuildTarget::C
+        && pruning_fired
+        && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
     let deep_exprs = if preserve_host_library_surface {
-        eval_pruned_deep_exprs
+        full_deep_exprs
     } else {
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
-    // Reuse a semantic proof only if neither removal changed its program.
-    // A preserved host surface may reuse the separate post-drop proof; all
-    // other changed emission inputs must be checked again before lowering.
-    let checked_compilation = if !eval_drop_fired
-        && (!pruning_fired || preserve_host_library_surface)
-    {
+    // Reuse the semantic proof only if pruning did not change its program;
+    // a changed emission input is checked again before lowering.
+    let checked_compilation = if !pruning_fired || preserve_host_library_surface {
         selected_checked
-    } else if preserve_host_library_surface {
-        post_drop_checked.expect("a changed preserved host surface was checked")
     } else {
         checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?
     };
@@ -4087,11 +4063,6 @@ fn cmd_build(
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4162,7 +4133,6 @@ fn cmd_build(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4220,7 +4190,6 @@ fn cmd_build(
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4318,7 +4287,6 @@ fn cmd_build(
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4454,16 +4422,6 @@ fn cmd_build_deep(
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
     let pruning_fired = pruned_deep_exprs.len() != deep_exprs.len();
     // The backend gate must also see declarations that pruning would remove.
-    // When nothing was pruned, the retained-program gate below sees the same
-    // checked program and needs no duplicate pass.
-    if pruning_fired {
-        shared_compiler_gate(
-            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                selected_checked.program(),
-                target,
-            ),
-        )?;
-    }
     let preserve_host_library_surface = target == BuildTarget::C
         && pruning_fired
         && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
@@ -4485,11 +4443,6 @@ fn cmd_build_deep(
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    shared_compiler_gate(
-        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-            checked, target,
-        ),
-    )?;
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4542,7 +4495,6 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
                 shared_compiler_gate(match execution_host.as_ref() {
                     Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
                         plan,
@@ -4600,7 +4552,6 @@ fn cmd_build_deep(
         }
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -4693,7 +4644,6 @@ fn cmd_build_deep(
         }
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
@@ -7898,18 +7848,6 @@ fn shared_compiler_gate(
     result: Result<(), chelis_compiler_api::compiler::CompilerError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     result.map_err(|error| boxed_string_error(compiler_error_messages(&error)))
-}
-
-fn apply_shared_host_builtin_gates(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    shared_compiler_gate(chelis_compiler_api::compiler::reject_host_only_builtins(
-        program, target,
-    ))?;
-    shared_compiler_gate(chelis_compiler_api::compiler::reject_eval_only_builtins(
-        program, target,
-    ))
 }
 
 fn apply_shared_window_gates(
@@ -12141,116 +12079,6 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
-fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
-    match expr.carrier() {
-        DeepExprCarrier::DecodedNode(DeepTag::Def | DeepTag::Defsig, _, children) => {
-            match children.first() {
-                Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Host builtins that the IR evaluator (`chelis eval` / `chelis test`)
-/// supports but the compiled build backends deliberately do not. Kept in
-/// one place so the shared compiler gate and [`drop_unreachable_eval_only_defs`]
-/// stay in agreement.
-// The list itself lives in `chelis_ir::host` and is shared with the
-// public compiler API's `compile_for_execution` gate, so the CLI build
-// pipeline and the chelis-python path cannot drift (chelis#891 review
-// finding 13).
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTINS;
-
-/// Drop top-level decls for any function that can never be lowered into a
-/// compiled artifact and is not reachable from the entry program: one whose
-/// body references an eval-only host builtin ([`EVAL_ONLY_HOST_BUILTINS`]), OR
-/// one that (transitively) references such a dropped def. An unused transitive
-/// dependency module (e.g. chelis-std's `Std.Process`) must not drag them into
-/// the build's lowering target. Both the `def` body and its sibling `defsig`
-/// are removed by name. A reachable eval-only use is preserved so the build
-/// gate still rejects it. chelis#334.
-///
-/// The drop is a transitive closure (chelis#1168): a removed eval-only
-/// definition cannot leave an unreachable wrapper with a dangling reference
-/// in the post-drop program. Build rechecks the retained program after this
-/// transformation when its input changes.
-///
-/// The complete selected program passes its semantic gate before this drop.
-/// A type, effect, or linearity error in an unreachable eval-only-tainted
-/// definition therefore fails the build instead of disappearing here
-/// (chelis#1184). Backend rejection still applies to the retained program.
-fn drop_unreachable_eval_only_defs(exprs: Vec<DeepExpr>, entry_seeds: &[String]) -> Vec<DeepExpr> {
-    use chelis_unord::{UnordMap, UnordSet};
-
-    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_seeds)
-        .iter()
-        .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
-        .collect::<UnordSet<_>>();
-
-    // Reverse index over the UNREACHABLE named defs, borrowing from `exprs` (no
-    // per-def String clones): referenced-name -> the unreachable defs that
-    // reference it, plus the seed worklist of unreachable defs that directly use
-    // an eval-only builtin. Reachable defs are never dropped (a reachable
-    // eval-only use is preserved for the build gate), and reachability is
-    // transitive, so a dropped (unreachable) def is only ever referenced by
-    // another unreachable def — the closure stays within this set.
-    let mut dependents: UnordMap<&str, Vec<&str>> = UnordMap::new();
-    let mut worklist: Vec<&str> = Vec::new();
-    for expr in &exprs {
-        let Some(name) = deep_named_decl_name(expr) else {
-            continue;
-        };
-        if reachable.contains(name) {
-            continue;
-        }
-        let mut direct_eval_only = false;
-        for var in deep_referenced_vars(expr) {
-            if EVAL_ONLY_HOST_BUILTINS.contains(&var) {
-                direct_eval_only = true;
-            }
-            dependents.entry(var).or_default().push(name);
-        }
-        if direct_eval_only {
-            worklist.push(name);
-        }
-    }
-
-    // Transitive closure via the reverse index (O(edges), single pass per node):
-    // a dropped name pulls in every unreachable def that references it. Dropping
-    // only the DIRECT eval-only users would leave an unreachable wrapper with a
-    // dangling reference to a dropped def (see the doc comment).
-    let mut drop_borrowed: UnordSet<&str> = UnordSet::new();
-    while let Some(name) = worklist.pop() {
-        if !drop_borrowed.insert(name) {
-            continue;
-        }
-        if let Some(refs) = dependents.get(name) {
-            worklist.extend(refs.iter().copied());
-        }
-    }
-
-    // Materialize the (typically small) dropped set as owned strings so the
-    // borrows into `exprs` end before the move below.
-    let drop_names: UnordSet<String> = drop_borrowed
-        .into_sorted()
-        .into_iter()
-        .map(String::from)
-        .collect();
-    drop(worklist);
-    drop(dependents);
-
-    exprs
-        .into_iter()
-        .filter(|expr| {
-            deep_named_decl_name(expr)
-                .map(|name| !drop_names.contains(name))
-                .unwrap_or(true)
-        })
-        .collect()
-}
-
 /// The entry program's top-level names, which is the whole of what the build
 /// pruners read from it.
 ///
@@ -12274,13 +12102,6 @@ fn prune_build_program_to_reachable_defs(
     // Delegate to the shared reachable-defs pruner (single source of truth in
     // chelis-compiler-api, also used by the WI-3 graph-extraction producer).
     chelis_compiler_api::prune::prune_to_reachable_seeds(exprs.to_vec(), entry_seeds.to_vec())
-}
-
-/// Every `var` reference name in `expr`. Delegates to the shared traversal in
-/// chelis-compiler-api so the build path and the WI-3 producer agree on what
-/// "references" means.
-fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
-    chelis_compiler_api::prune::deep_referenced_vars(expr)
 }
 
 fn apply_manifest_display_roots(
@@ -13156,93 +12977,6 @@ mod batch_fallback_reason_tests {
         );
         assert_eq!(parse_plain_test_summary("not a summary"), None);
         assert_eq!(parse_plain_test_summary("x passed, 1 failed"), None);
-    }
-}
-
-#[cfg(test)]
-mod eval_only_pruning_tests {
-    use super::{
-        deep_named_decl_name, drop_unreachable_eval_only_defs, entry_seed_names,
-        expanded_desugared_program,
-    };
-
-    fn desugar(src: &str) -> Vec<chelis_deep::ast::Expr> {
-        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-        expanded_desugared_program(&decls).expect("desugar")
-    }
-
-    /// chelis#334: a pure-tensor entry program plus an unused library def
-    /// that uses the eval-only `process_run` builtin (the shape of
-    /// chelis-std's `Std.Process`). The dead eval-only def must be dropped
-    /// so the build gate does not reject a program that never reaches it.
-    #[test]
-    fn drops_unreachable_eval_only_def_but_keeps_entry() {
-        let full = desugar(
-            "def unused_runner(cmd: string, args: List[string]) -> (i64, string, string) = process_run(cmd, args)\n\
-             def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
-        );
-        let entry = desugar(
-            "def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
-        );
-        let kept = drop_unreachable_eval_only_defs(full, &entry_seed_names(&entry));
-        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        assert!(
-            names.contains(&"main"),
-            "entry `main` must survive: {names:?}"
-        );
-        assert!(
-            !names.contains(&"unused_runner"),
-            "unreachable eval-only def must be dropped: {names:?}"
-        );
-    }
-
-    /// Transitive removal includes every caller and each paired `defsig`.
-    /// A one-hop drop would leave `outer` and its signature behind.
-    #[test]
-    fn drops_transitive_eval_only_chain_and_paired_signatures() {
-        let full = desugar(
-            "def runner(cmd: string) -> (i64, string, string) = process_run(cmd, [])\n\
-             def wrapper(cmd: string) -> (i64, string, string) = runner(cmd)\n\
-             def outer(cmd: string) -> (i64, string, string) = wrapper(cmd)\n\
-             def main() -> i32 = cast(0, i32)\n",
-        );
-        let full_names: Vec<&str> = full.iter().filter_map(deep_named_decl_name).collect();
-        for name in ["runner", "wrapper", "outer"] {
-            assert!(
-                full_names
-                    .iter()
-                    .filter(|candidate| **candidate == name)
-                    .count()
-                    >= 2,
-                "fixture needs a def and defsig for {name}: {full_names:?}"
-            );
-        }
-
-        let entry = desugar("def main() -> i32 = cast(0, i32)\n");
-        let kept = drop_unreachable_eval_only_defs(full, &entry_seed_names(&entry));
-        let kept_names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        for name in ["runner", "wrapper", "outer"] {
-            assert!(
-                !kept_names.contains(&name),
-                "removed closure must include {name} and its defsig: {kept_names:?}"
-            );
-        }
-    }
-
-    /// Negative parity: a *reachable* eval-only use is preserved so the
-    /// build gate still rejects it with a clean diagnostic instead of the
-    /// program silently building with a missing function.
-    #[test]
-    fn keeps_reachable_eval_only_def_for_the_gate() {
-        let exprs =
-            desugar("def main() -> (i64, string, string) = process_run(\"echo\", [\"hi\"])\n");
-        let entry = entry_seed_names(&exprs);
-        let kept = drop_unreachable_eval_only_defs(exprs, &entry);
-        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
-        assert!(
-            names.contains(&"main"),
-            "reachable eval-only def must be preserved for the build gate: {names:?}"
-        );
     }
 }
 

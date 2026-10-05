@@ -1552,7 +1552,10 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
     assert_eq!(verify::verify(&pad_dag), Vec::<String>::new());
     let error = evaluate_lengths(&pad_dag, Prim::F32, &[("input", 2)])
         .expect_err("a nonzero Pad shape dependency must not override its computed axis");
-    assert!(error.contains("[3] vs [2]"), "{error}");
+    assert!(
+        error.contains("eq operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1752,16 +1755,16 @@ fn logical_random_activation_is_control_only_during_grad() {
     };
     let low = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, -1.0),
+        RiscOp::synth_const(Prim::F64, -1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let high = dag.add_node(
         decl,
-        RiscOp::synth_const(Prim::F32, 1.0),
+        RiscOp::synth_const(Prim::F64, 1.0),
         vec![],
-        scalar(Prim::F32),
+        scalar(Prim::F64),
         None,
     );
     let seed = dag.add_node(

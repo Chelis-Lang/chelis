@@ -47,8 +47,8 @@
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
+use chelis_abi::failure::{NumericTrapKind, NumericTrapLine};
 use chelis_deep::NamedCastMode;
-use chelis_vocab::{NumericTrapKind, NumericTrapLine};
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
 pub const NUMERIC_TRAP_PREFIX: &str = NumericTrapLine::PREFIX;
@@ -3862,11 +3862,9 @@ impl<'a> PreparedDropout<'a> {
 /// Validated `[05-OP-8]` controls: the output dtype `p` and its two bounds.
 ///
 /// Construction performs the atom's checks before any draw: `p` is an active
-/// float dtype, both bounds share one dtype that widens exactly into `p`'s
-/// arithmetic width (f64 for `p = f64`, f32 otherwise), both are finite,
-/// `low <= high`, and `high - low` is finite at that width. The bounds'
-/// dtype is `p` or f32; f32 is the checker's current bound signature for
-/// every `p` (chelis#1295), which the atom's `p`-dtype bounds replace.
+/// float dtype, both bounds have dtype `p`, both are finite, `low <= high`,
+/// and `high - low` is finite at `p`'s arithmetic width (f64 for `p = f64`,
+/// f32 otherwise, into which an f16 or bf16 bound widens exactly).
 #[derive(Debug, Clone, Copy)]
 pub struct UniformLikeParameters {
     prim: Prim,
@@ -3894,7 +3892,7 @@ impl UniformLikeParameters {
                 rhs: high.prim(),
             });
         }
-        if low.prim() != prim && low.prim() != Prim::F32 {
+        if low.prim() != prim {
             return Err(NumericKernelError::DtypeMismatch {
                 op: "uniform_like",
                 lhs: prim,
@@ -4983,12 +4981,14 @@ mod tests {
         }
     }
 
-    fn f32_scalar(value: f32) -> ScalarValue {
-        scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+    /// A `[05-OP-8]` bound at the draw's dtype `prim`; every value these
+    /// tests use is exact at every float dtype.
+    fn bound(prim: Prim, value: f32) -> ScalarValue {
+        scalar_from_f64("test", prim, f64::from(value)).unwrap()
     }
 
     fn uniform_element(prim: Prim, low: f32, high: f32, key: RandomKey, index: usize) -> f64 {
-        PreparedUniformLike::new(prim, index + 1, f32_scalar(low), f32_scalar(high))
+        PreparedUniformLike::new(prim, index + 1, bound(prim, low), bound(prim, high))
             .unwrap()
             .apply(key)
             .unwrap()
@@ -5037,7 +5037,7 @@ mod tests {
             "the two widths must not share a post-hoc f32 sampler"
         );
         for prim in [Prim::F16, Prim::Bf16] {
-            let storage = PreparedUniformLike::new(prim, 5, f32_scalar(low), f32_scalar(high))
+            let storage = PreparedUniformLike::new(prim, 5, bound(prim, low), bound(prim, high))
                 .unwrap()
                 .apply(key)
                 .unwrap();
@@ -5045,7 +5045,12 @@ mod tests {
             assert!((low as f64..high as f64).contains(&storage.scalar_at(index).as_f64_lossy()));
         }
         assert!(matches!(
-            PreparedUniformLike::new(Prim::Int32, 1, f32_scalar(low), f32_scalar(high)),
+            PreparedUniformLike::new(
+                Prim::Int32,
+                1,
+                bound(Prim::F32, low),
+                bound(Prim::F32, high)
+            ),
             Err(NumericKernelError::WrongFamily { .. })
         ));
     }
@@ -5101,7 +5106,7 @@ mod tests {
                     }
                     let (low, high) = (-1.5f32, 2.25f32);
                     let sampled =
-                        PreparedUniformLike::new(prim, 24, f32_scalar(low), f32_scalar(high))
+                        PreparedUniformLike::new(prim, 24, bound(prim, low), bound(prim, high))
                             .unwrap()
                             .apply(key)
                             .unwrap();
@@ -5208,8 +5213,7 @@ mod tests {
     }
 
     // [05-OP-8]: the bounds are validated before any draw, at the arithmetic
-    // width, with equal bounds admitted; the bounds carry `p` or the checker's
-    // current f32 signature (chelis#1295) and nothing else.
+    // width, with equal bounds admitted; the bounds carry `p` and nothing else.
     #[test]
     fn uniform_parameters_validate_the_bounds_at_the_arithmetic_width() {
         let domain = |prim| {
@@ -5226,12 +5230,13 @@ mod tests {
                 (f32::NEG_INFINITY, 0.0),
             ] {
                 assert_eq!(
-                    UniformLikeParameters::new(prim, f32_scalar(low), f32_scalar(high)).map(|_| ()),
+                    UniformLikeParameters::new(prim, bound(prim, low), bound(prim, high))
+                        .map(|_| ()),
                     domain(prim),
                     "{prim:?} [{low}, {high})"
                 );
             }
-            let equal = PreparedUniformLike::new(prim, 3, f32_scalar(0.5), f32_scalar(0.5))
+            let equal = PreparedUniformLike::new(prim, 3, bound(prim, 0.5), bound(prim, 0.5))
                 .unwrap()
                 .apply(seed_key(42))
                 .unwrap();
@@ -5239,25 +5244,30 @@ mod tests {
                 assert_eq!(equal.scalar_at(index).as_f64_lossy(), 0.5);
             }
         }
-        // Finite f32 bounds whose difference overflows f32 but not f64: the
-        // f64 draw computes in f64 and is valid; every narrower `p` computes
-        // in f32 and traps.
-        let (low, high) = (f32_scalar(-3.0e38), f32_scalar(3.0e38));
-        assert!(UniformLikeParameters::new(Prim::F64, low, high).is_ok());
-        for prim in [Prim::F16, Prim::Bf16, Prim::F32] {
+        // Finite bounds whose difference overflows f32 but not f64: the f64
+        // draw computes in f64 and is valid; f32 and bf16 compute in f32 and
+        // trap.
+        for prim in [Prim::F64, Prim::F32, Prim::Bf16] {
+            let (low, high) = (bound(prim, -3.0e38), bound(prim, 3.0e38));
+            let expected = if prim == Prim::F64 {
+                Ok(())
+            } else {
+                domain(prim)
+            };
             assert_eq!(
                 UniformLikeParameters::new(prim, low, high).map(|_| ()),
-                domain(prim)
+                expected,
+                "{prim:?}"
             );
         }
-        let f64_bound = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
-        let f16_bound = scalar_from_f64("test", Prim::F16, 0.5).unwrap();
-        assert!(UniformLikeParameters::new(Prim::F64, f64_bound, f64_bound).is_ok());
-        assert!(UniformLikeParameters::new(Prim::F16, f16_bound, f16_bound).is_ok());
+        // A bound of any dtype but `p`, the f32 bounds of the retired
+        // signature included, is refused.
         for (prim, low, high) in [
-            (Prim::F32, f64_bound, f64_bound),
-            (Prim::Bf16, f16_bound, f16_bound),
-            (Prim::F64, f32_scalar(0.5), f64_bound),
+            (Prim::F32, bound(Prim::F64, 0.5), bound(Prim::F64, 0.5)),
+            (Prim::Bf16, bound(Prim::F16, 0.5), bound(Prim::F16, 0.5)),
+            (Prim::F64, bound(Prim::F32, 0.5), bound(Prim::F32, 0.5)),
+            (Prim::F16, bound(Prim::F32, 0.5), bound(Prim::F32, 0.5)),
+            (Prim::F64, bound(Prim::F32, 0.5), bound(Prim::F64, 0.5)),
         ] {
             assert!(
                 matches!(

@@ -195,17 +195,6 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
     // to the branded section C2 rendering. --------------------------------
     (
-        "c_stub_tensor_scan",
-        "def gen() -> tensor[5, f32] = \
-         tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
-         out = gen()\n",
-        "c",
-        "error: unsupported: builtin `tensor_scan` on `chelis build --target c` host emission \
-         (codegen:c); deliberate [05-HOST-1]: host-runtime builders are intentionally excluded \
-         from compiled targets; run under `chelis eval` or `chelis test`, or rewrite the caller \
-         to use tensor-lane primitives\n",
-    ),
-    (
         "c_to_string_tensor",
         "def f(x: tensor[2, f32]) -> string = to_string(x)\n\
          out = f(to_tensor([1.5, 2.5]))\n",

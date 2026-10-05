@@ -167,7 +167,10 @@ result = add(x, cast(y, f32))
 `cast(e, p)` explicitly converts a scalar or tensor to the named dtype; a
 tensor keeps its dimensions. Casts can cross numeric kinds and can target
 `bool`. An integer-to-float cast may round, and a float-to-integer cast
-requires a finite, integral value in range. Integer literals default to
+requires a finite, integral value in range; any other value traps. To narrow
+on purpose, use a named conversion: `cast_trunc` truncates a float toward
+zero, `cast_saturate` clamps to the target's range, and `cast_wrap` wraps a
+signed integer modulo the target width. Integer literals default to
 `i32` and float literals to `f32`, subject to these exact adoption rules:
 
 1. A suffix binds a literal to its stated dtype.
