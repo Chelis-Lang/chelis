@@ -224,6 +224,7 @@ impl Metadata {
             let key = MetadataName::Core(value.key());
             match value {
                 V::Type(v) => f(key, v.expression()),
+                V::Accumulator(v) => f(key, v.expression()),
                 V::PropertyTolerance(v) | V::PropertySeed(v) | V::PropertySamples(v) => {
                     f(key, v.expression())
                 }
@@ -462,6 +463,9 @@ impl Metadata {
         for value in self.values() {
             let rebuilt = match value {
                 V::Type(v) => V::Type(TypeSyntax::try_new(f(v.expression(), R::Type)?)?),
+                V::Accumulator(v) => {
+                    V::Accumulator(AccumulatorSyntax::try_new(f(v.expression(), R::Type)?)?)
+                }
                 V::PropertyTolerance(v) => V::PropertyTolerance(RuntimeExpression::try_for_key(
                     f(v.expression(), R::Expression)?,
                     "property_tolerance",

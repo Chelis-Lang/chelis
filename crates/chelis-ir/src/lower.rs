@@ -8483,6 +8483,7 @@ impl<'program> LowerCtx<'program> {
         input: NodeId,
         axis: usize,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         let input_ty = self
             .dag
@@ -8496,10 +8497,23 @@ impl<'program> LowerCtx<'program> {
         };
         match name {
             "sum" => {
-                let op = RiscOp::sum_default(axis, input_ty.precision)
-                    .expect("checked variadic sum dtype");
+                // Each stage accumulates in the explicit accumulator or the
+                // default for its input `q`, and finalizes at
+                // `sum_result(q, a)`: i32 for an i8 or i16 stage, the input
+                // dtype for bf16 and f16 (spec/04 §5.7.1).
+                let op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, input_ty.precision, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, input_ty.precision),
+                }
+                .expect("checked variadic sum accumulator");
                 let RiscOp::Sum { accumulator, .. } = op else {
-                    unreachable!("sum_default returns Sum");
+                    unreachable!("the sum constructors return Sum");
+                };
+                let output_ty = TensorType {
+                    precision: input_ty.precision.sum_result_precision(accumulator),
+                    ..output_ty
                 };
                 let sum = self.dag.add_node(
                     self.owner(),
@@ -12068,11 +12082,21 @@ impl<'program> LowerCtx<'program> {
             if func_name == "split_key" && kids.len() == 2 {
                 return self.lower_split_key(&kids[1]);
             }
+            // spec/04 §5.7: the checker admitted this explicit accumulator
+            // against §5.7.1's permitted pairs.
+            let accumulator = meta
+                .accumulator()
+                .and_then(|accumulator| stamped_parts(accumulator.expression()))
+                .and_then(|(_, _, parts)| match parts.first() {
+                    Some(Expr::Atom(Atom::Name(name), _)) => Prim::parse_name(name),
+                    _ => None,
+                });
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &kids[1..],
                 &ty,
                 app_span,
+                accumulator,
             ));
         }
 
@@ -12145,7 +12169,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.lower_split_key(&args[0])
             } else {
-                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span, None))
             }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -14993,6 +15017,7 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         ty: &TensorType,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         match func_name {
             // [05-OP-58] owns these exact identities. They cannot be encoded
@@ -15565,15 +15590,27 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_matmul(
-                    self.owner(),
-                    &mut self.dag,
-                    a,
-                    b,
-                    &a_ty,
-                    &b_ty,
-                    parent_span.as_deref(),
-                )
+                match accumulator {
+                    Some(accumulator) => tier2::lower_matmul_with_accumulator(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        accumulator,
+                        parent_span.as_deref(),
+                    ),
+                    None => tier2::lower_matmul(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        parent_span.as_deref(),
+                    ),
+                }
             }
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
@@ -16009,7 +16046,11 @@ impl<'program> LowerCtx<'program> {
                 let mut result = input;
                 for position in axes {
                     result = self.lower_variadic_value_reduction_stage(
-                        func_name, result, position, app_span,
+                        func_name,
+                        result,
+                        position,
+                        app_span,
+                        accumulator,
                     );
                 }
                 result
@@ -16032,7 +16073,13 @@ impl<'program> LowerCtx<'program> {
                 // carries a wildcard placeholder. See
                 // `Self::reduction_out_dims`.
                 let out_dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
+                let sum_op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, operand_prec, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, operand_prec),
+                }
+                .unwrap_or_else(|msg| {
                     // The type checker already rejects unsupported
                     // operand precisions before lowering; fall back to
                     // the operand precision so the resulting IR can
@@ -16068,9 +16115,7 @@ impl<'program> LowerCtx<'program> {
                 // precision so downstream consumers see the documented
                 // result type.
                 if accumulator != operand_prec {
-                    let result_prec = operand_prec
-                        .default_reduce_sum_result_precision()
-                        .unwrap_or(operand_prec);
+                    let result_prec = operand_prec.sum_result_precision(accumulator);
                     if result_prec != accumulator {
                         let cast_ty = TensorType {
                             dims: out_dims,

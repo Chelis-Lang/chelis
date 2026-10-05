@@ -1796,6 +1796,12 @@ pub enum WireSurfExpr {
         items: Vec<WireSurfExpr>,
         span: Span,
     },
+    /// A call with an explicit accumulator dtype (spec/02 `CallArgs`).
+    Accumulate {
+        call: Box<WireSurfExpr>,
+        accumulator: String,
+        span: Span,
+    },
     Cast {
         expr: Box<WireSurfExpr>,
         ty: String,

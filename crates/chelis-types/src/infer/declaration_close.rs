@@ -87,7 +87,7 @@ impl AuthoredBinderContract {
             // Parameter and body-only dimension roles are rigid under
             // [04-INF-6]; result-only roles retain §4.4.1 output inference.
             check_authored_dvars_rigid(name, &rigidity.decl_ty, &rigidity.dim_names, subst, errors);
-            check_declared_tvars_rigid(name, &self.type_names, subst, errors);
+            check_declared_tvars_rigid(name, &self.type_names, &self.dtype_bounds, subst, errors);
             check_declared_rvars_rigid(name, &rigidity.rank_names, subst, errors);
         }
         check_declared_dtype_bounds(name, &self.type_names, &self.dtype_bounds, subst, errors);

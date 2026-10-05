@@ -11753,6 +11753,59 @@ fn grad_wrt_param_names(grad_list: &Node, param_names: &[String]) -> Option<Vec<
 /// looping.
 const MAX_LIST_SHAPE_RESOLUTION_DEPTH: usize = 64;
 
+/// The explicit accumulator dtype an `app` carries (spec/04 §5.7), which
+/// the checker admitted against §5.7.1's permitted pairs.
+fn explicit_accumulator(list: &Node) -> Option<chelis_types::types::Prim> {
+    let accumulator = list.meta().accumulator()?;
+    let (_, _, parts) = stamped_parts(accumulator.expression())?;
+    parts
+        .first()
+        .and_then(symbol_name)
+        .and_then(chelis_types::types::Prim::parse_name)
+}
+
+/// `einsum` with an explicit accumulator `a` ([05-OP-33]): both operands
+/// convert exactly to `a`, the contraction multiplies and sums there (the
+/// default accumulator over `a` is `a` itself), and the result finalizes at
+/// `sum_result(p, a)`, the call's checked type `ty`.
+fn accumulated_einsum(
+    mut args: Vec<HostExpr>,
+    accumulator: chelis_types::types::Prim,
+    ty: HostTypeTerm,
+) -> HostExpr {
+    let at_accumulator = |ty: HostTypeTerm| match ty {
+        HostTypeTerm::Tensor(tensor) => HostTypeTerm::Tensor(TensorType {
+            precision: accumulator,
+            ..tensor
+        }),
+        other => other,
+    };
+    for operand in args.iter_mut().skip(1) {
+        let operand_ty = at_accumulator(host_expr_type(operand));
+        let value = std::mem::replace(operand, HostExpr::new(HostExprKind::Unit));
+        *operand = HostExpr::new(HostExprKind::Builtin {
+            name: "cast".to_string(),
+            args: vec![value],
+            ty: operand_ty,
+        });
+    }
+    let contracted_ty = at_accumulator(ty.clone());
+    let contracted = HostExpr::new(HostExprKind::Builtin {
+        name: "einsum".to_string(),
+        args,
+        ty: contracted_ty.clone(),
+    });
+    if contracted_ty == ty {
+        contracted
+    } else {
+        HostExpr::new(HostExprKind::Builtin {
+            name: "cast".to_string(),
+            args: vec![contracted],
+            ty,
+        })
+    }
+}
+
 fn lower_app_host_expr(
     app_expr: &Expr,
     list: &Node,
@@ -12626,6 +12679,11 @@ fn lower_app_host_expr(
     } else {
         infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
+    if name == "einsum"
+        && let Some(accumulator) = explicit_accumulator(list)
+    {
+        return Ok(accumulated_einsum(args, accumulator, ty));
+    }
     let args = if matches!(name.as_str(), "eq" | "neq" | "test_assert_eq") {
         conform_equality_operands(args)
     } else {

@@ -371,6 +371,19 @@ fn bind_checked_precision(
     }
 }
 
+/// The explicit accumulator dtype an `app` carries (spec/04 §5.7).
+fn explicit_accumulator(metadata: &Metadata) -> Option<Prim> {
+    let (tag, children) = tagged_expr_children(metadata.accumulator()?.expression())?;
+    (tag == DeepTag::TPrim)
+        .then(|| {
+            children
+                .first()
+                .and_then(symbol_name)
+                .and_then(prim_from_name)
+        })
+        .flatten()
+}
+
 fn checked_precision_leaf(actual: &Expr, caller_bindings: &UnordMap<String, Prim>) -> Option<Prim> {
     let (actual_tag, actual_children) = tagged_expr_children(actual)?;
     match actual_tag {
@@ -1731,7 +1744,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 3
             && kids[2..].iter().any(|axis| var_name(axis).is_some())
         {
-            return self.eval_named_axis_reduction_app(reduce_name, kids);
+            return self.eval_named_axis_reduction_app(reduce_name, kids, node.metadata);
         }
 
         // chelis#339 site A twin: a named-axis EXPAND app — the axis slot
@@ -1745,7 +1758,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
         {
-            return self.eval_named_axis_reduction_app(expand_name, kids);
+            return self.eval_named_axis_reduction_app(expand_name, kids, node.metadata);
         }
 
         let arg_type_exprs = kids[1..]
@@ -1838,8 +1851,10 @@ impl<'a> EvalContext<'a> {
                     )?;
                 }
             }
-            let builtin_result =
-                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
+            let builtin_result = match explicit_accumulator(node.metadata) {
+                Some(accumulator) => accumulated_builtin_value(name, &args, accumulator),
+                None => self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref()),
+            };
             // The checked builtin catalog owns the numeric operation set.
             // Mixed-domain equality is trusted only for numeric arguments;
             // recursive container comparison can include authored strings.

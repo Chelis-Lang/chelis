@@ -306,6 +306,7 @@ fn collect_pattern_names(pattern: &LetPattern, out: &mut Vec<String>) {
 fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
         Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => Vec::new(),
+        Expr::Accumulate(call, _, _) => vec![call.as_ref()],
         Expr::Apply(callee, args, _) => {
             let mut kids = vec![callee.as_ref()];
             kids.extend(args);

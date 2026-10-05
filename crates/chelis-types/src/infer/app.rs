@@ -63,6 +63,9 @@ pub(super) fn infer_app(
         builtins::builtin_decl(name)
     });
     let checkpoint = errors.checkpoint();
+    // spec/04 §5.7: an explicit `accumulator=` is checked against the
+    // operand dtype after the call checks at its default accumulator.
+    let accumulator = node.meta().accumulator();
     let result = infer_app_inner(
         expr,
         node,
@@ -72,8 +75,39 @@ pub(super) fn infer_app(
         adt_reg,
         errors,
         product,
-        expected_result,
+        if accumulator.is_some() {
+            None
+        } else {
+            expected_result
+        },
     );
+    let result = match accumulator {
+        Some(accumulator) if errors.iter_since(checkpoint).next().is_none() => {
+            let operation = builtin.map(|builtin| builtin.name);
+            match accumulated_result(
+                operation,
+                accumulator.expression(),
+                kids,
+                &result,
+                product,
+                subst,
+                errors,
+            ) {
+                Ok(result) => result,
+                Err(message) => {
+                    let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+                    return report(
+                        errors,
+                        match TypeDiagnosticLocation::from_expr(expr) {
+                            Some(location) => location.attach(error),
+                            None => error,
+                        },
+                    );
+                }
+            }
+        }
+        _ => result,
+    };
     if errors.iter_since(checkpoint).next().is_none()
         && let Some(builtin) = builtin
     {
@@ -1039,4 +1073,67 @@ pub(super) fn validate_deferred_drop_operands(subst: &Subst, errors: &mut Diagno
             });
         }
     }
+}
+
+/// The result of a `matmul`, `sum` or `einsum` call with an explicit
+/// `accumulator=`: the call's default-accumulator `result` at
+/// `sum_result(p, accumulator)` (`p` for `matmul`), once spec/04 §5.7.1's
+/// permitted-pairs table admits the operand dtype `p` with that accumulator.
+fn accumulated_result(
+    operation: Option<&str>,
+    accumulator: &deep::Expr,
+    kids: &[deep::Expr],
+    result: &Type,
+    product: &InferenceProduct,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<Type, String> {
+    let operation = match operation {
+        Some(operation @ ("matmul" | "sum" | "einsum")) => operation,
+        Some(operation) => {
+            return Err(format!(
+                "`{operation}` takes no `accumulator=` argument: only `matmul`, `sum` and \
+                 `einsum` select an accumulator (spec/04 §5.7); remove the argument"
+            ));
+        }
+        None => {
+            return Err(
+                "`accumulator=` applies only to a call of the built-in `matmul`, `sum` \
+                 or `einsum` (spec/04 §5.7); remove the argument"
+                    .to_string(),
+            );
+        }
+    };
+    let accumulator = stamped_parts(accumulator)
+        .filter(|(tag, _, _)| *tag == DeepTag::TPrim)
+        .and_then(|(_, _, parts)| parts.first().and_then(symbol_name))
+        .and_then(Prim::parse_name)
+        .ok_or_else(|| {
+            format!("`{operation}`'s `accumulator=` must name a dtype (spec/04 §5.7)")
+        })?;
+    let operand = kids
+        .get(if operation == "einsum" { 2 } else { 1 })
+        .and_then(|operand| product.current_owner_type(operand, subst, errors));
+    // A borrowed operand is decided on its referent.
+    let operand = match operand.map(|operand| subst.apply(&operand)) {
+        Some(Type::Ref(referent)) => Some(subst.apply(&referent)),
+        operand => operand,
+    };
+    let operand = match operand {
+        Some(Type::Tensor(_, TensorPrec::Concrete(prim))) => prim,
+        _ => {
+            return Err(format!(
+                "`{operation}` with `accumulator={}` is decided over the operand's dtype at \
+                 the call (spec/04 §5.7.1's permitted-pairs table), and this operand's dtype is \
+                 a type variable, which the checker does not decide an explicit accumulator \
+                 over; omit `accumulator=`, or pass an operand of concrete dtype",
+                accumulator.name()
+            ));
+        }
+    };
+    let result_precision = explicit_accumulator_result(operation, operand, accumulator)?;
+    Ok(match subst.apply(result) {
+        Type::Tensor(dims, _) => Type::Tensor(dims, TensorPrec::Concrete(result_precision)),
+        other => other,
+    })
 }

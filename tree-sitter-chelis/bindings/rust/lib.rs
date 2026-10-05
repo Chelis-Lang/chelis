@@ -66,6 +66,33 @@ mod tests {
         );
     }
 
+    /// chelis#2985: spec/02 `CallArgs` ends with an optional
+    /// `accumulator=<dtype>`; `accumulator` stays an ordinary identifier
+    /// everywhere else.
+    #[test]
+    fn surf_tree_sitter_accepts_the_explicit_accumulator_argument() {
+        for source in [
+            "out = sum(x, 0i32, accumulator=f64)\n",
+            "out = einsum(\"i,i->\", a, b, accumulator=i64)\n",
+            "out = x |> sum(0i32, accumulator=f64)\n",
+            "out = f(accumulator=f64)\n",
+            "out = f(accumulator)\n",
+            "out = f(accumulator == y)\n",
+            "out = accumulator\n",
+            "accumulator = 1\n",
+            "accumulator = f64\n",
+            "def accumulator() -> i32 = 1\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+        for source in [
+            "out = sum(x, accumulator=f64, 0i32)\n",
+            "out = sum(x, 0i32, accumulator=)\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
     #[test]
     fn surf_v019_tree_sitter_accepts_the_canonical_surface() {
         for source in [

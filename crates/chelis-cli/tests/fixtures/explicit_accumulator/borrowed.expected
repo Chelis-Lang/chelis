@@ -1,0 +1,6 @@
+16777218.0
+30000
+tensor(shape=[1, 1], data=[16777218.0])
+tensor(shape=[1], data=[600])
+tensor(shape=[1], data=[600])
+out = ()

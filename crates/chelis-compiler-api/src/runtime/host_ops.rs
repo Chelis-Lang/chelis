@@ -1468,6 +1468,17 @@ pub(super) fn tensor_matmul_host(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
+    let accumulator = RiscOp::default_matmul_accumulator(lhs.precision)?;
+    tensor_matmul_host_with_accumulator(lhs, rhs, accumulator)
+}
+
+/// `matmul` with a resolved accumulator: spec/05 §4.1's lowering, which
+/// multiplies at the operand dtype and sums in `accumulator`.
+pub(super) fn tensor_matmul_host_with_accumulator(
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+    accumulator: Prim,
+) -> Result<RuntimeTensorValue, String> {
     let a = &lhs.value.shape;
     let b = &rhs.value.shape;
     if a.len() < 2 || b.len() < 2 {
@@ -1495,19 +1506,68 @@ pub(super) fn tensor_matmul_host(
     let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let lhs_id = add_load(&mut dag, decl, lhs_name.clone(), lhs_ty.clone());
     let rhs_id = add_load(&mut dag, decl, rhs_name.clone(), rhs_ty.clone());
-    let root = tier2::lower_matmul(
+    let root = tier2::lower_matmul_with_accumulator(
         decl.into(),
         &mut dag,
         lhs_id,
         rhs_id,
         &lhs_ty,
         &rhs_ty,
+        accumulator,
         None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(lhs_name, lhs.value.clone());
     inputs.insert(rhs_name, rhs.value.clone());
     extract_root(&dag, &inputs, root, "matmul")
+}
+
+/// `matmul`, `sum` or `einsum` with the explicit accumulator the checker
+/// admitted (spec/04 §5.7). `sum` and `einsum` convert their operands
+/// exactly to the accumulator, run at its default (the accumulator itself),
+/// and finalize at `sum_result(p, a)` ([05-OP-30], [05-OP-33]).
+pub(super) fn accumulated_builtin_value(
+    name: &str,
+    args: &[RuntimeValue],
+    accumulator: Prim,
+) -> Result<RuntimeValue, String> {
+    let widen = |tensor: RuntimeTensorValue| match cast_tensor_value(tensor, accumulator)? {
+        RuntimeValue::Tensor(tensor) => Ok(tensor),
+        _ => Err(format!(
+            "{name}'s accumulator cast did not produce a tensor"
+        )),
+    };
+    let finalize = |result: RuntimeTensorValue, operand: Prim| {
+        let target = operand.sum_result_precision(accumulator);
+        if result.precision == target {
+            Ok(RuntimeValue::Tensor(result))
+        } else {
+            cast_tensor_value(result, target)
+        }
+    };
+    match name {
+        "matmul" => {
+            let lhs = expect_tensor_arg(args, 0)?;
+            let rhs = expect_tensor_arg(args, 1)?;
+            tensor_matmul_host_with_accumulator(&lhs, &rhs, accumulator).map(RuntimeValue::Tensor)
+        }
+        "sum" => {
+            let tensor = expect_tensor_arg(args, 0)?;
+            let axis = expect_int_arg(args, 1)?;
+            let operand = tensor.precision;
+            let total = tensor_reduce_host(&widen(tensor)?, axis, ReduceOp::Sum)?;
+            finalize(total, operand)
+        }
+        "einsum" => {
+            let equation = expect_string_arg(args, 0)?;
+            let lhs = expect_tensor_arg(args, 1)?;
+            let rhs = expect_tensor_arg(args, 2)?;
+            let operand = lhs.precision;
+            let total = tensor_einsum_value(&equation, &widen(lhs)?, &widen(rhs)?)?;
+            finalize(total, operand)
+        }
+        other => Err(format!("`{other}` takes no accumulator")),
+    }
 }
 
 /// `insert`: replicate a tensor along a NEW axis.

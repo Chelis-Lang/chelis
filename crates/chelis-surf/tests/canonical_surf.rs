@@ -2241,3 +2241,42 @@ fn explicit_v018_migration_renames_inside_the_value_that_binds_the_shadow() {
     let expected = "def f() = {\n  drop = skip(xs, 1i64)\n  drop\n}\n";
     assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
 }
+
+/// chelis#2985: a call's final `accumulator=<dtype>` argument (spec/02
+/// `CallArgs`) formats canonically, desugars to the `app` node's
+/// `accumulator` metadata (spec/03 §1.1), and resugars to the same Surf; its
+/// Deep form reparses and prints unchanged.
+#[test]
+fn explicit_accumulator_round_trips_through_deep() {
+    let source = concat!(
+        "module Demo.Accumulator\n",
+        "def total(x: tensor[3, i8]) -> tensor[i64] = sum(x, 0i32, accumulator=i64)\n",
+        "def dot(a: tensor[3, f16], b: tensor[3, f16]) -> tensor[f16] = einsum(\"i,i->\", a, b, accumulator=f64)\n",
+        "def product(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(a, b, accumulator=f64)\n",
+        "def piped(x: tensor[3, f32]) -> tensor[f64] = x |> sum(0i32, accumulator=f64)\n",
+    );
+    assert_eq!(format_source(source).expect("formats"), source);
+    let surf = parse_str(source).expect("canonical program parses");
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
+    let printed = print_canonical(&deep);
+    for accumulator in ["i64", "f64"] {
+        assert!(
+            printed.contains(&format!("(app {{accumulator: (t-prim {{}} {accumulator})")),
+            "{printed}"
+        );
+    }
+    let reparsed = parse_deep(&printed).expect("the Deep form reparses");
+    assert_eq!(print_canonical(&reparsed), printed);
+    let resugared = resugar_program(&deep).expect("the Deep form resugars");
+    assert_eq!(format_program(&resugared), source);
+}
+
+/// chelis#2985: `accumulator=` takes a dtype and follows every positional
+/// argument.
+#[test]
+fn explicit_accumulator_rejects_a_misplaced_or_non_dtype_argument() {
+    rejects("out = sum(x, accumulator=f64, 0i32)\n");
+    rejects("out = sum(x, 0i32, accumulator=x)\n");
+    rejects("out = sum(x, 0i32, accumulator=int64)\n");
+    parses("out = sum(x, 0i32, accumulator=f64)\n");
+}

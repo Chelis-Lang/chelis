@@ -3640,7 +3640,20 @@ pub fn unify_tensor_prec(
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            message: match crate::infer::sum_result_widening_note(
+                None,
+                &Type::Prim(*a),
+                &Type::Prim(*b),
+            ) {
+                Some(note) => {
+                    format!(
+                        "tensor precision mismatch: {} vs {}; {note}",
+                        a.name(),
+                        b.name()
+                    )
+                }
+                None => format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            },
         }),
         (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
         (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),
@@ -3949,10 +3962,18 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
-            message: format!(
-                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
-                prim.name()
-            ),
+            message: {
+                let message = format!(
+                    "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
+                    prim.name()
+                );
+                let small_integer =
+                    restriction.admits(Prim::Int8) || restriction.admits(Prim::Int16);
+                match crate::infer::sum_result_bound_note(small_integer, *prim) {
+                    Some(note) => format!("{message}; {note}"),
+                    None => message,
+                }
+            },
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
