@@ -74,7 +74,8 @@ explains the project workflow.
   [canonical project reference](spec/design/chelis_canonical_reference.md).
 - [Architecture](ARCHITECTURE.md): compiler, evaluator, and code generation.
 - [Contributor setup](docs/contributor_setup.md), the
-  [contribution guide](CONTRIBUTING.md), and the [agent contract](AGENTS.md).
+  [contribution policy](CONTRIBUTING.md), the
+  [maintainer guide](docs/maintainer_guide.md), and the [agent contract](AGENTS.md).
 
 ## License
 
