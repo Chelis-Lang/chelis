@@ -898,6 +898,9 @@ enum ReefSrcCommand {
 }
 
 fn main() {
+    // Before any host or user lookup: the static Linux build must not load
+    // the host's NSS plugins.
+    chelisup::nss::use_builtin_services();
     // Tier B process isolation: if this process was spawned as a prove worker,
     // run one cvc5 solve and exit before doing anything else; otherwise enable
     // isolation so every Tier B solve runs in a short-lived child whose crash

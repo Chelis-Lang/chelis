@@ -216,12 +216,14 @@ validation still builds and checks its own Darwin shipping artifact in `release.
 
 ## Release builds
 
-`release.yml` builds all three release artifacts (linux-x86_64,
-linux-x86_64-glibc2.31, darwin-arm64) with `cargo build --release -p
-chelis-cli --features smt,sealed-runtime`, so the shipped `chelis` binary
-discharges property obligations through cvc5 instead of degrading to the
+`release.yml` builds all four release artifacts (linux-x86_64,
+linux-x86_64-glibc2.31, linux-x86_64-static, darwin-arm64) with `cargo build
+--release -p chelis-cli --features smt,sealed-runtime`, so the shipped `chelis`
+binary discharges property obligations through cvc5 instead of degrading to the
 solver-free fuzz path, and carries a sealed runtime whose export the tarball
-ships (`spec/08-backends.md` §2.1). Each release job:
+ships (`spec/08-backends.md` §2.1). The static job adds `--target
+x86_64-unknown-linux-gnu` with `RUSTFLAGS=-C target-feature=+crt-static`, which
+links glibc, libstdc++, and cvc5 into a static-pie executable. Each release job:
 
 - installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
   uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot
@@ -254,7 +256,7 @@ even when the per-PR SMT lanes are green off the asset.
 Building cvc5 cold begins by pulling the cvc5 source and its dependencies
 over the network, so the release jobs are the only lanes exposed to a
 transient GitHub refusal there. Because `publish-release` has `needs:` on all
-three build jobs, one such failure skips the publish and leaves a pushed tag
+four build jobs, one such failure skips the publish and leaves a pushed tag
 with no GitHub Release. Such failures occur at `cvc5-sys` `build.rs` dependency
 downloads (HTTP 403) and at the source clone, with no change to the tree.
 
