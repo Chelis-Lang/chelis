@@ -4185,11 +4185,14 @@ path even though bare `round` under `grad` remains a structural
 > call has no other observable effect and produces no output.
 >
 > Failure: Any arity other than one is a type error naming the expected
-> arity, and a borrowed operand is a type error (Domain). A `drop` of a
-> value an earlier use consumed is consuming fan-out under spec/04 section
-> 8.3, repaired by a copy inserted at the earlier use, except on a
-> key-carrying value ([04-LIN-9]) or a destructured component, where it is
-> the ownership rejection. A `drop` of an owner that a closure borrows is
+> arity, and a borrowed operand is a type error (Domain). A `drop` after
+> an earlier ordinary consume, such as a consuming call argument or
+> `realize`, is consuming fan-out under spec/04 section 8.3, repaired by a
+> copy inserted at the earlier use. A `drop` after any other earlier
+> consume is the ownership rejection: after a consume of a key-carrying
+> value ([04-LIN-9]) or of a destructured component, a match on the value
+> as scrutinee, or a closure capture that consumes it ([04-LIN-2]). A
+> `drop` of an owner that a closure borrows is
 > the ownership rejection of [04-LIN-2], and every use of an owner after
 > its `drop` is the ownership rejection of [04-LIN-11]. `drop` has no
 > List-count form: a two-argument call is an arity error, not a prefix

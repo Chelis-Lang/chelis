@@ -2092,6 +2092,7 @@ impl Checker {
         };
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
         if let Some((dropped, site)) = dropped_component_overlapping(scope, &[use_id, owner], &path)
+            && !scope.is_component_id(use_id)
         {
             self.report_use_after_component_drop(name, &dropped, &site, expr);
         }
@@ -2111,7 +2112,11 @@ impl Checker {
             return false;
         };
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        if self.projection_root == Some(owner) {
+        // A destructuring `let` binds the parent to a desugarer carrier, and
+        // that bind is already refused naming the parent the source spells;
+        // a later use through the carrier or a component would name a binding
+        // the source never wrote (spec/04 section 8.3).
+        if self.projection_root == Some(owner) || scope.is_component_id(use_id) {
             return false;
         }
         match dropped_component_overlapping(scope, &[use_id, owner], &[]) {
@@ -4060,7 +4065,6 @@ fn type_expr_holds_key(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> boo
     )
 }
 
-/// The literal position of a `tuple-get` selector, when it is one.
 /// [04-LIN-11]: one step of a projection chain, `.i` or `.f`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProjectionStep {
@@ -4120,6 +4124,7 @@ fn render_projection(path: &[ProjectionStep]) -> String {
         .collect()
 }
 
+/// The literal position of a `tuple-get` selector, when it is one.
 fn literal_index(expr: &Expr) -> Option<usize> {
     let literal = tagged_children(expr, DeepTag::Lit)
         .and_then(|children| children.first())

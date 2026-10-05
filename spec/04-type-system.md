@@ -3126,8 +3126,10 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 - `copy(x)` reads `x` without consuming it and yields a fresh owned value.
 - `drop(x)` is an explicit consume, and a terminal one: it ends the owner, and no
   inserted copy keeps the owner usable after it ([04-LIN-11]). A `drop` after an
-  earlier ordinary consume is consuming fan-out like any other: the earlier use
-  receives the inserted copy. The compiler also inserts implicit last-use drops for
+  earlier ordinary consume, such as a consuming call argument or `realize`, is
+  consuming fan-out like any other: the earlier use receives the inserted copy. A
+  match scrutinee and a consuming closure capture are not ordinary consumes, and a
+  `drop` after either is rejected like any other later use. The compiler also inserts implicit last-use drops for
   locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
@@ -3193,8 +3195,9 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > carrier binding. A borrowing capture holds its borrow for as long as the
 > closure value exists, and a closure value can be stored, returned, or
 > passed on, so after a closure that borrows an owner is created, a `drop`
-> of that owner ([05-OP-67]), through any name bound to it, is rejected,
-> whether or not the closure is called again. A closure that captures a
+> call ([05-OP-67]) applied to that owner in the closure's scope, through any
+> name bound to it there, is rejected, whether or not the closure is called
+> again. A closure that captures a
 > `copy` of the owner leaves the original free to drop.
 
 These binding identities also govern runtime lookup: a named declaration's

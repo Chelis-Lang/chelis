@@ -428,3 +428,87 @@ def f(h: Holder) -> (Holder, tensor[4, f32]) =
         "eat(h.items) then h",
     );
 }
+
+// Round 1 of #3205: which earlier consumes a `drop` may follow, and naming
+// the source binding after a destructure.
+
+#[test]
+fn a_drop_after_realize_is_accepted() {
+    assert_accepted(
+        r#"
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
+  {
+    a = realize(x)
+    c = drop(x)
+    a
+  }
+"#,
+        "realize(x) then drop(x)",
+    );
+}
+
+#[test]
+fn a_drop_after_a_match_on_the_value_is_refused() {
+    assert_refused(
+        r#"
+def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
+  {
+    r = match p with {
+      | (a, b) => b
+    }
+    c = drop(p)
+    r
+  }
+"#,
+        CheckErrorKind::UseAfterConsume,
+        &["variable `p`", "match scrutinee"],
+        "drop after a match scrutinee",
+    );
+}
+
+#[test]
+fn a_drop_after_a_consuming_capture_is_refused() {
+    assert_refused(
+        r#"
+def eat(t: tensor[4, f32]) -> tensor[4, f32] = t
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
+  {
+    g = fn (k: i32) -> eat(x)
+    c = drop(x)
+    g(1)
+  }
+"#,
+        CheckErrorKind::UseAfterConsume,
+        &["variable `x`", "closure capture"],
+        "drop after a consuming capture",
+    );
+}
+
+#[test]
+fn destructuring_after_a_component_drop_names_the_source_binding() {
+    let errors = linearity(
+        r#"
+def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
+  {
+    c = drop(p.0)
+    (a, b) = p
+    b
+  }
+"#,
+    )
+    .expect_err("destructuring p after drop(p.0) must be refused");
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                && error.message.contains("variable `p`")
+                && error.message.contains("call to `drop`")
+        }),
+        "expected UseAfterConsume naming `p`; got {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.message.contains("__chelis_tmp")),
+        "no diagnostic may name a desugarer binding; got {errors:?}"
+    );
+}
