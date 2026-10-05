@@ -765,14 +765,22 @@ Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
 > rejected during macro expansion, whether or not the program calls the
 > macro, with a diagnostic that names the macro and the repeated parameter.
 
-> **[02-MACRO-2]** A call that resolves to a macro under the resolution order
-> below SHALL supply exactly one argument for each parameter of that macro.
-> This applies to user-defined and standard prelude macros alike, and to a
-> call that a macro expansion produces. A call with fewer or more arguments
-> SHALL be rejected during macro expansion, before substitution, with a
-> diagnostic that names the macro, its parameter count, and the supplied
-> argument count. Expansion SHALL NOT leave a parameter without its argument
-> to resolve in the caller's scope, and SHALL NOT discard an argument.
+> **[02-MACRO-2]** Each call that macro expansion expands SHALL supply
+> exactly one positional argument for each parameter of the macro it resolves
+> to under the resolution order below. This applies to user-defined and
+> standard prelude macros alike, and to a call that an earlier expansion
+> produced. A call with fewer or more positional arguments SHALL be rejected
+> during macro expansion, before substitution, with a diagnostic that names
+> the macro, its parameter count, and the supplied argument count. Expanding a
+> call SHALL NOT leave a parameter to resolve in the caller's scope, and SHALL
+> NOT discard a surplus argument.
+
+> **[02-MACRO-3]** Macro parameters are positional, so a call that macro
+> expansion expands SHALL NOT carry a named argument such as `accumulator=`
+> (§6.1). Such a call SHALL be rejected during macro expansion, before
+> substitution, with a diagnostic that names the macro and the named
+> argument. A named argument that a macro body writes on a call that does not
+> resolve to a macro belongs to that call, and expansion SHALL preserve it.
 
 Macro rules:
 
@@ -1870,7 +1878,8 @@ A call's argument list may end with the one named argument
 `sum(x, 0i32, accumulator=f64)`. It follows every positional argument and
 desugars to the `app` node's `accumulator` metadata (spec/03 §1.1). Only a
 call of the built-in `matmul`, `sum`, or `einsum` admits it; on any other
-callee it is a type error.
+callee it is a type error, except that a macro call carrying it is rejected
+earlier, during macro expansion ([02-MACRO-3]).
 
 ### 6.2 Bindings
 

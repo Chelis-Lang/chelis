@@ -1,11 +1,12 @@
-//! A macro call with the wrong argument count, or a macro definition that
-//! repeats a parameter, is rejected by `check`, `eval`, and `build` before
-//! any lane runs (spec/02-surf-syntax.md [02-MACRO-1], [02-MACRO-2]).
+//! A macro call with the wrong argument count or a named argument, or a macro
+//! definition that repeats a parameter, is rejected by `check`, `eval`, and
+//! `build` before any lane runs (spec/02-surf-syntax.md [02-MACRO-1],
+//! [02-MACRO-2], [02-MACRO-3]).
 
 mod common;
 
 use assert_cmd::Command;
-use common::{make_app, write_file};
+use common::{build_and_run, gcc_available, make_app, write_file};
 use std::path::Path;
 
 fn run(root: &Path, reef_home: Option<&Path>, args: &[&str]) -> std::process::Output {
@@ -83,6 +84,39 @@ fn assert_file_rejected(name: &str, program: &str, diagnostic: &str) {
     assert_rejected_in_each_command(dir.path(), None, &source, diagnostic);
 }
 
+/// `16777216 + 1 + 1` sums to `16777216` in `f32` and to `16777218` in an
+/// `f64` accumulator.
+const SUM_OPERAND: &str = "floats: tensor[3, f32] = to_tensor([16777216.0f32, 1.0f32, 1.0f32])\n";
+const MATMUL_OPERANDS: &str = "a: tensor[1, 3, f32] = to_tensor([[16777216.0f32, 1.0f32, 1.0f32]])\n\
+     b: tensor[3, 1, f32] = to_tensor([[1.0f32], [1.0f32], [1.0f32]])\n";
+
+/// `check` reports a perfect score with no errors, and `eval` succeeds; the
+/// evaluator's output.
+fn checked_clean_and_evaluated(name: &str, program: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join(name);
+    write_file(&source, program);
+    let source = source.to_str().expect("UTF-8 path");
+
+    let checked = run(dir.path(), None, &["check", source]);
+    let report: serde_json::Value =
+        serde_json::from_slice(&checked.stdout).expect("check emits JSON");
+    assert!(
+        checked.status.success()
+            && report["score"].as_f64() == Some(1.0)
+            && report["errors"].as_array().is_some_and(Vec::is_empty),
+        "{name} must check clean: {report}"
+    );
+
+    let evaluated = run(dir.path(), None, &["eval", "--file", source]);
+    assert!(
+        evaluated.status.success(),
+        "{name} must evaluate: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    String::from_utf8(evaluated.stdout).expect("UTF-8 stdout")
+}
+
 /// Without the rule, the missing `y` read `f`'s own parameter and `out`
 /// evaluated to 9.
 #[test]
@@ -155,6 +189,94 @@ fn repeated_macro_parameter_is_rejected() {
     );
 }
 
+/// Without the rule, the named argument was dropped with the replaced call:
+/// `total(floats, accumulator=f64)` evaluated to 16777216.0, and the
+/// compiled C executable of the `matmul` variant printed the same value.
+#[test]
+fn named_argument_on_a_macro_call_is_rejected() {
+    for (name, program, callee) in [
+        (
+            "sum.ch",
+            format!(
+                "macro total(x) = sum(x, 0i32)\n{SUM_OPERAND}out = total(floats, accumulator=f64)\n"
+            ),
+            "total",
+        ),
+        (
+            "matmul.ch",
+            format!(
+                "macro mm(a, b) = matmul(a, b)\n{MATMUL_OPERANDS}out = mm(a, b, accumulator=f64)\n"
+            ),
+            "mm",
+        ),
+        (
+            "prelude.ch",
+            "out = residual(1i32, fn (a: i32) -> a, accumulator=f64)\n".to_string(),
+            "residual",
+        ),
+        (
+            "pipe.ch",
+            "macro keep(x) = x\nout = 7i32 |> keep(accumulator=f64)\n".to_string(),
+            "keep",
+        ),
+    ] {
+        assert_file_rejected(
+            name,
+            &program,
+            &format!(
+                "macro `{callee}` takes only positional arguments, but this call passes the \
+                 named argument `accumulator=`"
+            ),
+        );
+    }
+}
+
+/// A named argument written inside a macro body belongs to the built-in call
+/// there, so the `f64` accumulator survives expansion.
+#[test]
+fn named_argument_inside_a_macro_body_is_kept() {
+    let sum = format!(
+        "macro total(x) = sum(x, 0i32, accumulator=f64)\n{SUM_OPERAND}out = total(floats)\n"
+    );
+    let matmul = format!(
+        "macro mm(a, b) = matmul(a, b, accumulator=f64)\n{MATMUL_OPERANDS}out = mm(a, b)\n"
+    );
+    for (name, program, value) in [
+        ("sum_body.ch", &sum, "out = 16777218.0"),
+        (
+            "matmul_body.ch",
+            &matmul,
+            "out = tensor(shape=[1, 1], data=[16777218.0])",
+        ),
+    ] {
+        let stdout = checked_clean_and_evaluated(name, program);
+        assert!(
+            stdout.lines().any(|line| line == value),
+            "{name} must evaluate with the f64 accumulator: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn named_argument_inside_a_macro_body_is_kept_in_compiled_c() {
+    if !gcc_available() {
+        eprintln!("skipping: c compiler not available");
+        return;
+    }
+    let stdout = build_and_run(
+        &format!(
+            "macro mm(a, b) = matmul(a, b, accumulator=f64)\n{MATMUL_OPERANDS}out = mm(a, b)\n"
+        ),
+        "matmul_body",
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "out = tensor(shape=[1, 1], data=[16777218.0])"),
+        "the compiled executable must accumulate in f64: {stdout}"
+    );
+}
+
 /// Inside a package the linker qualifies the macro's name before expansion,
 /// so the diagnostic names `..__Demo__Main__keep`; the rule is unchanged.
 #[test]
@@ -192,29 +314,8 @@ fn exact_arity_macro_calls_check_clean_and_evaluate() {
             "out = 11",
         ),
     ] {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join(name);
-        write_file(&source, program);
-        let source = source.to_str().expect("UTF-8 path");
-
-        let checked = run(dir.path(), None, &["check", source]);
-        let report: serde_json::Value =
-            serde_json::from_slice(&checked.stdout).expect("check emits JSON");
-        assert!(
-            checked.status.success()
-                && report["score"].as_f64() == Some(1.0)
-                && report["errors"].as_array().is_some_and(Vec::is_empty),
-            "an exact-arity call must check clean: {report}"
-        );
-
-        let evaluated = run(dir.path(), None, &["eval", "--file", source]);
-        assert!(
-            evaluated.status.success(),
-            "eval must succeed: {}",
-            String::from_utf8_lossy(&evaluated.stderr)
-        );
         assert_eq!(
-            String::from_utf8_lossy(&evaluated.stdout).trim(),
+            checked_clean_and_evaluated(name, program).trim(),
             value,
             "{name} must evaluate to the argument the macro selects"
         );

@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::annotations::{MacroSource, MetadataValue};
+use chelis_deep::annotations::{MacroSource, MetadataKey, MetadataValue};
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, MetaExpr, Metadata, UnknownFormData};
 use thiserror::Error;
 
@@ -62,12 +62,20 @@ pub enum ExpansionError {
     DuplicateParameter { name: String, parameter: String },
 
     #[error(
-        "macro `{name}` expects {expected} argument(s), but this call supplies {found}; a macro call supplies exactly one argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
+        "macro `{name}` expects {expected} argument(s), but this call supplies {found}; a macro call supplies exactly one positional argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
     )]
     ArityMismatch {
         name: String,
         expected: usize,
         found: usize,
+    },
+
+    #[error(
+        "macro `{name}` takes only positional arguments, but this call passes the named argument `{argument}=` (spec/02-surf-syntax.md [02-MACRO-3])"
+    )]
+    NamedArgument {
+        name: String,
+        argument: &'static str,
     },
 
     #[error(
@@ -107,14 +115,26 @@ impl MacroDef {
         }
     }
 
-    /// Pair each parameter with the call's argument at its position. A call
-    /// supplies exactly one argument per parameter ([02-MACRO-2]); any other
-    /// count is rejected here, before substitution, so no parameter is left
-    /// to resolve in the caller's scope and no argument escapes checking.
+    /// Pair each parameter with the call's positional argument at its
+    /// position, before substitution. Macro parameters are positional, so a
+    /// call that also carries a named argument is rejected ([02-MACRO-3]),
+    /// and a call supplies exactly one positional argument per parameter
+    /// ([02-MACRO-2]): no parameter is left to resolve in the caller's scope,
+    /// and no argument is dropped with the replaced invocation node.
     fn bind_arguments<'a>(
         &'a self,
+        invocation: &Metadata,
         args: &'a [Expr],
     ) -> Result<impl Iterator<Item = (&'a String, &'a Expr)>, ExpansionError> {
+        if let Some(argument) = invocation
+            .values()
+            .find_map(|value| named_argument(value.key()))
+        {
+            return Err(ExpansionError::NamedArgument {
+                name: self.name.clone(),
+                argument,
+            });
+        }
         if args.len() != self.params.len() {
             return Err(ExpansionError::ArityMismatch {
                 name: self.name.clone(),
@@ -123,6 +143,52 @@ impl MacroDef {
             });
         }
         Ok(self.params.iter().zip(args))
+    }
+}
+
+/// The named argument an invocation node's own annotation encodes, if any
+/// (spec/03 §1.1). Expansion replaces the invocation node, so each core key
+/// is classified here and a new key needs a decision before a macro call can
+/// drop it; producer extensions are opaque, and the replacement inherits them.
+fn named_argument(key: MetadataKey) -> Option<&'static str> {
+    match key {
+        // `f(..., accumulator=p)` (spec/02 §6.1): nothing in a macro's
+        // positional parameter list could receive it.
+        MetadataKey::Accumulator => Some(key.spelling()),
+        // The invocation's value annotations, which the replacement inherits
+        // (`inherit_replaced_value_annotations`).
+        MetadataKey::Type
+        | MetadataKey::SurfBindingType
+        // Provenance, locations, and reserved keys, none of which changes the
+        // program; expansion stamps its own `source`.
+        | MetadataKey::Source
+        | MetadataKey::Loc
+        | MetadataKey::Span
+        | MetadataKey::Lin
+        | MetadataKey::Doc
+        // Keys whose placement excludes an `app` node.
+        | MetadataKey::Eff
+        | MetadataKey::DtypeBounds
+        | MetadataKey::Effects
+        | MetadataKey::Wrt
+        | MetadataKey::ChelisRole
+        | MetadataKey::PropertySourceKind
+        | MetadataKey::PropertyQuantifiers
+        | MetadataKey::PropertyPreconditions
+        | MetadataKey::PropertySourceId
+        | MetadataKey::PropertyTolerance
+        | MetadataKey::PropertySeed
+        | MetadataKey::PropertySamples
+        | MetadataKey::PropertyContracts
+        | MetadataKey::Opaque
+        | MetadataKey::Invariant
+        | MetadataKey::InvariantAmenability
+        | MetadataKey::SurfPath
+        | MetadataKey::SurfDimGroupSize
+        | MetadataKey::SurfLiteralStyle
+        | MetadataKey::Effect
+        | MetadataKey::LiteralSource
+        | MetadataKey::Destructure => None,
     }
 }
 
@@ -526,7 +592,7 @@ impl Expander {
         let Some(def) = macros.get(&name) else {
             return Ok(None);
         };
-        let arguments = def.bind_arguments(&args)?;
+        let arguments = def.bind_arguments(node.metadata, &args)?;
         self.consume_expansion_budget()?;
         let invocation = macro_source(&def.name, &args);
         let (placeholder_params, placeholder_args) =

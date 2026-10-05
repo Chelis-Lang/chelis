@@ -1,10 +1,10 @@
-//! A macro call supplies exactly one argument per parameter, and a macro
-//! definition names each parameter once (spec/02-surf-syntax.md
-//! [02-MACRO-1], [02-MACRO-2]), at both the Surf `macro` and the internal
-//! Deep `defmacro` ingress.
+//! A macro call supplies exactly one positional argument per parameter and
+//! no named argument, and a macro definition names each parameter once
+//! (spec/02-surf-syntax.md [02-MACRO-1], [02-MACRO-2], [02-MACRO-3]), at both
+//! the Surf `macro` and the internal Deep `defmacro` ingress.
 
-use chelis_deep::Expr;
-use chelis_deep::ast::strip_metadata;
+use chelis_deep::DeepTag;
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, strip_metadata};
 use chelis_deep::printer::print_canonical;
 use chelis_macros::{ExpandedProgram, ExpansionError, ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
@@ -80,6 +80,71 @@ fn assert_duplicate_parameter(
             && message.contains(&format!("parameter `{repeated}`")),
         "the diagnostic must name the macro and the repeated parameter: {message}"
     );
+}
+
+fn assert_named_argument(
+    result: Result<ExpandedProgram, ExpansionError>,
+    macro_name: &str,
+    named: &str,
+) {
+    let error = match result {
+        Ok(expanded) => panic!(
+            "`{macro_name}` called with `{named}=` must not expand; got:\n{}",
+            print_canonical(expanded.exprs())
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            ExpansionError::NamedArgument { name, argument }
+                if name == macro_name && *argument == named
+        ),
+        "expected a named-argument rejection for `{macro_name}`; got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("macro `{macro_name}`"))
+            && message.contains(&format!("named argument `{named}=`")),
+        "the diagnostic must name the macro and the named argument: {message}"
+    );
+}
+
+/// The `accumulator` annotation of every call to `callee` in the expansion,
+/// as canonical type syntax, or `none`.
+fn accumulators_on_calls_to(exprs: &[Expr], callee: &str) -> Vec<String> {
+    fn walk(expr: &Expr, callee: &str, out: &mut Vec<String>) {
+        let ExprCarrier::DecodedNode(tag, metadata, children) = expr.carrier() else {
+            return;
+        };
+        if tag == DeepTag::App
+            && matches!(
+                children.first().map(Expr::carrier),
+                Some(ExprCarrier::DecodedNode(
+                    DeepTag::Var,
+                    _,
+                    [Expr::Atom(Atom::Name(name), _)]
+                )) if name == callee
+            )
+        {
+            out.push(metadata.accumulator().map_or_else(
+                || "none".to_string(),
+                |accumulator| {
+                    print_canonical(std::slice::from_ref(accumulator.expression()))
+                        .trim_end()
+                        .to_string()
+                },
+            ));
+        }
+        for child in children {
+            walk(child, callee, out);
+        }
+    }
+    let mut out = Vec::new();
+    for expr in exprs {
+        walk(expr, callee, &mut out);
+    }
+    out
 }
 
 /// Every top-level form of the expansion without metadata, so the `source`
@@ -276,4 +341,68 @@ fn exact_arity_calls_substitute_every_argument() {
                 .contains("(app {} (var {} add) (var {} x) (app {} (var {} g) (var {} x)))")),
         "the prelude call must substitute both arguments: {prelude:#?}"
     );
+}
+
+/// Without the rule, the call's `accumulator=` was dropped with the replaced
+/// invocation node, so `total(x, accumulator=f64)` summed in `f32`.
+#[test]
+fn a_named_argument_on_a_macro_call_is_rejected() {
+    for (source, name) in [
+        (
+            "macro total(x) = sum(x, 0i32)\n\
+             def f(x: tensor[3, f32]) -> f32 = total(x, accumulator=f64)\n",
+            "total",
+        ),
+        (
+            "macro keep(x) = x\nout = keep(7i32, accumulator=f64)\n",
+            "keep",
+        ),
+        (
+            "macro keep(x) = x\nout = 7i32 |> keep(accumulator=f64)\n",
+            "keep",
+        ),
+        (
+            "out = residual(1i32, fn (a: i32) -> a, accumulator=f64)\n",
+            "residual",
+        ),
+        (
+            "macro keep(x) = x\nmacro outer(a) = keep(a, accumulator=f64)\nout = outer(7i32)\n",
+            "keep",
+        ),
+    ] {
+        assert_named_argument(expand(&desugar(source)), name, "accumulator");
+    }
+    assert_named_argument(
+        expand(&deep(
+            "(defmacro {} keep (params {} x) (var {} x))\n\
+             (def {} out (app {accumulator: (t-prim {} f64)} (var {} keep) (lit {} 7)))",
+        )),
+        "keep",
+        "accumulator",
+    );
+}
+
+/// A named argument that the body writes on a built-in call belongs to that
+/// call, so expansion keeps it on the expanded call.
+#[test]
+fn a_named_argument_inside_a_macro_body_survives_expansion() {
+    for (source, callee) in [
+        (
+            "macro total(x) = sum(x, 0i32, accumulator=f64)\n\
+             def f(x: tensor[3, f32]) -> f32 = total(x)\n",
+            "sum",
+        ),
+        (
+            "macro mm(a, b) = matmul(a, b, accumulator=f64)\n\
+             def f(a: tensor[1, 3, f32], b: tensor[3, 1, f32]) -> tensor[1, 1, f32] = mm(a, b)\n",
+            "matmul",
+        ),
+    ] {
+        let expanded = expand(&desugar(source)).expect("the body's named argument expands");
+        assert_eq!(
+            accumulators_on_calls_to(expanded.exprs(), callee),
+            ["(t-prim {} f64)"],
+            "the expanded `{callee}` call must keep its accumulator"
+        );
+    }
 }
