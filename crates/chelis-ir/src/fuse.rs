@@ -116,6 +116,8 @@ fn fused_step_op(op: &RiscOp) -> Option<FusedStepOp> {
         RiscOp::Tan => Some(FusedStepOp::Tan),
         RiscOp::Atan => Some(FusedStepOp::Atan),
         RiscOp::Tanh => Some(FusedStepOp::Tanh),
+        RiscOp::Erf => Some(FusedStepOp::Erf),
+        RiscOp::Erfc => Some(FusedStepOp::Erfc),
         RiscOp::Abs => Some(FusedStepOp::Abs),
         RiscOp::Floor => Some(FusedStepOp::Floor),
         RiscOp::Ceil => Some(FusedStepOp::Ceil),

@@ -9,6 +9,13 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "app.rs",
+      "function": "infer_app_inner",
+      "ordinal": 1,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
       "ordinal": 1,

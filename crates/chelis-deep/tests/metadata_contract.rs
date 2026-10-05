@@ -90,6 +90,10 @@ const CASES: &[(&str, &str)] = &[
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),
+    (
+        "accumulator",
+        "(app {accumulator: (t-prim {} f64)} (var {} sum) (var {} x) (lit {} 0))",
+    ),
 ];
 
 fn metadata_value_span(expr: &chelis_deep::RawExpr, key: &str) -> Option<Span> {

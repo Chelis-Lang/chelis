@@ -95,7 +95,9 @@ fn exact_integer_reference_covers_rounding_ties_and_i64_limits() {
 
 // Keep the small all-width matrix under its original identity. The larger
 // cases run separately so every case retains the same per-element oracle
-// without one test consuming the hosted nextest timeout.
+// without one test consuming the hosted nextest timeout. The counts above
+// 2048 are `.config/ci-test-targets.toml` test exclusions that the nightly
+// `module-oracles` job runs; the 257, 258 and 300 cases run per pull request.
 #[test]
 fn every_linspace_element_agrees_with_exact_rational_reference() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
@@ -184,26 +186,6 @@ linspace_matrix_case!(
     300
 );
 linspace_matrix_case!(
-    linspace_f16_2049_matches_every_exact_rational_element,
-    "f16",
-    2049
-);
-linspace_matrix_case!(
-    linspace_f16_2050_matches_every_exact_rational_element,
-    "f16",
-    2050
-);
-linspace_matrix_case!(
-    linspace_f16_2051_matches_every_exact_rational_element,
-    "f16",
-    2051
-);
-linspace_matrix_case!(
-    linspace_f16_4097_matches_every_exact_rational_element,
-    "f16",
-    4097
-);
-linspace_matrix_case!(
     linspace_bf16_257_matches_every_exact_rational_element,
     "bf16",
     257
@@ -217,26 +199,6 @@ linspace_matrix_case!(
     linspace_bf16_300_matches_every_exact_rational_element,
     "bf16",
     300
-);
-linspace_matrix_case!(
-    linspace_bf16_2049_matches_every_exact_rational_element,
-    "bf16",
-    2049
-);
-linspace_matrix_case!(
-    linspace_bf16_2050_matches_every_exact_rational_element,
-    "bf16",
-    2050
-);
-linspace_matrix_case!(
-    linspace_bf16_2051_matches_every_exact_rational_element,
-    "bf16",
-    2051
-);
-linspace_matrix_case!(
-    linspace_bf16_4097_matches_every_exact_rational_element,
-    "bf16",
-    4097
 );
 linspace_matrix_case!(
     linspace_f32_257_matches_every_exact_rational_element,
@@ -254,26 +216,6 @@ linspace_matrix_case!(
     300
 );
 linspace_matrix_case!(
-    linspace_f32_2049_matches_every_exact_rational_element,
-    "f32",
-    2049
-);
-linspace_matrix_case!(
-    linspace_f32_2050_matches_every_exact_rational_element,
-    "f32",
-    2050
-);
-linspace_matrix_case!(
-    linspace_f32_2051_matches_every_exact_rational_element,
-    "f32",
-    2051
-);
-linspace_matrix_case!(
-    linspace_f32_4097_matches_every_exact_rational_element,
-    "f32",
-    4097
-);
-linspace_matrix_case!(
     linspace_f64_257_matches_every_exact_rational_element,
     "f64",
     257
@@ -288,26 +230,88 @@ linspace_matrix_case!(
     "f64",
     300
 );
-linspace_matrix_case!(
-    linspace_f64_2049_matches_every_exact_rational_element,
-    "f64",
-    2049
-);
-linspace_matrix_case!(
-    linspace_f64_2050_matches_every_exact_rational_element,
-    "f64",
-    2050
-);
-linspace_matrix_case!(
-    linspace_f64_2051_matches_every_exact_rational_element,
-    "f64",
-    2051
-);
-linspace_matrix_case!(
-    linspace_f64_4097_matches_every_exact_rational_element,
-    "f64",
-    4097
-);
+
+// The counts above 2048 are spelled as plain functions so the module-oracles
+// selection test can find each excluded name in this source.
+#[test]
+fn linspace_f16_2049_matches_every_exact_rational_element() {
+    assert_linspace_elements("f16", &[2049]);
+}
+
+#[test]
+fn linspace_f16_2050_matches_every_exact_rational_element() {
+    assert_linspace_elements("f16", &[2050]);
+}
+
+#[test]
+fn linspace_f16_2051_matches_every_exact_rational_element() {
+    assert_linspace_elements("f16", &[2051]);
+}
+
+#[test]
+fn linspace_f16_4097_matches_every_exact_rational_element() {
+    assert_linspace_elements("f16", &[4097]);
+}
+
+#[test]
+fn linspace_bf16_2049_matches_every_exact_rational_element() {
+    assert_linspace_elements("bf16", &[2049]);
+}
+
+#[test]
+fn linspace_bf16_2050_matches_every_exact_rational_element() {
+    assert_linspace_elements("bf16", &[2050]);
+}
+
+#[test]
+fn linspace_bf16_2051_matches_every_exact_rational_element() {
+    assert_linspace_elements("bf16", &[2051]);
+}
+
+#[test]
+fn linspace_bf16_4097_matches_every_exact_rational_element() {
+    assert_linspace_elements("bf16", &[4097]);
+}
+
+#[test]
+fn linspace_f32_2049_matches_every_exact_rational_element() {
+    assert_linspace_elements("f32", &[2049]);
+}
+
+#[test]
+fn linspace_f32_2050_matches_every_exact_rational_element() {
+    assert_linspace_elements("f32", &[2050]);
+}
+
+#[test]
+fn linspace_f32_2051_matches_every_exact_rational_element() {
+    assert_linspace_elements("f32", &[2051]);
+}
+
+#[test]
+fn linspace_f32_4097_matches_every_exact_rational_element() {
+    assert_linspace_elements("f32", &[4097]);
+}
+
+#[test]
+fn linspace_f64_2049_matches_every_exact_rational_element() {
+    assert_linspace_elements("f64", &[2049]);
+}
+
+#[test]
+fn linspace_f64_2050_matches_every_exact_rational_element() {
+    assert_linspace_elements("f64", &[2050]);
+}
+
+#[test]
+fn linspace_f64_2051_matches_every_exact_rational_element() {
+    assert_linspace_elements("f64", &[2051]);
+}
+
+#[test]
+fn linspace_f64_4097_matches_every_exact_rational_element() {
+    assert_linspace_elements("f64", &[4097]);
+}
 
 #[test]
 fn linspace_rejects_invalid_counts_endpoints_and_dtypes() {

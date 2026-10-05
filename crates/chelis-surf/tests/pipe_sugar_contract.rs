@@ -246,6 +246,32 @@ fn every_mixed_operator_requires_grouping() {
 }
 
 #[test]
+fn accumulator_pipe_stages_preserve_the_explicit_width_and_call_arity() {
+    for expression in [
+        "x |> sum(0i32, accumulator=f64)",
+        "x |> (sum(0i32, accumulator=f64))",
+    ] {
+        let source = format!("out = {expression}\n");
+        assert_eq!(
+            meaning(&source),
+            meaning("out = sum(x, 0i32, accumulator=f64)\n")
+        );
+        let formatted = format_source(&source).unwrap();
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        let deep = desugar_program(&parse_str(&source).unwrap()).unwrap();
+        let surf = chelis_surf::format::format_program(&resugar_program(&deep).unwrap());
+        assert_eq!(meaning(&surf), meaning(&source));
+        assert!(!surf.contains("|>"));
+    }
+    for expression in [
+        "x |> sum(0i32, accumulator=wat)",
+        "x |> sum(0i32, accumulator=f64, 1i32)",
+    ] {
+        assert!(parse_str(&format!("out = {expression}\n")).is_err());
+    }
+}
+
+#[test]
 fn grouped_pipes_preserve_fmt_and_surface_retraction() {
     for source in [
         "out = (a * b) |> f\n",

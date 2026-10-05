@@ -165,6 +165,8 @@ pub fn constant_fold(dag: &mut Dag) {
                 RiscOp::Tan => Some(chelis_types::FloatUnOp::Tan),
                 RiscOp::Atan => Some(chelis_types::FloatUnOp::Atan),
                 RiscOp::Tanh => Some(chelis_types::FloatUnOp::Tanh),
+                RiscOp::Erf => Some(chelis_types::FloatUnOp::Erf),
+                RiscOp::Erfc => Some(chelis_types::FloatUnOp::Erfc),
                 _ => None,
             };
             if let Some(inp) = input

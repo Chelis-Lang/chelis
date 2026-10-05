@@ -1,6 +1,6 @@
 {
   "schema": "chelis-prove-standard-contract-discharges-v1",
-  "std_graph_digest": "f74a5e4c28d3f7dc596b9ca6c61227180e43ffb362aa88ce4280c2f456dace1b",
+  "std_graph_digest": "cf6a1919a7ac33f3bf5b9cac89d48645440e7cbf143ded7609c77099ec184f69",
   "rows": [
     {
       "contract": "std.normal_cdf.range",
@@ -46,11 +46,11 @@
       "contract": "std.normal_cdf.reflection",
       "samples": 8192,
       "seed": 3235848230,
-      "checked_samples": 4098,
-      "max_error": 0.000244140625,
+      "checked_samples": 2794,
+      "max_error": 0.00048828125,
       "counterexample": {
-        "error": 0.000244140625,
-        "x": 0.0026397705078125
+        "error": 0.00048828125,
+        "x": -3.181640625
       },
       "domain": "normal-cdf finite domain [-10, 10]",
       "dtype": "f16"
@@ -59,11 +59,11 @@
       "contract": "std.normal_cdf.reflection",
       "samples": 8192,
       "seed": 3235848230,
-      "checked_samples": 4104,
-      "max_error": 0.001953125,
+      "checked_samples": 3295,
+      "max_error": 0.00390625,
       "counterexample": {
-        "error": 0.001953125,
-        "x": 0.0174560546875
+        "error": 0.00390625,
+        "x": -1.953125
       },
       "domain": "normal-cdf finite domain [-10, 10]",
       "dtype": "bf16"
@@ -72,11 +72,11 @@
       "contract": "std.normal_cdf.reflection",
       "samples": 8192,
       "seed": 3235848230,
-      "checked_samples": 4097,
-      "max_error": 2.9802322387695312e-8,
+      "checked_samples": 2614,
+      "max_error": 5.960464477539063e-8,
       "counterexample": {
-        "error": 2.9802322387695312e-8,
-        "x": 0.0010967479320243
+        "error": 5.960464477539063e-8,
+        "x": -3.620504140853882
       },
       "domain": "normal-cdf finite domain [-10, 10]",
       "dtype": "f32"
@@ -86,7 +86,7 @@
       "samples": 8192,
       "seed": 3235848230,
       "checked_samples": 8192,
-      "max_error": 5.551115123125783e-17,
+      "max_error": 1.1102230246251565e-16,
       "counterexample": null,
       "domain": "normal-cdf finite domain [-10, 10]",
       "dtype": "f64"
@@ -95,13 +95,9 @@
       "contract": "std.normal_cdf.monotonicity",
       "samples": 8192,
       "seed": 3235848230,
-      "checked_samples": 4096,
-      "max_error": 0.0009765625,
-      "counterexample": {
-        "error": 0.0009765625,
-        "hi": 0.0007686614990234375,
-        "lo": -0.0011310577392578125
-      },
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
       "domain": "ordered normal-cdf finite pairs in [-10, 10]",
       "dtype": "f16"
     },

@@ -697,6 +697,10 @@ impl SparseMetadata {
     pub fn base(&self) -> &ShapeMetadata {
         &self.base
     }
+    /// The base axis the plan's indices select along.
+    pub fn axis(&self) -> usize {
+        self.axis
+    }
     pub fn domain(&self) -> &ShapeMetadata {
         &self.domain
     }

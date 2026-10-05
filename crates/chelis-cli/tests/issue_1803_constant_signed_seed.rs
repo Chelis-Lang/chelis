@@ -66,8 +66,8 @@ fn canonical_signed_constants_execute_exact_split_draws_in_surf_and_deep() {
                     "template = to_tensor([{zeros}])\n\
                  sampled = {{\n\
                    (a, b) = split_key(key_from_seed({seed_expr}))\n\
-                   first = uniform_like(a, template, 0.0f32, 1.0f32)\n\
-                   second = uniform_like(b, template, 0.0f32, 1.0f32)\n\
+                   first = uniform_like(a, template, 0.0{dtype}, 1.0{dtype})\n\
+                   second = uniform_like(b, template, 0.0{dtype}, 1.0{dtype})\n\
                    concat([first, second], 0i32)\n }}\n"
                 ),
             );

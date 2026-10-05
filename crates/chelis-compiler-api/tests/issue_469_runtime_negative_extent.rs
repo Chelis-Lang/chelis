@@ -1,13 +1,12 @@
 //! chelis#469: a runtime negative `expand`/`insert` size traps `Domain` in the
 //! host interpreter exactly as compiled C renders it.
 //!
-//! spec/04-type-system.md section 4.7.2: "A runtime negative size traps
-//! `Domain` before allocation or access." The C runtime prints the metadata
-//! line `Domain: expansion axis or extent outside domain` and then [04-NUM-9]'s
-//! `numeric trap: domain in <op> at i64`. The host interpreter used to return
-//! the untyped `<op> requires non-negative extent, got <n>` instead, so the
-//! same program failed with different, untyped text on the two lanes. The
-//! cross-lane comparison is
+//! spec/04-type-system.md section 4.7: a runtime negative size fails the
+//! non-negativity guard, a `Domain` trap in the owning operation, before
+//! allocation or access. Every lane renders it through
+//! `chelis_abi::failure::negative_target_extent`: a context line naming the
+//! axis and the value, then [04-NUM-9]'s `numeric trap: domain in <op> at
+//! i64`. The cross-lane comparison is
 //! `crates/chelis-cli/tests/issue_469_runtime_scalar_extent.rs`
 //! (`a_runtime_negative_size_traps_domain_on_both_lanes`).
 
@@ -45,7 +44,7 @@ fn a_runtime_negative_size_traps_domain_in_the_host_interpreter() {
         ));
         assert!(
             message.contains(&format!(
-                "Domain: expansion axis or extent outside domain\nnumeric trap: domain in {op} at i64"
+                "{op} target extent at axis 0 is negative: -1\nnumeric trap: domain in {op} at i64"
             )),
             "{op}: the trap renders as the C runtime renders it; got {message}"
         );

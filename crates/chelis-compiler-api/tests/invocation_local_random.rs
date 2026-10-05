@@ -56,7 +56,7 @@ fn split_tree_draws_repeat_their_reference_bits_at_every_float_dtype() {
     ] {
         let source = format!(
             r#"
-def sample(k: key, x: &tensor[2, {dtype}]) -> tensor[2, {dtype}] = uniform_like(k, x, 0.0f32, 1.0f32)
+def sample(k: key, x: &tensor[2, {dtype}]) -> tensor[2, {dtype}] = uniform_like(k, x, cast(0.0, {dtype}), cast(1.0, {dtype}))
 def nested(x: tensor[2, {dtype}]) -> (tensor[2, {dtype}], tensor[2, {dtype}], tensor[2, {dtype}]) = {{
   (a, rest) = split_key(key_from_seed(42i64))
   (b, c) = split_key(rest)

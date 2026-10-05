@@ -19,6 +19,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -58,8 +59,8 @@ def verify_sidecar(path: Path) -> str:
 
 
 # The installer slug and the release build `chelisup install` downloads on each
-# canary host. On Linux that is the glibc-2.31 build (chelis#2686).
-PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-glibc2.31"),
+# canary host. On Linux that is the static build.
+PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-static"),
              ("Darwin", "arm64"): ("darwin-arm64", "darwin-arm64")}
 
 
@@ -246,6 +247,22 @@ def corrupt_driver(driver: str, target: str) -> str:
     return driver.replace(marker, injection + marker)
 
 
+LINK_REQUIREMENTS = "Link requirements (after module archive): "
+
+
+def reported_link_flags(build_stdout: str) -> list[str]:
+    """The flags `chelis build --emit-c` tells a library consumer to link after the
+    runtime archive. The canary links exactly as that guidance says, so on glibc
+    before 2.34 it gets `-lpthread -ldl` alongside `-lm`."""
+    lines = [line for line in build_stdout.splitlines() if line.startswith(LINK_REQUIREMENTS)]
+    if len(lines) != 1:
+        raise ValueError("build did not report one link-requirements line")
+    words = shlex.split(lines[0][len(LINK_REQUIREMENTS):])
+    if len(words) < 2 or not words[1].endswith("libchelis_runtime.a"):
+        raise ValueError("link requirements do not name the runtime archive")
+    return words[2:]
+
+
 def execute(args: argparse.Namespace, report: dict) -> None:
     root = args.evidence
     slug, build = PLATFORMS.get((platform.system(), platform.machine()),
@@ -309,7 +326,8 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     source = root / "manifested_callable.ch"
     source.write_text(fixture.ADD_PROGRAM)
     output = root / "generated"
-    runner.run("build", [shim, "build", "--emit-c", source, "--output", output])
+    built = runner.run("build", [shim, "build", "--emit-c", source, "--output", output])
+    link_flags = reported_link_flags(built.stdout)
     require_staged_runtime(output, inventory)
     # Quoted includes search the source directory first. Move only generated C
     # into a header-free directory, then explicitly use shipped include/lib.
@@ -322,7 +340,7 @@ def execute(args: argparse.Namespace, report: dict) -> None:
         raise ValueError("host C compiler unavailable")
     runner.run("link", [compiler, "-O2", "-I", installed / "include",
                         consumer / "callable.c", consumer / "driver.c",
-                        installed / "lib/libchelis_runtime.a", "-lm",
+                        installed / "lib/libchelis_runtime.a", *link_flags,
                         "-o", consumer / "canary"])
     for call in range(3):
         runner.run(f"execute-{call}", [consumer / "canary"])
@@ -333,7 +351,7 @@ def execute(args: argparse.Namespace, report: dict) -> None:
         driver.write_text(corrupt_driver(fixture.DRIVER_C, target))
         runner.run(f"link-{target}", [compiler, "-O2", "-I", installed / "include",
                     consumer / "callable.c", driver,
-                    installed / "lib/libchelis_runtime.a", "-lm", "-o", binary])
+                    installed / "lib/libchelis_runtime.a", *link_flags, "-o", binary])
         runner.run(f"reject-{target}", [binary], expected_failure=diagnostic)
     verify_installed(installed, inventory)
     if verify_sidecar(archive) != archive_hash or verify_sidecar(installer) != installer_hash:

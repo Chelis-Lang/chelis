@@ -1520,6 +1520,166 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "Std.Datetime extreme-argument sweep, one chelis test case per call; std_datetime_extreme_arguments_canary runs per pull request; run it on demand with cargo nextest run -p chelis-cli --test std_datetime_failures"
 tracking_issue = "chelis#2970"
 
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f16_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_bf16_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f32_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2049_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2050_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_2051_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_2992_linspace"
+name = "linspace_f64_4097_matches_every_exact_rational_element"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
+tracking_issue = "chelis#3209"
+
 # Cargo metadata classifies paths under workspace package roots directly.
 # Shared roots remain fail-closed unless this file records a current,
 # evidence-backed disposition. Directory prefixes end in `/`; other rules are
@@ -2923,6 +3083,15 @@ reason = "script-unit checks the immutable Bullseye producer and release configu
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/test_ci_cvc5_build.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the cvc5 fetch-retry classifier and requires every release.yml smt build to go through the retry wrapper inside a bounded job"
+tracking_issue = "chelis#1004"
+
+[[path_rule]]
 prefix = "scripts/devenv_entry_regression.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3702,6 +3871,15 @@ reason = "the checked-in rejection registry agreement and offline authority-admi
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
+prefix = "scripts/check_rejection_authority_boundary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the [05-UNS-5] construction-boundary check and its unit tests run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
 prefix = "scripts/generate_rejection_registries.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -4369,6 +4547,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_compiled_host_effect_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "compiled host-effect oracle source contracts and leg definitions execute in the script unit suite"
+tracking_issue = "chelis#1297"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_compiled_host_effect_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "compiled host-effect oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1297"
 
 [[path_rule]]
 prefix = "scripts/dtype_relu_oracle.py"

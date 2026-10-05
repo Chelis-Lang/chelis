@@ -1934,7 +1934,8 @@ fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
             },
-            vec![(2, Some(2)), (0, None), (-1, None), (4, None)],
+            // chelis#1795: equal endpoints describe an empty axis.
+            vec![(2, Some(2)), (0, Some(0)), (-1, None), (4, None)],
         ),
         (
             "stride",
@@ -6822,7 +6823,7 @@ fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
         .expect("fused runtime-shape codegen")
         .c_source;
     assert!(
-        src.contains("elementwise operand shape mismatch"),
+        src.contains("chelis_elementwise_shape_trap("),
         "fused codegen dropped the deferred operand-shape guard:\n{src}"
     );
     assert!(
@@ -6861,7 +6862,7 @@ int main(void) {{
         String::from_utf8_lossy(&run.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("operands disagree at axis"),
         "fused runtime-shape trap emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -6897,7 +6898,7 @@ fn direct_positive_rank_mismatch_traps_before_indexing() {
         .expect("rank-divergent codegen must stay defensive")
         .c_source;
     assert!(
-        src.contains("elementwise operand rank mismatch"),
+        src.contains("chelis_elementwise_shape_trap("),
         "generated C omitted the positive-rank mismatch guard:\n{src}"
     );
 
@@ -7275,11 +7276,11 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
     let function = "host_positive_rank_guard";
     let src = emit_host_program(&program, function).expect("host-lane codegen");
     assert!(
-        src.contains("elementwise operand rank mismatch"),
+        src.contains("chelis_host_require_elementwise_agreement(\"add\", "),
         "host-lane codegen omitted the positive-rank mismatch guard:\n{src}"
     );
     assert!(
-        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        src.contains("chelis_host_require_elementwise_agreement(\"add\", __arg0_"),
         "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
     );
     let reads_tensor_rank_field = src.lines().any(|line| {
@@ -7312,7 +7313,7 @@ int main(void) {{
         String::from_utf8_lossy(&run.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("operands disagree in rank"),
         "host-lane rank guard emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -7328,7 +7329,7 @@ fn host_lane_max_elem_positive_rank_mismatch_traps_before_indexing() {
     let function = "host_positive_rank_guard_max_elem";
     let src = emit_host_program(&program, function).expect("host-lane codegen");
     assert!(
-        src.contains("elementwise operand rank mismatch"),
+        src.contains("chelis_host_require_elementwise_agreement(\"max_elem\", "),
         "host-lane max_elem codegen omitted the positive-rank guard:\n{src}"
     );
 
@@ -7354,7 +7355,7 @@ int main(void) {{
         String::from_utf8_lossy(&run.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("operands disagree in rank"),
         "host-lane max_elem guard emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -7370,11 +7371,11 @@ fn host_lane_equal_rank_shape_mismatch_traps_before_indexing() {
     let function = "host_equal_rank_shape_guard";
     let src = emit_host_program(&program, function).expect("host-lane codegen");
     assert!(
-        src.contains("elementwise operand shape mismatch"),
+        src.contains("chelis_host_require_elementwise_agreement(\"add\", "),
         "host-lane codegen omitted the equal-rank shape guard:\n{src}"
     );
     assert!(
-        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        src.contains("chelis_host_require_elementwise_agreement(\"add\", __arg0_"),
         "host-lane shape guard must call the shared opaque-tensor guard:\n{src}"
     );
     assert!(
@@ -7404,7 +7405,7 @@ int main(void) {{
         String::from_utf8_lossy(&run.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("operands disagree at axis"),
         "host-lane shape guard emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -7550,7 +7551,7 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         .unwrap_or_else(|| panic!("generated C omitted {function}:\n{src}"))
         .1;
     let guard_offset = function_body
-        .find("elementwise operand shape mismatch")
+        .find("chelis_elementwise_shape_trap(")
         .unwrap_or_else(|| panic!("inlined {reduce_kind} dropped its shape guard:\n{src}"));
     let allocation_offset = function_body
         .find("chelis_alloc(")
@@ -7652,7 +7653,7 @@ int main(void) {{
         "inlined {reduce_kind} mismatch reached allocation/indexing"
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("operands disagree at axis"),
         "inlined {reduce_kind} mismatch emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -11238,7 +11239,7 @@ fn a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_ev
         (
             "pad",
             -1,
-            "must be a non-negative integer",
+            "numeric trap: domain in pad at i64",
             "numeric trap: domain in pad at i64",
         ),
         (
@@ -11656,7 +11657,7 @@ const DEAD_LET_KINDS: [DeadLetKind; 10] = [
         traps: "5i64",
         total: "3i64",
         n: 4,
-        eval_trap: "must be a non-negative integer",
+        eval_trap: "numeric trap: domain in pad at i64",
         c_trap: "numeric trap: domain in pad at i64",
     },
     DeadLetKind {

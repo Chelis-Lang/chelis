@@ -87,7 +87,7 @@ impl AuthoredBinderContract {
             // Parameter and body-only dimension roles are rigid under
             // [04-INF-6]; result-only roles retain §4.4.1 output inference.
             check_authored_dvars_rigid(name, &rigidity.decl_ty, &rigidity.dim_names, subst, errors);
-            check_declared_tvars_rigid(name, &self.type_names, subst, errors);
+            check_declared_tvars_rigid(name, &self.type_names, &self.dtype_bounds, subst, errors);
             check_declared_rvars_rigid(name, &rigidity.rank_names, subst, errors);
         }
         check_declared_dtype_bounds(name, &self.type_names, &self.dtype_bounds, subst, errors);
@@ -239,6 +239,8 @@ fn report_substitution_ledgers(
     // attribution local and prevents one declaration's deferrals from leaking
     // into the next.
     validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
+    // chelis#3180: a `drop` operand pinned to a borrow after its call.
+    validate_deferred_drop_operands(subst, errors);
     // chelis#3009: a `sum`-family result whose precision variable nothing
     // bound is decided over that variable's dtypes before the ledger reports.
     subst.decide_pending_sum_results(None);

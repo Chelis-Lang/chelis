@@ -34,6 +34,9 @@ fn additional_core_payloads_reject_bad_shapes_and_owners() {
         "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
         "(bind {destructure: false} x (lit {} 1))",
         "(var {destructure: true} x)",
+        "(app {accumulator: (t-prim {} float64)} (var {} sum) (lit {} 1))",
+        "(app {accumulator: (t-tensor {} (t-prim {} f64))} (var {} sum) (lit {} 1))",
+        "(var {accumulator: (t-prim {} f64)} x)",
     ] {
         assert!(parse_str(source).is_err(), "accepted {source}");
     }
@@ -51,9 +54,9 @@ fn source_arguments_and_extension_values_are_data() {
 }
 
 #[test]
-fn registered_inventory_contains_twenty_nine_compiler_owned_keys() {
+fn registered_inventory_contains_every_compiler_owned_key() {
     let keys = chelis_deep::metadata::REGISTERED_METADATA_KEYS;
-    assert_eq!(keys.len(), 29);
+    assert_eq!(keys.len(), 30);
     assert_eq!(TYPED_CASES.len(), keys.len());
     for key in keys {
         assert!(
@@ -61,7 +64,7 @@ fn registered_inventory_contains_twenty_nine_compiler_owned_keys() {
             "{key}"
         );
     }
-    for key in ["effect", "literal_source", "destructure"] {
+    for key in ["effect", "literal_source", "destructure", "accumulator"] {
         assert!(keys.contains(&key), "{key}");
     }
 }
@@ -214,6 +217,10 @@ const TYPED_CASES: &[(&str, &str)] = &[
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),
+    (
+        "accumulator",
+        "(app {accumulator: (t-prim {} f64)} (var {} sum) (var {} x) (lit {} 0))",
+    ),
 ];
 
 #[test]

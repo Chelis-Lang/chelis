@@ -253,12 +253,12 @@ fn cast_element_and_extent_order(native: bool) {
                     "{output}"
                 );
                 assert!(!output.contains("extent `"), "{output}");
-                if !native {
-                    assert!(
-                        output.contains("fractional float-to-int conversion"),
-                        "{output}"
-                    );
-                }
+                // A cast trap ends on its trap line in both lanes; eval
+                // appends no hint after it.
+                assert!(
+                    !output.contains("fractional float-to-int conversion"),
+                    "{output}"
+                );
             }
         }
     }

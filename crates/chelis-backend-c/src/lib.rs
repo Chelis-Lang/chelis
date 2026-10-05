@@ -2254,7 +2254,13 @@ int main(int argc, char **argv) {{
                 );
             } else {
                 assert!(!run.status.success(), "invalid mode {mode} succeeded");
-                let brand = if mode == 7 { "Domain:" } else { "Overflow:" };
+                // Mode 7's element-count disagreement is spec/04 section
+                // 4.7's `Domain` trap in `reshape`.
+                let brand = if mode == 7 {
+                    "numeric trap: domain in reshape at i64"
+                } else {
+                    "Overflow:"
+                };
                 assert!(stderr.contains(brand), "mode {mode}: {stderr}");
             }
             assert!(!stderr.contains("runtime error:"), "mode {mode}: {stderr}");

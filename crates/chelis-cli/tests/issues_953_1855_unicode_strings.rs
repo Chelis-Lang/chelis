@@ -102,27 +102,27 @@ fn character_builtin_domain_errors_match_in_eval_and_compiled_lanes() {
         (
             "char_code_empty",
             "char_code(\"\")",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 0 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char_code_many",
             "char_code(\"ab\")",
-            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+            "char_code operand has 2 Unicode scalar values, expected exactly one\nnumeric trap: domain in char_code at i64",
         ),
         (
             "char_from_code_negative",
             "char_from_code(cast(-1, i64))",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code -1 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char_from_code_surrogate",
             "char_from_code(cast(55296, i64))",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 55296 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
         (
             "char_from_code_too_large",
             "char_from_code(cast(1114112, i64))",
-            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+            "char_from_code code 1114112 is not a Unicode scalar value\nnumeric trap: domain in char_from_code at i64",
         ),
     ] {
         let (_dir, reef_home, app) = make_app(stem);

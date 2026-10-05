@@ -141,7 +141,9 @@ fn vmapped_gather_rejects_an_index_outside_the_row_even_when_inside_the_batch() 
         .unwrap();
     assert!(!eval.status.success(), "eval accepted an invalid row index");
     assert!(
-        String::from_utf8_lossy(&eval.stderr).contains("gather index 4 out of bounds"),
+        String::from_utf8_lossy(&eval.stderr).contains("gather index 4 out of bounds")
+            && String::from_utf8_lossy(&eval.stderr)
+                .contains("numeric trap: domain in gather at i64"),
         "{}",
         String::from_utf8_lossy(&eval.stderr)
     );

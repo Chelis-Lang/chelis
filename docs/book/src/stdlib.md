@@ -38,9 +38,13 @@ tensor and its sum.
   `eq`, `neq`, `gt`, `gte`, and `lte` compare values and return `bool` values
   or tensors. `and`, `or`, and `not` operate on booleans.
 - `neg` and `abs` accept signed integers and floats. `recip`, `exp`, `log`,
-  `sqrt`, `sin`, `cos`, `tan`, and `atan` accept floats. `floor`, `ceil`, and
+  `sqrt`, `sin`, `cos`, `tan`, `atan`, `erf`, and `erfc` accept floats. `floor`, `ceil`, and
   `round` also accept integers, for which they are identities.
-- `relu`, `sigmoid`, `tanh`, `silu`, and `gelu` are float activations.
+- `relu`, `sigmoid`, `tanh`, `silu`, `gelu`, and `gelu_tanh` are float
+  activations. `gelu` is the exact `x * Phi(x)` with `Phi` the standard normal
+  CDF; `gelu_tanh` is the tanh approximation that GPT-2-style models use.
+- `standard_normal_cdf` is the standard normal CDF `Phi`, built from the correctly
+  rounded `erfc`; `Std.Contracts.normal_cdf` calls it.
 
 ### Reductions and windows
 
@@ -217,9 +221,8 @@ from a clock that never runs backwards, and `monotonic_until(a, b)` is the exact
 no other datetime function takes one and it does not convert to an `Instant`. Both reads carry
 `IO`, so every caller carries it, declared or inferred. A failed read reports
 `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
-the underlying read. The clocks run under `chelis eval` and `chelis test`;
-`chelis build` does not compile them
-([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
+the underlying read. The clocks run under `chelis eval`, `chelis test`, and
+compiled C, which share one definition of each read.
 
 ### Business days
 

@@ -142,10 +142,11 @@ fn eval_file_agrees_with_deep_then_eval() {
     }
 }
 
-/// Entry points that check and evaluate the program they are handed as text
-/// or as a parsed module (`eval`, `prepare_eval`, `eval_in_context` and
-/// their variants, the CLI's text wrappers over them, and the obligation
-/// engine's source entry).
+/// Entry points that check and then evaluate or lower the program they are
+/// handed as text or as a parsed module (`eval`, `prepare_eval`,
+/// `eval_in_context` and their variants, the CLI's text wrappers over them,
+/// the obligation engine's source entry, and `compiler::lower`, which the
+/// prove Beacon lane fed printed Surf until chelis#3172).
 const TEXT_EVALUATORS: &[&str] = &[
     "eval",
     "eval_for_target",
@@ -163,6 +164,7 @@ const TEXT_EVALUATORS: &[&str] = &[
     "try_eval_result_for_target",
     "eval_bool_with_bindings",
     "run_surf_source_obligations",
+    "lower",
 ];
 
 #[derive(Default)]
@@ -253,6 +255,7 @@ fn no_cli_or_prove_function_evaluates_printed_surf() {
         "obligation_run.rs",
         "property_runner.rs",
         "std_graph.rs",
+        "beacon.rs",
     ] {
         assert!(
             sources
@@ -267,8 +270,8 @@ fn no_cli_or_prove_function_evaluates_printed_surf() {
         .collect::<Vec<_>>();
     assert!(
         found.is_empty(),
-        "a function evaluates the Surf printer's output instead of the program it holds \
-         (chelis#3129):\n{}",
+        "a function evaluates or lowers the Surf printer's output instead of the program \
+         it holds (chelis#3129, chelis#3172):\n{}",
         found.join("\n")
     );
 }

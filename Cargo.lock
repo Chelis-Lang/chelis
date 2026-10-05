@@ -477,6 +477,7 @@ dependencies = [
 name = "chelis-backend-c"
 version = "0.18.12"
 dependencies = [
+ "chelis-abi",
  "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
@@ -923,6 +924,7 @@ version = "0.18.12"
 dependencies = [
  "chelis-runtime",
  "chelis-runtime-bundle-macro",
+ "object",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1002,6 +1004,7 @@ name = "chelis-types"
 version = "0.18.12"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-crmath",
  "chelis-deep",
  "chelis-macros",

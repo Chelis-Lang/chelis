@@ -6228,6 +6228,32 @@ fn check_refuses_a_move_after_drop() {
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }
 
+/// chelis#3180: the operand of `drop` is owned ([05-OP-67]), so `drop(&x)` is a
+/// type error rather than an implicit consume of `x`.
+#[test]
+fn check_refuses_a_borrowed_drop_operand() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("drop_borrow.ch");
+    write_file(
+        &path,
+        "module M.Main\ndef f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  c = drop(&x)\n  x\n}\ndef xs() -> List[f32] = [1.5, 2.5, 3.5]\nout = f(to_tensor(xs()))\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("TypeMismatch")
+                && error["expected"].as_str() == Some("an owned value")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("drop argument 1"))
+        }),
+        "expected a TypeMismatch for the borrowed drop operand; got {errors:?}"
+    );
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
 #[test]
 fn check_reports_macro_provenance_for_type_errors() {
     let dir = tempdir().expect("tempdir");
@@ -7546,8 +7572,24 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
 
 #[test]
 fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
-    // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
-    // Tanh approximation matches the host-runtime `activation_gelu_f32` helper.
+    // gelu_tanh(0) = 0; gelu_tanh(1) ≈ 0.84119; gelu_tanh(-1) ≈ -0.15881.
+    run_activation_parity(
+        "bucket3_gelu_tanh",
+        r#"
+def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu_tanh(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = gelu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu_tanh pointwise (tanh-approx)")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_gelu_exact_runs_in_eval_and_c_lanes() {
+    // gelu(x) = x * Phi(x): gelu(1) ≈ 0.8413447, gelu(-1) ≈ -0.1586553, which
+    // the tanh approximation misses by about 2.2e-4.
     run_activation_parity(
         "bucket3_gelu",
         r#"
@@ -7555,8 +7597,8 @@ def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu(x)
 
 input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
 actual = gelu_apply(input)
-expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-approx)")
+expected = to_tensor([cast(0.0, f32), cast(0.8413447, f32), cast(-0.1586553, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.00001, "gelu pointwise (exact)")
 "#,
     );
 }
@@ -9385,6 +9427,65 @@ fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
             .output()
             .expect("compiled program should run");
         assert_eq!(last_line(&run), expected, "{stem}: compiled C");
+    }
+}
+
+/// chelis#2985: every spec/04 §5.7.1 permitted accumulator pair of `sum`
+/// and `einsum`, and every float pair of `matmul`, written with Surf's
+/// `accumulator=` argument, prints the same values in eval and in a built
+/// executable. The f32-with-f64 rows and the i32-with-i64 rows print a total
+/// only the wider accumulator holds (16777218 and 2147483648). The named-axis
+/// form keeps the accumulator at every stage, and its default i8 total is the
+/// i32 sum_result rather than a trap; borrowed operands behave the same.
+#[test]
+fn explicit_accumulator_pairs_agree_in_eval_and_c() {
+    let dir = tempdir().expect("tempdir");
+    for (stem, source, expected) in [
+        (
+            "pairs",
+            include_str!("fixtures/explicit_accumulator/pairs.ch"),
+            include_str!("fixtures/explicit_accumulator/pairs.expected"),
+        ),
+        (
+            "named_axes",
+            include_str!("fixtures/explicit_accumulator/named_axes.ch"),
+            include_str!("fixtures/explicit_accumulator/named_axes.expected"),
+        ),
+        (
+            "borrowed",
+            include_str!("fixtures/explicit_accumulator/borrowed.ch"),
+            include_str!("fixtures/explicit_accumulator/borrowed.expected"),
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("run chelis eval");
+        assert!(eval.status.success(), "{stem} eval: {eval:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&eval.stdout),
+            expected,
+            "{stem} eval"
+        );
+        let out_dir = dir.path().join(format!("{stem}_out"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = StdCommand::new(out_dir.join(stem))
+            .output()
+            .expect("compiled program should run");
+        assert!(run.status.success(), "{stem} run: {run:?}");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "{stem} C");
     }
 }
 

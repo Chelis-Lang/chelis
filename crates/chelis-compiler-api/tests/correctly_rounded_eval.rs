@@ -2,8 +2,8 @@
 //! primitive and every section 3.3 activation as its pinned graph of
 //! correctly rounded primitives, bit for bit against an independent reference
 //! built from `chelis-crmath` (spec/design/correctly_rounded_math.md section 8,
-//! tests 6-7). Also the `sin` adjoint through `cos` (chelis#2989), `gelu` at the
-//! largest finite inputs (chelis#2997), the `tanh` adjoint, and the IEEE default
+//! tests 6-7). Also the `sin` adjoint through `cos` (chelis#2989), `gelu` and
+//! `gelu_tanh` at the largest finite inputs (chelis#2997), the `tanh` adjoint, and the IEEE default
 //! floating-point environment around evaluation (section 6).
 use chelis_compiler_api::compiler::{compile, eval_selected, prepare_eval_in_context};
 use chelis_compiler_api::schema::{
@@ -175,7 +175,15 @@ fn inputs_f32() -> Vec<f32> {
 // requires; a canonical NaN in stays NaN through the later primitives, so
 // finalizing each graph's result equals finalizing every primitive.
 macro_rules! reference_graphs {
-    ($module:ident, $t:ty, $canonical_nan:expr, $exp:path, $tanh:path) => {
+    (
+        $module:ident,
+        $t:ty,
+        $canonical_nan:expr,
+        $exp:path,
+        $tanh:path,
+        $erfc:path,
+        $phi:expr
+    ) => {
         mod $module {
             fn canonical(x: $t) -> $t {
                 if x.is_nan() {
@@ -189,15 +197,46 @@ macro_rules! reference_graphs {
                 canonical(1.0 / (1.0 + $exp(-x)))
             }
 
-            pub fn silu(x: $t) -> $t {
-                canonical(x * sigmoid(x))
+            // m(x): -0.0 at -inf, x everywhere else.
+            fn guard(x: $t) -> $t {
+                if x < <$t>::MIN { -0.0 } else { x }
             }
 
-            pub fn gelu(x: $t) -> $t {
+            pub fn silu(x: $t) -> $t {
+                canonical(guard(x) * sigmoid(x))
+            }
+
+            pub fn gelu_tanh(x: $t) -> $t {
                 let cubic = 0.044715_f64 as $t;
                 let c = 0.797_884_560_802_865_4_f64 as $t;
                 let u = c * (x + cubic * ((x * x) * x));
-                canonical(x * sigmoid(2.0 * u))
+                canonical(guard(x) * sigmoid(2.0 * u))
+            }
+
+            // Phi at the type's own width: (c, cl, k, s) are 1/sqrt(2), its
+            // residual, 2/sqrt(pi), and the Veltkamp splitter at this width.
+            pub fn phi(x: $t) -> $t {
+                let (c, cl, k, s): ($t, $t, $t, $t) = $phi;
+                let e = $erfc(-x * c);
+                let z = if x.abs() < 64.0 { x } else { 0.0 };
+                let a = -z;
+                let th = a * c;
+                let ta = s * a;
+                let ah = ta - (ta - a);
+                let al = a - ah;
+                let tc = s * c;
+                let ch = tc - (tc - c);
+                let cr = c - ch;
+                let tl = ((((ah * ch - th) + ah * cr) + al * ch) + al * cr) + a * cl;
+                canonical(0.5 * (e - (k * $exp(-(th * th))) * tl))
+            }
+
+            pub fn standard_normal_cdf(x: $t) -> $t {
+                phi(x)
+            }
+
+            pub fn gelu(x: $t) -> $t {
+                canonical(guard(x) * phi(x))
             }
 
             pub fn tanh(x: $t) -> $t {
@@ -230,25 +269,9 @@ macro_rules! reference_graphs {
                 exps.iter().map(|value| canonical(value / sum)).collect()
             }
 
-            // Std.Contracts.normal_cdf and its erf_approx, primitive by primitive.
+            // Std.Contracts.normal_cdf is standard_normal_cdf.
             pub fn normal_cdf(x: $t) -> $t {
-                let k = |value: f64| value as $t;
-                let erf = |x: $t| -> $t {
-                    let ax = if x < 0.0 { -x } else { x };
-                    if ax < k(0.00001) {
-                        // The library spells 2/sqrt(pi) as 1.1283791670955126.
-                        return x * k(std::f64::consts::FRAC_2_SQRT_PI);
-                    }
-                    let t = 1.0 / (1.0 + k(0.3275911) * ax);
-                    let poly = t
-                        * (k(0.254829592)
-                            + t * (k(-0.284496736)
-                                + t * (k(1.421413741)
-                                    + t * (k(-1.453152027) + t * k(1.061405429)))));
-                    let y = 1.0 - poly * $exp(-(ax * ax));
-                    if x < 0.0 { -y } else { y }
-                };
-                canonical(k(0.5) * (1.0 - erf(-(x * k(0.7071067811865475)))))
+                phi(x)
             }
         }
     };
@@ -259,14 +282,28 @@ reference_graphs!(
     f32,
     0x7fc0_0000,
     chelis_crmath::exp_f32,
-    chelis_crmath::tanh_f32
+    chelis_crmath::tanh_f32,
+    chelis_crmath::erfc_f32,
+    (
+        std::f32::consts::FRAC_1_SQRT_2,
+        1.210_161_75e-8,
+        std::f32::consts::FRAC_2_SQRT_PI,
+        4097.0
+    )
 );
 reference_graphs!(
     ref64,
     f64,
     0x7ff8_0000_0000_0000,
     chelis_crmath::exp_f64,
-    chelis_crmath::tanh_f64
+    chelis_crmath::tanh_f64,
+    chelis_crmath::erfc_f64,
+    (
+        std::f64::consts::FRAC_1_SQRT_2,
+        -4.833_646_656_726_457e-17,
+        std::f64::consts::FRAC_2_SQRT_PI,
+        134_217_729.0
+    )
 );
 
 /// An activation's surface name and its reference.
@@ -291,11 +328,15 @@ fn assert_bits(op: &str, dtype: &str, inputs: &[u64], got: &[u64], want: &[u64])
 fn f32_activations_match_the_correctly_rounded_reference_bit_for_bit() {
     let inputs = inputs_f32();
     let bits: Vec<u64> = inputs.iter().map(|x| u64::from(x.to_bits())).collect();
-    let cases: [Case<f32>; 4] = [
+    let cases: [Case<f32>; 8] = [
         ("tanh", ref32::tanh),
+        ("erf", chelis_crmath::erf_f32),
+        ("erfc", chelis_crmath::erfc_f32),
         ("sigmoid", ref32::sigmoid),
         ("silu", ref32::silu),
         ("gelu", ref32::gelu),
+        ("gelu_tanh", ref32::gelu_tanh),
+        ("standard_normal_cdf", ref32::standard_normal_cdf),
     ];
     for (op, reference) in cases {
         let source = unary_source("f32", inputs.len(), &format!("{op}(x)"));
@@ -312,11 +353,15 @@ fn f32_activations_match_the_correctly_rounded_reference_bit_for_bit() {
 fn f64_activations_match_the_correctly_rounded_reference_bit_for_bit() {
     let inputs = inputs_f64(f64::MAX);
     let bits: Vec<u64> = inputs.iter().map(|x| x.to_bits()).collect();
-    let cases: [Case<f64>; 4] = [
+    let cases: [Case<f64>; 8] = [
         ("tanh", ref64::tanh),
+        ("erf", chelis_crmath::erf_f64),
+        ("erfc", chelis_crmath::erfc_f64),
         ("sigmoid", ref64::sigmoid),
         ("silu", ref64::silu),
         ("gelu", ref64::gelu),
+        ("gelu_tanh", ref64::gelu_tanh),
+        ("standard_normal_cdf", ref64::standard_normal_cdf),
     ];
     for (op, reference) in cases {
         let source = unary_source("f64", inputs.len(), &format!("{op}(x)"));
@@ -455,14 +500,15 @@ fn normal_cdf_matches_the_correctly_rounded_reference_bit_for_bit() {
     }
 }
 
-/// chelis#2997: every finite f16 input, against the pinned graph evaluated at
-/// f16 (each primitive correctly rounded at f32, then finalized once).
+/// chelis#2997: every finite f16 input, against the pinned `gelu_tanh` graph
+/// evaluated at f16 (each primitive correctly rounded at f32, then finalized
+/// once).
 #[test]
-fn gelu_is_the_pinned_graph_on_every_finite_f16_input() {
+fn gelu_tanh_is_the_pinned_graph_on_every_finite_f16_input() {
     let r = |x: f32| f16::from_f32(x).to_f32();
     let k = |x: f64| f16::from_bits(storage_reference(x.to_bits(), 64, Output::F16)).to_f32();
     let sigmoid = |x: f32| r(1.0 / r(1.0 + chelis_crmath::exp_f16(f16::from_f32(-x)).to_f32()));
-    let gelu = |x: f32| {
+    let gelu_tanh = |x: f32| {
         let u = r(k(0.797_884_560_802_865_4) * r(x + r(k(0.044715) * r(r(x * x) * x))));
         r(x * sigmoid(r(2.0 * u)))
     };
@@ -471,31 +517,68 @@ fn gelu_is_the_pinned_graph_on_every_finite_f16_input() {
         .map(u64::from)
         .collect();
     let got = eval_main(
-        &unary_source("f16", inputs.len(), "gelu(x)"),
+        &unary_source("f16", inputs.len(), "gelu_tanh(x)"),
         "f16",
         &inputs,
     );
     let want: Vec<u64> = inputs
         .iter()
-        .map(|bits| u64::from(f16::from_f32(gelu(f16::from_bits(*bits as u16).to_f32())).to_bits()))
+        .map(|bits| {
+            u64::from(f16::from_f32(gelu_tanh(f16::from_bits(*bits as u16).to_f32())).to_bits())
+        })
         .collect();
-    assert_bits("gelu", "f16", &inputs, &got, &want);
+    assert_bits("gelu_tanh", "f16", &inputs, &got, &want);
     let max = inputs
         .iter()
         .position(|bits| *bits == u64::from(f16::MAX.to_bits()))
         .unwrap();
-    assert_eq!(got[max], u64::from(f16::MAX.to_bits()), "gelu(f16::MAX)");
+    assert_eq!(
+        got[max],
+        u64::from(f16::MAX.to_bits()),
+        "gelu_tanh(f16::MAX)"
+    );
+}
+
+/// Every finite f16 input: `standard_normal_cdf` is the f32 `Phi` graph on the exact
+/// widening, finalized once, and `gelu` multiplies the input by that f16
+/// value (spec/05 section 3.3).
+#[test]
+fn gelu_and_standard_normal_cdf_are_the_pinned_graph_on_every_finite_f16_input() {
+    let inputs: Vec<u64> = (0..=u16::MAX)
+        .filter(|bits| f16::from_bits(*bits).is_finite())
+        .map(u64::from)
+        .collect();
+    let phi = |x: f32| f16::from_f32(ref32::phi(x)).to_f32();
+    for (op, reference) in [
+        ("standard_normal_cdf", &phi as &dyn Fn(f32) -> f32),
+        ("gelu", &|x: f32| x * phi(x)),
+    ] {
+        let got = eval_main(
+            &unary_source("f16", inputs.len(), &format!("{op}(x)")),
+            "f16",
+            &inputs,
+        );
+        let want: Vec<u64> = inputs
+            .iter()
+            .map(|bits| {
+                u64::from(f16::from_f32(reference(f16::from_bits(*bits as u16).to_f32())).to_bits())
+            })
+            .collect();
+        assert_bits(op, "f16", &inputs, &got, &want);
+    }
 }
 
 #[test]
-fn gelu_at_the_largest_finite_input_is_the_input() {
+fn gated_activations_at_the_largest_finite_input_are_the_input() {
     for (dtype, max) in [
         ("bf16", u64::from(bf16::MAX.to_bits())),
         ("f32", u64::from(f32::MAX.to_bits())),
         ("f64", f64::MAX.to_bits()),
     ] {
-        let got = eval_main(&unary_source(dtype, 1, "gelu(x)"), dtype, &[max]);
-        assert_eq!(got, vec![max], "{dtype} gelu(max finite) must be the input");
+        for op in ["gelu", "gelu_tanh"] {
+            let got = eval_main(&unary_source(dtype, 1, &format!("{op}(x)")), dtype, &[max]);
+            assert_eq!(got, vec![max], "{dtype} {op}(max finite) must be the input");
+        }
     }
 }
 
@@ -694,6 +777,6 @@ fn reference_inputs_cover_both_saturated_and_unsaturated_regions() {
     assert!(
         inputs
             .iter()
-            .any(|x| ref32::gelu(*x) == *x && x.is_finite() && *x > 1e30)
+            .any(|x| ref32::gelu_tanh(*x) == *x && x.is_finite() && *x > 1e30)
     );
 }

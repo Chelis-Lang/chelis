@@ -199,15 +199,13 @@ fn integer_tensors_of_different_lengths_fail_in_both_lanes() {
                   def three(seed: i64) -> List[i32] = [1i32, 2i32, 3i32]\n\
                   def two(seed: i64) -> List[i32] = [1i32, 2i32]\n\
                   result = to_list(bitxor(to_tensor(three(0i64)), to_tensor(two(0i64))))\n";
+    // spec/04 section 4.7: both lanes trap `Domain` in `bitxor` with the
+    // same context line (chelis#3107).
+    let failure = "bitxor operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
+                   numeric trap: domain in bitxor at i64";
     let refused = refusal(source);
-    assert!(
-        refused.contains("tensor shapes must match"),
-        "eval reported {refused}"
-    );
+    assert!(refused.contains(failure), "eval reported {refused}");
     let generated = ownership_support::emit(source, "lengths_differ");
     let stderr = ownership_support::run_failure_stderr(&generated, "");
-    assert!(
-        stderr.contains("elementwise operand shape mismatch"),
-        "{stderr}"
-    );
+    assert!(stderr.contains(failure), "{stderr}");
 }

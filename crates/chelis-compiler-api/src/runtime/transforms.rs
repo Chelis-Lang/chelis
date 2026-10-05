@@ -682,7 +682,7 @@ impl<'a> EvalContext<'a> {
         let prepared_inputs =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare_input)
                 .map_err(|error| {
-                if provider_failed {
+                if provider_failed || is_numeric_trap_failure(&error) {
                     error
                 } else {
                     let kind_label = match kind {
@@ -723,7 +723,7 @@ impl<'a> EvalContext<'a> {
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.
-            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+            if is_numeric_trap_failure(&err) {
                 return err;
             }
             let kind_label = match kind {
@@ -1160,6 +1160,16 @@ fn stage_grad_list_value(
              element is not a supported scalar, tensor, List, tuple, ADT, or unit value"
         )),
     }
+}
+
+/// Whether an evaluation failure is a numeric trap: a canonical [04-NUM-9]
+/// line, after any context lines (spec/04-type-system.md section 4.7). A
+/// trap renders byte-identically on every surface, so a transform's
+/// evaluation wrapper must pass it through unchanged.
+pub(super) fn is_numeric_trap_failure(failure: &str) -> bool {
+    failure
+        .lines()
+        .any(chelis_types::NumericTrap::is_canonical_line)
 }
 
 #[cfg(test)]

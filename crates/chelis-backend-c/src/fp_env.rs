@@ -116,6 +116,8 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Atan
         | RiscOp::Tanh
         | RiscOp::Softmax { .. }
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -224,6 +226,8 @@ pub fn fused_step_nan_finalization(op: &chelis_ir::dag::FusedStepOp) -> NanFinal
         | FusedStepOp::Tan
         | FusedStepOp::Atan
         | FusedStepOp::Tanh
+        | FusedStepOp::Erf
+        | FusedStepOp::Erfc
         | FusedStepOp::Abs
         | FusedStepOp::Floor
         | FusedStepOp::Ceil

@@ -26,6 +26,7 @@
 use chelis_unord::UnordMap;
 
 use super::checked::{InferenceProduct, PostAppCall, PostAppReplay};
+use super::common::sum_result_bound_note;
 use super::expr_pattern::family_members;
 use super::type_derivation::{DerivationStep, TypeDerivation, resolve_type_derivation};
 use crate::adt::AdtRegistry;
@@ -33,7 +34,7 @@ use crate::env::Env;
 use crate::env::{free_dvars, free_rvars, free_tvars};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, Prim, RankVar, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::types::{Dim, Prim, RankVar, TensorPrec, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::{Subst, unify};
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
@@ -81,6 +82,7 @@ fn render_declared_rank(rank_names: &UnordMap<RankVar, String>, rv: RankVar) -> 
 pub(super) fn check_declared_tvars_rigid(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
+    declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -102,13 +104,26 @@ pub(super) fn check_declared_tvars_rigid(
     for binder in binders {
         let resolved = subst.apply(&Type::Var(binder));
         let Type::Var(resolved_var) = resolved else {
+            let small_integer = declared_bounds
+                .get(&binder)
+                .copied()
+                .flatten()
+                .is_some_and(|bound| bound.admits(Prim::Int8) || bound.admits(Prim::Int16));
+            let note = match &resolved {
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => {
+                    sum_result_bound_note(small_integer, *prim)
+                }
+                _ => None,
+            }
+            .map(|note| format!("; {note}"))
+            .unwrap_or_default();
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!(
                     "declared type parameter {} of `{declaration}` was narrowed to \
                      `{resolved}` by the function body: an authored type binder is rigid and \
                      the body must type-check for every instantiation \
-                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                     (spec/04-type-system.md §3.1.3 [04-INF-6]){note}",
                     render_declared_binder(type_names, binder),
                 ),
                 vec![

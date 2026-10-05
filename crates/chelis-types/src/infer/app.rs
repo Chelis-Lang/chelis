@@ -63,6 +63,9 @@ pub(super) fn infer_app(
         builtins::builtin_decl(name)
     });
     let checkpoint = errors.checkpoint();
+    // spec/04 §5.7: an explicit `accumulator=` is checked against the
+    // operand dtype after the call checks at its default accumulator.
+    let accumulator = node.meta().accumulator();
     let result = infer_app_inner(
         expr,
         node,
@@ -72,8 +75,39 @@ pub(super) fn infer_app(
         adt_reg,
         errors,
         product,
-        expected_result,
+        if accumulator.is_some() {
+            None
+        } else {
+            expected_result
+        },
     );
+    let result = match accumulator {
+        Some(accumulator) if errors.iter_since(checkpoint).next().is_none() => {
+            let operation = builtin.map(|builtin| builtin.name);
+            match accumulated_result(
+                operation,
+                accumulator.expression(),
+                kids,
+                &result,
+                product,
+                subst,
+                errors,
+            ) {
+                Ok(result) => result,
+                Err(message) => {
+                    let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+                    return report(
+                        errors,
+                        match TypeDiagnosticLocation::from_expr(expr) {
+                            Some(location) => location.attach(error),
+                            None => error,
+                        },
+                    );
+                }
+            }
+        }
+        _ => result,
+    };
     if errors.iter_since(checkpoint).next().is_none()
         && let Some(builtin) = builtin
     {
@@ -418,6 +452,28 @@ fn infer_app_inner(
                 1,
                 arg_tys.len()
             ));
+        }
+        // The operand is owned, so a borrowed one is a type error rather
+        // than an implicit consume of its owner.
+        // An operand still unresolved here is re-checked against the final
+        // substitution when the declaration closes (chelis#3180).
+        match subst.apply(&arg_tys[0]) {
+            operand @ Type::Ref(_) => {
+                let error = borrowed_drop_operand_error(&operand);
+                let error = CheckError {
+                    message: with_node_provenance(node, error.message.clone()),
+                    ..error
+                };
+                return_with_collection_cleanup!(report_at_check_site(
+                    errors,
+                    error,
+                    CheckSite::Expr(expr),
+                ));
+            }
+            Type::Var(tv) => {
+                subst.record_deferred_drop_operand(tv, TypeDiagnosticLocation::from_expr(expr));
+            }
+            _ => {}
         }
         return_with_collection_cleanup!(Type::Unit);
     }
@@ -986,4 +1042,98 @@ fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], su
         }
         subst.insert_dim(root, Dim::Wildcard);
     }
+}
+
+/// [05-OP-67]: the operand of `drop` is owned, so a borrowed one is a type
+/// error rather than an implicit consume of its owner. Shared by the eager
+/// check in the `drop` route and the deferred one at declaration close.
+pub(super) fn borrowed_drop_operand_error(operand: &Type) -> CheckError {
+    CheckError::with_types(
+        CheckErrorKind::TypeMismatch,
+        format!(
+            "drop argument 1: expected an owned value, got borrowed `{operand}`; `drop` ends its \
+             operand's lifetime and cannot take a borrow ([05-OP-67])"
+        ),
+        "an owned value".to_string(),
+        operand.to_string(),
+        vec!["Drop the owner itself: write `drop(x)`, not `drop(&x)`".to_string()],
+    )
+}
+
+/// chelis#3180: re-check each `drop` operand that was unresolved when its call
+/// was inferred against the declaration's final substitution.
+pub(super) fn validate_deferred_drop_operands(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    for (tv, location) in subst.take_deferred_drop_operands() {
+        let operand = subst.apply(&Type::Var(tv));
+        if matches!(operand, Type::Ref(_)) {
+            let error = borrowed_drop_operand_error(&operand);
+            errors.push(match location {
+                Some(location) => location.attach(error),
+                None => error,
+            });
+        }
+    }
+}
+
+/// The result of a `matmul`, `sum` or `einsum` call with an explicit
+/// `accumulator=`: the call's default-accumulator `result` at
+/// `sum_result(p, accumulator)` (`p` for `matmul`), once spec/04 §5.7.1's
+/// permitted-pairs table admits the operand dtype `p` with that accumulator.
+fn accumulated_result(
+    operation: Option<&str>,
+    accumulator: &deep::Expr,
+    kids: &[deep::Expr],
+    result: &Type,
+    product: &InferenceProduct,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<Type, String> {
+    let operation = match operation {
+        Some(operation @ ("matmul" | "sum" | "einsum")) => operation,
+        Some(operation) => {
+            return Err(format!(
+                "`{operation}` takes no `accumulator=` argument: only `matmul`, `sum` and \
+                 `einsum` select an accumulator (spec/04 §5.7); remove the argument"
+            ));
+        }
+        None => {
+            return Err(
+                "`accumulator=` applies only to a call of the built-in `matmul`, `sum` \
+                 or `einsum` (spec/04 §5.7); remove the argument"
+                    .to_string(),
+            );
+        }
+    };
+    let accumulator = stamped_parts(accumulator)
+        .filter(|(tag, _, _)| *tag == DeepTag::TPrim)
+        .and_then(|(_, _, parts)| parts.first().and_then(symbol_name))
+        .and_then(Prim::parse_name)
+        .ok_or_else(|| {
+            format!("`{operation}`'s `accumulator=` must name a dtype (spec/04 §5.7)")
+        })?;
+    let operand = kids
+        .get(if operation == "einsum" { 2 } else { 1 })
+        .and_then(|operand| product.current_owner_type(operand, subst, errors));
+    // A borrowed operand is decided on its referent.
+    let operand = match operand.map(|operand| subst.apply(&operand)) {
+        Some(Type::Ref(referent)) => Some(subst.apply(&referent)),
+        operand => operand,
+    };
+    let operand = match operand {
+        Some(Type::Tensor(_, TensorPrec::Concrete(prim))) => prim,
+        _ => {
+            return Err(format!(
+                "`{operation}` with `accumulator={}` is decided over the operand's dtype at \
+                 the call (spec/04 §5.7.1's permitted-pairs table), and this operand's dtype is \
+                 a type variable, which the checker does not decide an explicit accumulator \
+                 over; omit `accumulator=`, or pass an operand of concrete dtype",
+                accumulator.name()
+            ));
+        }
+    };
+    let result_precision = explicit_accumulator_result(operation, operand, accumulator)?;
+    Ok(match subst.apply(result) {
+        Type::Tensor(dims, _) => Type::Tensor(dims, TensorPrec::Concrete(result_precision)),
+        other => other,
+    })
 }

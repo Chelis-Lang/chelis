@@ -2378,6 +2378,7 @@ fn validate_surface_expression(expression: &Expr) -> Result<(), ResugarError> {
                 validate_surface_expression(argument)?;
             }
         }
+        Expr::Accumulate(call, _, _) => validate_surface_expression(call)?,
         Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             for item in items {
                 validate_surface_expression(item)?;
@@ -2692,6 +2693,26 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Lit => resugar_literal(node),
         T::App => {
             at_least(&node, 1)?;
+            // spec/03 §1.1 `accumulator`: the call's trailing
+            // `accumulator=<dtype>` argument.
+            if let Some(accumulator) = node.meta.accumulator() {
+                let precision = primitive_type_name(accumulator.expression()).ok_or(
+                    ResugarError::InvalidSurfaceMetadata {
+                        key: "accumulator".to_string(),
+                        expected: "a `(t-prim {} precision)` dtype",
+                    },
+                )?;
+                let function = resugar_expression_inner(&node.children[0])?;
+                let arguments = node.children[1..]
+                    .iter()
+                    .map(resugar_expression_inner)
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Expr::Accumulate(
+                    Box::new(Expr::Apply(Box::new(function), arguments, node.span)),
+                    precision.to_string(),
+                    node.span,
+                ));
+            }
             if let Some(items) = resugar_finite_list(&node)? {
                 return Ok(Expr::List(items, node.span));
             }

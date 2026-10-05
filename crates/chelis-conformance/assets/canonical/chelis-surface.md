@@ -101,6 +101,8 @@ separately named modular operation applies (`spec/04` [04-NUM-3/7]).
 | `cos` | `-g*sin(x)` |
 | `tan` | `g/cos²(x)` |
 | `atan` | `g/(1+x²)` |
+| `erf` | `g*(2/sqrt(pi))*exp(-x²)` |
+| `erfc` | `-g*(2/sqrt(pi))*exp(-x²)` |
 | `sqrt` | `g/(2*sqrt(x))` |
 | `abs` | `g*sign(x)` (0 at x=0) for floats; integer form is forward-only |
 | `floor` | float path: `grad` rejects (`PiecewiseConstant`); integer form is identity |
@@ -134,8 +136,15 @@ normalized original positions in descending order. For `sum`, the default
 `bf16`/`f16` accumulator is `f32`, and the result returns to `bf16`/`f16`.
 Other defaults are
 `f32→f32`, `f64→f64`, `i8/i16→i32`, `i32→i32`, and `i64→i64`.
-An explicit wider accumulator follows the exact result matrix in
-`spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
+`sum`, `cumsum`, `trace`, and `einsum` all return
+`sum_result(p, default(p))`, so over `i8` or `i16` each returns `i32`: a
+total of N values needs more bits than its elements, so the stored tensor
+keeps its dtype and only the aggregate widens. Declare the result as `i32`,
+pass `accumulator=i64` to `sum` or `einsum`, or narrow it with an explicit
+`cast`.
+An explicit wider accumulator, written as the final argument
+`accumulator=<dtype>` (`sum(x, 0i32, accumulator=f64)`), follows the exact
+result matrix in `spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
 accumulator parameter.
 
 ### 1.4 Windowed reduction — `spec/05` §2.3.1 (Valid padding only)
@@ -224,7 +233,7 @@ its own zero rule.
 | `and`,`or`,`not` | bool-only operations ([05-OP-26..28]); direct `Logical` nodes exist | structural `grad` rejection |
 | `relu` | dedicated `RiscOp::Relu`; forward equals stored-bit `max_elem(x, 0)` | `g` only where `0 < x`; exact +0 at both zeros and NaN |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
-| `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
+| `tanh`,`silu`,`gelu`,`gelu_tanh`,`standard_normal_cdf` | `tier2.rs` decompositions; `standard_normal_cdf` is the standard normal CDF `Phi` over `erfc`, `gelu` is exact (`x*Phi(x)`), `gelu_tanh` the tanh approximation | differentiable |
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | float-only `sum` followed by division by the selected axis extent, in canonical multi-axis order | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
@@ -277,12 +286,13 @@ implemented for selected paths, with wider semantics specified by
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval supports scalar state; compiled execution and transform coverage are incomplete. |
+| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval and compiled C run scalar and tensor states; transform coverage is incomplete. |
 
 `tensor_scan` stacks successive states into a tensor; list `scan` (§3.3)
-returns a `List`. Its spec includes float-state AD and `vmap` rules. Build
-paths reject unsupported `tensor_scan` forms
-(`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
+returns a `List`. Its spec includes float-state AD and `vmap` rules.
+Compiled C runs it as the list `scan` over `range(0, n)` stacked at the
+state's own dtype; a tensor state stacks against the initial state, so
+`n = 0` keeps every state extent.
 
 ### 3.3 Higher-order list / sequence combinators
 
@@ -327,9 +337,9 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 | Name | Signature | Notes |
 |---|---|---|
 | `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
-| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; CLI and compiler API reject compiled builds. |
-| `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval/test runs it; compiled builds reject it. [05-OP-75] |
-| `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval/test runs it; compiled builds reject it. [05-OP-75] |
+| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval and compiled C run it; a signal reports `-1`, and a capture that is not UTF-8 traps `IO`. |
+| `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval and compiled C run it. [05-OP-75] |
+| `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval and compiled C run it. [05-OP-75] |
 
 String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
 preserves valid names exactly, without normalization; on conversion failure its
@@ -361,29 +371,31 @@ until it can gate their checks. Shifts use declared-width
 two's-complement semantics; counts at or above the width fully shift out
 the value, while negative counts trap ([04-NUM-13]).
 
-### 3.8 Decimal rounding — Eval/test availability
+### 3.8 Decimal rounding
 
-The registered `round_to(x: f64|f32, places: int) -> f64|f32`
-performs ties-to-even decimal rounding on the operand's exact binary
-value ([05-OP-1], [04-NUM-8]). It preserves the operand dtype and accepts
-`places` in 0..=100 at any integer width; f16/bf16 calls currently reject.
-The controlling [05-OP-1] contract admits all four float dtypes and the
-complete signed-integer `places` domain, so those limits are implementation
-gaps.
+`round_to(x: f64|f32|f16|bf16, places: int) -> same dtype` rounds the
+operand's exact binary value to the nearest multiple of `10^(-places)`,
+ties to the even coefficient, and finalizes once at the operand's own width
+([05-OP-1], [04-NUM-8]). `places` is any signed integer: a negative count
+rounds left of the decimal point, a count finer than the value is the
+identity, a zero result keeps the operand's sign, and a result past the
+largest finite value is the signed infinity. Non-finite operands pass
+through unchanged. Eval and compiled C share one definition.
 Eval/test execute it; compiled builds reject it through the shared
 eval-only gate. [05-HOST-2] requires compiled-host support.
 
 The source-defined `Std.Io.Json` module (§11) provides JSON values with
 distinct `JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
 
-### 3.9 CSV I/O — Eval/test availability
+### 3.9 CSV I/O
 
 The builtin CSV carrier is exactly `List[Dict[string,string]]`: the input's
 first record supplies the column names, the carrier contains only data rows,
 and parsing keeps every cell as text. Numeric meaning enters only through an
 explicit `csv_int*` or `csv_f64*` accessor ([05-OP-2..3]).
 Every operation validates the carrier and fails loudly; no cell is silently
-coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
+coerced or defaulted. Eval and compiled C share one definition of every
+operation. The separate source-defined module is `Std.Io.Csv` (§11).
 
 | Name | Signature | Notes |
 |---|---|---|
@@ -424,13 +436,14 @@ and `load` are `RiscOp` memory nodes produced during lowering, and
 `cast_saturate`, `cast_wrap`, `copy`, `grad`, `vmap`, `jit`, and `realize`.
 
 ```
-Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
+Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan erf erfc sqrt
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
               key_from_seed split_key split_keys fold_in
-Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
+Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu gelu_tanh
+              standard_normal_cdf
               softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
@@ -683,7 +696,7 @@ not replace the selected backend's admission check.
 | `cost` | Report lowered-IR copy cost (`--json`) | no |
 | `deep` | Desugar Surf → Deep s-expr (`--annotate`) | no |
 | `surf` | Resugar well-formed public Deep → canonical Surf; invalid or unpreservable metadata is an error | no |
-| `migrate` | Explicit `surf`/`deep` source migrations from a named older grammar; normal parsing does not silently migrate | command-specific |
+| `migrate` | Explicit `surf`/`deep` source migrations, plus `pipes --baseline-compiler OLD` with whole-file Deep proof; pipe migration defaults to an atomic batch, with explicit `--keep-going` for independent files and a nonzero exit on any failure | command-specific |
 | `prove` | `@property` verifier (`--tier`, `--samples`, `--seed`, `--smt-timeout`, `--capabilities`); see §12 | no |
 | `test` | Run Chelis-native tests (`--filter`, `--json`, `--jobs`, `--expect`, `--batch-mode`) | no |
 | `tide` | REPL / HTTP API / MCP / LSP entry points (`serve`, `lsp`, and MCP mode) | no |

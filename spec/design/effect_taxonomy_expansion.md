@@ -63,13 +63,15 @@ operations.
 For the current ten evaluator builtin routes, the default adapter in
 `crates/chelis-compiler-api/src/runtime/system_adapter.rs` performs the host
 filesystem, process, and clock calls after the policy wrapper checks
-permission. The wrapper, not the adapter, normalizes a clock reading and
-checks its range, so an injected test clock meets the same contract.
-The adapter preserves directory-name byte ordering and strict UTF-8 failure
-under `spec/05-risc-primitives.md` [05-HOST-4], rather than inventing a lossy
-or unsorted evaluator rule. The compiled C lane and `chelis-runtime` ABI are
-outside this *evaluator* policy; [05-HOST-2]'s outstanding compiled host
-`process_run` parity remains owned by chelis#1297.
+permission. The process spawn and the clock reads are `chelis-runtime`'s
+`host_process` and `host_clock` definitions, which compiled C calls too. The
+wrapper, not the adapter, normalizes a clock reading and checks its range, so
+an injected test clock meets the same contract, and the evaluator decodes a
+child process's captures with the runtime's strict UTF-8 rule. The adapter
+preserves directory-name byte ordering and strict UTF-8 failure under
+`spec/05-risc-primitives.md` [05-HOST-4], rather than inventing a lossy or
+unsorted evaluator rule. The compiled C lane and `chelis-runtime` ABI are
+outside this *evaluator* policy: compiled IO consults no policy.
 
 The acceptance command is `python3 scripts/eval_system_oracle.py`.
 `scripts/eval_system_guard.py` also runs in the Python-only Rust-policy gate

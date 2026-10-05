@@ -44,7 +44,6 @@ EXPECTED_PUBLIC_FUNCTIONS = Counter(
         "__build_deliberate_rejection": 1,
         "__build_unimplemented_rejection": 1,
         "new": 1,
-        "compiled_host_only_builtin": 1,
         "with_span": 1,
         "with_supported_alternative": 1,
         "identity": 1,

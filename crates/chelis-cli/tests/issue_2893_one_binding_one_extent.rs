@@ -35,19 +35,17 @@ const POSITIVE: &[(&str, &str)] = &[
     ),
 ];
 
-/// Each twin, with the line `chelis eval` and the executable report.
-const NEGATIVE: &[(&str, &str, &str, &str)] = &[
+/// Each twin, with the failure both lanes report identically (chelis#3107).
+const NEGATIVE: &[(&str, &str, &str)] = &[
     (
         "two-run-time-ranges",
         "module Demo.Main\nx = cast(to_tensor(range(0i64, 4i64)), f16)\ny = cast(to_tensor(range(0i64, 3i64)), f16)\nb = add(copy(x), y)\n",
-        "tensor shapes must match for elementwise op",
-        "elementwise operand shape mismatch",
+        "add operands disagree at axis 0: lhs [4] has 4, rhs [3] has 3\nnumeric trap: domain in add at i64",
     ),
     (
         "two-computed-tensors",
         "module Demo.Main\nx = to_tensor([div(1.0f32, 0.0f32), 2.0f32])\ny = to_tensor([div(1.0f32, 0.0f32), 2.0f32, 3.0f32])\nb = neq(x, y)\n",
-        "tensor comparison expects matching tensor shape",
-        "elementwise operand shape mismatch",
+        "neq operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in neq at i64",
     ),
 ];
 
@@ -93,7 +91,7 @@ fn two_uses_of_one_binding_build_and_match_eval() {
 
 #[test]
 fn two_bindings_of_different_lengths_still_fail_in_both_lanes() {
-    for (name, source, evaluator, executable) in NEGATIVE {
+    for (name, source, failure) in NEGATIVE {
         let (_dir, reef_home, app) = make_app(&format!("issue-2893-{name}"));
         let main = app.join("src/main.ch");
         write_file(&main, source);
@@ -104,7 +102,7 @@ fn two_bindings_of_different_lengths_still_fail_in_both_lanes() {
         );
         let stderr = String::from_utf8_lossy(&evaluated.stderr);
         assert!(!evaluated.status.success(), "{name}: eval accepted");
-        assert!(stderr.contains(evaluator), "{name}: eval: {stderr}");
+        assert!(stderr.contains(failure), "{name}: eval: {stderr}");
         let out = app.join("out");
         let built = chelis(
             &reef_home,
@@ -126,6 +124,6 @@ fn two_bindings_of_different_lengths_still_fail_in_both_lanes() {
         let ran = StdCommand::new(out.join("main")).output().unwrap();
         let stderr = String::from_utf8_lossy(&ran.stderr);
         assert!(!ran.status.success(), "{name}: the executable accepted");
-        assert!(stderr.contains(executable), "{name}: executable: {stderr}");
+        assert!(stderr.contains(failure), "{name}: executable: {stderr}");
     }
 }

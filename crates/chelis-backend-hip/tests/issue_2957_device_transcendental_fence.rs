@@ -63,6 +63,8 @@ fn every_transcendental_and_sqrt_is_rejected_with_a_typed_diagnostic() {
         (RiscOp::Tan, "tan"),
         (RiscOp::Atan, "atan"),
         (RiscOp::Tanh, "tanh"),
+        (RiscOp::Erf, "erf"),
+        (RiscOp::Erfc, "erfc"),
         (RiscOp::Sqrt, "sqrt"),
     ] {
         let error = codegen(&chain_dag(op), name).expect_err(name);

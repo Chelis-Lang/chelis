@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-pub const FUNCTIONS: [&str; 7] = ["exp", "log", "sin", "cos", "tan", "atan", "tanh"];
+pub const FUNCTIONS: [&str; 9] = [
+    "exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc",
+];
 
 /// One MPFR-derived fixture row: `function width input expected # note`.
 #[derive(Clone, Debug)]
@@ -55,6 +57,8 @@ pub fn f32_kernel(function: &str) -> fn(f32) -> f32 {
         "tan" => chelis_crmath::tan_f32,
         "atan" => chelis_crmath::atan_f32,
         "tanh" => chelis_crmath::tanh_f32,
+        "erf" => chelis_crmath::erf_f32,
+        "erfc" => chelis_crmath::erfc_f32,
         other => panic!("unknown function {other}"),
     }
 }
@@ -68,6 +72,8 @@ pub fn f64_kernel(function: &str) -> fn(f64) -> f64 {
         "tan" => chelis_crmath::tan_f64,
         "atan" => chelis_crmath::atan_f64,
         "tanh" => chelis_crmath::tanh_f64,
+        "erf" => chelis_crmath::erf_f64,
+        "erfc" => chelis_crmath::erfc_f64,
         other => panic!("unknown function {other}"),
     }
 }

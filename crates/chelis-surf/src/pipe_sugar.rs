@@ -30,6 +30,7 @@ pub(crate) fn visit_expr_mut(expr: &mut Expr, visit: &mut impl FnMut(&mut Expr))
             }
         }
         Expr::Access(value, _, _)
+        | Expr::Accumulate(value, _, _)
         | Expr::TupleGet(value, _, _)
         | Expr::Unary(_, value, _)
         | Expr::Cast(value, _, _, _)
@@ -132,6 +133,17 @@ pub(crate) fn normalize(expr: &mut Expr) {
                 arguments.insert(0, carried);
                 Expr::Apply(callee, arguments, span)
             }
+            (PipeStageSyntax::CallFirst, Expr::Accumulate(call, precision, _)) => {
+                let Expr::Apply(callee, mut arguments, _) = *call else {
+                    unreachable!("parser-validated accumulator call stage")
+                };
+                arguments.insert(0, carried);
+                Expr::Accumulate(
+                    Box::new(Expr::Apply(callee, arguments, span)),
+                    precision,
+                    span,
+                )
+            }
             (PipeStageSyntax::Cast(mode), Expr::Apply(_, arguments, _)) => {
                 let [Expr::Var(dtype, _)] = arguments.as_slice() else {
                     unreachable!("parser-validated cast stage");
@@ -156,6 +168,9 @@ fn validate_stage(expr: &Expr) -> Result<(), crate::desugar::DesugarError> {
             let valid = match (&stage.syntax, &stage.expression) {
                 (PipeStageSyntax::Callable, _) => true,
                 (PipeStageSyntax::CallFirst, Expr::Apply(..)) => true,
+                (PipeStageSyntax::CallFirst, Expr::Accumulate(call, _, _)) => {
+                    matches!(call.as_ref(), Expr::Apply(..))
+                }
                 (PipeStageSyntax::Cast(mode), Expr::Apply(head, args, _)) => {
                     matches!(head.as_ref(), Expr::Var(name, _) if name == mode.keyword())
                         && matches!(args.as_slice(), [Expr::Var(..)])

@@ -2079,7 +2079,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, cos, tan, atan, tanh, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, tanh, erf, erfc, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
@@ -2263,6 +2263,11 @@ operands to `matmul` does not implicitly widen them. The accumulator
 parameter is what tells the backend to compute the inner sum at a wider
 precision and (where the result is the operand precision) downcast at the
 end.
+
+Surf spells the parameter as the call's final argument
+`accumulator=<dtype>` (spec/02 `CallArgs`), and Deep carries it as the `app`
+node's `accumulator` metadata (spec/03 §1.1). Any other call that supplies
+it is a type error.
 
 The accumulator is optional only on the user-facing Surf and Deep call
 surfaces. When it is omitted, the compiler resolves it to the documented
@@ -3122,14 +3127,19 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   the earliest point after its last use that post-dominates that use on the applicable
   control-flow path. This is not a user-facing type error.
 - `copy(x)` reads `x` without consuming it and yields a fresh owned value.
-- `drop(x)` is an explicit consume. The compiler also inserts implicit last-use
-  drops for locals that are not otherwise consumed.
+- `drop(x)` is an explicit consume, and a terminal one: it ends the owner, and no
+  inserted copy keeps the owner usable after it ([04-LIN-11]). A `drop` after an
+  earlier ordinary consume is consuming fan-out like any other: the earlier use
+  receives the inserted copy. The compiler also inserts implicit last-use drops for
+  locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
 - Creating a closure whose body consumes a captured tensor consumes that outer binding
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
-  outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
-  subject below.
+  outer binding instead. Which binding a consuming capture lands on, and why a
+  borrowing capture forbids a later `drop` of the owner, are [04-LIN-2]'s subject below.
+- A tuple projection `p.i` or a field access `r.f` outside a destructuring `let` moves
+  that component out of its parent; [04-LIN-11] says when the parent stays usable.
 - A top-level function declaration ([04-INF-7]) is not a closure creation, and checking
   it never changes top-level ownership state. Because a declaration may be called after
   every top-level initializer, including from another module, its body is checked
@@ -3139,8 +3149,13 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   order. A consuming use of such a reference yields each call's owned result through a
   copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
   whose copy [04-LIN-9] refuses.
-- Ordinary consuming fan-out is handled by inserted copies, except on a
-  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
+- An *ordinary consume* is every consuming use except a `drop` ([04-LIN-11]), a
+  match scrutinee, a consuming closure capture ([04-LIN-2]), and a consume of a
+  key-carrying value ([04-LIN-9]) or of a destructured component (below). A
+  consuming call argument, `realize`, and the value a destructuring `let`
+  destructures are ordinary consumes. Ordinary consuming fan-out (a later use after
+  an earlier ordinary consume) is handled by inserted copies; a use after any other
+  consume is rejected. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
@@ -3183,7 +3198,13 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > each consume their own binding, and both closure creations are
 > accepted. The sole forwarding is a consuming capture of a destructured
 > component (or of an alias of one), which consumes the component's
-> carrier binding.
+> carrier binding. A borrowing capture holds its borrow for as long as the
+> closure value exists, and a closure value can be stored, returned, or
+> passed on, so after a closure that borrows an owner is created, a `drop`
+> call ([05-OP-67]) applied to that owner in the closure's scope, through any
+> name bound to it there, is rejected, whether or not the closure is called
+> again. A closure that captures a
+> `copy` of the owner leaves the original free to drop.
 
 These binding identities also govern runtime lookup: a named declaration's
 free references are not rebound by a caller's same-named local or parameter.
@@ -3268,7 +3289,8 @@ lexical binding, change which callable is selected, or memoize function results.
 > key-carrying argument, including the otherwise observational arguments of
 > a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
 > value is reached only by consuming that value: a destructuring `let` or
-> `match` pattern; a tuple projection, which takes each key-carrying
+> `match` pattern; a tuple projection, which moves the component out
+> ([04-LIN-11]) with a terminal consume, so it takes each key-carrying
 > component at most once and leaves the tuple unusable as a whole; a field
 > access, which consumes the whole value; or `vmap` over a key axis, which
 > gives each row to one application. Reading a consumed key's bits again in
@@ -3311,6 +3333,19 @@ lexical binding, change which callable is selected, or memoize function results.
 > the generic is a value binding rather than a function, ascribes the
 > binding a type with no type parameter or writes its value where it is
 > used.
+
+> **[04-LIN-11]** A `drop` ([05-OP-67]) is a terminal consume: no inserted
+> copy can precede it on behalf of a later use, so every use of the dropped
+> owner after it, through any name bound to that owner and on every path
+> that reaches the use, is rejected. A tuple projection `p.i` or a field
+> access `r.f` outside a destructuring `let` moves that component out of its
+> parent. An ordinary consume of a moved component is consuming fan-out:
+> copy insertion repairs it, and the parent stays usable. A terminal consume
+> of a moved component (a `drop` of it, or any consume of a key-carrying
+> component under [04-LIN-9]) leaves that component and every projection
+> overlapping it unusable afterwards, and leaves the parent unusable as a
+> whole, while every disjoint component stays usable: after `drop(p.0)`,
+> `p.1` is accepted and `p` and `p.0` are rejected.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the

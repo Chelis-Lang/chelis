@@ -85,6 +85,7 @@ macro_rules! expression_payload {
     };
 }
 expression_payload!(TypeSyntax, "type");
+expression_payload!(AccumulatorSyntax, "accumulator");
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeExpression(Expr);
 impl RuntimeExpression {
@@ -567,11 +568,12 @@ core_inventory! {
     Effect, effect, Spanned<chelis_vocab::EffectKind>, "effect";
     LiteralSource, literal_source, Spanned<LiteralOrigin>, "literal_source";
     Destructure, destructure, Present, "destructure";
+    Accumulator, accumulator, AccumulatorSyntax, "accumulator";
 }
 
 /// Core annotations, held as a key-sorted vector rather than a map.
 ///
-/// The core inventory has thirty keys and a real node carries a handful: the
+/// The core inventory has thirty-one keys and a real node carries a handful: the
 /// chelis#1604 metadata fixture has 72 maps, 41 of them empty and none above
 /// three entries. `MetadataValue` is 184 bytes wide on a 64-bit target, and a
 /// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, so
@@ -587,7 +589,7 @@ core_inventory! {
 ///
 /// Iteration keeps the key order every consumer already relies on, which
 /// `core_key_order_lock` pins, and lookup is a binary search over at most
-/// thirty elements.
+/// thirty-one elements.
 #[derive(Debug, PartialEq, Default)]
 struct Storage {
     core: Vec<MetadataValue>,
@@ -785,6 +787,7 @@ impl Metadata {
         for value in self.values() {
             match value {
                 MetadataValue::Type(v) => visit(v.expression(), R::Type),
+                MetadataValue::Accumulator(v) => visit(v.expression(), R::Type),
                 MetadataValue::PropertyTolerance(v)
                 | MetadataValue::PropertySeed(v)
                 | MetadataValue::PropertySamples(v) => visit(v.expression(), R::Expression),

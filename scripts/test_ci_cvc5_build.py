@@ -189,8 +189,8 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         ]
         self.assertEqual(
             len(smt_builds),
-            3,
-            "release.yml should build chelis-cli --features smt in all three jobs",
+            4,
+            "release.yml should build chelis-cli --features smt in all four jobs",
         )
         for line in smt_builds:
             self.assertIn(
@@ -216,6 +216,7 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         for job in (
             "build-linux-x86_64:",
             "build-linux-x86_64-glibc231:",
+            "build-linux-x86_64-static:",
             "build-darwin-arm64:",
         ):
             with self.subTest(job=job):

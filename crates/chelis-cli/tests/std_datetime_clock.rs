@@ -3,8 +3,8 @@
 //! `clock_now` and `monotonic_now` are the only reads of the host in the
 //! `Std.Datetime` family. Each carries `IO`, which `chelis check` holds every
 //! caller to. `MonotonicInstant` is opaque, and `monotonic_until` is the only
-//! datetime callable that takes one. Compiled builds reject the underlying [05-OP-75] reads, as they
-//! reject `process_run`, until compiled host execution lands (chelis#1297).
+//! datetime callable that takes one. Compiled C runs the underlying [05-OP-75]
+//! reads through the same runtime definition as the evaluator (chelis#1297).
 //! Exact readings from a fixed clock are pinned by the evaluator's
 //! injected-clock tests in `chelis-compiler-api`; these run the real clocks.
 //! Every accepted program has a rejected twin.
@@ -198,47 +198,41 @@ fn monotonic_instant_is_opaque_outside_its_module() {
     );
 }
 
-/// `chelis build --target c` rejects a program that reads either clock
-/// through the module, naming the [05-OP-75] builtin, as it rejects
-/// `process_run` (chelis#1297), and writes no C artifact.
+/// `chelis build --target c` runs a program that reads either clock through
+/// the module: `clock_now` lies between host reads around the run, and
+/// `monotonic_until` between successive readings is never negative.
 #[test]
-fn build_rejects_clock_reads_on_compiled_c() {
-    for (name, body, builtin) in [
-        (
-            "wall",
-            "stamp = instant_unix_second(clock_now())\n",
-            "clock_wall_read",
-        ),
-        (
-            "monotonic",
-            "span = duration_second(monotonic_until(monotonic_now(), monotonic_now()))\n",
-            "clock_monotonic_read",
-        ),
-    ] {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let out = dir.path().join("out");
-        let (success, stdout, stderr) = run_main(
-            &format!("clock-build-{name}-2863"),
-            "build",
-            body,
-            &["--target", "c", "--output", out.to_str().unwrap()],
-        );
-        assert!(
-            !success
-                && stderr.contains(&format!("unsupported: builtin `{builtin}`"))
-                && stderr
-                    .contains("compiled targets (the host interpreter's eval/test lanes only)"),
-            "{name}: expected the eval-only rejection of {builtin}, got stdout={stdout} stderr={stderr}"
-        );
-        assert!(
-            !out.join("main.c").exists(),
-            "{name}: a rejected build wrote a C artifact"
-        );
-    }
+fn compiled_c_runs_clock_reads_through_the_module() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out");
+    let (success, stdout, stderr) = run_main(
+        "clock-build-run-1297",
+        "build",
+        "stamp = instant_unix_second(clock_now())\n\
+         span = duration_second(monotonic_until(monotonic_now(), monotonic_now()))\n",
+        &["--target", "c", "--output", out.to_str().unwrap()],
+    );
+    assert!(
+        success,
+        "clock reads must build: stdout={stdout} stderr={stderr}"
+    );
+    let lower = host_now();
+    let output = std::process::Command::new(out.join("main"))
+        .output()
+        .expect("the built executable runs");
+    let upper = host_now();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    let stamp = printed(&stdout, "stamp");
+    assert!(
+        lower.0 <= stamp && stamp <= upper.0,
+        "{lower:?} <= {stamp} <= {upper:?}"
+    );
+    assert!(printed(&stdout, "span") >= 0, "{stdout}");
 }
 
-/// The accepted twin: importing the module without reading a clock leaves a
-/// compiled build untouched.
+/// The twin: importing the module without reading a clock builds too, and
+/// its executable reads no clock.
 #[test]
 fn build_accepts_a_program_that_reads_no_clock() {
     let dir = tempfile::tempdir().expect("tempdir");

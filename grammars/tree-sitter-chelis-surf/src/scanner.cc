@@ -138,6 +138,26 @@ bool finish_identifier(TSLexer *lexer, const bool *valid_symbols,
   if (is_reserved_identifier(name)) {
     return false;
   }
+  // spec/02 `AccumArg`: `accumulator` stays an ordinary identifier except
+  // as a call's final argument `accumulator=<dtype>`, the one place a dtype
+  // name follows `=` and closes or continues an argument list; the grammar
+  // lexes that keyword.
+  if (name == "accumulator" && skip_trivia_for_lookahead(lexer) &&
+      lexer->lookahead == '=') {
+    lexer->advance(lexer, false);
+    if (lexer->lookahead != '=' && skip_trivia_for_lookahead(lexer) &&
+        is_identifier_start(lexer->lookahead)) {
+      const std::string dtype = consume_identifier(lexer);
+      const bool is_dtype =
+          dtype == "f32" || dtype == "f64" || dtype == "bf16" || dtype == "f16" ||
+          dtype == "i8" || dtype == "i16" || dtype == "i32" || dtype == "i64" ||
+          dtype == "bool" || dtype == "string" || dtype == "key";
+      if (is_dtype && skip_trivia_for_lookahead(lexer) &&
+          (lexer->lookahead == ',' || lexer->lookahead == ')')) {
+        return false;
+      }
+    }
+  }
 
   const bool expression_field = valid_symbols[CANONICAL_RECORD_FIELD_NAME];
   const bool pattern_field = valid_symbols[CANONICAL_RECORD_PATTERN_FIELD_NAME];

@@ -512,7 +512,24 @@ module.exports = grammar({
           ),
         ),
       ),
-    call_arguments: ($) => seq("(", commaSep($.expression), ")"),
+    // spec/02 `CallArgs`: positional arguments, then an optional final
+    // `accumulator=<dtype>` (spec/04 §5.7).
+    call_arguments: ($) =>
+      seq(
+        "(",
+        optional(
+          choice(
+            seq(
+              commaSepNoTrail1($.expression),
+              optional(seq(",", $.accumulator_argument)),
+              optional(","),
+            ),
+            seq($.accumulator_argument, optional(",")),
+          ),
+        ),
+        ")",
+      ),
+    accumulator_argument: ($) => seq("accumulator", "=", field("precision", $.identifier)),
     callable_access_expression: ($) =>
       prec.left(
         PREC.field,

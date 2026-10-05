@@ -20,6 +20,17 @@ sha2 = "0.10"
 thiserror.workspace = true
 
 [dev-dependencies]
+# Test-only: reads the undefined symbols of every object in the carried
+# archive (`tests/runtime_no_host_transcendentals.rs`).
+object = { version = "0.37", default-features = false, features = [
+    "read_core",
+    "archive",
+    "coff",
+    "elf",
+    "macho",
+    "std",
+    "unaligned",
+] }
 tempfile = "3"
 
 [lints]

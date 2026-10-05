@@ -122,6 +122,8 @@ Each row names its governing atom.
 | `Numeric:dropout:TableA` | [05-OP-37] |
 | `Numeric:einsum:TableA` | [05-OP-51] |
 | `Numeric:eq:TableA` | [05-OP-36] |
+| `Numeric:erf:TableA` | [05-OP-46] |
+| `Numeric:erfc:TableA` | [05-OP-46] |
 | `Numeric:exp:TableA` | [05-OP-46] |
 | `Numeric:expand:TableA` | [05-OP-49] |
 | `Numeric:floor:TableA` | [05-OP-46] |
@@ -129,6 +131,7 @@ Each row names its governing atom.
 | `Numeric:fold_in:TableA` | [05-OP-72] |
 | `Numeric:gather:TableA` | [05-OP-52] |
 | `Numeric:gelu:TableA` | [05-OP-48] |
+| `Numeric:gelu_tanh:TableA` | [05-OP-48] |
 | `Numeric:gt:TableA` | [05-OP-36] |
 | `Numeric:gte:TableA` | [05-OP-36] |
 | `Numeric:guarded_fail:TableA` | [05-OP-68] |
@@ -174,6 +177,7 @@ Each row names its governing atom.
 | `Numeric:shrink:TableA` | [05-OP-49] |
 | `Numeric:sigmoid:TableA` | [05-OP-48] |
 | `Numeric:silu:TableA` | [05-OP-48] |
+| `Numeric:standard_normal_cdf:TableA` | [05-OP-48] |
 | `Numeric:sin:TableA` | [05-OP-46] |
 | `Numeric:softmax:TableA` | [05-OP-48] |
 | `Numeric:sort:TableA` | [05-OP-53] |

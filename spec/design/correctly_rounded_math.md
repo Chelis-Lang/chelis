@@ -263,8 +263,11 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   (driver intermediates). The compiler is selected by its path, not through the
   environment. `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CCC_OVERRIDE_OPTIONS`,
   `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`, locale and OpenMP variables are not on it, and on
-  macOS neither are `SDKROOT` nor `DEVELOPER_DIR`: the SDK follows the `xcode-select`
-  default, and another Xcode is chosen by naming its compiler in `CHELIS_CC`.
+  macOS neither are the caller's `SDKROOT` nor `DEVELOPER_DIR`. On macOS the build sets
+  `SDKROOT` itself to the SDK of the `xcode-select` default (`xcrun --show-sdk-path`
+  under the allowlist), the one the `/usr/bin` shims choose. Another Xcode is chosen
+  by naming its `clang` in `CHELIS_CC`; that compiler has no SDK of its own, and it
+  compiles against this one.
 - The profile is `-O2 -ffp-contract=off -fno-fast-math` plus the target's required
   flags, the same strict profile `cross_lane_gate.md` PD2 defines, now the product
   default.
@@ -275,7 +278,13 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   (`__OPTIMIZE__`). The amalgamation's `#error` guards refuse the same two modes and
   excess-precision evaluation (`FLT_EVAL_METHOD` other than 0) when the canary compiles.
   The canary then runs, and any bit it prints that differs from the profile refuses the
-  compiler, naming each broken obligation, its spec text, and its first broken row.
+  compiler, naming each broken obligation, its spec text, and its first broken row. A
+  compiler that cannot build the canary at all is refused with its own diagnostic and
+  without the claim that something added flags: the canary carries every kernel, so a
+  builtin a kernel calls unconditionally would make every native build fail on a
+  compiler without it. `scripts/vendor_core_math.py` therefore routes each
+  `__builtin_roundeven` through a `roundeven_finite` that uses the builtin only where
+  the compiler version has it.
 
 **The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
 holds a closed list of the profile's obligations, each tied to the text it enforces:
@@ -518,3 +527,160 @@ decision.
 1. Whether the x86-64 target's declared CPU baseline should include hardware FMA
    (x86-64-v3), which would remove the software `fma` call from binary64 kernels at the
    cost of not running on older CPUs. Values do not depend on the answer.
+
+## 12. The error functions, `normal_cdf`, and `gelu`
+
+spec/05 makes `gelu` the exact Gaussian error linear unit `x * Phi(x)`, with `Phi` the
+standard normal CDF, and keeps the tanh approximation as a separate operation,
+`gelu_tanh`, for models trained with it (GPT-2 and its descendants). The same `Phi` graph
+(spec/05 §3.3) is the [05-OP-48] builtin `standard_normal_cdf`, and the [05-OP-35] stdlib
+`normal_cdf` calls it, replacing the Abramowitz-and-Stegun polynomial, so the language
+has one standard normal CDF. Both rest on two new [05-OP-46] correctly rounded
+primitives, `erf` and `erfc`.
+
+`standard_normal_cdf` is a builtin because no Surf definition can spell `Phi`: its residual
+constant `cl` and splitter differ between f32 and f64, f16 and bf16 evaluate the f32
+graph, and a definition generic over `p: Float` has no way to select per-dtype
+constants. It cannot be named `normal_cdf`: inside the standard library package that name
+resolves to the package's own definition, and shells define three-argument
+`normal_cdf`s.
+
+### 12.1 Why `erfc` and `erf` are primitives
+
+`Phi(x) = 0.5 * erfc(-x/sqrt(2))`. The left tail, where `Phi` is tiny, is where finance
+evaluates it (deep out-of-the-money options) and where `0.5 * (1 + erf(x/sqrt(2)))`
+cancels to zero, so `erfc` is the leaf. No graph over the existing primitives reproduces
+`erfc` to correct rounding, and the A&S-class polynomial it replaces breaks
+monotonicity at f16. `erf` is a primitive on the `tanh` precedent: `1 - erfc(x)` loses
+all relative accuracy near zero, so a library `erf` would be wrong exactly where `erf` is
+small. ONNX `Erf` (hydronnx) and `Nautilus.Special` need it.
+
+Making `Phi` itself the correctly rounded primitive was rejected. No correctly rounded
+binary64 `Phi` kernel exists, in CORE-MATH or elsewhere, so the rule could not be met at
+f64; a composition over `erfc` keeps the primitive set to functions with published
+kernels at both widths (tenets 2 and 7).
+
+### 12.2 Kernels and vendoring
+
+CORE-MATH provides all four at the commit already pinned in `VENDOR.toml`
+(`284b3b0e`), so the change adds files without moving the upstream pin:
+
+| function | binary32 | binary64 | binary64 worst-case corpus shipped |
+|---|---|---|---|
+| `erf` | `binary32/erf/erff.c` | `binary64/erf/erf.c` | `erf.wc` |
+| `erfc` | `binary32/erfc/erfcf.c` | `binary64/erfc/erfc.c` | `erfc.wc` |
+
+Each file includes only `<stdint.h>`, `<errno.h>`, and (binary64 `erfc`) `<fenv.h>`, and
+needs nothing outside what §3.3's reduction already handles: the `errno` blocks, the
+`FENV_ACCESS` pragma, and binary64 `erfc`'s inline-assembly `roundeven_finite` arms
+(the `__builtin_roundeven` arm stays). None uses `__int128`, `fegetround`, or an
+`FE_` constant. `scripts/vendor_core_math.py import` adds the four files, regenerates the
+amalgamation, and records their identifiers and hashes; the exhaustive binary32 gate and
+the binary64 worst-case corpora of §8 extend to both functions. The lanes gain `Erf` and
+`Erfc` wherever `Tanh` is wired (§4), each through the amalgamation's `chelis_cr_erf*`
+entries.
+
+### 12.3 The scaled argument and its error
+
+`-x/sqrt(2)` rounds before `erfc` sees it. A relative argument error `d` becomes a
+relative error of about `2 t^2 d` in `erfc(t)` for large `t = -x/sqrt(2)`, that is about
+`x^2 d` in `Phi`, so the plain graph `0.5 * erfc(mul(neg(x), c))` loses up to `x^2` ulps
+in the left tail. Measured against mpmath on 1,500 samples per band, the plain graph
+reaches 1,539 ulps at f64 (`x = -36.5`), 159 ulps at f32 (`x = -12.6`), and 13 ulps at
+f16.
+
+The §3.3 graph removes that error by composition. A Veltkamp split and Dekker's
+two-product give the exact rounding error `tl` of `th = RN(-x*c)`, and the first-order
+Taylor term `k * exp(-th^2) * tl` corrects `erfc(th)` toward `erfc(th + tl)`. The
+remaining error is the correctly rounded `erfc`, the final subtraction, and a second-order
+term of relative size about `(x^2 u)^2`. In units of the result, the `erfc` rounding
+costs half a unit except where `Phi` sits just below a power of two: there `erfc(th)`
+lies one binade above the result and rounds on a grid twice as coarse, costing up to a
+full result unit, and the subtraction adds another half, so the bound is about 1.5 units. At an 8- or 11-bit significand that second-order
+term is not small, so f16 and bf16 evaluate the f32 graph and finalize once, which is the
+composition [05-OP-46] already uses for its own narrow-width leaves. The range bound
+`L = 64` exceeds every width's saturation point (f64 `Phi` underflows below
+`x = -38.5`) and keeps `65 * 64`, `4097 * 64`, and `th^2` finite.
+
+Measured with an mpmath model that evaluates the §3.3 text step by step, each
+primitive rounded to its width and each leaf correctly rounded:
+
+| width | inputs | max error (normal results) | adjacent-pair monotonicity violations |
+|---|---|---|---|
+| f64 | 8,006 sampled in `[-38, 8]` plus successors, and every binade boundary of `Phi` | 1.326 ulp (`x = -27.256566083845673`) | 0 |
+| f32 | 8,006 sampled in `[-13, 8]` plus successors, and every binade boundary of `Phi` | 1.453 ulp (`x = -4.900964260101318`) | 0 |
+| f16 | all 63,490 non-NaN values | 0.500005 ulp | 0 |
+| bf16 | all 65,282 non-NaN values | 0.5000026 ulp | 0 |
+
+Random sampling alone reported 0.98 ulp at f32 and f64: it never lands on the binade
+boundaries, which a search that solves `Phi(x) = 2^k` for every `k` and scans the
+neighbours finds. Every lane returns the same bits there, and the two boundary inputs
+are rows of the per-pull-request witness tests.
+
+At f16 and bf16 the f32 result is within about 1.5 f32 units of the truth, which is
+`1.5 * 2^-13` f16 units or `1.5 * 2^-16` bf16 units, so the single finalization stays
+within half a unit plus that margin; the exhaustive figures above sit far inside it.
+`gelu` there is within half a unit of its result plus `|x|` times that `Phi` error,
+because its product reads the finalized `Phi`. The manual gate
+`half_dtype_phi_and_gelu_error_bounds_hold_on_every_input` checks both bounds and
+monotonicity over every f16 and bf16 input.
+
+The spec states the graph, not a bound: the bits are pinned by construction, and these
+figures belong to the implementation oracle (§12.6). Monotonicity is measured, not
+structural; the plain graph is monotone by construction but fails the accuracy goal.
+
+Computing the f32 graph at f64 and rounding once was rejected. It is not a composition
+over f32 primitives, the Metal lane has no f64, and the f32 graph already holds within
+about 1.5 ulp. The narrow-width normal_cdf reflection failures recorded in #3116 and in
+the regenerated discharge table do not come from the graph's accuracy. Reflection compares
+two separately rounded values, `Phi(-x)` and `1 - Phi(x)`; where they lie in `[0.5, 1)`
+they share that binade's grid (`2^-24` at f32), so two results each within a unit or so
+of the truth differ by a whole unit there, far above the fixed `1e-10` tolerance. The
+recorded counterexamples are exactly one such unit: `2^-24` at `x = -3.62` (f32),
+`2^-11` at `x = -3.18` (f16), and `2^-8` at `x = -1.95` (bf16). That property needs a
+per-width tolerance, not a new graph.
+
+### 12.4 Infinite inputs of the gated activations
+
+`silu`, `gelu`, and `gelu_tanh` multiply `x` by a gate that is `+0` at `-inf`, so the
+plain product is `-inf * 0`, a NaN where the limit is zero. The §3.3 multiplicand guard
+`m(x)` replaces `-inf` by `-0.0` before the product and changes nothing else. `-0.0`
+rather than `+0` because the functions approach zero from below, and every
+sufficiently negative finite input already returns `-0.0` (`x * +0`); IEEE 754 likewise
+signs a zero limit by its side. The guard is a `where` on `cmplt(x, lowest)`, which
+is true only at `-inf`, so the result stays one graph over existing primitives and
+the product node never sees `-inf`.
+Checked with the same model, old graph against guarded graph: every finite f16 and bf16
+value and 4,004 sampled f32 and f64 values are bit-identical, `-inf` gives `-0.0`,
+`+inf` gives `+inf`, and NaN stays NaN for all three. `sigmoid` and `normal_cdf` give
+`+0` and `1` at the infinities without a guard.
+
+Gradients at an infinite input remain the derivative of the graph and can be NaN, for
+example through `exp`'s adjoint `0 * inf` inside `sigmoid` at `-inf`. That is
+unchanged by the guard and outside this change.
+
+### 12.5 Gradients
+
+`gelu` and `normal_cdf` differentiate the stated graph (spec/05 §3.3, [05-OP-35]), as
+`gelu_tanh` does today. The `erfc` adjoint `-g*k*exp(-(x*x))` supplies the density, so the
+gradient approximates `Phi(x) + x*phi(x)`, with relative error growing like `x^2 u`
+from the rounded square, as every `exp(-x*x)` density does. Through the split, the
+tangents of `ah` and `al` sum to the tangent of `a`, so `tl` contributes a derivative of
+order `u` and the correction's gradient stays at rounding level. Outside `|x| < L` the
+correction reads `z = 0`, so its gradient is exactly zero.
+
+### 12.6 Implementation surface
+
+`chelis_types::activation` holds the one definition of every §3.3 graph, `Phi`
+included; the IR lowering (`chelis_ir::tier2`), the evaluator's scalar and tensor
+kernels, and the C host helpers (built from the `tier2` graph) all run it, so `gelu`,
+`gelu_tanh`, `silu`, and `standard_normal_cdf` have no hand-written lane copy. The graph's
+steps are `neg`, `abs`, `exp`, `erfc`, `recip`, `add`, `sub`, `mul`, `cmplt`, `where`,
+and the f16/bf16 `cast`s. `erf` and `erfc` are wired wherever `tanh` is: the
+evaluator, IR evaluation and fusion, the adjoint, C kernel and host emission, the wire
+schema (version 27), and the device fences. Tests pin the evaluator against an
+independent MPFR model of the graphs on the witness set at every width, the IR and the
+C host helpers against the evaluator (every finite f16 input and the witnesses at the
+other widths), and the f16/bf16 bounds above as a manual gate. The prove discharges in
+`crates/chelis-prove/data/standard_contract_discharges.json` and the standard graph digest
+regenerate.

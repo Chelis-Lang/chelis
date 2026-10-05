@@ -73,6 +73,7 @@ pub struct LowerDiagnostic {
     pub fatal: bool,
     unsupported: Option<Box<Unsupported>>,
     host_control: bool,
+    dimension_mismatch: bool,
 }
 
 impl LowerDiagnostic {
@@ -84,7 +85,23 @@ impl LowerDiagnostic {
             fatal: false,
             unsupported: None,
             host_control: false,
+            dimension_mismatch: false,
         }
+    }
+
+    /// A dimension mismatch the lowered graph proves from literals before
+    /// any execution (spec/04-type-system.md section 4.7): a type error the
+    /// checker could not see, reported with the checker's kind.
+    fn dimension_mismatch(message: impl Into<String>, span_id: Option<String>) -> Self {
+        Self {
+            dimension_mismatch: true,
+            ..Self::new(message, None, span_id).fatal()
+        }
+    }
+
+    /// Whether this diagnostic is a `DimensionMismatch` proven from literals.
+    pub fn is_dimension_mismatch(&self) -> bool {
+        self.dimension_mismatch
     }
 
     pub(crate) fn from_unsupported(
@@ -106,6 +123,7 @@ impl LowerDiagnostic {
             fatal: false,
             unsupported: Some(Box::new(unsupported)),
             host_control: false,
+            dimension_mismatch: false,
         }
     }
 
@@ -141,6 +159,9 @@ impl LowerDiagnostic {
 
 impl fmt::Display for LowerDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.dimension_mismatch {
+            write!(f, "DimensionMismatch: ")?;
+        }
         write!(f, "{}", self.message)?;
         if let Some(span_id) = &self.span_id {
             write!(f, " at source span `{span_id}`")?;
@@ -478,6 +499,70 @@ fn raise_fatal_lowering_error(
     span_id: Option<String>,
 ) -> ! {
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+}
+
+/// The extent `dag` fixes for `axis` of `id`, or `None` when only run time
+/// has it ([`LowerCtx::graph_fixed_axis_extent`] documents the two origins).
+fn graph_fixed_axis_extent(dag: &Dag, id: NodeId, axis: usize) -> Option<usize> {
+    use crate::axis_sources::ExtentOrigin;
+    match crate::axis_sources::resolve_axis_extent(dag, id, axis)? {
+        ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+        ExtentOrigin::OpComputed { op, axis } => {
+            crate::axis_sources::static_op_computed_axis_extent(dag, op, axis)
+        }
+        ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
+    }
+}
+
+/// spec/04-type-system.md section 4.7: "A violation proven from literals is a
+/// type error. Literals that become visible only when a call is inlined prove
+/// it just the same when the lowered graph fixes the claimed axis to a
+/// different extent: the program is rejected before any execution, on every
+/// lane". A same-shape operation whose operands' extents the graph fixes to
+/// different values at one axis, typically literal Lists that reach
+/// `to_tensor` through an inlined call, is that violation. It is reported as
+/// the checker reports the direct spelling, naming the operation, the
+/// operand and both extents.
+fn reject_literal_operand_disagreement(dag: &Dag) {
+    let fixed = |id: NodeId, axis: usize| graph_fixed_axis_extent(dag, id, axis);
+    for node in dag.nodes() {
+        // A malformed relation is the IR verifier's to report; only a
+        // well-formed one can prove a disagreement.
+        let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        else {
+            continue;
+        };
+        for axis in 0..node.output_type.dims.len() {
+            let mut expected: Option<usize> = None;
+            // Operands in input order, so the reported argument is the
+            // first one disagreeing with an earlier fixed operand.
+            let members = node
+                .inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, input)| agreement.members().contains(input));
+            for (index, &member) in members {
+                let Some(extent) = fixed(member, axis) else {
+                    continue;
+                };
+                match expected {
+                    None => expected = Some(extent),
+                    Some(required) if required != extent => {
+                        let argument = index + 1;
+                        raise_lowering_diagnostic(LowerDiagnostic::dimension_mismatch(
+                            format!(
+                                "`{}` argument {argument}, axis {axis}: expected {required}, \
+                                 got {extent} (extents fixed by literals after inlining)",
+                                crate::grad::risc_op_name(&node.op)
+                            ),
+                            node.span_id.clone(),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
 }
 
 fn raise_fatal_unsupported(
@@ -2469,6 +2554,7 @@ fn lower_subexpr_program_inner_impl(
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    reject_literal_operand_disagreement(&dce_dag);
     let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     #[cfg(not(feature = "lowering-trace"))]
     let _ = (&dce_remap, &copy_remap);
@@ -4603,8 +4689,12 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "relu"
                         | "sigmoid"
                         | "tanh"
+                        | "erf"
+                        | "erfc"
                         | "silu"
                         | "gelu"
+                        | "gelu_tanh"
+                        | "standard_normal_cdf"
                         | "cmplt"
                         | "gt"
                         | "gte"
@@ -8272,6 +8362,7 @@ impl<'program> LowerCtx<'program> {
         input: NodeId,
         axis: usize,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         let input_ty = self
             .dag
@@ -8285,10 +8376,23 @@ impl<'program> LowerCtx<'program> {
         };
         match name {
             "sum" => {
-                let op = RiscOp::sum_default(axis, input_ty.precision)
-                    .expect("checked variadic sum dtype");
+                // Each stage accumulates in the explicit accumulator or the
+                // default for its input `q`, and finalizes at
+                // `sum_result(q, a)`: i32 for an i8 or i16 stage, the input
+                // dtype for bf16 and f16 (spec/04 §5.7.1).
+                let op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, input_ty.precision, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, input_ty.precision),
+                }
+                .expect("checked variadic sum accumulator");
                 let RiscOp::Sum { accumulator, .. } = op else {
-                    unreachable!("sum_default returns Sum");
+                    unreachable!("the sum constructors return Sum");
+                };
+                let output_ty = TensorType {
+                    precision: input_ty.precision.sum_result_precision(accumulator),
+                    ..output_ty
                 };
                 let sum = self.dag.add_node(
                     self.owner(),
@@ -11857,11 +11961,21 @@ impl<'program> LowerCtx<'program> {
             if func_name == "split_key" && kids.len() == 2 {
                 return self.lower_split_key(&kids[1]);
             }
+            // spec/04 §5.7: the checker admitted this explicit accumulator
+            // against §5.7.1's permitted pairs.
+            let accumulator = meta
+                .accumulator()
+                .and_then(|accumulator| stamped_parts(accumulator.expression()))
+                .and_then(|(_, _, parts)| match parts.first() {
+                    Some(Expr::Atom(Atom::Name(name), _)) => Prim::parse_name(name),
+                    _ => None,
+                });
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &kids[1..],
                 &ty,
                 app_span,
+                accumulator,
             ));
         }
 
@@ -11934,7 +12048,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.lower_split_key(&args[0])
             } else {
-                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span, None))
             }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -14782,6 +14896,7 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         ty: &TensorType,
         app_span: Span,
+        accumulator: Option<Prim>,
     ) -> NodeId {
         match func_name {
             // [05-OP-58] owns these exact identities. They cannot be encoded
@@ -15174,12 +15289,22 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            // `tanh` is the [05-OP-46] Tier 1 primitive; `silu` and `gelu`
-            // route through their §3.3 tier2 lowerings, mirroring the
-            // relu/sigmoid pattern above.
+            // `tanh`, `erf`, and `erfc` are [05-OP-46] Tier 1 primitives; `silu`,
+            // `gelu`, `gelu_tanh`, and `standard_normal_cdf` route through their §3.3
+            // tier2 lowerings, mirroring the relu/sigmoid pattern above.
             "tanh" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "tanh input");
                 let node = self.lower_transcendental(RiscOp::Tanh, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erf input");
+                let node = self.lower_transcendental(RiscOp::Erf, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "erfc" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "erfc input");
+                let node = self.lower_transcendental(RiscOp::Erfc, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {
@@ -15208,6 +15333,40 @@ impl<'program> LowerCtx<'program> {
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_gelu(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "gelu_tanh" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "gelu_tanh input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_gelu_tanh(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "standard_normal_cdf" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "standard_normal_cdf input");
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_standard_normal_cdf(
                     self.owner(),
                     &mut self.dag,
                     x,
@@ -15310,15 +15469,27 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_matmul(
-                    self.owner(),
-                    &mut self.dag,
-                    a,
-                    b,
-                    &a_ty,
-                    &b_ty,
-                    parent_span.as_deref(),
-                )
+                match accumulator {
+                    Some(accumulator) => tier2::lower_matmul_with_accumulator(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        accumulator,
+                        parent_span.as_deref(),
+                    ),
+                    None => tier2::lower_matmul(
+                        self.owner(),
+                        &mut self.dag,
+                        a,
+                        b,
+                        &a_ty,
+                        &b_ty,
+                        parent_span.as_deref(),
+                    ),
+                }
             }
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
@@ -15754,7 +15925,11 @@ impl<'program> LowerCtx<'program> {
                 let mut result = input;
                 for position in axes {
                     result = self.lower_variadic_value_reduction_stage(
-                        func_name, result, position, app_span,
+                        func_name,
+                        result,
+                        position,
+                        app_span,
+                        accumulator,
                     );
                 }
                 result
@@ -15777,7 +15952,13 @@ impl<'program> LowerCtx<'program> {
                 // carries a wildcard placeholder. See
                 // `Self::reduction_out_dims`.
                 let out_dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
+                let sum_op = match accumulator {
+                    Some(accumulator) => {
+                        RiscOp::sum_with_accumulator(axis, operand_prec, accumulator)
+                    }
+                    None => RiscOp::sum_default(axis, operand_prec),
+                }
+                .unwrap_or_else(|msg| {
                     // The type checker already rejects unsupported
                     // operand precisions before lowering; fall back to
                     // the operand precision so the resulting IR can
@@ -15813,9 +15994,7 @@ impl<'program> LowerCtx<'program> {
                 // precision so downstream consumers see the documented
                 // result type.
                 if accumulator != operand_prec {
-                    let result_prec = operand_prec
-                        .default_reduce_sum_result_precision()
-                        .unwrap_or(operand_prec);
+                    let result_prec = operand_prec.sum_result_precision(accumulator);
                     if result_prec != accumulator {
                         let cast_ty = TensorType {
                             dims: out_dims,
@@ -17447,7 +17626,7 @@ impl<'program> LowerCtx<'program> {
             if raw < 0 {
                 let argument = if name == "index" { "index" } else { "count" };
                 raise_fatal_lowering_error(
-                    format!("{name} requires non-negative {argument}, got {raw}"),
+                    chelis_abi::failure::list_argument_negative(name, argument, raw),
                     Some(count_arg.span()),
                     count_arg.span_id().map(ToOwned::to_owned),
                 );
@@ -17456,7 +17635,7 @@ impl<'program> LowerCtx<'program> {
             return match name {
                 "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
                     raise_fatal_lowering_error(
-                        format!("index {raw} out of bounds for list of len {}", items.len()),
+                        chelis_abi::failure::list_index_out_of_bounds(raw, items.len()),
                         Some(count_arg.span()),
                         count_arg.span_id().map(ToOwned::to_owned),
                     )
@@ -19812,14 +19991,7 @@ impl<'program> LowerCtx<'program> {
     /// because a DECLARING witness observes a parameter axis rather than an
     /// operation's result.
     fn graph_fixed_axis_extent(&self, id: NodeId, axis: usize) -> Option<usize> {
-        use crate::axis_sources::ExtentOrigin;
-        match crate::axis_sources::resolve_axis_extent(&self.dag, id, axis)? {
-            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
-            ExtentOrigin::OpComputed { op, axis } => {
-                crate::axis_sources::static_op_computed_axis_extent(&self.dag, op, axis)
-            }
-            ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
-        }
+        graph_fixed_axis_extent(&self.dag, id, axis)
     }
 
     /// A checked call type refines a produced result only when this exact

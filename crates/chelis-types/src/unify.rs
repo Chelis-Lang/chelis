@@ -302,6 +302,14 @@ pub struct Subst {
     /// by the inference driver, and never part of a persisted context.
     #[serde(skip)]
     deferred_borrow_vars: Mutex<Vec<TypeVar>>,
+    /// chelis#3180, mirroring `deferred_borrow_vars`: `drop` sites whose
+    /// operand type was still an unresolved `Type::Var` when the call was
+    /// inferred (an unannotated lambda parameter pinned only by a later
+    /// call). The driver drains these per declaration and refuses any that
+    /// resolved to a borrow, since [05-OP-67] makes the operand owned. Not
+    /// serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    deferred_drop_operands: Mutex<Vec<(TypeVar, Option<crate::deep_type::TypeDiagnosticLocation>)>>,
     /// RFC D-CHECK deferred-access ledger, mirroring
     /// `deferred_borrow_vars`: `access`/`record-update` sites whose
     /// target type was still an unresolved `Type::Var` when inference
@@ -1075,6 +1083,12 @@ impl Clone for Subst {
                 self.deferred_borrow_vars
                     .lock()
                     .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
+            deferred_drop_operands: Mutex::new(
+                self.deferred_drop_operands
+                    .lock()
+                    .expect("subst.deferred_drop_operands poisoned")
                     .clone(),
             ),
             deferred_tensor_operands: Mutex::new(
@@ -2218,6 +2232,32 @@ impl Subst {
                 .deferred_borrow_vars
                 .lock()
                 .expect("subst.deferred_borrow_vars poisoned"),
+        )
+    }
+
+    /// chelis#3180: record a `drop` whose operand type was still an
+    /// unresolved `Type::Var`. See the `deferred_drop_operands` field doc.
+    pub(crate) fn record_deferred_drop_operand(
+        &self,
+        v: TypeVar,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
+    ) {
+        self.deferred_drop_operands
+            .lock()
+            .expect("subst.deferred_drop_operands poisoned")
+            .push((v, location));
+    }
+
+    /// Drain the deferred-drop ledger; called once per declaration by the
+    /// driver, mirroring `take_deferred_borrow_vars`.
+    pub(crate) fn take_deferred_drop_operands(
+        &self,
+    ) -> Vec<(TypeVar, Option<crate::deep_type::TypeDiagnosticLocation>)> {
+        std::mem::take(
+            &mut *self
+                .deferred_drop_operands
+                .lock()
+                .expect("subst.deferred_drop_operands poisoned"),
         )
     }
 
@@ -3600,7 +3640,20 @@ pub fn unify_tensor_prec(
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            message: match crate::infer::sum_result_widening_note(
+                None,
+                &Type::Prim(*a),
+                &Type::Prim(*b),
+            ) {
+                Some(note) => {
+                    format!(
+                        "tensor precision mismatch: {} vs {}; {note}",
+                        a.name(),
+                        b.name()
+                    )
+                }
+                None => format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+            },
         }),
         (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
         (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),
@@ -3909,10 +3962,18 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
-            message: format!(
-                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
-                prim.name()
-            ),
+            message: {
+                let message = format!(
+                    "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
+                    prim.name()
+                );
+                let small_integer =
+                    restriction.admits(Prim::Int8) || restriction.admits(Prim::Int16);
+                match crate::infer::sum_result_bound_note(small_integer, *prim) {
+                    Some(note) => format!("{message}; {note}"),
+                    None => message,
+                }
+            },
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,

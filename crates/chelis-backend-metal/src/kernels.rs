@@ -213,6 +213,8 @@ pub fn unary_func(op: &chelis_ir::dag::RiscOp, precision: Prim) -> Option<&'stat
         RiscOp::Tan => Some("tan"),
         RiscOp::Atan => Some("atan"),
         RiscOp::Tanh => Some("tanh"),
+        RiscOp::Erf => Some("erf"),
+        RiscOp::Erfc => Some("erfc"),
         RiscOp::Abs => Some("fabs"),
         RiscOp::Floor => Some("floor"),
         RiscOp::Ceil => Some("ceil"),

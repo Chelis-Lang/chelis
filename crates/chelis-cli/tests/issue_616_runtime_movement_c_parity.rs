@@ -492,13 +492,13 @@ out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.
     assert_close("eval-vs-C shrink grad", &c_grad, &eval_grad);
 }
 
-/// Error-path parity (soundness): a runtime shrink whose bounds resolve to a
-/// ZERO-SIZE axis (`start == end`) must fail LOUDLY in both lanes — the eval
-/// lane rejects an empty-or-inverted bound, and the C runtime guard mirrors
-/// it exactly (`end <= start` aborts). Before this guard alignment the C
-/// lane silently produced an empty tensor where eval errored.
+/// Parity on a ZERO-SIZE axis: a runtime shrink whose bounds resolve to
+/// `start == end` selects an empty axis in both lanes. `spec/05` section
+/// 2.4.1's closed list of runtime-bound errors does not include an empty span,
+/// and the runtime metadata rule says equal endpoints describe an empty axis
+/// (chelis#1795).
 #[test]
-fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
+fn issue_616_runtime_shrink_zero_size_axis_is_empty_in_both_lanes() {
     // k = n - 4 == 0 for the 4-element input: bounds [0, 0).
     let body = "\
   k = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(4, i64)), i64)\n\
@@ -509,29 +509,29 @@ fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
     );
 
     let eval_out = run_eval(&source, "rtzero");
+    let eval_stdout = String::from_utf8_lossy(&eval_out.stdout).into_owned();
     assert!(
-        !eval_out.status.success(),
-        "eval must reject the zero-size shrink axis; stdout={}",
-        String::from_utf8_lossy(&eval_out.stdout)
+        eval_out.status.success(),
+        "eval must select the empty axis; stderr={}",
+        String::from_utf8_lossy(&eval_out.stderr)
     );
-    let eval_err = String::from_utf8_lossy(&eval_out.stderr).into_owned();
     assert!(
-        eval_err.contains("empty or inverted"),
-        "eval must name the empty-bound rejection; stderr={eval_err}"
+        eval_stdout.contains("out = tensor(shape=[0], data=[])"),
+        "eval returns the extent-0 tensor; stdout={eval_stdout}"
     );
 
     let (_dir, build_dir) = build_c(&source, "rtzero");
     let bin = gcc(&build_dir, "rtzero", None, "self_bin");
     let run = StdCommand::new(&bin).output().expect("run emitted program");
     assert!(
-        !run.status.success(),
-        "C binary must abort on the zero-size shrink axis; stdout={}",
-        String::from_utf8_lossy(&run.stdout)
+        run.status.success(),
+        "C binary must select the empty axis; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
     );
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        stderr.lines().last() == Some("numeric trap: domain in shrink at i64"),
-        "C rejection must use the canonical shrink domain diagnostic; stderr={stderr}"
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        eval_stdout,
+        "both lanes print the same extent-0 tensor"
     );
 }
 

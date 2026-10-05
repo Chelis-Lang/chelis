@@ -1221,18 +1221,29 @@ impl CEmitter {
         if (all_static && statically_compatible) || agreement.members().len() < 2 {
             return;
         }
-        let id = node.id.0;
+        // spec/04-type-system.md section 4.7: a disagreement is a `Domain`
+        // trap in the operation, rendered by the runtime as every evaluator
+        // renders it.
+        // Matmul's decomposed product reports matmul's own trap, with the
+        // operands as written ([`chelis_ir::tier2::is_matmul_product`]).
+        let (trap, op) = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+            ("chelis_matmul_product_trap(", String::new())
+        } else {
+            (
+                "chelis_elementwise_shape_trap(",
+                format!("\"{}\", ", chelis_ir::grad::risc_op_name(&node.op)),
+            )
+        };
         for (left_index, left) in agreement.members().iter().enumerate() {
             let a = left.0;
             for right in &agreement.members()[left_index + 1..] {
                 let b = right.0;
                 self.line(&format!(
                     "if (t{a}_rank != t{b}_rank) {{ \
-                     fprintf(stderr, \"chelis: elementwise operand rank mismatch at node {id}: %d vs %d\\n\", \
-                     t{a}_rank, t{b}_rank); abort(); }} \
+                     {trap}{op}t{a}, t{b}); }} \
                      if (t{a}_rank == t{b}_rank) {{ for (int __d = 0; __d < t{a}_rank; __d++) {{ \
-                     if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ fprintf(stderr, \"chelis: \
-                     elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
+                     if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ \
+                     {trap}{op}t{a}, t{b}); \
                      }} }} }}"
                 ));
             }
@@ -1629,6 +1640,12 @@ impl CEmitter {
             }
             RiscOp::Tanh => {
                 self.emit_unary_func(id, "chelis_cr_tanhf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Erf => {
+                self.emit_unary_func(id, "chelis_cr_erff", &node.inputs, &node.output_type)
+            }
+            RiscOp::Erfc => {
+                self.emit_unary_func(id, "chelis_cr_erfcf", &node.inputs, &node.output_type)
             }
             RiscOp::Abs if node.output_type.precision.is_integer() => {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
@@ -2972,6 +2989,8 @@ impl CEmitter {
             "chelis_cr_tanf" => "chelis_cr_tan",
             "chelis_cr_atanf" => "chelis_cr_atan",
             "chelis_cr_tanhf" => "chelis_cr_tanh",
+            "chelis_cr_erff" => "chelis_cr_erf",
+            "chelis_cr_erfcf" => "chelis_cr_erfc",
             "fabsf" => "fabs",
             "floorf" => "floor",
             "ceilf" => "ceil",
@@ -5731,6 +5750,16 @@ impl CEmitter {
                 let f = mf("chelis_cr_tanhf");
                 format!("{f}({a})")
             }
+            FusedStepOp::Erf => {
+                let a = resolve(&inputs[0]);
+                let f = mf("chelis_cr_erff");
+                format!("{f}({a})")
+            }
+            FusedStepOp::Erfc => {
+                let a = resolve(&inputs[0]);
+                let f = mf("chelis_cr_erfcf");
+                format!("{f}({a})")
+            }
             FusedStepOp::Abs => {
                 let a = resolve(&inputs[0]);
                 let f = mf("fabsf");
@@ -8020,6 +8049,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     let a = resolve(&step.input_indices[0]);
                     format!("chelis_cr_tanhf({a})")
                 }
+                FusedStepOp::Erf => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("chelis_cr_erff({a})")
+                }
+                FusedStepOp::Erfc => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("chelis_cr_erfcf({a})")
+                }
                 FusedStepOp::Abs => {
                     let a = resolve(&step.input_indices[0]);
                     format!("fabsf({a})")
@@ -8094,10 +8131,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.before_inactive_zeros_branch(id, |emitter| {
             emitter.emit_runtime_dim_sites(id, &extents);
         });
+        // spec/04-type-system.md section 4.7: a negative target extent fails
+        // the non-negativity guard, a `Domain` trap in `reshape`, rendered as
+        // `chelis_abi::failure::negative_target_extent` renders it for eval.
         for (axis, extent) in &extents {
             self.line(&format!(
-                "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
-                 must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
+                "if (({extent}) < 0) {{ fprintf(stderr, \"reshape target extent at axis {axis} \
+                 is negative: %lld\\n\", (long long)({extent})); \
+                 chelis_numeric_trap(\"numeric trap: domain in reshape at i64\"); }}"
             ));
             self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
         }
@@ -8157,6 +8198,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         let a = inputs[0].0;
         let extent = Self::bound_c_expr(size, inputs, a, axis);
+        let kind = dag.expansion_kind(NodeId(id));
+        let op = kind.primitive_name();
+        self.emit_negative_bound_guard(
+            op,
+            size,
+            &extent,
+            &chelis_abi::failure::negative_target_extent_prefix(op, axis),
+        );
         if self.runtime_dim_sites.contains_key(&(id, axis))
             || self.local_dim_guard_sites.contains_key(&id)
             || self
@@ -8177,7 +8226,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 emitter.emit_runtime_dim_sites(id, &extents)
             });
         }
-        let operation = match dag.expansion_kind(NodeId(id)) {
+        let operation = match kind {
             chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
             chelis_ir::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
         };
@@ -8224,6 +8273,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // `emit_dim_info` renders a runtime-bound named dimension.
             RtDim::Sym(name) => extent_read(name),
         }
+    }
+
+    /// spec/04-type-system.md section 4.7: a negative runtime bound of a
+    /// movement operation fails the non-negativity guard, a `Domain` trap in
+    /// `op`, before the operation builds its plan. `context_prefix` is the
+    /// shared rendering's text before the value
+    /// (`chelis_abi::failure::negative_target_extent_prefix` or
+    /// `negative_movement_bound_prefix`), so the line matches eval's. Only a
+    /// node-valued bound can be negative; a literal one is checked
+    /// statically and a metadata read never is.
+    fn emit_negative_bound_guard(
+        &mut self,
+        op: &str,
+        bound: &RtDim,
+        expr: &str,
+        context_prefix: &str,
+    ) {
+        if !matches!(bound, RtDim::Node(_)) {
+            return;
+        }
+        let negative = self.gated_check(&format!("({expr}) < 0"));
+        let trap = chelis_abi::failure::domain_trap_line_at_i64(op);
+        self.line(&format!(
+            "if ({negative}) {{ fprintf(stderr, \"{context_prefix}%lld\\n\", (long long)({expr})); \
+             chelis_numeric_trap(\"{trap}\"); }}"
+        ));
     }
 
     /// Declare every name whose extent this operation's axis produces.
@@ -8733,6 +8808,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .enumerate()
             .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
+        for (axis, (low, high)) in padding.iter().enumerate() {
+            let prefix = chelis_abi::failure::negative_movement_bound_prefix("pad", axis);
+            self.emit_negative_bound_guard("pad", low, &before[axis], &prefix);
+            self.emit_negative_bound_guard("pad", high, &after[axis], &prefix);
+        }
         self.emit_affine_bounds(&format!("t{id}_before"), &before);
         self.emit_affine_bounds(&format!("t{id}_after"), &after);
         self.emit_affine_plan(id, a, ty, "pad", &format!("t{id}_before, t{id}_after"));
@@ -8821,34 +8901,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .enumerate()
             .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
+        for (axis, (low, high)) in bounds.iter().enumerate() {
+            let prefix = chelis_abi::failure::negative_movement_bound_prefix("shrink", axis);
+            self.emit_negative_bound_guard("shrink", low, &start[axis], &prefix);
+            self.emit_negative_bound_guard("shrink", high, &end[axis], &prefix);
+        }
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
         self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
-        // Preserve the existing runtime-bound empty-range rejection shared
-        // with Eval. The metadata API also serves statically empty tensors;
-        // this operation-level admission rule is separate from shape safety.
-        //
-        // It stays AFTER the plan, and therefore after any extent guard the
-        // plan's site emits, because `spec/05-risc-primitives.md` section
-        // 2.4.1 does NOT make an empty span a runtime-bound error: its closed
-        // list is a negative bound, a shrink range overshoot, a non-positive
-        // stride step and the two reshape errors. `spec/04-type-system.md`
-        // section 4.7.2 makes only a NEGATIVE size an error. So an extent-0
-        // result under a declared `tensor[2, f32]` is a CLAIM mismatch and the
-        // guard reporting it is the conforming diagnostic; this rejection is
-        // an operation-level admission rule the numbered spec does not require,
-        // and the evaluator's matching rejection is what diverges from it
-        // (chelis#1795). Round 1 of chelis#1397 read the order the other way
-        // round and this comment records why that reading was wrong, so the
-        // next reader does not re-derive it.
-        for (axis, (start, end)) in bounds.iter().enumerate() {
-            if start.node_input().is_some() || end.node_input().is_some() {
-                let empty = self.gated_check(&format!(
-                    "t{id}_start[{axis}].bits == t{id}_end[{axis}].bits"
-                ));
-                self.line(&format!("if ({empty}) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at i64\"); }}"));
-            }
-        }
+        // `spec/05-risc-primitives.md` section 2.4.1 closes the runtime-bound
+        // errors: equal endpoints select an empty axis (chelis#1795), and the
+        // plan above traps an inverted or overshooting range.
         self.emit_slot_wrapper(id, ty);
         self.emit_movement_copy(id, |emitter| {
             emitter.line(&format!(

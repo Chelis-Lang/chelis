@@ -76,9 +76,10 @@ pub fn lower_relu(
     add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
 }
 
-/// Builds a section 3.3 activation graph as Tier 1 DAG nodes at `ty`. The
-/// graph itself is defined once, in [`chelis_types::activation`], which the
-/// evaluator's activation kernels also run, so the two lanes cannot drift.
+/// Builds a section 3.3 activation graph as Tier 1 DAG nodes with `ty`'s
+/// dimensions. The graph itself is defined once, in
+/// [`chelis_types::activation`], which the evaluator's activation kernels
+/// also run, so the two lanes cannot drift.
 struct DagActivationGraph<'a> {
     owner: Owner,
     dag: &'a mut Dag,
@@ -88,20 +89,39 @@ struct DagActivationGraph<'a> {
     input: NodeId,
 }
 
+impl DagActivationGraph<'_> {
+    fn at(&self, precision: Prim) -> TensorType {
+        TensorType {
+            dims: self.ty.dims.clone(),
+            precision,
+        }
+    }
+
+    fn node(&mut self, op: RiscOp, inputs: Vec<NodeId>, precision: Prim) -> NodeId {
+        let ty = self.at(precision);
+        add_synth(self.owner, self.dag, op, inputs, ty, self.parent_span)
+    }
+
+    fn precision(&self, id: NodeId) -> Prim {
+        self.dag
+            .get(id)
+            .expect("an activation step reads a node the graph built")
+            .output_type
+            .precision
+    }
+}
+
 impl ActivationGraph for DagActivationGraph<'_> {
     type Value = NodeId;
+    type Predicate = NodeId;
     type Error = std::convert::Infallible;
 
-    fn constant(&mut self, value: f64) -> Result<NodeId, Self::Error> {
-        let op = RiscOp::synth_const(self.ty.precision, value);
-        let constant = add_synth(
-            self.owner,
-            self.dag,
-            op,
-            vec![],
-            self.ty.clone(),
-            self.parent_span,
-        );
+    fn operand_prim(&self) -> Prim {
+        self.ty.precision
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<NodeId, Self::Error> {
+        let constant = self.node(RiscOp::synth_const(prim, value), vec![], prim);
         // An input-less constant has no extent of its own. Recording the
         // input as its shape source sizes an axis known only at run time
         // from the input (chelis#1482).
@@ -114,31 +134,50 @@ impl ActivationGraph for DagActivationGraph<'_> {
             FloatUnOp::Neg => RiscOp::Neg,
             FloatUnOp::Exp => RiscOp::Exp,
             FloatUnOp::Recip => RiscOp::Recip,
+            FloatUnOp::Abs => RiscOp::Abs,
+            FloatUnOp::Erfc => RiscOp::Erfc,
             other => unreachable!("section 3.3 activations use no `{}` step", other.name()),
         };
-        Ok(add_synth(
-            self.owner,
-            self.dag,
-            op,
-            vec![x],
-            self.ty.clone(),
-            self.parent_span,
-        ))
+        let precision = self.precision(x);
+        Ok(self.node(op, vec![x], precision))
     }
 
     fn binary(&mut self, op: FloatBinOp, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
         let op = match op {
             FloatBinOp::Add => RiscOp::Add,
+            FloatBinOp::Sub => RiscOp::Sub,
             FloatBinOp::Mul => RiscOp::Mul,
             other => unreachable!("section 3.3 activations use no `{other:?}` step"),
         };
-        Ok(add_synth(
-            self.owner,
-            self.dag,
-            op,
+        let precision = self.precision(lhs);
+        Ok(self.node(op, vec![lhs, rhs], precision))
+    }
+
+    fn less_than(&mut self, lhs: NodeId, rhs: NodeId) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![lhs, rhs],
-            self.ty.clone(),
-            self.parent_span,
+            Prim::Bool,
+        ))
+    }
+
+    fn select(
+        &mut self,
+        condition: NodeId,
+        then: NodeId,
+        otherwise: NodeId,
+    ) -> Result<NodeId, Self::Error> {
+        let precision = self.precision(then);
+        Ok(self.node(RiscOp::Where, vec![condition, then, otherwise], precision))
+    }
+
+    fn convert(&mut self, x: NodeId, prim: Prim) -> Result<NodeId, Self::Error> {
+        Ok(self.node(
+            RiscOp::Cast {
+                new_precision: prim,
+            },
+            vec![x],
+            prim,
         ))
     }
 }
@@ -179,7 +218,8 @@ pub fn lower_sigmoid(
     lower_derived_activation(DerivedActivation::Sigmoid, owner, dag, x, ty, parent_span)
 }
 
-/// `silu(x)` = `mul(x, sigmoid(x))` (section 3.3; a.k.a. swish).
+/// `silu(x)` = `mul(m(x), sigmoid(x))` (section 3.3; a.k.a. swish), with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_silu(
     owner: Owner,
     dag: &mut Dag,
@@ -190,11 +230,9 @@ pub fn lower_silu(
     lower_derived_activation(DerivedActivation::Silu, owner, dag, x, ty, parent_span)
 }
 
-/// `gelu(x)` = `mul(x, sigmoid(mul(const(2.0), u)))` with
-/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
-/// `c = sqrt(2/pi)` (section 3.3): the tanh approximation spelled through
-/// `0.5*(1+tanh(u)) = sigmoid(2u)`, which neither cancels for negative `x`
-/// nor overflows at the largest finite inputs.
+/// `gelu(x)` = `mul(m(x), Phi(x))` (section 3.3): the exact Gaussian error
+/// linear unit over section 3.3's standard normal CDF graph `Phi`, with the
+/// multiplicand guard `m` that gives `-0.0` at `-inf`.
 pub fn lower_gelu(
     owner: Owner,
     dag: &mut Dag,
@@ -203,6 +241,41 @@ pub fn lower_gelu(
     parent_span: Option<&str>,
 ) -> NodeId {
     lower_derived_activation(DerivedActivation::Gelu, owner, dag, x, ty, parent_span)
+}
+
+/// `gelu_tanh(x)` = `mul(m(x), sigmoid(mul(const(2.0), u)))` with
+/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
+/// `c = sqrt(2/pi)` (section 3.3): the tanh approximation spelled through
+/// `0.5*(1+tanh(u)) = sigmoid(2u)`, which neither cancels for negative `x`
+/// nor overflows at the largest finite inputs.
+pub fn lower_gelu_tanh(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(DerivedActivation::GeluTanh, owner, dag, x, ty, parent_span)
+}
+
+/// `standard_normal_cdf(x)` = `Phi(x)` (section 3.3): the standard normal CDF over
+/// the correctly rounded `erfc`, with the two-product correction of its
+/// scaled argument.
+pub fn lower_standard_normal_cdf(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_derived_activation(
+        DerivedActivation::StandardNormalCdf,
+        owner,
+        dag,
+        x,
+        ty,
+        parent_span,
+    )
 }
 
 /// `div(a, b)` — IEEE-754 elementwise division.
@@ -600,6 +673,25 @@ pub fn lower_matmul(
     b_ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
+    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
+        .expect("lower_matmul requires an admitted floating operand precision");
+    lower_matmul_with_accumulator(owner, dag, a, b, a_ty, b_ty, accumulator, parent_span)
+}
+
+/// spec/05 §4.1's matmul lowering with a resolved accumulator: products at
+/// the operand dtype, the contraction sum in `accumulator`, and the result
+/// finalized at the operand dtype.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_matmul_with_accumulator(
+    owner: Owner,
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    a_ty: &TensorType,
+    b_ty: &TensorType,
+    accumulator: Prim,
+    parent_span: Option<&str>,
+) -> NodeId {
     assert!(
         a_ty.dims.len() >= 2 && b_ty.dims.len() >= 2,
         "lower_matmul expects rank >= 2 tensors"
@@ -708,8 +800,6 @@ pub fn lower_matmul(
         parent_span,
     );
 
-    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
-        .expect("lower_matmul requires an admitted floating operand precision");
     let sum_ty = TensorType {
         dims: result_ty.dims.clone(),
         precision: accumulator,
@@ -742,6 +832,39 @@ pub fn lower_matmul(
             parent_span,
         )
     }
+}
+
+/// Whether `node` is the product [`lower_matmul`] synthesizes: a `Mul` of the
+/// left operand expanded along the trailing column axis and the right operand
+/// expanded along the row axis, all three lowered from one `matmul` call and
+/// so carrying its one span (both expands carry it, and the product carries
+/// it unless a later pass rebuilt it without one). A disagreement between this product's operands
+/// is a disagreement between matmul's operands, so a lane reports it as a
+/// `Domain` trap in `matmul` (spec/04-type-system.md section 4.7) through
+/// `chelis_abi::failure::matmul_product_disagreement`. An authored
+/// `mul(expand(..), expand(..))` has one span per expand call and stays a
+/// `mul`.
+///
+/// `get` reads a node by id from whichever view of the graph the caller
+/// holds.
+pub fn is_matmul_product<'a>(
+    node: &crate::dag::DagNode,
+    get: impl Fn(NodeId) -> Option<&'a crate::dag::DagNode>,
+) -> bool {
+    let rank = node.output_type.dims.len();
+    if !matches!(node.op, RiscOp::Mul) || node.inputs.len() != 2 || rank < 3 {
+        return false;
+    }
+    let (Some(lhs), Some(rhs)) = (get(node.inputs[0]), get(node.inputs[1])) else {
+        return false;
+    };
+    matches!(lhs.op, RiscOp::Expand { axis, .. } if axis == rank - 1)
+        && matches!(rhs.op, RiscOp::Expand { axis, .. } if axis == rank - 3)
+        && lhs.span_id.is_some()
+        && lhs.span_id == rhs.span_id
+        // A later pass may rebuild the product without its span; it never
+        // gives it another call's.
+        && (node.span_id.is_none() || node.span_id == lhs.span_id)
 }
 
 fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
@@ -1887,6 +2010,76 @@ mod tests {
         assert_eq!(result_node.output_type.dims.len(), 2);
         assert_eq!(result_node.output_type.dims[0], DimInfo::Lit(2));
         assert_eq!(result_node.output_type.dims[1], DimInfo::Lit(4));
+    }
+
+    /// The product `lower_matmul` synthesizes is recognized as matmul's, so a
+    /// lane names `matmul` in its trap; an authored `mul` of two expands with
+    /// the same axes is not, because each authored call has its own span.
+    #[test]
+    fn only_the_lowered_matmul_product_is_recognized_as_matmul() {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let (a_ty, b_ty) = (matrix_2x3(), matrix_3x4());
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "A".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "B".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, Some("surf:0..12"));
+        let product = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Mul))
+            .expect("the lowered product");
+        assert!(is_matmul_product(product, |id| dag.get(id)));
+
+        // The same shape authored call by call: three spans, so a `mul`.
+        let mut authored = Dag::new();
+        let owner = Owner::from(authored.declare("test"));
+        let expanded = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let a = authored.add_node(owner, RiscOp::Load { name: "A".into() }, vec![], a_ty, None);
+        let b = authored.add_node(owner, RiscOp::Load { name: "B".into() }, vec![], b_ty, None);
+        let lhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 2,
+                size: RtDim::Lit(4),
+            },
+            vec![a],
+            expanded.clone(),
+            Some("surf:0..5".into()),
+        );
+        let rhs = authored.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(2),
+            },
+            vec![b],
+            expanded.clone(),
+            Some("surf:6..11".into()),
+        );
+        let product = authored.add_node(
+            owner,
+            RiscOp::Mul,
+            vec![lhs, rhs],
+            expanded,
+            Some("surf:12..20".into()),
+        );
+        let product = authored.get(product).expect("authored product");
+        assert!(!is_matmul_product(product, |id| authored.get(id)));
     }
 
     #[test]

@@ -167,7 +167,10 @@ result = add(x, cast(y, f32))
 `cast(e, p)` explicitly converts a scalar or tensor to the named dtype; a
 tensor keeps its dimensions. Casts can cross numeric kinds and can target
 `bool`. An integer-to-float cast may round, and a float-to-integer cast
-requires a finite, integral value in range. Integer literals default to
+requires a finite, integral value in range; any other value traps. To narrow
+on purpose, use a named conversion: `cast_trunc` truncates a float toward
+zero, `cast_saturate` clamps to the target's range, and `cast_wrap` wraps a
+signed integer modulo the target width. Integer literals default to
 `i32` and float literals to `f32`, subject to these exact adoption rules:
 
 1. A suffix binds a literal to its stated dtype.
@@ -207,14 +210,35 @@ handle. Tensor comparisons produce a boolean tensor.
 Logical operations (`and`, `or`, `not`) take `bool`; transcendental operations
 such as `exp`, `log`, and `sqrt` take float types.
 
-`matmul`, `sum`, and `einsum` accept an optional `accumulator=p` argument.
-The compiler resolves the default from the operand dtype. For `bf16` and
+`matmul`, `sum`, and `einsum` accept an optional final argument
+`accumulator=p`, as in `sum(x, 0i32, accumulator=f64)`; any other call that
+supplies it is a type error. Omitted, the compiler resolves the default from
+the operand dtype. For `bf16` and
 `f16`, the default accumulator is `f32`; their result returns to the
 operand dtype. `sum` and `einsum` default to `i32` accumulation and an `i32`
 result for `i8` and `i16` inputs; integer `matmul` is rejected. For `f32`
 and signed integer reductions, an explicitly wider permitted accumulator
 also widens the result. The requested accumulator must have the same numeric
 kind and be no narrower than either the operands or their default.
+
+Small-integer sums widen to `i32` (`spec/04` §5.7.1), because a total of N
+values needs more bits than its elements. Stored `i8` and `i16` tensors stay
+`i8` and `i16`; only the aggregate an operation returns widens:
+
+| Operation | What it sums | Result for an `i8` or `i16` operand | Result for any other operand |
+|---|---|---|---|
+| `sum` | the selected axes | `i32` | the operand dtype |
+| `cumsum` | every prefix along the axis | `i32` | the operand dtype |
+| `trace` | the selected diagonal | `i32` | the operand dtype |
+| `einsum` | every contracted label | `i32` | the operand dtype |
+
+A declared result, or a downstream operation, that expects the operand dtype
+is a type error that names this rule. Declare the result as `i32`, or narrow
+it explicitly with `cast(total, i8)`, which traps `Overflow` when the total
+does not fit. `sum` and `einsum` also take `accumulator=i64` for an `i64`
+total. A function generic over a precision variable must bound it to
+dtypes that share one result, such as `Float`, `{i32, i64}`, or `{i8, i16}`
+with an `i32` result.
 
 ## Function types
 

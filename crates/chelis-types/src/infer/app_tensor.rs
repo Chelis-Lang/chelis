@@ -1023,10 +1023,9 @@ pub(super) fn check_reduction_signature(
     } else {
         prec.clone()
     };
-    // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
-    // before falling back to the generic unify error, so users binding
-    // `sum(i8 tensor)` to `tensor[i8]` see the spec-row hint
-    // instead of the opaque "doesn't match declared signature" trail.
+    // A declared result that the §5.7.1 widening contradicts is reported at
+    // the call with the rule and its repairs, rather than as a mismatch of
+    // the whole enclosing signature.
     if name == "sum" && pending_sum_result.is_none() && result_prec != prec {
         let resolved_result = subst.apply(result_ty);
         if let Type::Tensor(_, declared_prec) = resolved_result
@@ -1034,27 +1033,21 @@ pub(super) fn check_reduction_signature(
         {
             let expected = declared_prec.render();
             let got = result_prec.render();
+            let note = sum_result_widening_note(
+                Some("sum"),
+                &Type::Tensor(Vec::new(), prec.clone()),
+                &Type::Tensor(Vec::new(), result_prec.clone()),
+            )
+            .map(|note| format!("; {note}"))
+            .unwrap_or_default();
             return report_at_check_site(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "sum on operand precision `{}` produces result precision `{}` per \
-                         spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
-                         widens narrow integer operands to i32 to prevent silent overflow); \
-                         declared result: expected {expected}, got {got}. Use `tensor[{got}]` or \
-                         omit the result type to accept the spec default.",
-                        prec.render(),
-                        result_prec.render(),
-                    ),
+                    format!("sum's declared result: expected {expected}, got {got}{note}"),
                     expected,
                     got,
-                    vec![format!(
-                        "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
-                         produces a `{}` result by default to prevent silent overflow",
-                        prec.render(),
-                        result_prec.render(),
-                    )],
+                    vec![],
                 ),
                 site,
             );

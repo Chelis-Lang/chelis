@@ -118,7 +118,8 @@ fn recursive_list_ingress_rejects_ragged_shapes_and_nonnumeric_leaves() {
         ));
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("uniform inner shape"),
+            String::from_utf8_lossy(&output.stderr)
+                .contains("numeric trap: domain in to_tensor at i64"),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

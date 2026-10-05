@@ -505,6 +505,8 @@ pub enum FusedStepOp {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -527,6 +529,8 @@ impl FusedStepOp {
             Self::Tan => Some("tan"),
             Self::Atan => Some("atan"),
             Self::Tanh => Some("tanh"),
+            Self::Erf => Some("erf"),
+            Self::Erfc => Some("erfc"),
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -575,6 +579,8 @@ pub fn reject_device_correctly_rounded_ops(
             RiscOp::Tan => Some("tan"),
             RiscOp::Atan => Some("atan"),
             RiscOp::Tanh => Some("tanh"),
+            RiscOp::Erf => Some("erf"),
+            RiscOp::Erfc => Some("erfc"),
             RiscOp::Sqrt => Some("sqrt"),
             RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
             _ => None,
@@ -927,6 +933,8 @@ pub enum RiscOp {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1400,6 +1408,8 @@ pub enum RiscAtomIdentity {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Abs,
     Floor,
     Ceil,
@@ -1484,6 +1494,8 @@ impl RiscAtomIdentity {
         Self::Tan,
         Self::Atan,
         Self::Tanh,
+        Self::Erf,
+        Self::Erfc,
         Self::Abs,
         Self::Floor,
         Self::Ceil,
@@ -1568,6 +1580,8 @@ impl RiscAtomIdentity {
             Self::Tan => "tan",
             Self::Atan => "atan",
             Self::Tanh => "tanh",
+            Self::Erf => "erf",
+            Self::Erfc => "erfc",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1725,6 +1739,8 @@ impl RiscOp {
             Self::Tan => Semantic(Id::Tan),
             Self::Atan => Semantic(Id::Atan),
             Self::Tanh => Semantic(Id::Tanh),
+            Self::Erf => Semantic(Id::Erf),
+            Self::Erfc => Semantic(Id::Erfc),
             Self::Abs => Semantic(Id::Abs),
             Self::Floor => Semantic(Id::Floor),
             Self::Ceil => Semantic(Id::Ceil),
@@ -2057,6 +2073,8 @@ impl RiscOp {
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -2406,7 +2424,7 @@ impl DagNode {
     /// under its activation ([`TrapSeeds::is_claim_sized`]) is gated whatever
     /// its class, and where its activation is false it produces zeros of its
     /// declared type. Every same-shape producer's operand agreement (the
-    /// evaluator's "tensor shapes must match" and the C lane's
+    /// evaluator's `Domain` trap of spec/04 section 4.7 and the C lane's
     /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
     /// the kernel, not a gated check: a false activation leaves it in place,
     /// except at a claim-sized node, which then reads no operand. A result's
@@ -2503,6 +2521,8 @@ impl DagNode {
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
@@ -3119,7 +3139,7 @@ impl Dag {
                 };
                 !matches!(
                     (start.as_lit(), end, extent(axis)),
-                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                    (Some(start), Some(end), Some(extent)) if start <= end && end <= extent
                 )
             }),
             RiscOp::Stride { strides } => strides
@@ -3666,6 +3686,8 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Tan
         | RiscOp::Atan
         | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -4886,6 +4908,8 @@ mod tests {
             RiscOp::Tan,
             RiscOp::Atan,
             RiscOp::Tanh,
+            RiscOp::Erf,
+            RiscOp::Erfc,
             RiscOp::Abs,
             RiscOp::Floor,
             RiscOp::Ceil,
@@ -5193,8 +5217,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            69,
-            "one_of_every_risc_op must list all 69 classified samples"
+            71,
+            "one_of_every_risc_op must list all 71 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5203,10 +5227,10 @@ mod tests {
         let excluded = all.len() - targetable;
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
-        // (5 binary/cmp + 14 unary, including `round` and the chelis#2957
-        // `tanh` primitive), 5 reductions, 6
-        // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (35); stochastic (the two
+        // (5 binary/cmp + 16 unary, including `round`, the chelis#2957
+        // `tanh` primitive, and the `erf` and `erfc` primitives), 5
+        // reductions, 6 movement, 4 memory/blas value nodes (Const,
+        // ConstTensor, Load, BlasMatmul), and Cast are targetable (37); stochastic (the two
         // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
@@ -5225,7 +5249,7 @@ mod tests {
         // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
         // composition has no dedicated transformer (+1 = 34).
         assert_eq!(
-            targetable, 35,
+            targetable, 37,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(

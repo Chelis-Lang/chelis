@@ -878,18 +878,16 @@ fn random_node_operands(
     }
     let output = graph.dtype(node);
     let float = |prim: Option<Prim>| prim.is_some_and(|prim| prim.is_float());
-    // Whether input `slot` is a control of dtype `draw` (or f32, for a
-    // uniform draw's bound), shaped like a leading part of the key.
-    let control = |slot: usize, draw: Option<Prim>, uniform: bool| {
-        per_row(dims(slot))
-            && dtype(slot).is_some_and(|prim| Some(prim) == draw || (uniform && prim == Prim::F32))
+    // Whether input `slot` is a control of dtype `draw` ([05-OP-8]'s bounds,
+    // [05-OP-37]'s rate), shaped like a leading part of the key.
+    let control = |slot: usize, draw: Option<Prim>| {
+        per_row(dims(slot)) && dtype(slot).is_some_and(|prim| Some(prim) == draw)
     };
     let control_error = || {
         format!(
-            "{at}: random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape"
+            "{at}: random control must be a value of the draw's dtype, shaped like a leading part of its key's shape"
         )
     };
-    let bounds_error = || format!("{at}: uniform_like bounds must share one dtype");
     let same_as = |slot: usize| {
         dtype(slot) == output && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims))
     };
@@ -900,11 +898,8 @@ fn random_node_operands(
                     "{at}: uniform_like must preserve its float template's exact shape and dtype"
                 ));
             }
-            if !control(1, output, true) || !control(2, output, true) {
+            if !control(1, output) || !control(2, output) {
                 errors.push(control_error());
-            }
-            if dtype(1) != dtype(2) {
-                errors.push(bounds_error());
             }
         }
         KeyRole::Dropout | KeyRole::DropoutReplay => {
@@ -913,7 +908,7 @@ fn random_node_operands(
                     "{at}: dropout must preserve its float data input's exact shape and dtype"
                 ));
             }
-            if !control(1, output, false) {
+            if !control(1, output) {
                 errors.push(control_error());
             }
         }
@@ -1275,6 +1270,8 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Tan
         | RiscOp::Atan
         | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -2772,6 +2769,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -3566,6 +3565,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Tan
             | RiscOp::Atan
             | RiscOp::Tanh
+            | RiscOp::Erf
+            | RiscOp::Erfc
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round => {

@@ -74,10 +74,14 @@ enum CExpressionBuiltin {
     Tan,
     Atan,
     Tanh,
+    Erf,
+    Erfc,
     Relu,
     Sigmoid,
     Silu,
     Gelu,
+    GeluTanh,
+    StandardNormalCdf,
     Floor,
     Ceil,
     Round,
@@ -92,7 +96,7 @@ enum CExpressionBuiltin {
 impl CExpressionBuiltin {
     /// Every builtin name the host scalar lane decodes, and so every
     /// expression it can emit.
-    const NAMES: [(&'static str, Self); 64] = [
+    const NAMES: [(&'static str, Self); 68] = [
         ("add", Self::Add),
         ("sub", Self::Sub),
         ("mul", Self::Mul),
@@ -144,10 +148,14 @@ impl CExpressionBuiltin {
         ("tan", Self::Tan),
         ("atan", Self::Atan),
         ("tanh", Self::Tanh),
+        ("erf", Self::Erf),
+        ("erfc", Self::Erfc),
         ("relu", Self::Relu),
         ("sigmoid", Self::Sigmoid),
         ("silu", Self::Silu),
         ("gelu", Self::Gelu),
+        ("gelu_tanh", Self::GeluTanh),
+        ("standard_normal_cdf", Self::StandardNormalCdf),
         ("floor", Self::Floor),
         ("ceil", Self::Ceil),
         ("round", Self::Round),
@@ -199,9 +207,13 @@ impl CExpressionBuiltin {
             | Self::Tan
             | Self::Atan
             | Self::Tanh
+            | Self::Erf
+            | Self::Erfc
             | Self::Sigmoid
             | Self::Silu
             | Self::Gelu
+            | Self::GeluTanh
+            | Self::StandardNormalCdf
             | Self::Floor
             | Self::Ceil
             | Self::Round
@@ -310,7 +322,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{DimInfo, NamedCastMode, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, DimInfo, NamedCastMode, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
     VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
@@ -319,7 +331,7 @@ use chelis_ir::ownership::{
 use chelis_types::manifest::{RootManifest, RootPathStep};
 use chelis_types::types::{Lane, Prim};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
+use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
 pub(crate) fn emit_host_abi_program(
@@ -1236,11 +1248,6 @@ fn append_activation_helpers(
 ) {
     let c_type = if prim == Prim::F64 { "double" } else { "float" };
     let zero = if prim == Prim::F64 { "0.0" } else { "0.0f" };
-    let tanh = if prim == Prim::F64 {
-        "chelis_cr_tanh"
-    } else {
-        "chelis_cr_tanhf"
-    };
     let finalize = |expr: String| match finalizer {
         Some(function) => format!("{function}({expr})"),
         None => expr,
@@ -1254,18 +1261,32 @@ fn append_activation_helpers(
         out.push("}".to_string());
     }
 
-    if used(&format!("chelis_host_tanh_{suffix}")) {
+    // The [05-OP-46] primitives among the host scalar builtins.
+    for name in ["tanh", "erf", "erfc"] {
+        if !used(&format!("chelis_host_{name}_{suffix}")) {
+            continue;
+        }
+        let kernel = if prim == Prim::F64 {
+            format!("chelis_cr_{name}")
+        } else {
+            format!("chelis_cr_{name}f")
+        };
         out.push(format!(
-            "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
+            "static inline {c_type} chelis_host_{name}_{suffix}({c_type} x) {{"
         ));
-        out.push(format!("    return {};", finalize(format!("{tanh}(x)"))));
+        out.push(format!("    return {};", finalize(format!("{kernel}(x)"))));
         out.push("}".to_string());
     }
 
-    let lowerings: [(&str, ActivationLowering); 3] = [
+    let lowerings: [(&str, ActivationLowering); 5] = [
         ("sigmoid", chelis_ir::tier2::lower_sigmoid),
         ("silu", chelis_ir::tier2::lower_silu),
         ("gelu", chelis_ir::tier2::lower_gelu),
+        ("gelu_tanh", chelis_ir::tier2::lower_gelu_tanh),
+        (
+            "standard_normal_cdf",
+            chelis_ir::tier2::lower_standard_normal_cdf,
+        ),
     ];
     for (name, lower) in lowerings {
         if !used(&format!("chelis_host_{name}_{suffix}")) {
@@ -1274,7 +1295,7 @@ fn append_activation_helpers(
         out.push(format!(
             "static inline {c_type} chelis_host_{name}_{suffix}({c_type} x) {{"
         ));
-        out.extend(activation_body(prim, lower, &finalize));
+        out.extend(activation_body(prim, lower));
         out.push("}".to_string());
     }
 }
@@ -1289,12 +1310,10 @@ type ActivationLowering = fn(
 
 /// The C statements of one activation helper: the `tier2` lowering of a
 /// rank-0 `x` at `prim`, one finalized statement per primitive, in the
-/// graph's construction order (every operand precedes its user).
-fn activation_body(
-    prim: Prim,
-    lower: ActivationLowering,
-    finalize: &dyn Fn(String) -> String,
-) -> Vec<String> {
+/// graph's construction order (every operand precedes its user). Each node
+/// is spelled at its own dtype: `Phi` at f16 and bf16 runs at f32 between
+/// two casts, and its `cmplt` predicates are C `int`s.
+fn activation_body(prim: Prim, lower: ActivationLowering) -> Vec<String> {
     let ty = chelis_ir::tier2::scalar_type(prim);
     let mut dag = chelis_ir::dag::Dag::new();
     let owner = chelis_ir::dag::Owner::from(dag.declare("activation"));
@@ -1306,14 +1325,6 @@ fn activation_body(
         None,
     );
     let root = lower(owner, &mut dag, x, &ty, None);
-    let c_type = if prim == Prim::F64 { "double" } else { "float" };
-    let kernel = |f32_name: &str, f64_name: &str| {
-        if prim == Prim::F64 {
-            f64_name.to_string()
-        } else {
-            f32_name.to_string()
-        }
-    };
     let name = |id: chelis_ir::dag::NodeId| {
         if id == x {
             "x".to_string()
@@ -1327,13 +1338,35 @@ fn activation_body(
         if id == x {
             continue;
         }
+        let node_prim = node.output_type.precision;
+        let c_type = match node_prim {
+            Prim::F64 => "double",
+            Prim::F32 | Prim::F16 | Prim::Bf16 => "float",
+            Prim::Bool => "int",
+            other => unreachable!(
+                "spec/05 §3.3 activation lowering produced a {} value",
+                other.name()
+            ),
+        };
+        let finalize = |expr: String| match node_prim {
+            Prim::F16 => format!("chelis_host_finalize_f16({expr})"),
+            Prim::Bf16 => format!("chelis_host_finalize_bf16({expr})"),
+            _ => expr,
+        };
+        let kernel = |stem: &str| {
+            if node_prim == Prim::F64 {
+                format!("chelis_cr_{stem}")
+            } else {
+                format!("chelis_cr_{stem}f")
+            }
+        };
         let input = |position: usize| name(node.inputs[position]);
         let value = match &node.op {
             RiscOp::Const { value } => {
-                // The constant is already finalized at `prim`; f16, bf16,
+                // The constant is already finalized at its dtype; f16, bf16,
                 // and f32 values are exact as C `float`.
                 let wide = value.as_f64_lossy();
-                if prim == Prim::F64 {
+                if node_prim == Prim::F64 {
                     format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", wide.to_bits())
                 } else {
                     format!(
@@ -1343,17 +1376,32 @@ fn activation_body(
                 }
             }
             RiscOp::Neg => finalize(format!("-{}", input(0))),
-            RiscOp::Exp => finalize(format!(
+            RiscOp::Abs => finalize(format!(
                 "{}({})",
-                kernel("chelis_cr_expf", "chelis_cr_exp"),
+                if node_prim == Prim::F64 {
+                    "fabs"
+                } else {
+                    "fabsf"
+                },
                 input(0)
             )),
+            RiscOp::Exp => finalize(format!("{}({})", kernel("exp"), input(0))),
+            RiscOp::Erfc => finalize(format!("{}({})", kernel("erfc"), input(0))),
             RiscOp::Add => finalize(format!("{} + {}", input(0), input(1))),
+            RiscOp::Sub => finalize(format!("{} - {}", input(0), input(1))),
             RiscOp::Mul => finalize(format!("{} * {}", input(0), input(1))),
             RiscOp::Recip => {
-                let one = if prim == Prim::F64 { "1.0" } else { "1.0f" };
+                let one = if node_prim == Prim::F64 {
+                    "1.0"
+                } else {
+                    "1.0f"
+                };
                 finalize(format!("{one} / {}", input(0)))
             }
+            RiscOp::Compare(ComparisonKind::CmpLt) => format!("{} < {}", input(0), input(1)),
+            RiscOp::Where => format!("{} ? {} : {}", input(0), input(1), input(2)),
+            // f16/bf16 to f32 widens exactly; f32 to f16/bf16 rounds once.
+            RiscOp::Cast { .. } => finalize(input(0)),
             other => unreachable!(
                 "spec/05 §3.3 activation lowering produced `{other:?}`, which the \
                  host helper emitter has no C spelling for"
@@ -1959,17 +2007,16 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     );
     out.push("}".to_string());
     out.push(
-        "static void chelis_host_require_elementwise_agreement(const chelis_tensor *lhs, const chelis_tensor *rhs, const char *target_label, const char *lhs_label, const char *rhs_label) {"
+        "static void chelis_host_require_elementwise_agreement(const char *op, const chelis_tensor *lhs, const chelis_tensor *rhs) {"
             .to_string(),
     );
     out.push("    int32_t lhs_rank = chelis_tensor_rank(lhs);".to_string());
     out.push("    int32_t rhs_rank = chelis_tensor_rank(rhs);".to_string());
     out.push("    if (lhs_rank > 0 && rhs_rank > 0 && lhs_rank != rhs_rank) {".to_string());
-    out.push(
-        "        fprintf(stderr, \"chelis: elementwise operand rank mismatch at host value %s (%s vs %s): %d vs %d\\n\", target_label, lhs_label, rhs_label, lhs_rank, rhs_rank);"
-            .to_string(),
-    );
-    out.push("        abort();".to_string());
+    // spec/04-type-system.md section 4.7: a runtime shape disagreement is a
+    // `Domain` trap in the operation, which the runtime renders as the
+    // evaluators do before exiting with status 1 ([04-NUM-10]).
+    out.push("        chelis_elementwise_shape_trap(op, lhs, rhs);".to_string());
     out.push("    }".to_string());
     out.push("    if (lhs_rank == rhs_rank) {".to_string());
     out.push("        for (int32_t axis = 0; axis < lhs_rank; ++axis) {".to_string());
@@ -1977,11 +2024,7 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
         "            if (chelis_tensor_shape(lhs, axis) != chelis_tensor_shape(rhs, axis)) {"
             .to_string(),
     );
-    out.push(
-        "                fprintf(stderr, \"chelis: elementwise operand shape mismatch at host value %s (%s vs %s) axis %d\\n\", target_label, lhs_label, rhs_label, axis);"
-            .to_string(),
-    );
-    out.push("                abort();".to_string());
+    out.push("                chelis_elementwise_shape_trap(op, lhs, rhs);".to_string());
     out.push("            }".to_string());
     out.push("        }".to_string());
     out.push("    }".to_string());
@@ -4587,113 +4630,71 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         };
-        // [05-OP-8]: each bound is an f32 scalar operand. A bound the emitter
-        // can fold is stamped as its exact f32 image, as the DAG lane folds
-        // it; any other bound is the host scalar the arguments computed.
-        let low_f32_expr = uniform_bound_f32_expr(args.get(1), arg_vars.get(1), "low")?;
-        let high_f32_expr = uniform_bound_f32_expr(args.get(2), arg_vars.get(2), "high")?;
-        let low_f64_expr = format!("((double)({low_f32_expr}))");
-        let high_f64_expr = format!("((double)({high_f32_expr}))");
+        // [05-OP-8]: `low` and `high` have the template's dtype `p`. A bound
+        // the emitter can fold is stamped as its exact image at `p`, as the
+        // DAG lane folds it; any other bound is the host scalar the arguments
+        // computed. Both reach the draw at its arithmetic width: f64 for an
+        // f64 draw, f32 (exactly widened from f16 or bf16) otherwise.
+        let Some((_, HostType::Tensor(template_ty))) = arg_vars.first() else {
+            unreachable!("the template operand was matched as a tensor above");
+        };
+        let prim = template_ty.precision;
+        let arithmetic = match prim {
+            Prim::F64 => "double",
+            Prim::F32 | Prim::F16 | Prim::Bf16 => "float",
+            _ => return Err(uniform_bound_desync("template")),
+        };
+        let low_expr = uniform_bound_expr(args.get(1), arg_vars.get(1), prim, "low")?;
+        let high_expr = uniform_bound_expr(args.get(2), arg_vars.get(2), prim, "high")?;
 
         let key = format!("{key_var}.bits");
         // [05-OP-8] validates finite bounds, `low <= high` and a finite
         // difference at the draw's arithmetic width before any element is
-        // drawn: f64 subtracts the widened bounds, every other float dtype
-        // subtracts in f32.
+        // drawn.
         let low = self.next_temp("uniform_low");
         let high = self.next_temp("uniform_high");
-        let dtype = self.next_temp("uniform_dtype");
         let ind = self.indent.clone();
-        self.lines.push(format!(
-            "{ind}float {low} = {low_f32_expr}, {high} = {high_f32_expr};"
-        ));
-        self.lines.push(format!(
-            "{ind}int {dtype} = (int)chelis_host_tensor_dtype({template});"
-        ));
-        self.lines.push(format!(
-            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && ({dtype} == {f64} ? isfinite((double){high} - (double){low}) : isfinite({high} - {low})))) {{",
-            f64 = chelis_vocab::RuntimeDType::F64.c_macro(),
-        ));
-        self.lines.push(format!("{ind}    switch ({dtype}) {{"));
-        for (runtime, prim) in [
-            (chelis_vocab::RuntimeDType::F32, Prim::F32),
-            (chelis_vocab::RuntimeDType::F64, Prim::F64),
-            (chelis_vocab::RuntimeDType::F16, Prim::F16),
-            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
-        ] {
-            let trap = chelis_types::NumericTrap::Domain {
-                op: "uniform_like",
-                prim,
-            }
-            .to_string();
-            self.lines.push(format!(
-                "{ind}    case {}: chelis_numeric_trap({trap:?}); break;",
-                runtime.c_macro()
-            ));
+        let trap = chelis_types::NumericTrap::Domain {
+            op: "uniform_like",
+            prim,
         }
+        .to_string();
         self.lines.push(format!(
-            "{ind}    default: fprintf(stderr, \"uniform_like unsupported dtype %d\\n\", {dtype}); abort();"
+            "{ind}{arithmetic} {low} = {low_expr}, {high} = {high_expr};"
         ));
-        self.lines.push(format!("{ind}    }}"));
-        self.lines.push(format!("{ind}}}"));
         self.lines.push(format!(
-            "{}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));",
-            self.indent
+            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && isfinite({high} - {low}))) chelis_numeric_trap({trap:?});"
+        ));
+        self.lines.push(format!(
+            "{ind}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));"
         ));
         let (guard, view) = self.begin_tensor_write(target);
+        // f32 and f64 sample at their own width. f16 and bf16 execute the one
+        // fused multiply-add in f32 and narrow exactly once at the store, the
+        // same shape `emit::emit_uniform_like` gives the DAG lane, so a
+        // template that folds and one that does not agree element for element.
+        let sample = match prim {
+            Prim::F64 => format!("chelis_uniform_sample_f64({key}, (uint64_t)i, {low}, {high})"),
+            _ => format!("chelis_uniform_sample_f32({key}, (uint64_t)i, {low}, {high})"),
+        };
+        let (elem_t, stored) = match prim {
+            Prim::F64 => ("double", sample),
+            Prim::F32 => ("float", sample),
+            Prim::F16 => ("uint16_t", format!("chelis_f32_to_f16({sample})")),
+            _ => ("uint16_t", format!("chelis_f32_to_bf16({sample})")),
+        };
+        let ind = self.indent.clone();
+        self.lines.push(format!("{ind}{{"));
+        self.lines.push(format!(
+            "{ind}    {elem_t} *__target_data = ({elem_t}*){view}.data;"
+        ));
+        self.lines.push(format!(
+            "{ind}    for (int64_t i = 0; i < {view}.count; i++) {{"
+        ));
         self.lines
-            .push(format!("{}switch ({view}.dtype) {{", self.indent));
-        // One arm per active float dtype in [05-OP-8], which "admits every
-        // active float template dtype `p`". f32 and f64 sample at their own
-        // width. f16 and bf16 widen the stored bounds to f32, execute the one
-        // fused multiply-add in f32, and narrow exactly once at the store —
-        // the same shape `emit::emit_uniform_like` gives the DAG lane, so a
-        // template that folds and one that does not agree element for
-        // element. `chelis_f32_to_f16`/`_bf16` are `static inline` in
-        // `chelis_runtime.h`, which every emitted translation unit includes.
-        let sample_f32 = format!(
-            "chelis_uniform_sample_f32({key}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
-        );
-        for (macro_name, elem_t, sampled) in [
-            (
-                chelis_vocab::RuntimeDType::F32.c_macro(),
-                "float",
-                sample_f32.clone(),
-            ),
-            (
-                chelis_vocab::RuntimeDType::F64.c_macro(),
-                "double",
-                format!(
-                    "chelis_uniform_sample_f64({key}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
-                ),
-            ),
-            (
-                chelis_vocab::RuntimeDType::F16.c_macro(),
-                "uint16_t",
-                format!("chelis_f32_to_f16({sample_f32})"),
-            ),
-            (
-                chelis_vocab::RuntimeDType::Bf16.c_macro(),
-                "uint16_t",
-                format!("chelis_f32_to_bf16({sample_f32})"),
-            ),
-        ] {
-            let ind = &self.indent;
-            self.lines.push(format!("{ind}    case {macro_name}: {{"));
-            self.lines.push(format!(
-                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
-            ));
-            self.lines.push(format!(
-                "{ind}        for (int64_t i = 0; i < {view}.count; i++) {{"
-            ));
-            self.lines
-                .push(format!("{ind}            __target_data[i] = {sampled};"));
-            self.lines.push(format!("{ind}        }}"));
-            self.lines.push(format!("{ind}        break;"));
-            self.lines.push(format!("{ind}    }}"));
-        }
-        self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "uniform_like");
-        self.lines.push(format!("{}}}", self.indent));
+            .push(format!("{ind}        __target_data[i] = {stored};"));
+        self.lines.push(format!("{ind}    }}"));
+        self.lines.push(format!("{ind}}}"));
         self.end_tensor_write(&guard);
         Ok(())
     }
@@ -6572,7 +6573,7 @@ impl<'a> HostEmitter<'a> {
                 c_string_literal(&binder)
             ));
             self.lines
-                .push(format!("{indent}    chelis_flush_and_abort();"));
+                .push(format!("{indent}    chelis_flush_and_exit_trap();"));
             self.lines.push(format!(
                 "{indent}}} else if ({recorded}.value != {extent}) {{"
             ));
@@ -6956,6 +6957,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "+",
@@ -6970,6 +6972,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "-",
@@ -6984,6 +6987,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "*",
@@ -6998,6 +7002,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         "/",
@@ -7052,6 +7057,7 @@ impl<'a> HostEmitter<'a> {
                 {
                     self.assign_tensor_binary_elementwise(
                         target,
+                        name,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
                         if name == "and" { "&&" } else { "||" },
@@ -7146,6 +7152,22 @@ impl<'a> HostEmitter<'a> {
                     );
                     return Ok(());
                 }
+                "erf" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_erf_f32",
+                    );
+                    return Ok(());
+                }
+                "erfc" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_erfc_f32",
+                    );
+                    return Ok(());
+                }
                 "silu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
                         target,
@@ -7159,6 +7181,22 @@ impl<'a> HostEmitter<'a> {
                         target,
                         &arg_vars[0].0,
                         "chelis_host_gelu_f32",
+                    );
+                    return Ok(());
+                }
+                "gelu_tanh" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_gelu_tanh_f32",
+                    );
+                    return Ok(());
+                }
+                "standard_normal_cdf" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_standard_normal_cdf_f32",
                     );
                     return Ok(());
                 }
@@ -7661,9 +7699,12 @@ impl<'a> HostEmitter<'a> {
                 if let Some(claims) = result_claims {
                     let width = &arg_vars[1].0;
                     let sequences = &arg_vars[0].0;
+                    // The operation's own precondition comes before the
+                    // claim that reads `width`.
                     self.lines.push(format!(
-                        "{}if ({width} < 0) {{ fprintf(stderr, \"Domain: pad_sequences_to requires non-negative width\\n\"); exit(1); }}",
-                        self.indent));
+                        "{}chelis_pad_sequences_to_require_width({width});",
+                        self.indent
+                    ));
                     self.lines.push(format!(
                         "{}__chelis_check_host_result_extent_claims({claims}, 2, (const int64_t[][3]){{ {{0, 0, chelis_list_len({sequences})}}, {{1, 1, {width}}} }}, 2, \"pad_sequences_to\", \"numeric trap: domain in pad_sequences_to at i64\");",
                         self.indent));
@@ -7717,6 +7758,150 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_dir({});",
                     self.indent, arg_vars[0].0
+                ));
+                return Ok(());
+            }
+            // [05-HOST-1]: each callback application's returned state keeps
+            // the initial state's shape, checked before the next application.
+            // Both operands are borrowed; the check returns unit or traps.
+            name if name == chelis_ir::host::TENSOR_SCAN_STATE => {
+                self.lines.push(format!(
+                    "{}chelis_tensor_scan_check_state({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            // [05-HOST-1]: `tensor_scan`'s tensor states, stacked against the
+            // initial state's copy by the runtime.
+            name if name == chelis_ir::host::TENSOR_SCAN_STACK => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_scan_stack({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            // [05-HOST-3]: the assertion family runs in compiled host code
+            // through the runtime's shared checks and failure messages. The
+            // operands are borrowed; an assertion returns unit or traps.
+            "test_assert" => {
+                self.lines.push(format!(
+                    "{}if (!({})) chelis_test_assert_fail({});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_eq" => {
+                // Unit equals unit ([05-OP-36]): there is nothing to compare.
+                if !matches!(arg_vars[0].1, HostType::Unit) {
+                    let actual = self.box_value_expr(&arg_vars[0].0, &arg_vars[0].1)?;
+                    let expected = self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?;
+                    self.lines.push(format!(
+                        "{}chelis_test_assert_eq({actual}, {expected}, {});",
+                        self.indent, arg_vars[2].0
+                    ));
+                }
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_eq_tensor" => {
+                self.lines.push(format!(
+                    "{}chelis_test_assert_eq_tensor({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            "test_assert_close_tensor" => {
+                self.lines.push(format!(
+                    "{}chelis_test_assert_close_tensor({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    scalar_carrier_expr(&arg_vars[2].0, &arg_vars[2].1)?,
+                    arg_vars[3].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
+            // [05-OP-61], [05-OP-2..3], [05-OP-5]: the runtime's one CSV
+            // definition over the `List[Dict[string,string]]` carrier; row
+            // indices and numeric results cross as exact tagged scalars.
+            "parse_csv" | "to_csv" | "csv_cols" | "csv_strs" | "csv_f64s" | "csv_ints" => {
+                let call_args = arg_vars
+                    .iter()
+                    .map(|(var, _)| var.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.lines.push(format!(
+                    "{}{target} = chelis_{name}({call_args});",
+                    self.indent
+                ));
+                return Ok(());
+            }
+            "csv_nrows" => {
+                let call = format!("chelis_csv_nrows({})", arg_vars[0].0);
+                self.lines.push(format!(
+                    "{}{target} = {};",
+                    self.indent,
+                    scalar_carrier_value_expr(&call, ty)?
+                ));
+                return Ok(());
+            }
+            "csv_str" | "csv_f64" | "csv_int" => {
+                let call = format!(
+                    "chelis_{name}({}, {}, {})",
+                    arg_vars[0].0,
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?,
+                    arg_vars[2].0
+                );
+                let value = if name == "csv_str" {
+                    call
+                } else {
+                    scalar_carrier_value_expr(&call, ty)?
+                };
+                self.lines
+                    .push(format!("{}{target} = {value};", self.indent));
+                return Ok(());
+            }
+            // [05-OP-1]: the runtime's one decimal rounding, over the exact
+            // tagged carriers of the operand and `places`.
+            "round_to" => {
+                let call = format!(
+                    "chelis_round_to({}, {})",
+                    scalar_carrier_expr(&arg_vars[0].0, &arg_vars[0].1)?,
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                );
+                self.lines.push(format!(
+                    "{}{target} = {};",
+                    self.indent,
+                    scalar_carrier_value_expr(&call, ty)?
+                ));
+                return Ok(());
+            }
+            // spec/05 §2.6: the runtime's one `process_run` definition,
+            // shared with the evaluator.
+            "process_run" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_process_run({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            // [05-OP-75]: one checked host reading, shared with the
+            // evaluator through the runtime's `host_clock` definition.
+            "clock_wall_read" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_clock_wall_read();",
+                    self.indent
+                ));
+                return Ok(());
+            }
+            "clock_monotonic_read" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_clock_monotonic_read();",
+                    self.indent
                 ));
                 return Ok(());
             }
@@ -7774,6 +7959,8 @@ impl<'a> HostEmitter<'a> {
             "tan",
             "atan",
             "tanh",
+            "erf",
+            "erfc",
             "floor",
             "ceil",
             "round",
@@ -8338,8 +8525,12 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::Relu
                 | CExpressionBuiltin::Sigmoid
                 | CExpressionBuiltin::Tanh
+                | CExpressionBuiltin::Erf
+                | CExpressionBuiltin::Erfc
                 | CExpressionBuiltin::Silu
                 | CExpressionBuiltin::Gelu
+                | CExpressionBuiltin::GeluTanh
+                | CExpressionBuiltin::StandardNormalCdf
                     if !is_float_abi(ty) =>
                 {
                     return Err(invalid_abi_shape(
@@ -8396,6 +8587,26 @@ impl<'a> HostEmitter<'a> {
                     ),
                     [numeric_arg(0)],
                 ),
+                CExpressionBuiltin::Erf => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_erf_f16",
+                        "chelis_host_erf_bf16",
+                        "chelis_host_erf_f32",
+                        "chelis_host_erf_f64",
+                    ),
+                    [numeric_arg(0)],
+                ),
+                CExpressionBuiltin::Erfc => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_erfc_f16",
+                        "chelis_host_erfc_bf16",
+                        "chelis_host_erfc_f32",
+                        "chelis_host_erfc_f64",
+                    ),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Silu => EmittedExpr::call(
                     activation_math_function(
                         ty,
@@ -8413,6 +8624,26 @@ impl<'a> HostEmitter<'a> {
                         "chelis_host_gelu_bf16",
                         "chelis_host_gelu_f32",
                         "chelis_host_gelu_f64",
+                    ),
+                    [numeric_arg(0)],
+                ),
+                CExpressionBuiltin::GeluTanh => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_gelu_tanh_f16",
+                        "chelis_host_gelu_tanh_bf16",
+                        "chelis_host_gelu_tanh_f32",
+                        "chelis_host_gelu_tanh_f64",
+                    ),
+                    [numeric_arg(0)],
+                ),
+                CExpressionBuiltin::StandardNormalCdf => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_standard_normal_cdf_f16",
+                        "chelis_host_standard_normal_cdf_bf16",
+                        "chelis_host_standard_normal_cdf_f32",
+                        "chelis_host_standard_normal_cdf_f64",
                     ),
                     [numeric_arg(0)],
                 ),
@@ -8585,7 +8816,7 @@ impl<'a> HostEmitter<'a> {
     /// every operand through the TARGET's index vector applied to that
     /// operand's strides. An operand whose runtime rank or shape disagrees is
     /// therefore read partially or out of bounds, SILENTLY, where the
-    /// evaluator rejects with "tensor shapes must match for elementwise op".
+    /// evaluator traps `Domain` in the operation (spec/04 section 4.7).
     /// An elementwise call one of whose operands carries an IO effect is
     /// lowered here rather than through the tensor DAG, so before this guard
     /// existed such a call reached codegen with no operand comparison in
@@ -8593,18 +8824,18 @@ impl<'a> HostEmitter<'a> {
     ///
     /// Scope, and the reason it is not simply "ranks must be equal":
     /// `spec/05-risc-primitives.md` §1.2 forbids implicit rank extension, so
-    /// two positive ranks that differ are always a defect and abort. A rank-0
+    /// two positive ranks that differ always trap. A rank-0
     /// operand is the backend's own scalar-input representation, not source
     /// broadcasting, and keeps its established meaning. At equal positive
     /// rank the shapes are compared axis by axis, which is what §2.4 already
     /// requires of the tensor-DAG lane.
     ///
-    /// The message wording is the DAG guard's, so one grep over the emitted C
-    /// finds either lane; the emitted result and operand variable names
-    /// locate the site inside a generated translation unit.
-    fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
+    /// `op` is the canonical operation name the trap line carries; the
+    /// runtime's `chelis_elementwise_shape_trap` renders the context and trap
+    /// lines through the evaluators' own function, as the DAG guard does.
+    fn emit_elementwise_operand_guard(&mut self, op: &str, lhs: &str, rhs: &str) {
         self.lines.push(format!(
-            "{}chelis_host_require_elementwise_agreement({lhs}, {rhs}, \"{target}\", \"{lhs}\", \"{rhs}\");",
+            "{}chelis_host_require_elementwise_agreement(\"{op}\", {lhs}, {rhs});",
             self.indent
         ));
     }
@@ -8622,8 +8853,15 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
-    fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+    fn assign_tensor_binary_elementwise(
+        &mut self,
+        target: &str,
+        name: &str,
+        lhs: &str,
+        rhs: &str,
+        op: &str,
+    ) {
+        self.emit_elementwise_operand_guard(name, lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -8652,7 +8890,7 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         comparison: ElementwiseComparison,
     ) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_operand_guard(comparison.name(), lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -8968,7 +9206,7 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         func: BinaryElementwiseFunc,
     ) {
-        self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_operand_guard(func.label(), lhs, rhs);
         self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
         self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
@@ -9607,6 +9845,22 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    /// Emit input-contract assertions for a BLAS summary: nonnull, dtype,
+    /// rank, and per-axis dim checks.
+    ///
+    /// Every check here is an internal invariant and stays `abort()`; none is
+    /// a language failure with a `chelis eval` counterpart. The summary
+    /// replaces a call to the helper whose input types are `input_tys`, and
+    /// `remap_*_summary_to_params` admits it only when each argument's host
+    /// type equals the helper's input type. A host tensor's runtime extents
+    /// equal its host type by construction, because every producer is
+    /// guarded under spec/04-type-system.md section 4.7: the function-entry
+    /// interface guards (`entry_walk::tensor_metadata_checks` and the DAG
+    /// entry validation in `emit.rs`) and the result-claim guards
+    /// (`emit_result_claim_guard`). A literal axis is fixed by those guards,
+    /// and a symbolic axis is a declared binder of the enclosing function,
+    /// checked by its interface guard before the body runs. A failure here is
+    /// therefore a lowering bug, so the check reports it as one.
     fn emit_blas_summary_contract(
         &mut self,
         summary: &HostBlasMatmulSummary,
@@ -9802,6 +10056,20 @@ impl<'a> HostEmitter<'a> {
     /// `emit_blas_summary_contract` so summary-derived sparse
     /// codepaths fail loudly on the same shape mismatches the BLAS
     /// path catches.
+    ///
+    /// Every check here is an internal invariant and stays `abort()`; none is
+    /// a language failure with a `chelis eval` counterpart. The summary
+    /// replaces a call to the helper whose input types are `input_tys`, and
+    /// `remap_*_summary_to_params` admits it only when each argument's host
+    /// type equals the helper's input type. A host tensor's runtime extents
+    /// equal its host type by construction, because every producer is
+    /// guarded under spec/04-type-system.md section 4.7: the function-entry
+    /// interface guards (`entry_walk::tensor_metadata_checks` and the DAG
+    /// entry validation in `emit.rs`) and the result-claim guards
+    /// (`emit_result_claim_guard`). A literal axis is fixed by those guards,
+    /// and a symbolic axis is a declared binder of the enclosing function,
+    /// checked by its interface guard before the body runs. A failure here is
+    /// therefore a lowering bug, so the check reports it as one.
     fn emit_sparse_summary_contract(
         &mut self,
         summary: &HostSparseOpSummary,
@@ -12612,6 +12880,18 @@ impl ElementwiseComparison {
         }
     }
 
+    /// The canonical builtin name a trap in this comparison carries.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Less => "lt",
+            Self::LessEqual => "lte",
+            Self::Greater => "gt",
+            Self::GreaterEqual => "gte",
+            Self::Equal => "eq",
+            Self::NotEqual => "neq",
+        }
+    }
+
     fn c_operator(self) -> &'static str {
         match self {
             Self::Less => "<",
@@ -12749,45 +13029,65 @@ fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     }
 }
 
-fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
-    // f32 is the emitted bound width; see the matching note at the
-    // `uniform_like` site in `chelis-ir`'s lowering.
-    staged_bound(expr)
-        .and_then(|staged| staged.finalize(Prim::F32))
-        .map(|value| value.as_f64_lossy())
-}
-
-/// The C `float` expression of one `[05-OP-8]` bound: the exact f32 image of
-/// a bound the emitter folds, else the f32 host scalar the arguments computed.
-fn uniform_bound_f32_expr(
+/// The C expression of one `[05-OP-8]` bound at the draw's arithmetic width:
+/// `double` for an f64 draw, `float` for every other float dtype `p`. The
+/// bound has dtype `p`. A bound the emitter can fold is stamped as its exact
+/// image at `p`, as the DAG lane folds it; any other bound is the host scalar
+/// of dtype `p` the arguments computed. An f16 or bf16 bound widens exactly to
+/// f32.
+fn uniform_bound_expr(
     expr: Option<&HostExpr>,
     var: Option<&(String, HostType)>,
+    prim: Prim,
     which: &str,
 ) -> Result<String, Unsupported> {
-    if let Some(bound) = static_float_bound(expr) {
-        let bits = (bound as f32).to_bits();
-        return Ok(format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"));
+    if let Some(bound) = staged_bound(expr).and_then(|staged| staged.finalize(prim)) {
+        return Ok(match bound.element_ref() {
+            ElementRef::F64(value) => {
+                format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", value.to_bits())
+            }
+            ElementRef::F32(value) => {
+                format!("chelis_f32_from_bits(UINT32_C(0x{:08x}))", value.to_bits())
+            }
+            ElementRef::F16(value) => {
+                format!("chelis_f16_to_f32(UINT16_C(0x{:04x}))", value.to_bits())
+            }
+            ElementRef::Bf16(value) => {
+                format!("chelis_bf16_to_f32(UINT16_C(0x{:04x}))", value.to_bits())
+            }
+            _ => return Err(uniform_bound_desync(which)),
+        });
     }
-    match var {
-        Some((name, HostType::Float32)) => {
-            Ok(format!("(({})({name}))", cast_prim_c_type(Prim::F32)))
+    match (var, prim) {
+        (Some((name, HostType::Float64)), Prim::F64)
+        | (Some((name, HostType::Float32)), Prim::F32) => {
+            Ok(format!("(({})({name}))", cast_prim_c_type(prim)))
         }
-        _ => Err(Unsupported::new(
-            UnsupportedKind::Builtin("uniform_like".to_string()),
-            "`chelis build` host emission",
-            Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
-                "[04-TOT-2]",
-                "uniform_like's bounds are f32 scalars; the checker types them so, so a \
-                 bound that is neither a foldable literal nor an f32 host scalar here is \
-                 an internal desync"
-            ),
-        )
-        .with_supported_alternative(match which {
-            "low" => "give `uniform_like` an f32 low bound",
-            _ => "give `uniform_like` an f32 high bound",
-        })),
+        (Some((name, HostType::Float16)), Prim::F16) => Ok(format!("chelis_f16_to_f32({name})")),
+        (Some((name, HostType::BFloat16)), Prim::Bf16) => Ok(format!("chelis_bf16_to_f32({name})")),
+        _ => Err(uniform_bound_desync(which)),
     }
+}
+
+/// A `uniform_like` operand the checker types otherwise than [05-OP-8] says
+/// reached host emission: an internal desync, never a user-facing gate.
+fn uniform_bound_desync(which: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Builtin("uniform_like".to_string()),
+        "`chelis build` host emission",
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "uniform_like's template is a tensor of an admitted dtype `p` and its bounds \
+             have dtype `p`; the checker types them so, so any other operand here is an \
+             internal desync"
+        ),
+    )
+    .with_supported_alternative(match which {
+        "low" => "give `uniform_like` a low bound of the template's dtype",
+        "high" => "give `uniform_like` a high bound of the template's dtype",
+        _ => "give `uniform_like` a tensor template",
+    })
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise
@@ -13237,6 +13537,10 @@ mod expression_dispatch_tests {
             ("tanh", CExpressionBuiltin::Tanh),
             ("silu", CExpressionBuiltin::Silu),
             ("gelu", CExpressionBuiltin::Gelu),
+            ("gelu_tanh", CExpressionBuiltin::GeluTanh),
+            ("standard_normal_cdf", CExpressionBuiltin::StandardNormalCdf),
+            ("erf", CExpressionBuiltin::Erf),
+            ("erfc", CExpressionBuiltin::Erfc),
         ] {
             assert_eq!(CExpressionBuiltin::decode(name), Ok(expected));
         }
@@ -13244,7 +13548,17 @@ mod expression_dispatch_tests {
         let mut helpers = Vec::new();
         append_tensor_math_helpers(&mut helpers, &|_| true);
         let emitted = helpers.join("\n");
-        for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
+        for op in [
+            "relu",
+            "sigmoid",
+            "tanh",
+            "erf",
+            "erfc",
+            "silu",
+            "gelu",
+            "gelu_tanh",
+            "standard_normal_cdf",
+        ] {
             for width in ["f16", "bf16", "f32", "f64"] {
                 assert!(
                     emitted.contains(&format!("chelis_host_{op}_{width}")),
@@ -13347,73 +13661,103 @@ mod expression_dispatch_tests {
         );
     }
 
-    /// spec/05 §3.3's gelu graph at operand width, through `chelis-crmath`'s
-    /// exp: each primitive computes at f32 and `finalize` rounds it to the
-    /// operand dtype before the next primitive reads it.
-    fn gelu_reference_f32(
-        x: f32,
-        finalize: &dyn Fn(f32) -> f32,
-        constant: &dyn Fn(f64) -> f32,
-    ) -> f32 {
-        let c = constant(0.7978845608028654);
-        let k = constant(0.044715);
-        let two = constant(2.0);
-        let one = constant(1.0);
-        let x_squared = finalize(x * x);
-        let x_cubed = finalize(x_squared * x);
-        let u = finalize(c * finalize(x + finalize(k * x_cubed)));
-        let two_u = finalize(two * u);
-        let exp_neg = finalize(chelis_crmath::exp_f32(finalize(-two_u)));
-        let sigmoid = finalize(1.0 / finalize(one + exp_neg));
-        finalize(x * sigmoid)
+    /// The section 3.3 witnesses per width: signed zeros, the infinities, NaN,
+    /// the `Phi` range bound `|x| = 64` and its neighbours, the deep left
+    /// tail, and the largest finite magnitudes.
+    fn activation_witnesses() -> Vec<f64> {
+        vec![
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            1.0,
+            -1.0,
+            -0.75,
+            2.5,
+            -3.0,
+            -5.0,
+            -6.0,
+            -9.336,
+            -12.6,
+            -13.5,
+            -36.5,
+            -38.4,
+            63.75,
+            -63.75,
+            64.0,
+            -64.0,
+            65.0,
+            -65.0,
+            1e-30,
+            -1e-30,
+            1e30,
+            -1e30,
+            f64::MAX,
+            f64::MIN,
+        ]
     }
 
-    fn gelu_reference_f64(x: f64) -> f64 {
-        let u = 0.7978845608028654 * (x + 0.044715 * ((x * x) * x));
-        x * (1.0 / (1.0 + chelis_crmath::exp_f64(-(2.0 * u))))
-    }
-
-    /// chelis#2997: the host gelu helpers, derived from `tier2::lower_gelu`,
-    /// follow spec/05 §3.3's
-    /// `x*sigmoid(2u)` graph bit for bit, so gelu of a large finite input is
-    /// that input (the old `0.5*x*(1+tanh(u))` helper overflowed to `inf`).
-    /// Checked over every finite f16, at bf16/f32/f64 max finite, and at the
-    /// negative inputs where the tanh spelling cancels.
+    /// [05-OP-48] and [05-OP-46] at the host scalar lane: every C helper
+    /// `chelis_host_<op>_<width>` returns the evaluator's bits
+    /// (`chelis_types::float_unop`, the same `chelis_types::activation`
+    /// graph and `chelis-crmath` kernels) on every finite f16 input and on
+    /// the witnesses at bf16, f32, and f64. NaN results compare as NaN: the
+    /// caller, not the helper, applies [04-NUM-2]'s canonical NaN.
     #[test]
-    fn gelu_helpers_follow_the_pinned_sigmoid_graph() {
+    fn activation_helpers_return_the_evaluator_bits() {
+        use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64};
         use half::{bf16, f16};
+        let ops = [
+            ("sigmoid", FloatUnOp::Sigmoid),
+            ("silu", FloatUnOp::Silu),
+            ("gelu", FloatUnOp::Gelu),
+            ("gelu_tanh", FloatUnOp::GeluTanh),
+            ("standard_normal_cdf", FloatUnOp::StandardNormalCdf),
+            ("tanh", FloatUnOp::Tanh),
+            ("erf", FloatUnOp::Erf),
+            ("erfc", FloatUnOp::Erfc),
+        ];
         let mut helpers = Vec::new();
         append_tensor_math_helpers(&mut helpers, &|_| true);
         let mut main = String::from(
             "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
         );
         main.push_str(&helpers.join("\n"));
-        main.push_str(concat!(
-            "\nint main(void) {\n",
-            "    for (uint32_t b = 0; b < 65536u; b++) {\n",
-            "        if ((b & 0x7c00u) == 0x7c00u) continue;\n",
-            "        float y = chelis_host_gelu_f16(chelis_f16_to_f32((uint16_t)b));\n",
-            "        printf(\"f16 %04x %04x\\n\", (unsigned)b, (unsigned)chelis_f32_to_f16(y));\n",
-            "    }\n",
-        ));
-        let bf16_max = bf16::MAX.to_f32();
-        main.push_str(&format!(
-            "    {{ float y = chelis_host_gelu_bf16(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"bf16 %08x\\n\", (unsigned)o); }}\n",
-            bf16_max.to_bits()
-        ));
-        let f32_inputs = [f32::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
-        for x in f32_inputs {
+        main.push_str("\nint main(void) {\n");
+        for (name, _) in ops {
             main.push_str(&format!(
-                "    {{ float y = chelis_host_gelu_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"f32 %08x\\n\", (unsigned)o); }}\n",
-                x.to_bits()
+                concat!(
+                    "    for (uint32_t b = 0; b < 65536u; b++) {{\n",
+                    "        if ((b & 0x7c00u) == 0x7c00u) continue;\n",
+                    "        float y = chelis_host_{name}_f16(chelis_f16_to_f32((uint16_t)b));\n",
+                    "        printf(\"{name} f16 %04x %04x\\n\", (unsigned)b, (unsigned)chelis_f32_to_f16(y));\n",
+                    "    }}\n",
+                ),
+                name = name
             ));
         }
-        let f64_inputs = [f64::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
-        for x in f64_inputs {
-            main.push_str(&format!(
-                "    {{ double y = chelis_host_gelu_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t o; memcpy(&o, &y, 8); printf(\"f64 %016llx\\n\", (unsigned long long)o); }}\n",
-                x.to_bits()
-            ));
+        let witnesses = activation_witnesses();
+        for (name, _) in ops {
+            for x in &witnesses {
+                let b = chelis_types::bf16_from_f64_rne(*x);
+                main.push_str(&format!(
+                    "    {{ float y = chelis_host_{name}_bf16(chelis_bf16_to_f32(UINT16_C(0x{:04x}))); printf(\"{name} bf16 %04x %04x\\n\", 0x{:04x}u, (unsigned)chelis_f32_to_bf16(y)); }}\n",
+                    b.to_bits(),
+                    b.to_bits()
+                ));
+                let x32 = *x as f32;
+                main.push_str(&format!(
+                    "    {{ float y = chelis_host_{name}_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"{name} f32 %08x %08x\\n\", 0x{:08x}u, (unsigned)o); }}\n",
+                    x32.to_bits(),
+                    x32.to_bits()
+                ));
+                main.push_str(&format!(
+                    "    {{ double y = chelis_host_{name}_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t o; memcpy(&o, &y, 8); printf(\"{name} f64 %016llx %016llx\\n\", 0x{:016x}ull, (unsigned long long)o); }}\n",
+                    x.to_bits(),
+                    x.to_bits()
+                ));
+            }
         }
         main.push_str("    return 0;\n}\n");
         let main = crate::crmath_kernels::link_called_kernels(main);
@@ -13425,7 +13769,7 @@ mod expression_dispatch_tests {
             crate::toolchain::c_compiler(),
             crate::toolchain::CodegenRequirements::default(),
         );
-        let bin = dir.path().join("gelu");
+        let bin = dir.path().join("activations");
         let compiled = std::process::Command::new(&toolchain.compiler)
             .args(&toolchain.compile_flags)
             .arg("-std=c11")
@@ -13447,75 +13791,76 @@ mod expression_dispatch_tests {
         assert!(run.status.success());
         let stdout = String::from_utf8(run.stdout).unwrap();
 
-        let f16_finalize = |v: f32| f16::from_f32(v).to_f32();
-        let f16_constant = |v: f64| chelis_types::f16_from_f64_rne(v).to_f32();
-        let mut f16_rows = 0;
+        let eval = |op: FloatUnOp, x: ScalarValue| float_unop(op, x).unwrap();
+        let mut rows = 0;
         let mut mismatches = Vec::new();
-        for line in stdout.lines().filter(|line| line.starts_with("f16 ")) {
-            let mut fields = line.split(' ').skip(1);
-            let input = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
-            let got = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
-            let x = f16::from_bits(input).to_f32();
-            let want = f16::from_f32(gelu_reference_f32(x, &f16_finalize, &f16_constant)).to_bits();
-            f16_rows += 1;
-            if got != want {
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let [name, width, input, got] = fields[..] else {
+                panic!("malformed helper output line `{line}`");
+            };
+            let op = ops.iter().find(|(n, _)| *n == name).unwrap().1;
+            let (want_nan, want, got_nan, got) = match width {
+                "f16" => {
+                    let x = f16::from_bits(u16::from_str_radix(input, 16).unwrap());
+                    let want = eval(op, scalar_from_f64("test", Prim::F16, x.to_f64()).unwrap());
+                    let want = chelis_types::f16_from_f64_rne(want.as_f64_lossy());
+                    let got = f16::from_bits(u16::from_str_radix(got, 16).unwrap());
+                    (
+                        want.is_nan(),
+                        u64::from(want.to_bits()),
+                        got.is_nan(),
+                        u64::from(got.to_bits()),
+                    )
+                }
+                "bf16" => {
+                    let x = bf16::from_bits(u16::from_str_radix(input, 16).unwrap());
+                    let want = eval(op, scalar_from_f64("test", Prim::Bf16, x.to_f64()).unwrap());
+                    let want = chelis_types::bf16_from_f64_rne(want.as_f64_lossy());
+                    let got = bf16::from_bits(u16::from_str_radix(got, 16).unwrap());
+                    (
+                        want.is_nan(),
+                        u64::from(want.to_bits()),
+                        got.is_nan(),
+                        u64::from(got.to_bits()),
+                    )
+                }
+                "f32" => {
+                    let x = f32::from_bits(u32::from_str_radix(input, 16).unwrap());
+                    let want = eval(
+                        op,
+                        scalar_from_f64("test", Prim::F32, f64::from(x)).unwrap(),
+                    );
+                    let want = want.as_f64_lossy() as f32;
+                    let got = f32::from_bits(u32::from_str_radix(got, 16).unwrap());
+                    (
+                        want.is_nan(),
+                        u64::from(want.to_bits()),
+                        got.is_nan(),
+                        u64::from(got.to_bits()),
+                    )
+                }
+                "f64" => {
+                    let x = f64::from_bits(u64::from_str_radix(input, 16).unwrap());
+                    let want = eval(op, scalar_from_f64("test", Prim::F64, x).unwrap());
+                    let want = want.as_f64_lossy();
+                    let got = f64::from_bits(u64::from_str_radix(got, 16).unwrap());
+                    (want.is_nan(), want.to_bits(), got.is_nan(), got.to_bits())
+                }
+                other => panic!("unknown width {other}"),
+            };
+            rows += 1;
+            let agrees = if want_nan { got_nan } else { got == want };
+            if !agrees {
                 mismatches.push(format!(
-                    "f16 gelu({input:#06x}): got {got:#06x}, graph {want:#06x}"
+                    "{name} {width}({input}): C {got:#x}, evaluator {want:#x}"
                 ));
             }
         }
-        assert_eq!(f16_rows, 63488, "every finite f16 input");
-        assert!(
-            stdout.lines().any(|line| line == "f16 7bff 7bff"),
-            "gelu(65504) must be 65504 (chelis#2997)"
-        );
-
-        let bf16_line = stdout
-            .lines()
-            .find(|line| line.starts_with("bf16 "))
-            .unwrap();
-        let got = u32::from_str_radix(&bf16_line[5..], 16).unwrap();
         assert_eq!(
-            got,
-            bf16_max.to_bits(),
-            "gelu(bf16 max) must be bf16 max (chelis#2997)"
-        );
-
-        let f32_rows: Vec<u32> = stdout
-            .lines()
-            .filter_map(|line| line.strip_prefix("f32 "))
-            .map(|bits| u32::from_str_radix(bits, 16).unwrap())
-            .collect();
-        for (x, got) in f32_inputs.iter().zip(&f32_rows) {
-            let want = gelu_reference_f32(*x, &|v| v, &|v| v as f32).to_bits();
-            if *got != want {
-                mismatches.push(format!(
-                    "f32 gelu({x}): got {got:#010x}, graph {want:#010x}"
-                ));
-            }
-        }
-        assert_eq!(
-            f32_rows[0],
-            f32::MAX.to_bits(),
-            "gelu(f32 max) must be f32 max (chelis#2997)"
-        );
-        let f64_rows: Vec<u64> = stdout
-            .lines()
-            .filter_map(|line| line.strip_prefix("f64 "))
-            .map(|bits| u64::from_str_radix(bits, 16).unwrap())
-            .collect();
-        for (x, got) in f64_inputs.iter().zip(&f64_rows) {
-            let want = gelu_reference_f64(*x).to_bits();
-            if *got != want {
-                mismatches.push(format!(
-                    "f64 gelu({x}): got {got:#018x}, graph {want:#018x}"
-                ));
-            }
-        }
-        assert_eq!(
-            f64_rows[0],
-            f64::MAX.to_bits(),
-            "gelu(f64 max) must be f64 max (chelis#2997)"
+            rows,
+            ops.len() * (63488 + 3 * activation_witnesses().len()),
+            "every finite f16 input and every witness at the other widths"
         );
         assert!(
             mismatches.is_empty(),

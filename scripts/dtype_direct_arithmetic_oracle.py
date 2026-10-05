@@ -249,7 +249,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "current WireDag identities",
             "crates/chelis-compiler-api/src/schema.rs",
             (
-                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 26;",
+                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;",
                 "pub enum WireFusedStepOp {\n    Add,\n    Sub,",
                 "MaxElem,\n    MinElem,\n    ExtremaAdjoint {",
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',

@@ -50,8 +50,8 @@ silently skipped.
 
 `--fast` is the pre-push gate, run before every push. It fixes in place
 (`regen_all.py --tier 0`, then `cargo fmt --all`), then runs `chelis lint
---check .`, the std-bundle tracking guard, `cargo clippy -p <crate> --tests --
--D warnings` for each changed crate, one nextest run over the drift tripwires,
+--check .`, the std-bundle tracking guard, `cargo clippy -p <crate>
+--all-targets -- -D warnings` for each changed crate, one nextest run over the drift tripwires,
 and, when a chelis-std path changed, the bundle crate's own tests. Every writer
 runs before every check. It exits non-zero for any failing stage (fmt,
 regeneration, lint, the tracking guard, per-crate clippy, the tripwire run, or
@@ -748,8 +748,8 @@ FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0; cargo fmt --all; the chelis lint, eval-system guard, and "
-    "std-bundle tracking rows above; cargo clippy -p <crate> --tests -- -D "
-    "warnings per changed crate; one nextest run over the drift tripwires; "
+    "std-bundle tracking rows above; cargo clippy -p <crate> --all-targets -- "
+    "-D warnings per changed crate; one nextest run over the drift tripwires; "
     "and when a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
@@ -1289,7 +1289,7 @@ def fast_command_list(
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, changed-path
     classification, lint, evaluator system guard, std-bundle tracking guard,
-    `cargo clippy -p <crate> --tests` per changed crate, and one nextest run
+    `cargo clippy -p <crate> --all-targets` per changed crate, and one nextest run
     over the drift tripwires. When a std path changed, the bundle crate's own
     tests follow them. Every writer precedes every check.
 
@@ -1312,13 +1312,19 @@ def fast_command_list(
     commands.append(EVAL_SYSTEM_GUARD)
     commands.append(STD_BUNDLE_TRACKING_GUARD)
     for crate in crates:
-        commands.append(
-            ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]
-        )
+        commands.append(per_crate_clippy(crate))
     commands.append(FAST_TRIPWIRE_NEXTEST)
     if std_changed:
         commands.append(STD_BUNDLE_SELF_CONSISTENCY)
     return commands
+
+
+def per_crate_clippy(crate: str) -> list[str]:
+    """CI's workspace clippy narrowed to one crate: the same target selection
+    and lint level, so a lint that fires only in a non-test library or binary
+    build fails `--fast` as it fails CI (chelis#3126)."""
+    workspace = CLIPPY_WORKSPACE.index("--workspace")
+    return [*CLIPPY_WORKSPACE[:workspace], "-p", crate, *CLIPPY_WORKSPACE[workspace + 1:]]
 
 
 def _git_output(args: list[str]) -> str:
@@ -2820,7 +2826,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Run the pre-push gate before every push: regen_all.py --tier 0 "
             "and cargo fmt --all fix in place, then classify-paths, chelis "
             "lint --check ., eval_system_guard.py, cargo clippy -p <crate> "
-            "--tests per changed crate, and one nextest run over the drift "
+            "--all-targets per changed crate, and one nextest run over the drift "
             "tripwires. Prints the files it changed; never takes the lease."
         ),
     )

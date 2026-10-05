@@ -114,40 +114,40 @@ const NEGATIVE: &[(Case, &str, &str)] = &[
             name: "comparison_lengths_differ",
             source: "module Demo.Main\ndef both(xs: List[i64], ys: List[i64]) -> List[bool] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  to_list(lt(a, b))\n}\nresult = both([1i64, 2i64], [3i64, 0i64, 5i64])\n",
         },
-        "tensor comparison expects matching tensor shape",
-        "elementwise operand shape mismatch",
+        "lt operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in lt at i64",
+        "lt operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in lt at i64",
     ),
     (
         Case {
             name: "logical_lengths_differ",
             source: "module Demo.Main\ndef both(xs: List[i64], ys: List[i64]) -> List[bool] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  to_list(and(gt(a, sub(a, a)), lt(b, sub(b, b))))\n}\nresult = both([1i64, 2i64], [3i64, 0i64, 5i64])\n",
         },
-        "tensor bool op expects matching shapes, got [2] vs [3]",
-        "elementwise operand shape mismatch",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
     ),
     (
         Case {
             name: "inline_logical_lengths_differ",
             source: "module Demo.Main\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(and(lt(to_tensor(xs), to_tensor(xs)), lt(to_tensor(ys), to_tensor(ys))))\nresult = run([1i64, 2i64], [3i64, 0i64, 5i64])\n",
         },
-        "tensor bool op expects matching shapes, got [2] vs [3]",
-        "elementwise operand shape mismatch",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
     ),
     (
         Case {
             name: "where_lengths_differ",
             source: "module Demo.Main\ndef f(a: tensor[*, i64], b: tensor[*, i64]) -> tensor[*, i64] = where(lt(a, sub(a, a)), a, b)\ndef run(xs: List[i64], ys: List[i64]) -> List[i64] = to_list(f(to_tensor(xs), to_tensor(ys)))\nresult = run([1i64, -2i64], [3i64, 4i64, 5i64])\n",
         },
-        "where expects condition and both branches to have identical shape",
-        "elementwise operand shape mismatch",
+        "where operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in where at i64",
+        "where operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in where at i64",
     ),
     (
         Case {
             name: "wildcard_logical_lengths_differ",
             source: "module Demo.Main\ndef f(a: tensor[*, bool], b: tensor[*, bool]) -> tensor[*, bool] = and(a, b)\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  to_list(f(gt(a, sub(a, a)), gt(b, sub(b, b))))\n}\nresult = run([1i64, -2i64], [3i64, 4i64, 5i64])\n",
         },
-        "tensor shapes must match for elementwise op, got [2] vs [3]",
-        "elementwise operand shape mismatch",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
+        "and operands disagree at axis 0: lhs [2] has 2, rhs [3] has 3\nnumeric trap: domain in and at i64",
     ),
     // The issue's expected failure: the declared-result guard names `eq`.
     (

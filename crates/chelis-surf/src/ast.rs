@@ -248,7 +248,9 @@ impl std::ops::DerefMut for PipeStage {
 }
 impl From<Expr> for PipeStage {
     fn from(expression: Expr) -> Self {
-        let syntax = if matches!(expression, Expr::Apply(..)) {
+        let syntax = if matches!(&expression, Expr::Apply(..))
+            || matches!(&expression, Expr::Accumulate(call, _, _) if matches!(call.as_ref(), Expr::Apply(..)))
+        {
             PipeStageSyntax::CallFirst
         } else {
             PipeStageSyntax::Callable
@@ -263,6 +265,10 @@ pub enum Expr {
     Var(String, Span),
     Constructor(String, Span),         // Uppercase name
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
+    /// A call with an explicit accumulator dtype, `sum(x, 0i32,
+    /// accumulator=f64)`: the call (always an `Apply`) and the dtype
+    /// spelling (spec/02 `CallArgs`, spec/04 §5.7).
+    Accumulate(Box<Expr>, String, Span),
     List(Vec<Expr>, Span),
     Record(String, Vec<(String, Expr)>, Span),
     RecordUpdate(Box<Expr>, Vec<(String, Expr)>, Span),

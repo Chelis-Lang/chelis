@@ -108,7 +108,7 @@ CASE_CLAUSES = {
 CALLABLE_CLAUSES = {
     operation: clause
     for operations, clause in (
-        (("abs", "cos", "exp", "log", "neg", "recip", "round", "sqrt"),
+        (("abs", "cos", "erf", "erfc", "exp", "log", "neg", "recip", "round", "sqrt"),
          "`neg(x)`, `recip(x)`, `exp(x)`, `log(x)`"),
         (("add", "div", "mul"), "`add(x,y)`, `mul(x,y)`, `div(x,y)`"),
         (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
@@ -135,6 +135,8 @@ CALLABLE_CLAUSES = {
         (("reduce_window_sum", "reduce_window_mean", "reduce_window_max", "reduce_window_min"),
          "`window_reduction(arguments...) -> result` governs exactly"),
         (("relu",), "`relu(x) -> result` admits every active float dtype"),
+        (("standard_normal_cdf",),
+         "`gelu_tanh(x)`, and `standard_normal_cdf(x)` preserve one float scalar or tensor's shape and dtype"),
         (("shape",), "The runtime extent read (`shape(x, axis)`; C ABI"),
         (("sub",), "`sub(left, right) -> result` admits two values"),
         (("sum",), "`sum(x, axes..., accumulator = default(p)) -> result` admits"),

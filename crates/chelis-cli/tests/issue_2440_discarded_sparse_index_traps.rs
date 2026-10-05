@@ -20,24 +20,18 @@
 //! discarded program does too, and an in-range index returns a value in
 //! both.
 //!
-//! ## Why this does not assert one message across both lanes
+//! ## One message across both lanes
 //!
-//! Compiled C reports `numeric trap: domain in gather at i64`. The
-//! evaluator instead panics out of a bare `assert!`, so it produces no
-//! `numeric trap:` line at all. That divergence is **chelis#1636**, not this
-//! issue, and it predates the seed: the CONSUMED program panics in exactly
-//! the same way. Asserting a shared message here would fail for a reason
-//! chelis#2440 does not own, and weakening the compiled lane's assertion to
-//! match the evaluator's panic would stop pinning the message C actually
-//! owes. So each lane is pinned to what it owes, and the cross-lane claim is
-//! the one this issue is about: discarded behaves as consumed. When
-//! chelis#1636 lands, the evaluator rows tighten without this file changing
-//! shape.
+//! Both lanes report `numeric trap: domain in gather at i64`
+//! ([05-SPARSE-1], spec/04-type-system.md section 4.7), rendered by
+//! `chelis_abi::failure::sparse_index_out_of_bounds`; the evaluator no
+//! longer panics (chelis#1636). The cross-lane claim this issue owns is
+//! still that discarded behaves as consumed.
 
 use assert_cmd::Command;
 use std::path::Path;
 
-/// The trap the COMPILED lane owes an out-of-bounds sparse index.
+/// The trap both lanes owe an out-of-bounds sparse index.
 const C_TRAP: &str = "numeric trap: domain in gather at i64";
 
 /// Out of bounds for a 3-element axis, and in range.
@@ -65,9 +59,8 @@ out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0i64, INDEX]))
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     /// Stopped, carrying WHY. The `numeric trap:` line when there is one,
-    /// so the compiled lane's message stays pinned; otherwise the panic's
-    /// own message line, so the evaluator's chelis#1636 stop is compared by
-    /// reason too. Carrying `None` for every trapless stop would have made
+    /// so each lane's message stays pinned; otherwise a panic's own message
+    /// line, so an unexpected stop is compared by reason too. Carrying `None` for every trapless stop would have made
     /// a type error, an unsupported diagnostic and a lowering panic all
     /// compare equal to the stop this test means.
     Stopped(String),
@@ -188,8 +181,8 @@ fn a_discarded_out_of_bounds_gather_stops_exactly_where_a_consumed_one_does() {
     // failure that would also satisfy the equality below.
     assert_eq!(
         consumed_eval,
-        Verdict::Stopped("gather index 9 out of bounds for axis 0".to_string()),
-        "control: the evaluator's stop must be the chelis#1636 bounds panic"
+        Verdict::Stopped(C_TRAP.to_string()),
+        "control: the evaluator's stop must be the sparse-index domain trap"
     );
 
     // chelis#2440 itself: liveness must not decide whether the check runs.
@@ -202,8 +195,7 @@ fn a_discarded_out_of_bounds_gather_stops_exactly_where_a_consumed_one_does() {
         "C: a discarded out-of-bounds index must do what a consumed one does"
     );
 
-    // The compiled lane owes the exact trap line; the evaluator owes only a
-    // stop until chelis#1636 gives it the same line.
+    // The compiled lane owes the same trap line as the evaluator.
     assert_eq!(
         discarded_c,
         Verdict::Stopped(C_TRAP.to_string()),

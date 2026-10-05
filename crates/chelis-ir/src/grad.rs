@@ -713,6 +713,8 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Tan => "tan",
         RiscOp::Atan => "atan",
         RiscOp::Tanh => "tanh",
+        RiscOp::Erf => "erf",
+        RiscOp::Erfc => "erfc",
         RiscOp::Abs => "abs",
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
@@ -1835,6 +1837,31 @@ fn compute_adjoints(
             let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, one_minus], ty, None);
             Some(vec![(x, dx)])
         }
+        RiscOp::Erf | RiscOp::Erfc => {
+            // [05-OP-46]: erf gives g*(k*exp(neg(x*x))) and erfc gives
+            // neg(g*(k*exp(neg(x*x)))), with k = 2/sqrt(pi) rounded once to
+            // the operand dtype.
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let k = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_2_SQRT_PI),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
+            let neg_x_sq = dag.add_node(node.owner, RiscOp::Neg, vec![x_sq], ty.clone(), None);
+            let density = dag.add_node(node.owner, RiscOp::Exp, vec![neg_x_sq], ty.clone(), None);
+            let slope = dag.add_node(node.owner, RiscOp::Mul, vec![k, density], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope], ty.clone(), None);
+            let dx = if matches!(node.op, RiscOp::Erfc) {
+                dag.add_node(node.owner, RiscOp::Neg, vec![dx], ty, None)
+            } else {
+                dx
+            };
+            Some(vec![(x, dx)])
+        }
         RiscOp::Abs => {
             // d/dx abs(x) = sign(x): 1 if x > 0, -1 if x < 0, 0 if x = 0
             // Expressed as: (x > 0) - (x < 0) cast to float, then * g
@@ -1976,9 +2003,8 @@ fn compute_adjoints(
             Some(vec![(data, replay)])
         }
         // [05-OP-8]: zero to the template and the reparameterisation adjoint
-        // to each bound, read from the forward key. A bound stored at f32
-        // under a narrower or wider template (chelis#1295) takes the checked
-        // cast of the template-dtype adjoint.
+        // to each bound, read from the forward key. Each bound has the
+        // template's dtype ([05-OP-8]), as the verifier requires.
         RiscOp::UniformLike => {
             let template = node.inputs[0];
             let template_ty = forward.get(template).unwrap().output_type.clone();
@@ -2009,19 +2035,6 @@ fn compute_adjoints(
                     },
                     None,
                 );
-                let adjoint = if bound_ty.precision == node.output_type.precision {
-                    adjoint
-                } else {
-                    dag.add_node(
-                        node.owner,
-                        RiscOp::Cast {
-                            new_precision: bound_ty.precision,
-                        },
-                        vec![adjoint],
-                        bound_ty,
-                        None,
-                    )
-                };
                 contributions.push((node.inputs[slot], adjoint));
             }
             Some(contributions)
@@ -6874,6 +6887,25 @@ mod tests {
             (a - expected).abs() < 1e-4,
             "grad of atan at 1.5 should be ≈ {expected} (1/3.25), got {a}"
         );
+    }
+
+    /// [05-OP-46]: erf(x) at x=0.5 has gradient (2/sqrt(pi))*exp(-0.25)
+    /// ≈ 0.8788, and erfc(x) its negation; both agree with finite differences.
+    #[test]
+    fn grad_erf_and_erfc_at_0_5() {
+        let expected = 0.878_782_578_935_444_8;
+        for (op, sign) in [(RiscOp::Erf, 1.0), (RiscOp::Erfc, -1.0)] {
+            let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+                dag.add_node(owner, op.clone(), vec![a], ty.clone(), None)
+            });
+            let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
+            assert_grad_close(a, n);
+            assert!(
+                (a - sign * expected).abs() < 1e-4,
+                "grad of {op:?} at 0.5 should be ≈ {}, got {a}",
+                sign * expected
+            );
+        }
     }
 
     /// tan(x) at x=0.3: grad = 1/cos²(0.3) ≈ 1.047.

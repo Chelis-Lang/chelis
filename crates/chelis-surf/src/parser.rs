@@ -1991,9 +1991,8 @@ impl Parser {
                 while *self.peek() == TokenKind::LParen {
                     let start = expression_span(&lhs);
                     self.advance();
-                    let args = self.parse_expr_list(TokenKind::RParen)?;
-                    let end = self.expect(&TokenKind::RParen)?;
-                    lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
+                    let (args, accumulator, end) = self.parse_call_args()?;
+                    lhs = call_expr(lhs, args, accumulator, start.merge(end));
                     if self.mode != ParseMode::LegacyV018 {
                         break;
                     }
@@ -2462,9 +2461,8 @@ impl Parser {
             if *self.peek() == TokenKind::LParen {
                 let start = expression_span(&expr);
                 self.advance();
-                let args = self.parse_expr_list(TokenKind::RParen)?;
-                let end = self.expect(&TokenKind::RParen)?;
-                expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+                let (args, accumulator, end) = self.parse_call_args()?;
+                expr = call_expr(expr, args, accumulator, start.merge(end));
             }
             return Ok(expr);
         }
@@ -2473,9 +2471,12 @@ impl Parser {
             if *self.peek() == TokenKind::LParen {
                 let start = expression_span(&expr);
                 self.advance();
-                let args = self.parse_expr_list(TokenKind::RParen)?;
-                let end = self.expect(&TokenKind::RParen)?;
-                expr = extend_legacy_application(expr, args, start.merge(end.span));
+                let (args, accumulator, end) = self.parse_call_args()?;
+                let span = start.merge(end);
+                expr = extend_legacy_application(expr, args, span);
+                if let Some(precision) = accumulator {
+                    expr = Expr::Accumulate(Box::new(expr), precision, span);
+                }
                 continue;
             }
 
@@ -2534,10 +2535,8 @@ impl Parser {
                 // Allow parenthesized call as postfix
                 if *self.peek() == TokenKind::LParen {
                     self.advance();
-                    let args = self.parse_expr_list(TokenKind::RParen)?;
-                    let end = self.expect(&TokenKind::RParen)?;
-                    let span = tok.span.merge(end.span);
-                    expr = Expr::Apply(Box::new(expr), args, span);
+                    let (args, accumulator, end) = self.parse_call_args()?;
+                    expr = call_expr(expr, args, accumulator, tok.span.merge(end));
                 }
                 Ok(expr)
             }
@@ -2608,6 +2607,43 @@ impl Parser {
             exprs.push(self.parse_expr(0)?);
         }
         Ok(exprs)
+    }
+
+    /// A call's arguments after its `(`, through the closing `)`: the
+    /// positional arguments, then an optional final `accumulator = <dtype>`
+    /// (spec/02 `CallArgs`). Returns the closing parenthesis's span.
+    fn parse_call_args(&mut self) -> Result<(Vec<Expr>, Option<String>, Span), ParseError> {
+        let mut args = Vec::new();
+        let mut accumulator = None;
+        while *self.peek() != TokenKind::RParen {
+            if matches!(self.peek(), TokenKind::Ident(name) if name == "accumulator")
+                && self.peek_significant_after(1) == Some(&TokenKind::Eq)
+            {
+                self.advance();
+                self.advance();
+                let (precision, precision_span) = self.expect_ident()?;
+                self.reject_retired_integer_dtype_name(&precision, precision_span)?;
+                if crate::dtype_name::canonical_primitive_name(&precision).is_none()
+                    && !crate::dtype_name::is_reserved_dtype_name(&precision)
+                {
+                    return Err(ParseError::Expected {
+                        expected: "a dtype after `accumulator=`".into(),
+                        found: precision,
+                        offset: precision_span.offset,
+                    });
+                }
+                self.consume_trailing_comma_before(&TokenKind::RParen);
+                accumulator = Some(precision);
+                break;
+            }
+            args.push(self.parse_expr(0)?);
+            if *self.peek() != TokenKind::Comma {
+                break;
+            }
+            self.advance();
+        }
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok((args, accumulator, end.span))
     }
 
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
@@ -3987,12 +4023,23 @@ fn is_single_letter_upper(name: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
 }
 
+/// A call of `callee`, wrapped in [`Expr::Accumulate`] when it names an
+/// explicit accumulator dtype.
+fn call_expr(callee: Expr, args: Vec<Expr>, accumulator: Option<String>, span: Span) -> Expr {
+    let call = Expr::Apply(Box::new(callee), args, span);
+    match accumulator {
+        Some(precision) => Expr::Accumulate(Box::new(call), precision, span),
+        None => call,
+    }
+}
+
 pub(crate) fn expression_span(e: &Expr) -> Span {
     match e {
         Expr::Lit(_, s) => *s,
         Expr::Var(_, s) => *s,
         Expr::Constructor(_, s) => *s,
         Expr::Apply(_, _, s) => *s,
+        Expr::Accumulate(_, _, s) => *s,
         Expr::List(_, s) => *s,
         Expr::Record(_, _, s) => *s,
         Expr::RecordUpdate(_, _, s) => *s,

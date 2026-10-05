@@ -24,6 +24,22 @@
     }
   },
   {
+    "type": "accumulator_argument",
+    "named": true,
+    "fields": {
+      "precision": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "additive_expression",
     "named": true,
     "fields": {
@@ -264,6 +280,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "accumulator_argument",
+          "named": true
+        },
         {
           "type": "expression",
           "named": true
@@ -3671,6 +3691,10 @@
   },
   {
     "type": "_",
+    "named": false
+  },
+  {
+    "type": "accumulator",
     "named": false
   },
   {

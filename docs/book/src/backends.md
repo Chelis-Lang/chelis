@@ -68,18 +68,20 @@ configured default, never the build machine's CPU), plus the target's other
 required flags. Native tools run with an environment cleared down to `PATH` and
 `TMPDIR`, so variables such as `CCC_OVERRIDE_OPTIONS`, `NIX_CFLAGS_COMPILE`,
 `CPATH`, or `SDKROOT` cannot change a compile; `hipcc` is the exception and
-keeps its environment. The C compiler is a declared input: the build prints
-`Compiler: <path> (<version>)`, and refuses a compiler, for example a wrapper
-script, that predefines `__FAST_MATH__`, a nonzero `__FINITE_MATH_ONLY__`, or no
-`__OPTIMIZE__` under the profile.
+keeps its environment. On macOS the build sets `SDKROOT` to the SDK of the
+`xcode-select` default, so a compiler named in `CHELIS_CC`, such as another
+Xcode's `clang`, finds the system headers. The C compiler is a declared input:
+the build prints `Compiler: <path> (<version>)`, and refuses a compiler, for
+example a wrapper script, that predefines `__FAST_MATH__`, a nonzero
+`__FINITE_MATH_ONLY__`, or no `__OPTIMIZE__` under the profile.
 
-Transcendentals (`exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`) are
+Transcendentals (`exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, `erfc`) are
 correctly rounded, so every lane returns the same bits for them. Generated C
 does not call the platform math library, Accelerate vForce, or Sleef: each unit
 defines the kernels it uses as `static` functions, taken byte for byte from the
 compiler's vendored CORE-MATH kernels that `chelis eval` also runs. A static
 library therefore exports no extra math symbol, and `chelis_math.h` declares
-nothing. Activations such as `sigmoid`, `silu`, `gelu`, and `softmax` are
+nothing. Activations such as `sigmoid`, `silu`, `gelu`, `gelu_tanh`, and `softmax` are
 graphs over these kernels and IEEE arithmetic, so they agree bit for bit too.
 
 Static libraries contain module and support objects, with no process entry.

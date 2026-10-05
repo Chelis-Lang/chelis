@@ -922,6 +922,18 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.entry.as_deref(),
         Target::Eval,
     )?;
+    lower_result(compiled)
+}
+
+/// Lower Surf declarations the caller already holds. The declarations are the
+/// program that is checked and lowered; no source text is printed or parsed
+/// again (chelis#3172).
+pub fn lower_decls(decls: &[Decl], entry: Option<&str>) -> Result<LowerResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    lower_result(compile_decls_for_eval(decls, entry, Target::Eval)?)
+}
+
+fn lower_result(compiled: CompiledSource) -> Result<LowerResult> {
     let dag = wire_dag(&compiled.dag)
         .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
@@ -1915,7 +1927,6 @@ fn execution_artifact_from_compiled_observed(
     let collect_trace = observer
         .as_ref()
         .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
     {
@@ -1937,17 +1948,6 @@ fn execution_artifact_from_compiled_observed(
     #[cfg(feature = "emission-observer")]
     let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
     let func_name = execution_c_symbol(entry_name);
-
-    // Reject host-runtime-only builtins early for any compiled-backend
-    // target so both public compiler APIs preserve the owning builtin's
-    // specific diagnostic. The fallible emitter independently rejects an
-    // unknown compiled-lane builtin; this gate improves ordering and context,
-    // and is not the correctness boundary. See spec/05-risc-primitives.md
-    // §3.6 and spec/design/loud_unsupported.md §C6.3.
-    if let Some(host_program) = host_program {
-        reject_host_only_builtins(host_program, build_target)?;
-        reject_eval_only_builtins(host_program, build_target)?;
-    }
 
     match target {
         CompileTarget::C => {
@@ -2520,7 +2520,7 @@ pub fn eval_decls_selected(
     selected_root_names: &[String],
 ) -> Result<EvalResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
     eval_compiled(&compiled, bindings, Some(selected_root_names))
 }
 
@@ -2627,7 +2627,7 @@ pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
 )]
 pub fn prepare_eval_decls(decls: &[Decl]) -> Result<PreparedEval> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
     Ok(PreparedEval {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -3496,10 +3496,17 @@ fn lower_diagnostic_to_compiler_error(
         error.errors[0].message = diagnostic.to_string();
         return error;
     }
+    // spec/04-type-system.md section 4.7: a mismatch the lowered graph
+    // proves from literals is a type error, reported with the checker's kind.
+    let kind = if diagnostic.is_dimension_mismatch() {
+        GeneralKind::DimensionMismatch
+    } else {
+        GeneralKind::LowerError
+    };
     stage_error_with_span(
         "lower",
         diagnostic.to_string(),
-        GeneralKind::LowerError,
+        kind,
         deep_span_to_diagnostic(diagnostic.span),
     )
 }
@@ -4088,9 +4095,13 @@ fn compile_source_scoped_mode(
 /// Compile Surf declarations the caller has already parsed or assembled, for
 /// evaluation. The declarations are the program that is checked, lowered, and
 /// run; no source text is printed or parsed again (chelis#3129).
-fn compile_decls_for_eval(decls: &[Decl], target: Target) -> Result<CompiledSource> {
+fn compile_decls_for_eval(
+    decls: &[Decl],
+    entry: Option<&str>,
+    target: Target,
+) -> Result<CompiledSource> {
     bail_if_cancelled("parse")?;
-    let prepared = crate::pipeline::prepare_surf_decls(decls, None)
+    let prepared = crate::pipeline::prepare_surf_decls(decls, entry)
         .map_err(|error| {
             pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(
                 error,
@@ -4143,8 +4154,6 @@ fn compiled_from_pipeline_outcome(
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
         crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
             // C execution selects host lowering here, before artifact emission.
-            // Preserve the host-only builtin diagnostic before lowering callbacks.
-            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
             let realizability = chelis_effects::realizability::infer_realizability(
                 checked.program(),
                 crate::target_capability::tensor_capable_prims(target),
@@ -4762,12 +4771,6 @@ pub fn reject_unsupported_reduce_window_precision(
     Ok(())
 }
 
-/// Host-only builtins that have no compiled-backend lowering. Calls
-/// to these from a `chelis build` program must fail at compile time
-/// with the owning early diagnostic. The emitter's Result boundary remains
-/// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
-const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
-
 /// Closed target vocabulary for shared pre-codegen build gates.
 ///
 /// Gate callers cannot pass an arbitrary string: every target spelling is
@@ -4820,12 +4823,6 @@ impl TryFrom<&str> for BuildTarget {
             )),
         }
     }
-}
-
-fn host_only_builtin_error(name: &str, target: BuildTarget) -> CompilerError {
-    let unsupported =
-        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target.as_str());
-    unsupported_stage_error(unsupported)
 }
 
 fn unsupported_gate_error(
@@ -4968,220 +4965,6 @@ pub fn reject_inexact_device_reduction_cells(
             ),
         ));
     }
-    Ok(())
-}
-
-/// Reject direct host-runtime-only calls on checked Deep before host lowering
-/// descends into their callback arguments. This preserves the owning builtin
-/// diagnostic even when an argument is itself intentionally unrepresentable
-/// in compiled code (for example `tensor_scan(..., fn (...), ...)`). The
-/// concrete-HostProgram scan below remains the second boundary for aliases
-/// and other shapes materialized by lowering.
-pub fn reject_host_only_builtins_before_host_lowering(
-    program: &CheckedProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
-        return Err(host_only_builtin_error(&name, target));
-    }
-    Ok(())
-}
-
-/// Eval/test-only builtins (`process_run`, the chelis#890 JSON family, the
-/// chelis#903 CSV family) are rejected for every compiled target with the
-/// same message the CLI build gate prints, so the public
-/// `compile()`/`compile_for_execution()` APIs (the chelis-python path)
-/// fail loudly instead of falling through to a generic codegen error
-/// (chelis#891 review finding 13). The list lives in `chelis_ir::host`
-/// and this gate is consumed by both public build paths.
-pub fn reject_eval_only_builtins(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
-        // Branded through `Unsupported` (section C2,
-        // spec/design/loud_unsupported.md). Both public build paths call
-        // this definition, keeping their diagnostics byte-compatible. The
-        // stage tag names the ACTUAL rejecting lane (round-2 red-team
-        // finding: a hardcoded "c" misstated the lane on HIP builds).
-        return Err(unsupported_stage_error(
-            chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
-                "compiled targets (the host interpreter's eval/test lanes only)",
-                chelis_types::unsupported::Stage::Codegen(target.as_str()),
-                chelis_types::deliberate_rejection!(
-                    "[05-HOST-2]",
-                    "run the program with `chelis eval` or `chelis test`, or remove the \
-                     call before building (spec/05-risc-primitives.md section 3.7)"
-                ),
-            ),
-        ));
-    }
-    Ok(())
-}
-
-pub fn reject_host_only_builtins(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> std::result::Result<(), CompilerError> {
-    let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    use chelis_ir::host::{
-        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
-    };
-
-    // A higher-order helper's callback can itself reach a host-only
-    // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
-    // callback carries its body inline, so we descend into it. A *named*
-    // callback refers to a top-level function by name; that function's
-    // body is scanned separately when we walk `program.functions`, so we
-    // do not need to chase the reference here.
-    fn scan_callback(callback: &ConcreteHostCallback, found: &mut Option<String>) {
-        if let HostCallbackKind::Inline { body, .. } = &callback.kind {
-            scan_expr(body, found);
-        }
-    }
-
-    fn scan_expr(expr: &ConcreteHostExpr, found: &mut Option<String>) {
-        if found.is_some() {
-            return;
-        }
-        match &expr.kind {
-            ConcreteHostExprKind::Builtin { name, args, .. } => {
-                if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
-                    *found = Some(name.clone());
-                    return;
-                }
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::Call { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::TensorCall { args, .. } => {
-                for arg in args {
-                    scan_expr(arg, found);
-                }
-            }
-            ConcreteHostExprKind::If {
-                cond,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                scan_expr(cond, found);
-                scan_expr(then_expr, found);
-                scan_expr(else_expr, found);
-            }
-            ConcreteHostExprKind::Let { bindings, body, .. }
-            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
-                for binding in bindings {
-                    scan_expr(&binding.value, found);
-                }
-                scan_expr(body, found);
-            }
-            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
-                for item in items {
-                    scan_expr(item, found);
-                }
-            }
-            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
-                for field in fields {
-                    scan_expr(field, found);
-                }
-            }
-            ConcreteHostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
-            ConcreteHostExprKind::MatchOption {
-                scrutinee,
-                some_expr,
-                none_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                scan_expr(some_expr, found);
-                scan_expr(none_expr, found);
-            }
-            ConcreteHostExprKind::MatchAdt {
-                scrutinee,
-                arms,
-                default_expr,
-                ..
-            } => {
-                scan_expr(scrutinee, found);
-                for arm in arms {
-                    scan_expr(&arm.expr, found);
-                }
-                if let Some(d) = default_expr {
-                    scan_expr(d, found);
-                }
-            }
-            ConcreteHostExprKind::Map { callback, list, .. }
-            | ConcreteHostExprKind::Filter { callback, list, .. }
-            | ConcreteHostExprKind::Partition { callback, list, .. }
-            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
-                scan_callback(callback, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::Fold {
-                callback,
-                init,
-                list,
-                ..
-            }
-            | ConcreteHostExprKind::Scan {
-                callback,
-                init,
-                list,
-                ..
-            } => {
-                scan_callback(callback, found);
-                scan_expr(init, found);
-                scan_expr(list, found);
-            }
-            ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
-            ConcreteHostExprKind::FormalIngress { value, .. }
-            | ConcreteHostExprKind::ExtentSites { value, .. } => scan_expr(value, found),
-            _ => {}
-        }
-    }
-
-    // This walk is deliberately whole-program (every global value AND
-    // every function body), NOT scoped to the build entry's reachable
-    // call graph. That asymmetry with the reachability-scoped AD guard
-    // in `runtime.rs::find_reachable_host_only_builtin_call` is
-    // intentional: `chelis_backend_c::host_emit` emits *every*
-    // `program.functions` entry unconditionally (no dead-code pruning),
-    // so a `tensor_scan` call inside an otherwise-unreferenced helper still
-    // reaches the C emitter's fallible builtin boundary. The gate walks the
-    // same emitted set to preserve the earlier, builtin-specific diagnostic;
-    // it is not the sole defense. The AD guard can scope to the transform
-    // target because AD lowers only that target's subgraph. If backend
-    // dead-function pruning lands later, this can be narrowed to the emitted
-    // set in lockstep.
-    let mut found: Option<String> = None;
-    for global in &program.globals {
-        scan_expr(&global.value, &mut found);
-        if found.is_some() {
-            break;
-        }
-    }
-    if found.is_none() {
-        for function in &program.functions {
-            scan_expr(&function.body, &mut found);
-            if found.is_some() {
-                break;
-            }
-        }
-    }
-
-    if let Some(name) = found {
-        return Err(host_only_builtin_error(&name, target));
-    }
-
     Ok(())
 }
 
@@ -6183,43 +5966,38 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
     } else {
         GeneralKind::EvalError
     };
-    // A declared literal result guard attributes its trap to the producing
-    // cast, but it did not reject an element conversion. Recognize the exact
-    // extent context and canonical line before attaching conversion advice.
-    let extent_cast = (|| {
-        let mut lines = message.lines();
-        let context = lines.next()?.strip_prefix("extent `")?;
-        let (claim, comparison) = context.split_once("`: claimed = ")?;
-        let (required, observation) = comparison.split_once(", cast axis ")?;
-        let (axis, observed) = observation.split_once(" = ")?;
-        required.parse::<u64>().ok()?;
-        axis.parse::<usize>().ok()?;
-        observed.parse::<usize>().ok()?;
-        Some(
-            claim == required
-                && lines.next() == Some("numeric trap: domain in cast at i64")
-                && lines.next().is_none(),
-        )
-    })()
-    .unwrap_or(false);
-    let cast_domain =
-        trusted_numeric_trap && !extent_cast && message.contains("numeric trap: domain in cast at");
-    let mut error = stage_error("eval", message, kind);
-    if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
-        diagnostic.suggestions.push(
-            "fractional float-to-int conversion must state its rounding explicitly: \
-             use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
-             `floor` or `round` before `cast`; the remaining named lossy cast \
-             forms are tracked by chelis#759"
-                .to_string(),
-        );
-    }
-    error
+    // [04-NUM-9]: a numeric trap renders byte-identically in every lane, so
+    // eval attaches no lane-only advice after the trap line.
+    stage_error("eval", message, kind)
 }
 
 #[cfg(test)]
 mod eval_trap_classification_tests {
     use super::*;
+
+    /// The shared failure renderings in `chelis_abi::failure` end in one
+    /// canonical [04-NUM-9] line, so eval classifies them as numeric traps;
+    /// the List index failure is not a trap.
+    #[test]
+    fn shared_failure_renderings_classify_as_their_lanes_report_them() {
+        for message in [
+            chelis_abi::failure::operand_shape_disagreement("add", &[2], &[3]),
+            chelis_abi::failure::operand_shape_disagreement("lt", &[2, 3], &[3]),
+            chelis_abi::failure::sparse_index_out_of_bounds("scatter_elements", -1, 1, 4),
+        ] {
+            let error = eval_stage_error(message.clone(), true);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::NumericTrap,
+                "{message}"
+            );
+        }
+        let error = eval_stage_error(chelis_abi::failure::list_index_out_of_bounds(5, 2), true);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::EvalError
+        );
+    }
 
     #[test]
     fn canonical_trap_line_becomes_a_typed_eval_diagnostic() {
@@ -6620,6 +6398,11 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
         },
         Expr::Constructor(name, s) => WireSurfExpr::Constructor {
             name: name.clone(),
+            span: span(*s),
+        },
+        Expr::Accumulate(call, accumulator, s) => WireSurfExpr::Accumulate {
+            call: Box::new(wire_expr(call)?),
+            accumulator: accumulator.clone(),
             span: span(*s),
         },
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
@@ -7144,6 +6927,8 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Tan => WireRiscOp::Tan,
         RiscOp::Atan => WireRiscOp::Atan,
         RiscOp::Tanh => WireRiscOp::Tanh,
+        RiscOp::Erf => WireRiscOp::Erf,
+        RiscOp::Erfc => WireRiscOp::Erfc,
         RiscOp::Abs => WireRiscOp::Abs,
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
@@ -7396,6 +7181,8 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                         FusedStepOp::Tan => WireFusedStepOp::Tan,
                         FusedStepOp::Atan => WireFusedStepOp::Atan,
                         FusedStepOp::Tanh => WireFusedStepOp::Tanh,
+                        FusedStepOp::Erf => WireFusedStepOp::Erf,
+                        FusedStepOp::Erfc => WireFusedStepOp::Erfc,
                         FusedStepOp::Abs => WireFusedStepOp::Abs,
                         FusedStepOp::Floor => WireFusedStepOp::Floor,
                         FusedStepOp::Ceil => WireFusedStepOp::Ceil,
@@ -7489,7 +7276,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 26);
+        assert_eq!(wire.schema_version, 27);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7802,7 +7589,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 26);
+        assert_eq!(json["schema_version"], 27);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

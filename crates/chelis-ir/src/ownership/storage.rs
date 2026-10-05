@@ -751,6 +751,8 @@ fn classify_nodes(
                 | RiscOp::Tan
                 | RiscOp::Atan
                 | RiscOp::Tanh
+                | RiscOp::Erf
+                | RiscOp::Erfc
                 | RiscOp::Abs
                 | RiscOp::Floor
                 | RiscOp::Ceil

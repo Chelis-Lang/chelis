@@ -45,6 +45,7 @@ portable across Surf and Reef boundaries.
 | `effect` | `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
 | `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
 | `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
+| `accumulator` | `(t-prim {} p)` | On `app`: the explicit accumulator dtype of a `matmul`, `sum`, or `einsum` call (spec/04 §5.7); a type error on any other call |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `wrt` | variable or nonempty tuple of variables | On `grad`: `(var {} name)` or `(tuple {} (var {} name) ...)`, preserving target order; see §2.7 |
 | `span` | string | External-source span identifier (see §1.1.1) |

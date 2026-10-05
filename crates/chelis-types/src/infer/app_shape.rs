@@ -613,7 +613,8 @@ pub(super) fn check_reshape_signature(
 /// Per spec/05-risc-primitives.md §2.4, `shrink` slices a sub-tensor whose
 /// rank matches the input and whose i-th axis dim is `end_i - start_i`.
 /// The second argument is a list-of-pair-of-i32 with one entry per input
-/// axis. Each pair is `[start, end]` with `0 <= start < end <= input_dim[i]`.
+/// axis. Each pair is `[start, end]` with `0 <= start <= end <= input_dim[i]`;
+/// equal endpoints select an empty axis (spec/05 section 2.4.1).
 ///
 /// Closes issue Chelis-Lang/chelis#187 on the type-system side: before this
 /// path was added, `shrink` was registered as `tensor_unop` (1-arg
@@ -837,8 +838,8 @@ pub(super) fn check_shrink_signature(
                 site,
             );
         }
-        if *start >= *end {
-            let expected = format!("end > start {start}");
+        if *start > *end {
+            let expected = format!("end >= start {start}");
             let got = format!("end {end}");
             return report_at_check_site(
                 errors,
@@ -847,7 +848,7 @@ pub(super) fn check_shrink_signature(
                     with_node_provenance(
                         node,
                         format!(
-                            "shrink argument 2 (bounds), axis {axis}: expected {expected}, got {got} (empty or inverted)"
+                            "shrink argument 2 (bounds), axis {axis}: expected {expected}, got {got} (inverted)"
                         ),
                     ),
                     expected,

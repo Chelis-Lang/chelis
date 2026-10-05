@@ -282,8 +282,8 @@ fn cxx_header_probe_rejects_the_c_only_noreturn_spelling() {
             .unwrap_or_else(|error| panic!("read published header {}: {error}", source.display()));
         let mutated = if name == "chelis_runtime.h" {
             let inline = contents.replace(
-                "static inline void chelis_flush_and_abort(void)",
-                "static inline _Noreturn void chelis_flush_and_abort(void)",
+                "static inline void chelis_flush_and_exit_trap(void)",
+                "static inline _Noreturn void chelis_flush_and_exit_trap(void)",
             );
             let mutated = inline.replace(
                 "void chelis_fail(chelis_string message);",

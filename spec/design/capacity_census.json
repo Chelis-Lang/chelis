@@ -223,6 +223,26 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_cols ( const chelis_list * table ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_f64s ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_ints ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_csv_strs ( const chelis_list * table , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
       "flags": []
     },
@@ -310,6 +330,11 @@
       "flags": [
         "numeric-op"
       ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_parse_csv ( chelis_string text ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -441,6 +466,26 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_f64 ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_int ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_csv_nrows ( const chelis_list * table ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_round_to ( chelis_scalar x , chelis_scalar places ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
       "flags": [
         "numeric-op"
@@ -472,6 +517,11 @@
       "flags": [
         "numeric-op"
       ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_csv_str ( const chelis_list * table , chelis_scalar row , chelis_string column ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -525,6 +575,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_to_csv ( const chelis_list * table ) ;",
       "flags": []
     },
     {
@@ -627,6 +682,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
       "flags": [
         "numeric-op"
@@ -659,6 +724,21 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor_write * chelis_tensor_begin_write ( chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_clock_monotonic_read ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_clock_wall_read ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_process_run ( chelis_string program , const chelis_list * args ) ;",
       "flags": []
     },
     {
@@ -1115,6 +1195,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_elementwise_shape_trap ( const char * op , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
       "flags": []
     },
@@ -1165,6 +1250,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_matmul_product_trap ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
       "flags": []
     },
@@ -1192,6 +1282,13 @@
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_option_retain ( const chelis_option * option ) ;",
       "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_pad_sequences_to_require_width ( int64_t width ) ;",
+      "flags": [
+        "numeric-op"
+      ]
     },
     {
       "kind": "header-export",
@@ -1318,6 +1415,26 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_write_literal ( chelis_tensor_write * guard , chelis_scalar count , const chelis_scalar * values ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_close_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_scalar tolerance , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_eq ( chelis_value actual , chelis_value expected , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_eq_tensor ( const chelis_tensor * actual , const chelis_tensor * expected , chelis_string label ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_test_assert_fail ( chelis_string label ) ;",
       "flags": []
     },
     {

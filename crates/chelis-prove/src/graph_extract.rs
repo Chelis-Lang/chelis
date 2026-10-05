@@ -262,6 +262,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Tan
             | WireRiscOp::Atan
             | WireRiscOp::Tanh
+            | WireRiscOp::Erf
+            | WireRiscOp::Erfc
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
@@ -630,7 +632,9 @@ const _: () = {
     // Version 25 adds Softmax axis metadata, with no embedded numeric values.
     // Version 26 makes `cast_trunc` the `trunc` rung of the tagged
     // `NamedCast`; it embeds no numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 26);
+    // Version 27 adds the Tier 1 `Erf` and `Erfc`, unary float primitives
+    // grouped with `Atan`; they embed no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 27);
 };
 
 #[cfg(test)]

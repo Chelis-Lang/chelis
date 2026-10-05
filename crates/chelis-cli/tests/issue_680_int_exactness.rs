@@ -560,10 +560,8 @@ fn shr_agrees_across_lanes() {
     assert_lane_parity("shr(cast(1024, i64), cast(3, i64))", 128, "shr_parity");
 }
 
-/// The class-level guard, not just the five instances. `reject_host_only_builtins`
-/// (`crates/chelis-compiler-api/src/compiler.rs:2232`) exists to stop a builtin
-/// from silently becoming a C stub, but `HOST_ONLY_BUILTINS` is `&["tensor_scan"]`
-/// (`compiler.rs:2230`), so it caught one builtin and missed five.
+/// The class-level guard, not just the five instances: the C host emitter's
+/// closed builtin dispatch must refuse what it cannot lower.
 ///
 /// An unimplemented builtin must fail the BUILD, not compile to `0` and return
 /// garbage at runtime. This test pins that no emitted C ever contains the

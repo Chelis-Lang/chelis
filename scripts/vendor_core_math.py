@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Vendor CORE-MATH kernels and generate the `chelis-crmath` amalgamation (chelis#2957).
 
-`spec/design/correctly_rounded_math.md` section 3.3 owns the design. The fourteen
+`spec/design/correctly_rounded_math.md` section 3.3 owns the design. The eighteen
 upstream kernel files under `crates/chelis-crmath/vendor/core-math/` are kept
 byte-for-byte as upstream ships them; `VENDOR.toml` beside them records the
 upstream commit, each file's SHA-256, and the file-scope identifiers of each
@@ -11,7 +11,7 @@ inputs alone (no compiler needed) this script generates
 every lane compiles:
 
 1. every file-scope identifier and macro of a kernel gets the kernel's prefix
-   (`chelis_cr_expf__`), so the fourteen kernels coexist in one unit;
+   (`chelis_cr_expf__`), so the eighteen kernels coexist in one unit;
 2. the kernel's external entry (`cr_expf`) is declared `static` before its
    definition, so every definition has internal linkage;
 3. a `static` entry `chelis_cr_<name>` calls the kernel and replaces any NaN
@@ -20,13 +20,19 @@ every lane compiles:
    must satisfy, because `chelis build` emits these same bytes into every unit
    that calls a kernel (design section 4.2). `contract_clean` drops what the
    contract forbids and what Chelis never observes: the `errno` blocks, the
-   floating-point exception raises, `<fenv.h>`, the `FENV_ACCESS` pragma, the
+   floating-point exception raises and status-flag save and clear, `<fenv.h>`, the `FENV_ACCESS` pragma, the
    `noinline`/`cold` attributes, the inline-assembly `roundeven` arms (the
    portable fallback beside them stays), and the x86-64 SSE intrinsic arms (the
-   portable arm beside each stays). The dynamic rounding-mode switch keeps only
+   portable arm beside each stays), and a `#define` between an `if` arm and its
+   `else` moves to the top of its kernel. The dynamic rounding-mode switch keeps only
    its round-to-nearest case, which Chelis pins at every entry (design section
    6). Values are unchanged: every dropped arm computes the same bits as the
-   arm that stays.
+   arm that stays;
+5. every `__builtin_roundeven` is reached through a `roundeven_finite` helper
+   that uses the builtin only on compilers that have it (GCC 10, Clang 17) and
+   otherwise rounds half to even with older builtins, to the same value. binary64
+   `sin` calls the builtin directly, so `guard_sin_roundeven` gives it binary64
+   `exp`'s helper verbatim and routes the call through it.
 
 The amalgamation opens with `#error` guards against fast math, finite-math-only,
 and excess-precision evaluation.
@@ -81,7 +87,7 @@ UPSTREAM_URL = "https://gitlab.inria.fr/core-math/core-math"
 
 # The [05-OP-46] transcendentals at both widths. `sqrt` needs no kernel: IEEE 754
 # makes the hardware square root correctly rounded.
-FUNCTIONS = ("exp", "log", "sin", "cos", "tan", "atan", "tanh")
+FUNCTIONS = ("exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc")
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,14 @@ _ROUNDING_SWITCH = re.compile(
 )
 _ATTRIBUTE = re.compile(r"__attribute__\(\((?:cold|noinline)(?:,(?:cold|noinline))*\)\)[ \t]*")
 _RAISE = re.compile(r"^[ \t]*feraiseexcept[ \t]*\([A-Z_]+\);[^\n]*\n", re.MULTILINE)
+# binary64 erfc saves the underflow flag on entry and clears a spurious underflow
+# before it returns; both only manage status flags, which Chelis never observes.
+_FLAG_SAVE = re.compile(r"^[ \t]*int[ \t]+underflow[ \t]*=[ \t]*fetestexcept[ \t]*\(FE_UNDERFLOW\);[^\n]*\n", re.MULTILINE)
+_FLAG_CLEAR = re.compile(
+    r"^[ \t]*if \(underflow == 0 && [^\n]*fetestexcept \(FE_UNDERFLOW\)\)\n"
+    r"[ \t]*feclearexcept \(FE_UNDERFLOW\);[^\n]*\n",
+    re.MULTILINE,
+)
 _DROPPED_LINES = re.compile(
     r"^[ \t]*(?:#[ \t]*pragma[ \t]+STDC[ \t]+FENV_ACCESS[ \t]+ON|#[ \t]*include[ \t]*<fenv\.h>)[^\n]*\n",
     re.MULTILINE,
@@ -226,7 +240,7 @@ _DROPPED_LINES = re.compile(
 # What the reduced text may still include; `generated_header.rs` admits each.
 CONTRACT_INCLUDES = {"<float.h>", "<inttypes.h>", "<stdint.h>", "<stdio.h>", "<string.h>"}
 _FORBIDDEN_TOKENS = ("__attribute", "__attribute__", "__asm", "__asm__", "asm", "_Pragma", "__declspec", "fegetround",
-                     "feraiseexcept", "errno", "_mm_setcsr")
+                     "feraiseexcept", "fetestexcept", "feclearexcept", "errno", "_mm_setcsr")
 
 
 def keep_portable_arms(text: str) -> str:
@@ -263,11 +277,47 @@ def keep_portable_arms(text: str) -> str:
     return "\n".join(out)
 
 
+def hoist_defines_before_else(text: str, origin: str) -> str:
+    """Move a `#define` that sits between an `if` arm and its `else` to the top of
+    the kernel text. The C grammar the generated-C contract parses has no
+    directive inside an `if`/`else` chain; the hoisted macro means the same
+    because no token before its original line names it."""
+    lines = text.split("\n")
+    hoisted: list[str] = []
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        m = _DEFINE.match(line)
+        if m:
+            j = i + 1
+            in_comment = False
+            while j < len(lines):
+                stripped = lines[j].strip()
+                if in_comment:
+                    in_comment = "*/" not in stripped
+                elif stripped.startswith("/*"):
+                    in_comment = "*/" not in stripped
+                elif stripped and not stripped.startswith("//"):
+                    break
+                j += 1
+            if j < len(lines) and lines[j].lstrip().startswith("else"):
+                name = m.group(1)
+                if name in _code_tokens("\n".join(out)):
+                    raise VendorError(f"{origin}: cannot hoist `{name}`, which is used before its definition")
+                hoisted.append(line)
+                continue
+        out.append(line)
+    if not hoisted:
+        return text
+    return "\n".join(hoisted + out)
+
+
 def contract_clean(text: str, origin: str) -> str:
     """Reduce one kernel's text to the generated-C contract (module docstring, item 4)."""
     text = keep_portable_arms(text)
+    text = hoist_defines_before_else(text, origin)
     text = _ROUNDING_SWITCH.sub(lambda m: _reindent(m.group("body"), m.group(1)), text)
     text = _RAISE.sub("", text)
+    text = _FLAG_CLEAR.sub("", _FLAG_SAVE.sub("", text))
     text = _DROPPED_LINES.sub("", text)
     text = _ATTRIBUTE.sub("", text)
     code = _code_tokens(text)
@@ -281,6 +331,60 @@ def contract_clean(text: str, origin: str) -> str:
         if target not in CONTRACT_INCLUDES:
             raise VendorError(f"{origin}: include {target} is outside the generated-C contract")
     return text
+
+
+# binary64 `sin` (`cr_sin_moderate`) calls `__builtin_roundeven` directly. GCC 9 and
+# older and Clang 16 and older (every Xcode 15) do not provide it, and `chelis build`
+# compiles every kernel into its compiler canary, so no native build worked on those
+# compilers. The other kernels that round to an integer call `roundeven_finite`,
+# which is the builtin where the compiler version provides it and a round-half-to-
+# even from older builtins otherwise; both give the same value for every finite input.
+_SIN_ROUNDEVEN_CALL = "__builtin_roundeven (invpi * ax)"
+_FENV_PRAGMA = "#pragma STDC FENV_ACCESS ON\n"
+ROUNDEVEN_HELPER_SOURCE = "src/binary64/exp/exp.c"
+_ROUNDEVEN_HELPER = re.compile(
+    r"^/\* __builtin_roundeven was introduced in gcc 10:\n.*?^#endif\n", re.MULTILINE | re.DOTALL
+)
+_ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+\w*roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
+# The compiler versions that provide the builtin, as CORE-MATH spells the test.
+_ROUNDEVEN_GUARD = (
+    "#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17))"
+    " && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))"
+)
+_ROUNDEVEN_BUILTINS = {"__builtin_roundeven", "__builtin_roundevenf", "__builtin_roundevenl"}
+
+
+def guard_sin_roundeven(text: str, read) -> str:
+    """binary64 `sin`'s text with binary64 `exp`'s `roundeven_finite` definition
+    after its `FENV_ACCESS` pragma and its `__builtin_roundeven` call replaced by a
+    call to that helper."""
+    helpers = _ROUNDEVEN_HELPER.findall(read(ROUNDEVEN_HELPER_SOURCE))
+    if len(helpers) != 1 or "roundeven_finite (double x)" not in helpers[0]:
+        raise VendorError(f"{ROUNDEVEN_HELPER_SOURCE} no longer defines one guarded roundeven_finite (double)")
+    if text.count(_SIN_ROUNDEVEN_CALL) != 1 or text.count(_FENV_PRAGMA) != 1:
+        raise VendorError("binary64 sin no longer has the one `__builtin_roundeven` call this guards")
+    text = text.replace(_SIN_ROUNDEVEN_CALL, "roundeven_finite (invpi * ax)")
+    return text.replace(_FENV_PRAGMA, f"{_FENV_PRAGMA}\n{helpers[0]}")
+
+
+def require_guarded_roundeven(text: str, origin: str) -> None:
+    """Fail unless every `__builtin_roundeven[fl]` in `text`'s code is the
+    `roundeven_finite` definition in the first arm of the compiler-version guard,
+    with the portable definition in its `#else` arm."""
+    lines = text.split("\n")
+    for m in _TOKEN.finditer(text):
+        if m.lastgroup != "ident" or m.group() not in _ROUNDEVEN_BUILTINS:
+            continue
+        index = text.count("\n", 0, m.start())
+        line = lines[index].strip()
+        guarded = (
+            _ROUNDEVEN_DEFINE.fullmatch(line) is not None
+            and 0 < index < len(lines) - 1
+            and lines[index - 1].strip() == _ROUNDEVEN_GUARD
+            and lines[index + 1].strip() == "#else"
+        )
+        if not guarded:
+            raise VendorError(f"{origin}: `{m.group()}` outside a guarded roundeven_finite: {line!r}")
 
 
 def _reindent(body: str, indent: str) -> str:
@@ -353,7 +457,7 @@ HEADER = """\
  * keeps its upstream copyright and permission notice). Do not edit: regenerate with
  * `.venv/bin/python scripts/vendor_core_math.py`; `--check` fails on any drift.
  *
- * Correctly rounded exp, log, sin, cos, tan, atan, and tanh at binary32 and binary64
+ * Correctly rounded exp, log, sin, cos, tan, atan, tanh, erf, and erfc at binary32 and binary64
  * ([05-OP-46], spec/design/correctly_rounded_math.md). Every definition is static;
  * the entries are chelis_cr_<name>, and each returns [04-NUM-2]'s canonical quiet NaN
  * for every NaN result. */
@@ -398,8 +502,12 @@ static {ctype} {entry}({ctype} x) {{
 
 def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     raw = read(kernel.path)
-    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
     rename = set(names)
+    if kernel.path == "src/binary64/sin/sin.c":
+        raw = guard_sin_roundeven(raw, read)
+        rename.add("roundeven_finite")
+    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
+    require_guarded_roundeven(text, kernel.path)
     if kernel.upstream_entry not in rename:
         raise VendorError(f"{kernel.name}: entry {kernel.upstream_entry} missing from identifiers")
     body = rename_identifiers(text, rename, kernel.prefix)
@@ -575,7 +683,8 @@ def mpfr_reference(gmpy2, function: str, bits: int, width: int) -> int:
     ctx.round = gmpy2.RoundToNearest
     with gmpy2.context(ctx):
         fn = {"exp": gmpy2.exp, "log": gmpy2.log, "sin": gmpy2.sin, "cos": gmpy2.cos,
-              "tan": gmpy2.tan, "atan": gmpy2.atan, "tanh": gmpy2.tanh}[function]
+              "tan": gmpy2.tan, "atan": gmpy2.atan, "tanh": gmpy2.tanh,
+              "erf": gmpy2.erf, "erfc": gmpy2.erfc}[function]
         y = fn(gmpy2.mpfr(x))
         if gmpy2.is_nan(y):
             return CANONICAL_NAN[width]
@@ -669,6 +778,19 @@ def function_inputs(function: str, width: int) -> list[tuple[int, str]]:
         rows += [(f(1e-3), "#2959: old lowering 620 ULP off"), (f(1e-5), "#2959: old lowering 14,932 ULP off"),
                  (f(-0.05580474063754082), "#2959 tanh witness"), (f(20.0), "saturates near 1"),
                  (f(-20.0), "saturates near -1"), (f(1e-30), "tiny argument")]
+    elif function in ("erf", "erfc"):
+        rows += [(f(1e-30), "tiny argument"), (f(-1e-30), "tiny negative argument"),
+                 (f(0.5), "erf(0.5)"), (f(-2.0), "erfc near 2"), (f(3.0), "erfc tail"),
+                 (f(6.0), "erf saturates near 1"), (f(-6.0), "erf saturates near -1")]
+        # [05-OP-35] normal_cdf arguments -x/sqrt(2): the deep left tail where erfc
+        # underflows, and the |x| = 64 bound of the spec/05 section 3.3 Phi graph.
+        for x in (-5.0, -12.6, -36.5, -38.4, 45.25, -45.25):
+            rows.append((f(-x * 0.7071067811865476), f"Phi argument at x = {x}"))
+        if width == 32:
+            rows += [(_f32(10.0546875), "erfcf result near the smallest subnormal"),
+                     (_f32(10.1), "erfcf result +0")]
+        else:
+            rows += [(_f64(27.2), "erfc result subnormal"), (_f64(27.3), "erfc result +0")]
     return rows
 
 

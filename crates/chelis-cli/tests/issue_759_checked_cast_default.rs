@@ -113,32 +113,40 @@ fn tensor_fractional_float_to_int_traps_domain() {
     );
 }
 
+/// [04-NUM-9]: the trap renders byte-identically in every lane, so the
+/// trap line is the LAST line of the failure on eval and on compiled C, with
+/// no lane-only advice after it. The named lossy forms (`cast_trunc`,
+/// `cast_saturate`, `cast_wrap`) are documented in the book's cast section,
+/// not taught from a trap.
 #[test]
 fn scalar_fractional_float_to_int_traps_domain() {
     for prim in ["i8", "i64"] {
+        let trap = format!("numeric trap: domain in cast at {prim}");
         let stderr =
             eval_lane_str(&format!("cast(3.5, {prim})")).expect_err("fractional cast must trap");
-        assert!(
-            stderr.contains(&format!("numeric trap: domain in cast at {prim}")),
-            "expected branded Domain trap: {stderr}"
+        assert_eq!(
+            stderr.lines().last(),
+            Some(trap.as_str()),
+            "eval ends on the trap line: {stderr}"
         );
-        // chelis#759's float-to-int rung SHIPPED as `cast_trunc`
-        // ([05-OP-6]), so the hint now names it as the migration target
-        // rather than calling it future work.
-        let expected_hint_suffix = "\n  hint: fractional float-to-int conversion must state its \
-        rounding explicitly: use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
-        `floor` or `round` before `cast`; the remaining named lossy cast forms are tracked \
-        by chelis#759";
-        assert!(
-            stderr.contains(expected_hint_suffix),
-            "fractional runtime cast must carry the complete teaching suffix: {stderr}"
-        );
-        for spelling in ["cast_trunc", "floor", "round", "chelis#759"] {
-            assert!(
-                stderr.contains(spelling),
-                "fractional cast diagnostic must teach `{spelling}`: {stderr}"
+        if c_toolchain_available() {
+            let program = format!(
+                "module M.Main\ndef f(x: f64) -> {prim} = cast(x, {prim})\nout = print(f(3.5f64))\n"
+            );
+            let (_, c_stderr, ok) =
+                c_lane_run(&program, &format!("fractional_{prim}")).expect("C lane builds");
+            assert!(!ok, "compiled fractional cast must trap: {c_stderr}");
+            assert_eq!(
+                c_stderr.lines().last(),
+                Some(trap.as_str()),
+                "compiled C ends on the same trap line: {c_stderr}"
             );
         }
+        // The passing twin: an integral value casts exactly.
+        assert_eq!(
+            eval_lane_str(&format!("cast(3.0, {prim})")).expect("integral cast"),
+            "3"
+        );
     }
 }
 #[test]
