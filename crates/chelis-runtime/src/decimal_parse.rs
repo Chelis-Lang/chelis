@@ -484,7 +484,9 @@ mod tests {
             assert_eq!(
                 outcome(text, width),
                 reference_outcome(text, width),
-                "`{text}` at width {width:?}"
+                "`{text}` at {} exponent and {} mantissa bits",
+                width.0,
+                width.1
             );
         }
         if let Ok(value) = text.parse::<f64>() {
