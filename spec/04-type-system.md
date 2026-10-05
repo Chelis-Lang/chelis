@@ -2245,15 +2245,19 @@ Otherwise:
   non-numeric `p` such as `bool` or `string`, cannot bind at `p`. In a
   declaration or under a dtype argument this is a type error that names the
   literal and `p`: `x: i32 = 1.5` and `b: bool = 1` are rejected. A cast keeps
-  the literal's default and converts the value under [04-NUM-14]:
-  `cast(2.0, i32)` is `2`, `cast(2.5, i32)` traps `domain`, and
-  `cast(1, bool)` is `true`.
+  the literal's default and applies [04-NUM-14] to the value, which converts
+  it or rejects it outside that operation's domain: `cast(2.0, i32)` is `2`,
+  `cast(2.5, i32)` traps `domain`, `cast(1, bool)` is `true`, and
+  `cast(1, string)` is rejected.
 
 **A cast its target binds denotes the literal.** A cast denotes its literal
 operand, with no conversion, exactly when the literal is unsuffixed, its kind
 admits the target, and the target is a primitive; that target is then a
-numeric primitive, and the cast is the same value as the literal with the
-target's suffix (§5.5). `cast(1.1, f64)` binds the decimal at `f64`, exactly
+numeric primitive, and the cast is the value of the literal bound at the
+target. For a non-negative literal that is the same value as the literal with
+the target's suffix (§5.5); a negated literal is the one signed literal
+described above, so `cast(-128, i8)` is the `i8` minimum, which has no
+suffixed spelling. `cast(1.1, f64)` binds the decimal at `f64`, exactly
 `0x3ff199999999999a`, and is the same value as `1.1f64`; it never rounds
 through the `f32` default first, which would yield `1.100000023841858`.
 Likewise `cast(3000000000, i64)` binds at `i64`, which is what lets an
@@ -2261,13 +2265,14 @@ integer outside the `i32` range be written without a suffix.
 Range and finiteness are checked at `p`: `cast(2147483648, i32)` is a range
 error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
 at `f16`, whereas `cast(70000.0f32, f16)` converts a finite `f32` value and
-yields infinity under [04-NUM-14]. Every other cast of a literal converts it
-under [04-NUM-14]: a suffixed literal, a float literal under an integer
-target, and any numeric literal under `bool`, as listed above. A cast to a
-dtype binder also keeps its conversion: the literal binds at each member its
-kind admits, where the conversion is the identity, and at any other member the
-cast converts the literal's default value, so `cast(2.5, p)` under
-`p: Numeric` traps `domain` at `i32` (`spec/03-deep-syntax.md` §6.4).
+yields infinity under [04-NUM-14]. Every other cast of a literal applies
+[04-NUM-14] to it: a suffixed literal, a float literal under an integer
+target, and any numeric literal under a non-numeric target, as listed above.
+A cast of an unsuffixed literal to a dtype binder also keeps its conversion:
+the literal binds at each member its kind admits, where the conversion is the
+identity, and at any other member the cast converts the literal's default
+value, so `cast(2.5, p)` under `p: Numeric` traps `domain` at `i32`
+(`spec/03-deep-syntax.md` §6.4).
 
 **Tensor elements state their dtype.** No default applies to a literal
 element of a `to_tensor` argument: an unsuffixed literal element of a
