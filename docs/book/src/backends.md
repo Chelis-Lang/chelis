@@ -70,7 +70,8 @@ required flags. Native tools run with an environment cleared down to `PATH` and
 `CPATH`, or `SDKROOT` cannot change a compile; `hipcc` is the exception and
 keeps its environment. On macOS the build sets `SDKROOT` to the SDK of the
 `xcode-select` default, so a compiler named in `CHELIS_CC`, such as another
-Xcode's `clang`, finds the system headers. The C compiler is a declared input:
+Xcode's `clang`, finds the system headers, and each command `--emit-c` prints
+starts with that `SDKROOT=` assignment. The C compiler is a declared input:
 the build prints `Compiler: <path> (<version>)`, and refuses a compiler, for
 example a wrapper script, that predefines `__FAST_MATH__`, a nonzero
 `__FINITE_MATH_ONLY__`, or no `__OPTIMIZE__` under the profile.

@@ -248,16 +248,21 @@ def corrupt_driver(driver: str, target: str) -> str:
 
 
 LINK_REQUIREMENTS = "Link requirements (after module archive): "
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def reported_link_flags(build_stdout: str) -> list[str]:
     """The flags `chelis build --emit-c` tells a library consumer to link after the
     runtime archive. The canary links exactly as that guidance says, so on glibc
-    before 2.34 it gets `-lpthread -ldl` alongside `-lm`."""
+    before 2.34 it gets `-lpthread -ldl` alongside `-lm`. The line may open with
+    variable assignments, the SDK a macOS build gives its tools; the canary links
+    with the host's `cc`, whose `/usr/bin` shim selects that same SDK."""
     lines = [line for line in build_stdout.splitlines() if line.startswith(LINK_REQUIREMENTS)]
     if len(lines) != 1:
         raise ValueError("build did not report one link-requirements line")
     words = shlex.split(lines[0][len(LINK_REQUIREMENTS):])
+    while words and ASSIGNMENT.match(words[0]):
+        words.pop(0)
     if len(words) < 2 or not words[1].endswith("libchelis_runtime.a"):
         raise ValueError("link requirements do not name the runtime archive")
     return words[2:]

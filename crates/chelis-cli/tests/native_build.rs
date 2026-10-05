@@ -91,6 +91,57 @@ fn emit_c_does_not_require_native_tools() {
     assert!(!out.join("libanswer.a").exists());
 }
 
+/// The `/usr/bin` clang is a shim that gives the compiler it runs the selected
+/// SDK. A clang named directly in `CHELIS_CC` has none, so the build sets
+/// `SDKROOT` for it, and the line `--emit-c` prints must carry that or it fails
+/// where the build's own compile succeeds.
+#[cfg(target_os = "macos")]
+#[test]
+fn emit_c_compile_line_builds_with_a_directly_named_clang() {
+    let found = Process::new("/usr/bin/xcrun")
+        .args(["--find", "clang"])
+        .output()
+        .unwrap();
+    assert!(found.status.success(), "xcrun --find clang failed");
+    let clang = String::from_utf8(found.stdout).unwrap().trim().to_string();
+    assert_ne!(clang, "/usr/bin/clang", "xcrun named the shim itself");
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("answer.ch");
+    let out = dir.path().join("out");
+    fs::write(&file, "answer = add(20i64, 22i64)\n").unwrap();
+    let printed = build(&file, &out)
+        .arg("--emit-c")
+        .env("CHELIS_CC", &clang)
+        .output()
+        .unwrap();
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let stdout = String::from_utf8(printed.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Compile: "))
+        .expect("a compile line");
+    // A shell holding only what the build passes its tools from this process.
+    let mut shell = Process::new("/bin/sh");
+    shell.env_clear().args(["-c", line]);
+    for name in chelis_backend_c::toolchain::TOOL_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            shell.env(name, value);
+        }
+    }
+    let compiled = shell.output().unwrap();
+    assert!(
+        compiled.status.success(),
+        "{line}\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let run = Process::new(out.join("answer")).output().unwrap();
+    assert_eq!(run.stdout, b"answer = 42\n");
+}
+
 #[test]
 fn missing_compiler_fails_with_install_guidance() {
     let dir = tempdir().unwrap();
