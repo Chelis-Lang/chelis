@@ -674,7 +674,6 @@ impl Prim {
     /// node's `output_type.precision` is the accumulator precision;
     /// lowering inserts a `Cast` for the bf16/f16 row to recover the
     /// operand-precision result.
-
     pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
         match self {
             Prim::Bf16 => Ok(Prim::Bf16),

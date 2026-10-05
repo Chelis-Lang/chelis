@@ -673,6 +673,25 @@ pub fn lower_matmul(
     b_ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
+    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
+        .expect("lower_matmul requires an admitted floating operand precision");
+    lower_matmul_with_accumulator(owner, dag, a, b, a_ty, b_ty, accumulator, parent_span)
+}
+
+/// spec/05 §4.1's matmul lowering with a resolved accumulator: products at
+/// the operand dtype, the contraction sum in `accumulator`, and the result
+/// finalized at the operand dtype.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_matmul_with_accumulator(
+    owner: Owner,
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    a_ty: &TensorType,
+    b_ty: &TensorType,
+    accumulator: Prim,
+    parent_span: Option<&str>,
+) -> NodeId {
     assert!(
         a_ty.dims.len() >= 2 && b_ty.dims.len() >= 2,
         "lower_matmul expects rank >= 2 tensors"
@@ -781,8 +800,6 @@ pub fn lower_matmul(
         parent_span,
     );
 
-    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
-        .expect("lower_matmul requires an admitted floating operand precision");
     let sum_ty = TensorType {
         dims: result_ty.dims.clone(),
         precision: accumulator,

@@ -139,10 +139,12 @@ Other defaults are
 `sum`, `cumsum`, `trace`, and `einsum` all return
 `sum_result(p, default(p))`, so over `i8` or `i16` each returns `i32`: a
 total of N values needs more bits than its elements, so the stored tensor
-keeps its dtype and only the aggregate widens. Declare the result as `i32`
-or narrow it with an explicit `cast`.
-An explicit wider accumulator follows the exact result matrix in
-`spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
+keeps its dtype and only the aggregate widens. Declare the result as `i32`,
+pass `accumulator=i64` to `sum` or `einsum`, or narrow it with an explicit
+`cast`.
+An explicit wider accumulator, written as the final argument
+`accumulator=<dtype>` (`sum(x, 0i32, accumulator=f64)`), follows the exact
+result matrix in `spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
 accumulator parameter.
 
 ### 1.4 Windowed reduction — `spec/05` §2.3.1 (Valid padding only)

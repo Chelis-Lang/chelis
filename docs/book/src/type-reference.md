@@ -210,8 +210,10 @@ handle. Tensor comparisons produce a boolean tensor.
 Logical operations (`and`, `or`, `not`) take `bool`; transcendental operations
 such as `exp`, `log`, and `sqrt` take float types.
 
-`matmul`, `sum`, and `einsum` accept an optional `accumulator=p` argument.
-The compiler resolves the default from the operand dtype. For `bf16` and
+`matmul`, `sum`, and `einsum` accept an optional final argument
+`accumulator=p`, as in `sum(x, 0i32, accumulator=f64)`; any other call that
+supplies it is a type error. Omitted, the compiler resolves the default from
+the operand dtype. For `bf16` and
 `f16`, the default accumulator is `f32`; their result returns to the
 operand dtype. `sum` and `einsum` default to `i32` accumulation and an `i32`
 result for `i8` and `i16` inputs; integer `matmul` is rejected. For `f32`
@@ -233,7 +235,8 @@ values needs more bits than its elements. Stored `i8` and `i16` tensors stay
 A declared result, or a downstream operation, that expects the operand dtype
 is a type error that names this rule. Declare the result as `i32`, or narrow
 it explicitly with `cast(total, i8)`, which traps `Overflow` when the total
-does not fit. A function generic over a precision variable must bound it to
+does not fit. `sum` and `einsum` also take `accumulator=i64` for an `i64`
+total. A function generic over a precision variable must bound it to
 dtypes that share one result, such as `Float`, `{i32, i64}`, or `{i8, i16}`
 with an `i32` result.
 
