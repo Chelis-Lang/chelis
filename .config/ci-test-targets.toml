@@ -3309,6 +3309,24 @@ reason = "the release canary installs the shipped toolchain and requires the sta
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = "scripts/verify_static_nss.py"
+disposition = "owner"
+workflow = "release.yml"
+job = "build-linux-x86_64-static"
+cadence = "tag push and workflow_dispatch"
+reason = "the static Linux build runs its chelis and chelisup host lookups in pinned images whose hosts lines name NSS plugins and refuses a binary the lookup ends with a signal"
+tracking_issue = "chelis#2686"
+
+[[path_rule]]
+prefix = "scripts/test_verify_static_nss.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the static host-lookup check's fail-closed controls: a signal, a lookup the binary never reached, and an image with no plugin witness never pass"
+tracking_issue = "chelis#2686"
+
+[[path_rule]]
 prefix = "scripts/test_installed_artifact_canary.py"
 disposition = "owner"
 workflow = "ci.yml"
