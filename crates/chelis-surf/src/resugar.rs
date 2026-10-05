@@ -193,6 +193,7 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::default());
+    let _explicit = ExplicitLiteralSpansScope::install();
     let mut expression = resugar_expression_inner(expr)?;
     strip_redundant_expression_suffixes(&mut expression);
     Ok(expression)
@@ -230,6 +231,7 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
         reject_extensions(expr)?;
     }
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
+    let _explicit = ExplicitLiteralSpansScope::install();
     let mut declarations = resugar_declaration_sequence(exprs)?;
     strip_redundant_suffixes(&mut declarations);
     validate_surface_declarations(&declarations)?;
@@ -242,6 +244,24 @@ thread_local! {
     /// another literal can only keep one more suffix, which is always safe.
     static EXPLICIT_LITERAL_SPANS: std::cell::RefCell<BTreeSet<(usize, usize)>> =
         std::cell::RefCell::default();
+}
+
+/// One resugaring's explicit-literal spans. Installing starts the request
+/// from an empty set and dropping restores the enclosing request's set, so a
+/// request that fails part way never leaves spans for the next one.
+struct ExplicitLiteralSpansScope(BTreeSet<(usize, usize)>);
+
+impl ExplicitLiteralSpansScope {
+    fn install() -> Self {
+        Self(EXPLICIT_LITERAL_SPANS.with(|spans| std::mem::take(&mut *spans.borrow_mut())))
+    }
+}
+
+impl Drop for ExplicitLiteralSpansScope {
+    fn drop(&mut self) {
+        let enclosing = std::mem::take(&mut self.0);
+        EXPLICIT_LITERAL_SPANS.with(|spans| *spans.borrow_mut() = enclosing);
+    }
 }
 
 fn record_explicit_literal(span: chelis_deep::Span) {

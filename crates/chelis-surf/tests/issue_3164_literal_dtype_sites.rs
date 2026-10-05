@@ -15,9 +15,12 @@
 //! test, so a mechanism that over-applies fails as surely as one that is
 //! missing.
 
+use chelis_deep::parser::parse_and_stamp_file;
 use chelis_deep::printer::print_expr;
 use chelis_surf::desugar::desugar_program;
+use chelis_surf::format::format_program;
 use chelis_surf::parser::parse_str;
+use chelis_surf::resugar::resugar_program;
 
 /// The desugared program, one Deep form per line, whitespace flattened and
 /// `span` metadata removed.
@@ -459,4 +462,25 @@ fn every_binder_of_to_tensor_is_rejected_at_surf_ingress() {
     }
     let uses = deep("xs = [1.5f32]\nf = to_tensor\nr = to_tensor(xs)\n");
     assert_contains(&uses, "(var {} to_tensor)", "uses of the intrinsic");
+}
+
+// === Printer state ===
+
+/// spec/03 §6.3.1's explicit-suffix side table belongs to one resugaring: a
+/// request that fails after recording an explicit literal must not change how
+/// the next request prints a literal with the same span. The padding after
+/// `"explicit"` gives both literals the same Deep source span.
+#[test]
+fn a_failed_resugaring_leaves_no_printer_state_for_the_next() {
+    let fail = "(def {} x (lit {surf_literal_style: \"explicit\"  , type: (t-prim {} f32)} 1.1))\n(defsig {} y (t-var {} p))";
+    let ok = "(def {} x (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f32)} 1.1))";
+    let failed = parse_and_stamp_file(fail).unwrap();
+    let good = parse_and_stamp_file(ok).unwrap();
+    let before = format_program(&resugar_program(&good).unwrap());
+    assert!(
+        resugar_program(&failed).is_err(),
+        "the second form must fail to resugar"
+    );
+    let after = format_program(&resugar_program(&good).unwrap());
+    assert_eq!(before, after);
 }
