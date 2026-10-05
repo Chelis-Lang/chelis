@@ -4186,12 +4186,9 @@ path even though bare `round` under `grad` remains a structural
 >
 > Failure: Any arity other than one is a type error naming the expected
 > arity, and a borrowed operand is a type error (Domain). A `drop` after
-> an earlier ordinary consume, such as a consuming call argument or
-> `realize`, is consuming fan-out under spec/04 section 8.3, repaired by a
-> copy inserted at the earlier use. A `drop` after any other earlier
-> consume is the ownership rejection: after a consume of a key-carrying
-> value ([04-LIN-9]) or of a destructured component, a match on the value
-> as scrutinee, or a closure capture that consumes it ([04-LIN-2]). A
+> an earlier ordinary consume, as spec/04 section 8.3 defines it, is
+> consuming fan-out repaired by a copy inserted at the earlier use; a
+> `drop` after any other earlier consume is the ownership rejection. A
 > `drop` of an owner that a closure borrows is
 > the ownership rejection of [04-LIN-2], and every use of an owner after
 > its `drop` is the ownership rejection of [04-LIN-11]. `drop` has no

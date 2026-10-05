@@ -512,3 +512,72 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
         "no diagnostic may name a desugarer binding; got {errors:?}"
     );
 }
+
+// Round 1 addendum of #3205: a source-spelled destructured component is an
+// owner like any other, and a destructuring `let` is an ordinary consume.
+
+#[test]
+fn using_a_component_whole_after_dropping_its_projection_is_refused() {
+    assert_use_after_component_drop(
+        r#"
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> ((tensor[4, f32], tensor[4, f32]), tensor[4, f32]) =
+  {
+    (a, b) = p
+    c = drop(a.0)
+    (a, b)
+  }
+"#,
+        "a",
+        "component a whole after drop(a.0)",
+    );
+}
+
+#[test]
+fn projecting_a_dropped_projection_of_a_component_again_is_refused() {
+    assert_use_after_component_drop(
+        r#"
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
+  {
+    (a, b) = p
+    c = drop(a.0)
+    a.0
+  }
+"#,
+        "a",
+        "a.0 after drop(a.0)",
+    );
+}
+
+#[test]
+fn using_a_component_after_dropping_a_projection_through_its_alias_is_refused() {
+    assert_use_after_component_drop(
+        r#"
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> (tensor[4, f32], tensor[4, f32]) =
+  {
+    (a, b) = p
+    q = a
+    c = drop(q.0)
+    a
+  }
+"#,
+        "a",
+        "a after drop(q.0) with q = a",
+    );
+}
+
+#[test]
+fn a_drop_after_a_destructuring_let_is_accepted() {
+    // A destructuring `let` consumes its value ordinarily (spec/04 section
+    // 8.3), so the later `drop` is fan-out repaired by copy insertion.
+    assert_accepted(
+        r#"
+def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
+  {
+    (a, b) = p
+    c = drop(p)
+    b
+  }
+"#,
+        "(a, b) = p then drop(p)",
+    );
+}

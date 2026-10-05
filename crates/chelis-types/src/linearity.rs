@@ -1419,7 +1419,17 @@ impl Checker {
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
-                    alias_source_id = var_name(value).and_then(|source| scope.top_id(source));
+                    // A bind refused because the source had a component
+                    // dropped ([04-LIN-11]) records no alias: the refusal
+                    // names the source, and later uses of the new name must
+                    // not repeat it under that name, which for a destructure
+                    // is a desugarer carrier the source never spells.
+                    alias_source_id = var_name(value)
+                        .and_then(|source| scope.top_id(source))
+                        .filter(|source| {
+                            let owner = scope.resolve_alias_chain(*source).unwrap_or(*source);
+                            dropped_component_overlapping(scope, &[*source, owner], &[]).is_none()
+                        });
                     self.consume_var_expr(
                         value,
                         scope,
@@ -2092,7 +2102,6 @@ impl Checker {
         };
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
         if let Some((dropped, site)) = dropped_component_overlapping(scope, &[use_id, owner], &path)
-            && !scope.is_component_id(use_id)
         {
             self.report_use_after_component_drop(name, &dropped, &site, expr);
         }
@@ -2112,11 +2121,7 @@ impl Checker {
             return false;
         };
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        // A destructuring `let` binds the parent to a desugarer carrier, and
-        // that bind is already refused naming the parent the source spells;
-        // a later use through the carrier or a component would name a binding
-        // the source never wrote (spec/04 section 8.3).
-        if self.projection_root == Some(owner) || scope.is_component_id(use_id) {
+        if self.projection_root == Some(owner) {
             return false;
         }
         match dropped_component_overlapping(scope, &[use_id, owner], &[]) {

@@ -66,10 +66,10 @@ The compiler inserts `Copy` for source-level consuming fan-out: a value used in 
 than one non-borrow consuming position. Copies are inserted for all consume sites before
 the final consume site; the final consume site takes the original.
 
-A `drop` is a terminal consume site ([04-LIN-11]). When it follows earlier consumes,
-the copies go to those earlier sites and the `drop` takes the original, so a `drop`
-after a consume is ordinary fan-out, and no use after a `drop` can be repaired by a
-copy. A tuple projection or field access outside a destructuring `let` moves its
+A `drop` is a terminal consume site ([04-LIN-11]). When it follows earlier ordinary
+consumes (spec/04 section 8.3 defines the term), the copies go to those earlier sites
+and the `drop` takes the original, so such a `drop` is ordinary fan-out, and no use
+after a `drop` can be repaired by a copy. A tuple projection or field access outside a destructuring `let` moves its
 component out of the parent: an ordinary consume of that component is fan-out the
 same way, while a `drop` of it ends the component, so the parent is unusable as a
 whole afterwards and only the disjoint components remain usable.

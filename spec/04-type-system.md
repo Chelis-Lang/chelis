@@ -3126,10 +3126,8 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 - `copy(x)` reads `x` without consuming it and yields a fresh owned value.
 - `drop(x)` is an explicit consume, and a terminal one: it ends the owner, and no
   inserted copy keeps the owner usable after it ([04-LIN-11]). A `drop` after an
-  earlier ordinary consume, such as a consuming call argument or `realize`, is
-  consuming fan-out like any other: the earlier use receives the inserted copy. A
-  match scrutinee and a consuming closure capture are not ordinary consumes, and a
-  `drop` after either is rejected like any other later use. The compiler also inserts implicit last-use drops for
+  earlier ordinary consume is consuming fan-out like any other: the earlier use
+  receives the inserted copy. The compiler also inserts implicit last-use drops for
   locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
@@ -3148,8 +3146,13 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   order. A consuming use of such a reference yields each call's owned result through a
   copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
   whose copy [04-LIN-9] refuses.
-- Ordinary consuming fan-out is handled by inserted copies, except on a
-  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
+- An *ordinary consume* is every consuming use except a `drop` ([04-LIN-11]), a
+  match scrutinee, a consuming closure capture ([04-LIN-2]), and a consume of a
+  key-carrying value ([04-LIN-9]) or of a destructured component (below). A
+  consuming call argument, `realize`, and the value a destructuring `let`
+  destructures are ordinary consumes. Ordinary consuming fan-out (a later use after
+  an earlier ordinary consume) is handled by inserted copies; a use after any other
+  consume is rejected. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
