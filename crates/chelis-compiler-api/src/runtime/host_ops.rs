@@ -523,15 +523,13 @@ pub(super) fn bitwise_binop(
         // chelis#2076, [05-OP-47]: two same-shaped tensors of one signed
         // integer dtype, element by element with the scalar rule.
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            // spec/04 section 4.7: a run-time disagreement traps `Domain` in
+            // the operation, rendered as compiled C renders it (chelis#3107).
             if lhs.value.shape != rhs.value.shape {
-                let render = |shape: &[usize]| {
-                    let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
-                    format!("[{}]", extents.join(", "))
-                };
-                return Err(format!(
-                    "tensor shapes must match for elementwise op, got {} vs {}",
-                    render(&lhs.value.shape),
-                    render(&rhs.value.shape)
+                return Err(operand_shape_disagreement(
+                    op.name(),
+                    &lhs.value.shape,
+                    &rhs.value.shape,
                 ));
             }
             let storage =
