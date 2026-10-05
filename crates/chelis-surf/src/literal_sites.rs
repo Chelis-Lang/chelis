@@ -262,18 +262,6 @@ pub(crate) fn dtype_argument<'a>(
     resolve_dtype(name, is_binder)
 }
 
-/// The literal elements of a bracket literal's items, recursively through
-/// nested bracket literals (§5.6).
-pub(crate) fn literal_elements<'a>(items: &'a [Expr], out: &mut Vec<NumericLiteral<'a>>) {
-    for item in items {
-        if let Some(literal) = numeric_literal(item) {
-            out.push(literal);
-        } else if let Expr::List(nested, _) = item {
-            literal_elements(nested, out);
-        }
-    }
-}
-
 /// The declaration that a declaration-site literal initializes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum DeclarationOwner<'a> {
@@ -292,8 +280,9 @@ pub(crate) enum Site<'a> {
         stated: Option<StatedDtype<'a>>,
         owner: DeclarationOwner<'a>,
     },
-    /// The operand of a checked cast.
-    Cast(Option<StatedDtype<'a>>),
+    /// The operand of a checked cast, which never takes a default it would
+    /// not take anyway: a cast collapses or converts (§5.6).
+    Cast,
     /// An element of `to_tensor(xs, p)`; `None` when `p` names no dtype.
     DtypeArgument(Option<StatedDtype<'a>>),
     /// An element of `to_tensor(xs)`, which has no default.
@@ -365,21 +354,27 @@ impl<'a> ProgramDeclarations<'a> {
 
     /// A top-level binding's declared type: its inline annotation, or else
     /// its standalone value `sig`.
-    pub(crate) fn binding_type(
+    pub(crate) fn binding_type<'t>(
         &self,
         name: &str,
-        inline: Option<&'a TypeExpr>,
-    ) -> Option<&'a TypeExpr> {
+        inline: Option<&'t TypeExpr>,
+    ) -> Option<&'t TypeExpr>
+    where
+        'a: 't,
+    {
         inline.or_else(|| self.value_types.get(name).copied())
     }
 
     /// A function's declared result type: its inline result type, or else
     /// the result of its standalone function `sig`.
-    pub(crate) fn result_type(
+    pub(crate) fn result_type<'t>(
         &self,
         name: &str,
-        inline: Option<&'a TypeExpr>,
-    ) -> Option<&'a TypeExpr> {
+        inline: Option<&'t TypeExpr>,
+    ) -> Option<&'t TypeExpr>
+    where
+        'a: 't,
+    {
         inline.or_else(|| self.result_types.get(name).copied())
     }
 
@@ -397,6 +392,18 @@ pub(crate) fn visit_program<'a>(decls: &'a [Decl], visitor: &mut impl SiteVisito
         visitor,
     };
     walker.decls(decls);
+}
+
+/// Visits every numeric literal of one expression with its §5.6 site, outside
+/// any declaration.
+pub(crate) fn visit_expression<'a>(expr: &'a Expr, visitor: &mut impl SiteVisitor<'a>) {
+    let declarations = ProgramDeclarations::default();
+    let mut walker = Walker {
+        declarations: &declarations,
+        binders: None,
+        visitor,
+    };
+    walker.expr(expr, None);
 }
 
 struct Walker<'d, 'a, V> {
@@ -521,7 +528,7 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
             Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => {}
             Expr::Apply(callee, arguments, _) => {
                 if let Some(call) = to_tensor_call(callee, arguments) {
-                    self.to_tensor(call, cast_target);
+                    self.tensor_conversion(call, cast_target);
                 } else {
                     self.expr(callee, None);
                     for argument in arguments {
@@ -551,8 +558,8 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
             }
             Expr::Cast(operand, target, mode, _) => {
                 let site = cast_operand(operand, target, *mode, &self.is_binder());
-                if let Some((literal, stated)) = site {
-                    self.visitor.literal(literal, Site::Cast(stated));
+                if let Some((literal, _)) = site {
+                    self.visitor.literal(literal, Site::Cast);
                 } else {
                     let target = matches!(mode, CastMode::Checked).then_some(target.as_str());
                     self.expr(operand, target);
@@ -614,7 +621,7 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
         }
     }
 
-    fn to_tensor(&mut self, call: ToTensorCall<'a>, cast_target: Option<&'a str>) {
+    fn tensor_conversion(&mut self, call: ToTensorCall<'a>, cast_target: Option<&'a str>) {
         let site = match call.dtype {
             Some(dtype) => {
                 let stated = dtype_argument(dtype, &self.is_binder());
@@ -646,7 +653,7 @@ mod tests {
             let site = match site {
                 Site::Ordinary => "ordinary".to_string(),
                 Site::Declaration { stated, .. } => format!("declaration {stated:?}"),
-                Site::Cast(stated) => format!("cast {stated:?}"),
+                Site::Cast => "cast".to_string(),
                 Site::DtypeArgument(stated) => format!("dtype {stated:?}"),
                 Site::MissingDtype { cast_target, .. } => format!("missing {cast_target:?}"),
             };
@@ -670,7 +677,7 @@ mod tests {
             sites("x: f64 = 1.1\ny = cast(-2.5, f32)\nz = to_tensor([1, [2]], i64)\n"),
             [
                 "1.1 declaration Some(Primitive(\"f64\"))",
-                "-2.5 cast Some(Primitive(\"f32\"))",
+                "-2.5 cast",
                 "1 dtype Some(Primitive(\"i64\"))",
                 "2 dtype Some(Primitive(\"i64\"))",
             ]
@@ -684,7 +691,7 @@ mod tests {
         );
         assert_eq!(
             sites("def k[p: Float](x: p) -> p = cast(1.5, p)\n"),
-            ["1.5 cast Some(Binder(\"p\"))"]
+            ["1.5 cast"]
         );
     }
 

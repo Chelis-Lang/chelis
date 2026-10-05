@@ -103,12 +103,13 @@ fn bare_int_literal_binds_at_a_declared_int64_result_and_nowhere_else() {
 /// i64-typed scalar binding. Should error.
 #[test]
 fn bare_float_literal_does_not_satisfy_int64() {
-    let src = "def main() -> i64 = 1.0";
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
+    // spec/04 §5.6 Binding: the declared i64 states a dtype a decimal
+    // literal cannot bind at, which Surf ingress rejects before any check.
+    let decls = parse_str("def main() -> i64 = 1.0").expect("surf parse");
+    let error = desugar_program(&decls).expect_err("a decimal literal never binds at i64");
     assert!(
-        res.is_err(),
-        "spec §5.3: bare float literal `1.0` is f32 by default, never i64"
+        error.to_string().contains("cannot bind at i64"),
+        "spec §5.6: {error}"
     );
 }
 
@@ -129,7 +130,7 @@ fn bare_float_literal_does_not_satisfy_int64() {
 /// indirect path. This pins it.
 #[test]
 fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
-    let src = "def main() -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
+    let src = "def main() -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0], f32), f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("indirect cast to f8e4m3 must still be rejected");

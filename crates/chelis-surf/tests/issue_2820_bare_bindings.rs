@@ -11,15 +11,17 @@ fn deep(source: &str) -> String {
 }
 #[test]
 fn bare_numeric_bindings_are_lists_and_to_tensor_makes_tensors() {
-    for literal in [
-        "[1, 2, 3]",
-        "[1.0, 2.0, 3.0]",
-        "[-1i64, 2i64]",
-        "[[1.0f16, 2.0f16], [3.0f16, 4.0f16]]",
+    for (literal, dtype) in [
+        ("[1, 2, 3]", "i32"),
+        ("[1.0, 2.0, 3.0]", "f32"),
+        ("[-1i64, 2i64]", "i64"),
+        ("[[1.0f16, 2.0f16], [3.0f16, 4.0f16]]", "f16"),
     ] {
         let bare = deep(&format!("result = {literal}\n"));
         assert!(!bare.contains("to_tensor"), "{literal}: {bare}");
-        let explicit = deep(&format!("result = to_tensor({literal})\n"));
+        // spec/04 §5.6: an unsuffixed `to_tensor` element states its dtype
+        // through the dtype argument.
+        let explicit = deep(&format!("result = to_tensor({literal}, {dtype})\n"));
         assert!(explicit.contains("to_tensor)"), "{literal}: {explicit}");
     }
 }
@@ -55,46 +57,39 @@ fn standalone_tensor_signature_supplies_the_declared_literal_context() {
     assert!(!output.contains("(t-prim {} f32)"), "{output}");
 }
 
+/// spec/04 §8.6: `to_tensor` is reserved, so no lexical binding can capture
+/// the conversion a declared tensor literal synthesizes, or any authored
+/// call.
 #[test]
-fn lexical_tensor_constructor_capture_is_a_loud_refusal() {
+fn a_lexical_binding_of_to_tensor_is_a_loud_refusal() {
     for source in [
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: tensor[2, i32] = [1, 2]\n xs\n}\nresult = sample()\n",
         "def sample(to_tensor) = {\n xs: tensor[2, i32] = [1, 2]\n xs\n}\n",
         "def sample() = {\n (to_tensor, other) = (fn (xs: List[i32]) -> xs, 1)\n xs: tensor[2, i32] = [1, 2]\n xs\n}\n",
-        // A declared tensor result converts a bare bracket-literal body too,
-        // whether the result is inline or in a standalone `sig`.
         "def sample(to_tensor: List[i32] -> tensor[2, i32]) -> tensor[2, i32] = [1, 2]\n",
         "sig sample: (List[i32] -> tensor[2, i32]) -> tensor[2, i32]\ndef sample(to_tensor) = [1, 2]\n",
-    ] {
-        let parsed = parse_str(source).unwrap();
-        let error = desugar_program(&parsed)
-            .expect_err("a lexical callable cannot own a synthesized tensor conversion");
-        assert!(error.to_string().contains("to_tensor"), "{error}");
-        assert!(error.span().is_some(), "{error}");
-    }
-    // An authored call, an explicit List and an unannotated bracket literal
-    // synthesize no conversion.
-    for source in [
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs: List[i32] = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
         "def sample() = {\n to_tensor = fn (xs: List[i32]) -> xs\n xs = [1, 2]\n to_tensor(xs)\n}\nresult = sample()\n",
     ] {
+        let parsed = parse_str(source).unwrap();
+        let error = desugar_program(&parsed).expect_err("`to_tensor` cannot be bound");
         assert!(
-            desugar_program(&parse_str(source).unwrap()).is_ok(),
-            "{source}"
+            error.to_string().contains("`to_tensor` is reserved"),
+            "{error}"
         );
+        assert!(error.span().is_some(), "{error}");
     }
 }
 
-/// A cast or a callee's parameter type never makes a bracket literal a tensor,
-/// so the argument of a `to_tensor` call there is an ordinary `List`: its
-/// literals bind at their suffix or the literal default, whether the call
-/// names the intrinsic or a lexical binding (spec/04-type-system.md §5.6).
+/// A cast or a callee's parameter type never makes a bracket literal a tensor
+/// or states its elements' dtype, so the argument of a `to_tensor` call there
+/// is an ordinary `List` whose literals bind at their suffix or the dtype
+/// argument (spec/04-type-system.md §5.6).
 #[test]
 fn a_to_tensor_argument_is_an_ordinary_list_whose_literals_keep_their_dtypes() {
     for source in [
-        "result = cast(to_tensor([1.5, 2.5]), f64)\n",
-        "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nresult = take(to_tensor([1.5, 2.5]))\n",
-        "def sample(to_tensor: List[f32] -> tensor[2, f32]) -> tensor[2, f64] = cast(to_tensor([1.5, 2.5]), f64)\n",
+        "result = cast(to_tensor([1.5, 2.5], f32), f64)\n",
+        "def take(x: tensor[2, f64]) -> tensor[2, f64] = x\nresult = take(to_tensor([1.5, 2.5], f32))\n",
     ] {
         let deep = deep(source);
         assert!(deep.contains("(t-prim {} f32)} 1.5)"), "{source}{deep}");

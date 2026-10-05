@@ -19,21 +19,24 @@ use chelis_deep::printer::print_expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
-/// The desugared program, one Deep form per line, whitespace flattened.
+/// The desugared program, one Deep form per line, whitespace flattened and
+/// `span` metadata removed.
 fn deep(source: &str) -> String {
     let decls = parse_str(source).unwrap_or_else(|error| panic!("parse: {error}\n{source}"));
     let exprs =
         desugar_program(&decls).unwrap_or_else(|error| panic!("desugar: {error}\n{source}"));
-    exprs
-        .iter()
-        .map(|expr| {
-            print_expr(expr)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    strip_spans(
+        &exprs
+            .iter()
+            .map(|expr| {
+                print_expr(expr)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// The desugaring error a Surf program must produce.
