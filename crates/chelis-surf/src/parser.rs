@@ -2096,17 +2096,18 @@ impl Parser {
     fn check_pipe_grouping(&self, start: usize, end: usize) -> Result<(), ParseError> {
         let mut index = start;
         let mut pipe = None;
-        let mut mixed = false;
+        let mut first_mixed = None;
         while index < end {
             let token = &self.tokens[index];
             if self.closing_delimiters[index] < end {
                 index = self.closing_delimiters[index] + 1;
                 continue;
             }
+            let token_index = index;
             index += 1;
             match token.kind {
                 TokenKind::Pipe => {
-                    pipe = Some(token.span.offset);
+                    pipe = Some(token_index);
                 }
                 TokenKind::Plus
                 | TokenKind::Minus
@@ -2127,15 +2128,71 @@ impl Parser {
                 | TokenKind::Dot
                 | TokenKind::If
                 | TokenKind::Match
-                | TokenKind::Fn => mixed = true,
-                TokenKind::With if self.starts_record_update(index - 1) => mixed = true,
+                | TokenKind::Fn => {
+                    first_mixed.get_or_insert(token_index);
+                }
+                TokenKind::With if self.starts_record_update(token_index) => {
+                    first_mixed.get_or_insert(token_index);
+                }
                 _ => {}
             }
         }
-        if mixed && let Some(offset) = pipe {
+        if let (Some(mixed), Some(pipe)) = (first_mixed, pipe) {
+            let before_pipe = mixed < pipe;
+            let hint = match &self.tokens[mixed].kind {
+                TokenKind::Dot if before_pipe => {
+                    if self.tokens[mixed + 1..pipe]
+                        .iter()
+                        .any(|token| token.kind == TokenKind::LParen)
+                    {
+                        "write `(M.f(x)) |> g`"
+                    } else {
+                        "write `(r.f) |> g`"
+                    }
+                }
+                TokenKind::Dot => {
+                    if matches!(
+                        self.tokens.get(mixed + 1).map(|token| &token.kind),
+                        Some(TokenKind::Int(_))
+                    ) {
+                        "write `x |> (f.1)`"
+                    } else {
+                        "write `x |> (M.f)`"
+                    }
+                }
+                TokenKind::If if before_pipe => {
+                    if self.tokens[pipe + 1..end]
+                        .iter()
+                        .any(|token| token.kind == TokenKind::Then)
+                    {
+                        "write `if (c |> f) then a else b`"
+                    } else if self.tokens[pipe + 1..end]
+                        .iter()
+                        .any(|token| token.kind == TokenKind::Else)
+                    {
+                        "write `if c then (x |> f) else y`"
+                    } else {
+                        "write `(if c then a else b) |> f` or `if c then a else (b |> f)`"
+                    }
+                }
+                TokenKind::Fn if before_pipe => "write `fn (v) -> (v |> f)`",
+                TokenKind::Fn => "write `x |> (fn (v) -> v + y)`",
+                TokenKind::Match => "parenthesize the pipe inside the match scrutinee or arm",
+                TokenKind::Colon if before_pipe => "write `(x: T) |> f`",
+                TokenKind::Colon => "write `x |> (f: T)`",
+                TokenKind::With if before_pipe => "write `(r with { a: x }) |> f`",
+                TokenKind::With => "write `x |> (r with { a: f })`",
+                TokenKind::Minus if mixed == start => "write `(-x) |> f`",
+                TokenKind::Bang if mixed == start => "write `(!x) |> f`",
+                TokenKind::Amp if mixed == start => "write `(&x) |> f`",
+                _ => "write `(a + b) |> f` or `a + (b |> f)`",
+            };
             return Err(ParseError::Expected {
-                expected: "explicit grouping around pipe operands mixed with operators or open-ended forms; write `(a + b) |> f` or `a + (b |> f)`".into(),
-                found: "ungrouped pipe combination".into(), offset,
+                expected: format!(
+                    "explicit grouping around pipe operands mixed with operators or open-ended forms; {hint}"
+                ),
+                found: "ungrouped pipe combination".into(),
+                offset: self.tokens[pipe].span.offset,
             });
         }
         Ok(())

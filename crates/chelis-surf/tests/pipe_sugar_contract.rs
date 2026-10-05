@@ -246,6 +246,43 @@ fn every_mixed_operator_requires_grouping() {
 }
 
 #[test]
+fn pipe_grouping_diagnostics_match_the_rejected_form() {
+    for (rejected, hint, grouped) in [
+        ("r.f |> g", "`(r.f) |> g`", "(r.f) |> g"),
+        ("M.f(x) |> g", "`(M.f(x)) |> g`", "(M.f(x)) |> g"),
+        ("x |> M.f", "`x |> (M.f)`", "x |> (M.f)"),
+        ("x |> f.1", "`x |> (f.1)`", "x |> (f.1)"),
+        (
+            "if c then x |> f else y",
+            "`if c then (x |> f) else y`",
+            "if c then (x |> f) else y",
+        ),
+        (
+            "if c then a else b |> f",
+            "`(if c then a else b) |> f`",
+            "(if c then a else b) |> f",
+        ),
+        (
+            "fn (v) -> v |> f",
+            "`fn (v) -> (v |> f)`",
+            "fn (v) -> (v |> f)",
+        ),
+        (
+            "x |> fn (v) -> v + y",
+            "`x |> (fn (v) -> v + y)`",
+            "x |> (fn (v) -> v + y)",
+        ),
+        ("a + b |> f", "`(a + b) |> f`", "(a + b) |> f"),
+    ] {
+        let error = parse_str(&format!("out = {rejected}\n"))
+            .expect_err("ungrouped expression must fail")
+            .to_string();
+        assert!(error.contains(hint), "{rejected}: {error}");
+        parse_str(&format!("out = {grouped}\n")).expect("suggested grouping must parse");
+    }
+}
+
+#[test]
 fn accumulator_pipe_stages_preserve_the_explicit_width_and_call_arity() {
     for expression in [
         "x |> sum(0i32, accumulator=f64)",
