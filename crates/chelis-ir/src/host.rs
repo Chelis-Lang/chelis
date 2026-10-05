@@ -772,10 +772,6 @@ struct CallableScopeUndo {
 }
 
 impl CallableScope {
-    fn contains_key(&self, name: &str) -> bool {
-        self.bindings.contains_key(name)
-    }
-
     fn get(&self, name: &str) -> Option<&Option<String>> {
         self.bindings.get(name)
     }
@@ -17914,8 +17910,9 @@ fn collect_dynamic_to_tensor_def_refs(
     referenced_defs: &mut BTreeSet<String>,
 ) -> bool {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
-    let mut directly_dynamic =
-        !callable_scope.contains_key("to_tensor") && expr_is_runtime_shaped_to_tensor(expr);
+    // `to_tensor` is reserved (spec/04 §8.6), so a call always names the
+    // intrinsic.
+    let mut directly_dynamic = expr_is_runtime_shaped_to_tensor(expr);
     if let Some(name) = app_callee_name(expr).or_else(|| direct_var_name(expr))
         && let Some(target) = resolve_top_level_callable_from_names(name, callable_scope, def_names)
     {
@@ -18032,8 +18029,7 @@ fn analyze_tensor_helper_preflight_scoped(
 ) -> TensorHelperPreflightFacts {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut facts = TensorHelperPreflightFacts {
-        reaches_dynamic_to_tensor: !callable_scope.contains_key("to_tensor")
-            && expr_is_runtime_shaped_to_tensor(expr),
+        reaches_dynamic_to_tensor: expr_is_runtime_shaped_to_tensor(expr),
         reaches_list_entry: false,
         contains_grad_like: stamped_parts(expr)
             .is_some_and(|(tag, _, _)| matches!(tag, DeepTag::Grad | DeepTag::Vmap))
@@ -23648,7 +23644,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         let inner = direct.bind("f".to_string(), None);
         direct.restore([inner, duplicate, outer]);
         assert!(
-            !direct.contains_key("f"),
+            direct.get("f").is_none(),
             "restoring repeated shadow bindings must recover the absent outer scope"
         );
 

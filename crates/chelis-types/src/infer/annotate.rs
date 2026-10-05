@@ -57,6 +57,20 @@ pub(super) enum ChildStampRole {
 /// an unknown child as a runtime expression. The completeness test below
 /// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
 /// of truth, so adding a tag requires an explicit ownership decision here.
+/// `(app (var to_tensor) xs T)` with a type-node dtype child `T`. A Deep
+/// binder of `to_tensor` is `ReservedName`, so the callee always names the
+/// intrinsic in a checked program.
+fn is_to_tensor_with_dtype_child(children: &[deep::Expr]) -> bool {
+    let [callee, _, dtype] = children else {
+        return false;
+    };
+    matches!(stamped_parts(callee), Some((DeepTag::Var, _, [name])) if symbol_name(name) == Some("to_tensor"))
+        && matches!(
+            stamped_parts(dtype),
+            Some((DeepTag::TPrim | DeepTag::TVar, _, _))
+        )
+}
+
 pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
     use ChildStampRole::{
         Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
@@ -329,6 +343,13 @@ pub(super) fn annotate_expr_with_scope(
         deep::Expr::Node(node, span) => {
             let tag = node.tag();
             let children = node.children_slice();
+            // spec/03 §6.4: `to_tensor`'s dtype child is checked during
+            // inference ([05-OP-57]); every lane receives `to_tensor(xs)`.
+            let children = if tag == DeepTag::App && is_to_tensor_with_dtype_child(children) {
+                &children[..2]
+            } else {
+                children
+            };
             let fn_ty_override = (tag == DeepTag::Fn)
                 .then(|| product.owner_type(expr, "function node", errors))
                 .flatten();
