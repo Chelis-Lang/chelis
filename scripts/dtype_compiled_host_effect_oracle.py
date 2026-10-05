@@ -125,12 +125,14 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 'chelis_abi::failure::negative_length_prefix("tensor_scan")',
                 'name: "to_tensor".to_string(),',
                 "name: TENSOR_SCAN_STACK.to_string(),",
+                "checked_tensor_scan_callback(callback, &state_ty, template, next, checked)",
+                "name: TENSOR_SCAN_STATE.to_string(),",
             ),
         ),
         SourceContract(
-            "tensor states stack against the initial state",
+            "tensor states are checked per application and stack against the initial state",
             HOST_EMIT,
-            ("chelis_tensor_scan_stack(",),
+            ("chelis_tensor_scan_check_state(", "chelis_tensor_scan_stack("),
         ),
         SourceContract(
             "assertions are emitted, never stubbed",

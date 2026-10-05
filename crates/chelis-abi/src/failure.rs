@@ -265,6 +265,33 @@ pub fn to_tensor_ragged(first: &[i64], child: usize, shape: &[i64]) -> String {
     )
 }
 
+/// A `tensor_scan` callback returned a state whose shape differs from the
+/// initial state's ([05-HOST-1] makes it invariant across every callback
+/// application): an extent disagreement under spec/04-type-system.md section
+/// 4.7, a `Domain` trap in `tensor_scan`, after a context line naming both
+/// shapes and the first disagreeing axis, or both ranks when those differ.
+pub fn tensor_scan_state_changed(initial: &[i64], state: &[i64]) -> String {
+    let (initial_text, state_text) = (render_shape(initial), render_shape(state));
+    let disagreeing_axis = initial
+        .iter()
+        .zip(state)
+        .position(|(left, right)| left != right);
+    let context = match disagreeing_axis.filter(|_| initial.len() == state.len()) {
+        Some(axis) => format!(
+            "tensor_scan state changed at axis {axis}: initial state {initial_text} has {}, \
+             callback result {state_text} has {}",
+            initial[axis], state[axis]
+        ),
+        None => format!(
+            "tensor_scan state changed rank: initial state {initial_text} has rank {}, \
+             callback result {state_text} has rank {}",
+            initial.len(),
+            state.len()
+        ),
+    };
+    format!("{context}\n{}", domain_trap_line_at_i64("tensor_scan"))
+}
+
 /// A runtime extent or count guard of `op` failed for a reason no more
 /// specific rendering here names: `context`, then the `Domain` trap line.
 /// Every lane that can reach the same guard renders it through the same
@@ -487,6 +514,23 @@ mod tests {
         // Agreement, including a broadcast batch extent of 1, is no failure.
         assert_eq!(matmul_operand_disagreement(&[1, 2, 3], &[5, 3, 2]), None);
         assert_eq!(matmul_operand_disagreement(&[2, 3], &[3, 2]), None);
+    }
+
+    #[test]
+    fn a_changed_scan_state_names_the_axis_or_the_ranks() {
+        use super::tensor_scan_state_changed;
+        assert_eq!(
+            tensor_scan_state_changed(&[2, 1], &[1, 2]),
+            "tensor_scan state changed at axis 0: initial state [2, 1] has 2, \
+             callback result [1, 2] has 1\n\
+             numeric trap: domain in tensor_scan at i64"
+        );
+        assert_eq!(
+            tensor_scan_state_changed(&[2], &[2, 1]),
+            "tensor_scan state changed rank: initial state [2] has rank 1, \
+             callback result [2, 1] has rank 2\n\
+             numeric trap: domain in tensor_scan at i64"
+        );
     }
 
     #[test]

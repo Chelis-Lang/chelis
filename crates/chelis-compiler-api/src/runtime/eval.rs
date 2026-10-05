@@ -3995,11 +3995,29 @@ impl<'a> EvalContext<'a> {
                                     describe_argument(Some(&acc))
                                 ));
                             };
-                            if next.precision != precision || next.value.shape != state_shape {
+                            // The checker fixes the state's dtype, so a changed
+                            // dtype is a checker desync. [05-HOST-1] makes the
+                            // shape invariant too; a callback whose declared
+                            // state admits another shape fails here, as soon as
+                            // its application returns.
+                            if next.precision != precision {
                                 return Err(
-                                    "tensor_scan callback changed the state's dtype or shape"
-                                        .to_string(),
+                                    "tensor_scan callback changed the state's dtype".to_string()
                                 );
+                            }
+                            if next.value.shape != state_shape {
+                                let extents = |shape: &[usize]| {
+                                    shape
+                                        .iter()
+                                        .map(|&extent| i64::try_from(extent).unwrap_or(i64::MAX))
+                                        .collect::<Vec<_>>()
+                                };
+                                return self.mark_numeric_trap_from_trusted_result(Err(
+                                    chelis_abi::failure::tensor_scan_state_changed(
+                                        &extents(&state_shape),
+                                        &extents(&next.value.shape),
+                                    ),
+                                ));
                             }
                             let storage = next.value.storage();
                             elements.extend((0..storage.len()).map(|k| storage.scalar_at(k)));

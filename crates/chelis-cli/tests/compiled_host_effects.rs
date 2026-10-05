@@ -551,6 +551,80 @@ fn tensor_scan_rejects_a_state_changing_callback_by_type() {
     }
 }
 
+/// [05-HOST-1] makes the state's shape invariant across every callback
+/// application. A callback whose declared state type admits another shape
+/// is checked when each application returns: the first changed state traps
+/// `Domain` in `tensor_scan` in spec/04-type-system.md section 4.7's form,
+/// before the next application's effects, identically on both lanes.
+#[test]
+fn tensor_scan_traps_a_state_whose_shape_changes_at_run_time() {
+    for (name, source, effects, context) in [
+        (
+            "scangrow",
+            "def step(prev: tensor[*, f32], i: i64) -> tensor[*, f32] ! { IO } = {\n\
+             _ = print(to_string(i))\n\
+             concat([prev, prev], 0i32)\n\
+             }\n\
+             xs = tensor_scan(to_tensor([1.0f32]), step, 3i64)\n",
+            "0\n",
+            "tensor_scan state changed at axis 0: initial state [1] has 1, callback result [2] has 2",
+        ),
+        (
+            "scanrank2grow",
+            "def step(prev: tensor[*, *, i32], i: i64) -> tensor[*, *, i32] = concat([prev, prev], 1i32)\n\
+             xs = tensor_scan(to_tensor([[1i32], [2i32]]), step, 2i64)\n",
+            "",
+            "tensor_scan state changed at axis 1: initial state [2, 1] has 1, callback result [2, 2] has 2",
+        ),
+        (
+            "scantranspose",
+            "def step(prev: tensor[*, *, i32], i: i64) -> tensor[*, *, i32] ! { IO } = {\n\
+             _ = print(to_string(i))\n\
+             permute(prev, 1i32, 0i32)\n\
+             }\n\
+             xs = tensor_scan(to_tensor([[1i32], [2i32]]), step, 2i64)\n",
+            "0\n",
+            "tensor_scan state changed at axis 0: initial state [2, 1] has 2, callback result [1, 2] has 1",
+        ),
+        (
+            "scaninlinegrow",
+            "xs = tensor_scan(to_tensor([1.0f32]), fn (prev: tensor[*, f32], i: i64) -> concat([prev, prev], 0i32), 2i64)\n",
+            "",
+            "tensor_scan state changed at axis 0: initial state [1] has 1, callback result [2] has 2",
+        ),
+    ] {
+        let run = parity::assert_lanes_agree(source, name);
+        assert_eq!(run.status, Some(1), "{name}: {run:?}");
+        assert_eq!(run.stdout, effects, "{name}: {run:?}");
+        assert_eq!(run.context, context, "{name}: {run:?}");
+        assert_eq!(
+            run.failure, "numeric trap: domain in tensor_scan at i64",
+            "{name}: {run:?}"
+        );
+    }
+}
+
+/// The passing twin: the same `*`-typed callbacks that keep the state's
+/// shape run every application on both lanes.
+#[test]
+fn tensor_scan_runs_a_wildcard_callback_that_keeps_the_state_shape() {
+    let source = "def step(prev: tensor[*, f32], i: i64) -> tensor[*, f32] ! { IO } = {\n\
+                  _ = print(to_string(i))\n\
+                  add(prev, prev)\n\
+                  }\n\
+                  def turn(prev: tensor[*, *, i32], i: i64) -> tensor[*, *, i32] = reshape(prev, [shape(prev, 0i32), shape(prev, 1i32)])\n\
+                  xs = tensor_scan(to_tensor([1.0f32]), step, 3i64)\n\
+                  ys = tensor_scan(to_tensor([[1i32], [2i32]]), turn, 2i64)\n";
+    let run = parity::assert_lanes_agree(source, "scankeep");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert_eq!(
+        run.stdout,
+        "0\n1\n2\nxs = tensor(shape=[3, 1], data=[2.0, 4.0, 8.0])\n\
+         ys = tensor(shape=[2, 2, 1], data=[1, 2, 1, 2])\n",
+        "{run:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // [05-OP-1] round_to at every active float dtype and every places (#1295)
 // ---------------------------------------------------------------------------

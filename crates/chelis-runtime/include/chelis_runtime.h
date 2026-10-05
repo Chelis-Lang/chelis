@@ -591,6 +591,7 @@ chelis_tuple *chelis_clock_wall_read(void);
 chelis_tuple *chelis_clock_monotonic_read(void);
 chelis_tuple *chelis_process_run(chelis_string program, const chelis_list *args);
 chelis_scalar chelis_round_to(chelis_scalar x, chelis_scalar places);
+void chelis_tensor_scan_check_state(const chelis_tensor *state, const chelis_tensor *shape_template);
 chelis_tensor *chelis_tensor_scan_stack(const chelis_list *states, const chelis_tensor *shape_template);
 void chelis_elementwise_shape_trap(const char *op, const chelis_tensor *lhs, const chelis_tensor *rhs);
 void chelis_matmul_product_trap(const chelis_tensor *lhs, const chelis_tensor *rhs);

@@ -3587,6 +3587,12 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
 /// identifier, so no user definition can collide with it.
 pub const TENSOR_SCAN_STACK: &str = "#chelis-tensor-scan-stack";
 
+/// The internal host builtin that checks one `tensor_scan` callback
+/// application's returned state against the initial state's copy,
+/// `(state: tensor[..s, p], template: tensor[..s, p]) -> unit`, trapping
+/// `Domain` in `tensor_scan` when the shapes differ ([05-HOST-1]).
+pub const TENSOR_SCAN_STATE: &str = "#chelis-tensor-scan-state";
+
 pub const HOST_UNRESOLVED_CALLABLE_MARKER: &str = "#chelis-unresolved-callable";
 pub const HOST_UNRESOLVED_TRANSFORM_MARKER: &str = "#chelis-unresolved-transform";
 
@@ -12135,6 +12141,20 @@ fn lower_app_host_expr(
             })),
             ty: index_list_ty,
         });
+        // A tensor state is checked against a copy of the initial state,
+        // taken before the scan consumes it, as each callback application
+        // returns ([05-HOST-1]'s shape invariance), and the states stack
+        // against the same copy, so `n = 0` keeps every state extent.
+        let template_name = matches!(state_ty, HostTypeTerm::Tensor(_))
+            .then(|| names.fresh("__chelis_tensor_scan_template"));
+        let callback = match &template_name {
+            Some(template) => {
+                let next = names.fresh("__chelis_tensor_scan_state");
+                let checked = names.fresh("__chelis_tensor_scan_checked");
+                checked_tensor_scan_callback(callback, &state_ty, template, next, checked)
+            }
+            None => callback,
+        };
         let states_ty = HostTypeTerm::List(Box::new(state_ty.clone()));
         let states = HostExpr::new(HostExprKind::Scan {
             callback,
@@ -12156,11 +12176,8 @@ fn lower_app_host_expr(
             binding(init_name.clone(), state_ty.clone(), init_expr),
             binding(length_name, HostTypeTerm::Int64, length_expr),
         ];
-        // A scalar state stacks through `to_tensor`. A tensor state stacks
-        // against a copy of the initial state taken before the scan
-        // consumes it, so `n = 0` keeps every state extent.
-        let body = if matches!(state_ty, HostTypeTerm::Tensor(_)) {
-            let template_name = names.fresh("__chelis_tensor_scan_template");
+        // A scalar state stacks through `to_tensor`.
+        let body = if let Some(template_name) = template_name {
             bindings.push(binding(
                 template_name.clone(),
                 state_ty.clone(),
@@ -16312,6 +16329,66 @@ fn checker_type_has_erased_adt_variable(
                 })
         }
         Type::Var(_) | Type::Tensor(_, _) | Type::Prim(_) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
+/// `callback` with each application's returned state checked against the
+/// `template` variable through [`TENSOR_SCAN_STATE`] before it becomes the
+/// next state. A named callback becomes an inline one that calls it, so the
+/// check runs at the same point for both kinds.
+fn checked_tensor_scan_callback(
+    callback: HostCallback,
+    state_ty: &HostTypeTerm,
+    template: &str,
+    next: String,
+    checked: String,
+) -> HostCallback {
+    let HostCallback { kind, ret_ty } = callback;
+    let (params, body) = match kind {
+        HostCallbackKind::Inline { params, body } => (params, *body),
+        HostCallbackKind::Named { function, params } => {
+            let args = params
+                .iter()
+                .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
+                .collect();
+            let body = HostExpr::new(HostExprKind::Call {
+                function,
+                args,
+                arg_tys: params.iter().map(|param| param.ty.clone()).collect(),
+                ty: ret_ty.clone(),
+            });
+            (params, body)
+        }
+    };
+    let binding = |name: String, ty: HostTypeTerm, value: HostExpr| HostBinding {
+        name,
+        display_name: None,
+        display_roots: Vec::new(),
+        ty,
+        value,
+    };
+    let check = HostExpr::new(HostExprKind::Builtin {
+        name: TENSOR_SCAN_STATE.to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(next.clone(), ret_ty.clone())),
+            HostExpr::new(HostExprKind::Var(template.to_string(), state_ty.clone())),
+        ],
+        ty: HostTypeTerm::Unit,
+    });
+    let body = HostExpr::new(HostExprKind::Let {
+        bindings: vec![
+            binding(next.clone(), ret_ty.clone(), body),
+            binding(checked, HostTypeTerm::Unit, check),
+        ],
+        body: Box::new(HostExpr::new(HostExprKind::Var(next, ret_ty.clone()))),
+        ty: ret_ty.clone(),
+    });
+    HostCallback {
+        kind: HostCallbackKind::Inline {
+            params,
+            body: Box::new(body),
+        },
+        ret_ty,
     }
 }
 

@@ -7761,6 +7761,17 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            // [05-HOST-1]: each callback application's returned state keeps
+            // the initial state's shape, checked before the next application.
+            // Both operands are borrowed; the check returns unit or traps.
+            name if name == chelis_ir::host::TENSOR_SCAN_STATE => {
+                self.lines.push(format!(
+                    "{}chelis_tensor_scan_check_state({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
+            }
             // [05-HOST-1]: `tensor_scan`'s tensor states, stacked against the
             // initial state's copy by the runtime.
             name if name == chelis_ir::host::TENSOR_SCAN_STACK => {

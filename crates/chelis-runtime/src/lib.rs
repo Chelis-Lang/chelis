@@ -7737,11 +7737,40 @@ pub unsafe extern "C" fn chelis_matmul_product_trap(
     );
 }
 
+/// [05-HOST-1] `tensor_scan`'s per-application state check in compiled host
+/// code: the state a callback returns keeps the initial state's shape, or
+/// the scan traps `Domain` in `tensor_scan` (spec/04-type-system.md section
+/// 4.7) before the next application runs. Both tensors are borrowed. The
+/// checker fixes the state's dtype, so a changed dtype is a checker desync.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_scan_check_state(
+    state: *const chelis_tensor,
+    shape_template: *const chelis_tensor,
+) {
+    let [dtype, state_dtype] = validate_tensor_inputs([
+        (shape_template, "tensor_scan template"),
+        (state, "tensor_scan state"),
+    ]);
+    if state_dtype != dtype {
+        runtime_fail!("chelis internal error: a tensor_scan callback changed the state's dtype");
+    }
+    if (*state).shape() != (*shape_template).shape() {
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::tensor_scan_state_changed(
+                (*shape_template).shape(),
+                (*state).shape()
+            )
+        );
+    }
+}
+
 /// [05-HOST-1] `tensor_scan` over a tensor state in compiled host code:
 /// stacks the scan's states along a new leading axis, giving
 /// `[len(states)] ++ shape(template)` at the template's dtype. The template
-/// is the initial state, so an empty scan keeps every state extent. A state
-/// whose dtype or shape differs from the template is a checker desync.
+/// is the initial state, so an empty scan keeps every state extent. Every
+/// state already passed `chelis_tensor_scan_check_state` when its callback
+/// returned, so a state that differs from the template is a lowering defect.
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_scan_stack(
     states: *const chelis_list,
@@ -7771,7 +7800,9 @@ pub unsafe extern "C" fn chelis_tensor_scan_stack(
         let tensor = state.payload.tensor as *const chelis_tensor;
         let [state_dtype] = validate_tensor_inputs([(tensor, "tensor_scan state")]);
         if state_dtype != dtype || (*tensor).shape() != state_shape.as_slice() {
-            runtime_fail!("tensor_scan: a state differs from the initial state's dtype or shape");
+            runtime_fail!(
+                "chelis internal error: a tensor_scan state escaped its per-application check"
+            );
         }
         ptr::copy_nonoverlapping(
             tensor_data(tensor),
