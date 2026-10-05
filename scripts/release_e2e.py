@@ -670,7 +670,7 @@ class Proof:
         return elf_verdict(name, linkage, static=static)
 
 
-def run(args: argparse.Namespace) -> int:
+def check_host(args: argparse.Namespace) -> int:
     match = TAG.fullmatch(args.tag)
     if match is None or SOURCE_SHA.fullmatch(args.source_sha) is None:
         raise SystemExit("--tag must be vX.Y.Z and --source-sha a full commit")
@@ -810,7 +810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="also check the bootstrap and GitHub install",
     )
-    proof.set_defaults(handler=run)
+    proof.set_defaults(handler=check_host)
     table = commands.add_parser("summarize", help="render every report as one table")
     table.add_argument("root", type=Path)
     table.add_argument("--require-pass", action="store_true")
