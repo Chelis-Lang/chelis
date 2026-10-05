@@ -156,9 +156,7 @@ fn assert_lanes_trap_lines(source: &str, entry: &str, lines: &[&str]) {
     );
     let program = ownership_support::emit(source, entry);
     let stderr = ownership_support::run_failure_stderr(&program, "");
-    // `line` may span a context line and its trap line; each must be a
-    // whole line of stderr, in order.
-    let expected = line.lines().collect::<Vec<_>>();
+    // Each of `lines` must be a whole line of stderr, in order.
     assert!(
         stderr
             .lines()
