@@ -1332,7 +1332,11 @@ fn cmd_migrate_pipes(
         let actual = chelis_deep::printer::print_canonical(&normalize(&current)?);
         if actual != expected {
             return Err(
-                "migration rejected: expanded Deep differs from the previous compiler".into(),
+                "migration rejected: expanded Deep differs from the previous compiler; \
+                 this compiler binds an unsuffixed literal under `cast` or `to_tensor` at its \
+                 stated dtype (chelis#3164), which changes its Deep, so a file with such a \
+                 literal migrates only with a compiler built at a436d9923, before that rule"
+                    .into(),
             );
         }
         Ok((path.to_path_buf(), original, migration.source))

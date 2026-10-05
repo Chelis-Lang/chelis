@@ -329,7 +329,12 @@ fn migration_requires_old_dtype_evidence_and_checks_the_entire_batch_before_writ
     ]
     .concat());
     assert!(!batch.status.success());
-    assert!(String::from_utf8_lossy(&batch.stderr).contains("Deep differs"));
+    let rejection = String::from_utf8_lossy(&batch.stderr);
+    assert!(rejection.contains("Deep differs"), "{rejection}");
+    // chelis#3254 item 5: the rejection names the literal dtype rule and a
+    // compiler built before it, whose Deep the migration can match.
+    assert!(rejection.contains("chelis#3164"), "{rejection}");
+    assert!(rejection.contains("a436d9923"), "{rejection}");
     assert_eq!(fs::read_to_string(&first).unwrap(), source);
     assert_eq!(
         fs::read_to_string(&second).unwrap(),
