@@ -3336,6 +3336,42 @@ reason = "script-unit runs the canary's transport, process and staged-runtime re
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = "scripts/release_e2e.py"
+disposition = "owner"
+workflow = "release-e2e.yml"
+job = "hosts"
+cadence = "each successful tag release run and workflow_dispatch"
+reason = "every host installs the release through the bootstrap, chelisup online and offline, then runs the book's First Program, eval, a native build, the SMT gate, the installed-artifact canary and a linkage check"
+tracking_issue = "chelis#3250"
+
+[[path_rule]]
+prefix = "scripts/test_release_e2e.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the release E2E verdict controls: a failed step blocks its dependents and fails the run, the summary counts host reports only, and the static Linux, dynamic Linux and macOS linkage refusals"
+tracking_issue = "chelis#3250"
+
+[[path_rule]]
+prefix = "nix/tests/release-e2e-nixos.nix"
+disposition = "owner"
+workflow = "release-e2e.yml"
+job = "nixos"
+cadence = "each successful tag release run and workflow_dispatch"
+reason = "the NixOS job boots stock and nix-ld VMs from this test and runs the release E2E harness in each"
+tracking_issue = "chelis#3250"
+
+[[path_rule]]
+prefix = ".github/workflows/release-e2e.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
+tracking_issue = "chelis#3250"
+
+[[path_rule]]
 prefix = "scripts/test_devenv_composition.py"
 disposition = "owner"
 workflow = "ci.yml"

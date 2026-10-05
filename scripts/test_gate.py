@@ -742,6 +742,10 @@ NON_GATE_WORKFLOWS = {
     # It repeats consumer build commands to warm their caches; it gates
     # nothing (scripts/test_ci_cache_policy.py owns its contract).
     "ci-cache-warm.yml",
+    # After a tag's release run, installs the published release on macOS,
+    # Linux distributions and NixOS and runs it (scripts/release_e2e.py). It
+    # builds nothing and runs no command the per-PR gate owns.
+    "release-e2e.yml",
 }
 
 
