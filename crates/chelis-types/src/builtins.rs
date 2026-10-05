@@ -811,7 +811,6 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
 ];
 
 const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
-    "uniform_like",
     "split_keys",
     "cmplt",
     "mod",
@@ -1308,7 +1307,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "uniform_like",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
