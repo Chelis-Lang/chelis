@@ -16,7 +16,7 @@ fn scalar_literal_ascription_mismatches_reject_at_check_eval_and_c_build() {
         "(1 : f64)",
         "((1.1f64 : f32) : f64)",
         "{\n  y: f32 = 1.5f64\n  y\n}",
-        "{\n  y: f64 = 1.1\n  y\n}",
+        "{\n  y: f64 = 1.1f32\n  y\n}",
     ] {
         common::write_file(&path, &format!("out = {expression}\n"));
         for args in [

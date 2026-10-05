@@ -692,6 +692,20 @@ name = "issue_1955_grad_selector_pipeline"
 package = "chelis-cli"
 name = "issue_1955_grad_selector_identity"
 
+# chelis#3164: a literal's dtype is written at its site; the desugarer, the
+# checker and Deep ingress, the printer round trip, and eval/native values.
+[[standing_target]]
+package = "chelis-surf"
+name = "issue_3164_literal_dtype_sites"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_3164_literal_dtype_checker"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_3164_literal_dtype_cli"
+
 # chelis#1975: fused zero slots, forward checks, and exact eval/native values.
 [[standing_target]]
 package = "chelis-compiler-api"

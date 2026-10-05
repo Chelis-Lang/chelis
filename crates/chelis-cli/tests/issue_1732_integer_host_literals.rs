@@ -82,6 +82,21 @@ fn integer_literal_returns_preserve_every_integer_width_and_exact_int64() {
     }
 }
 
+/// spec/04-type-system.md §5.6: a declared result states the dtype of an
+/// unsuffixed literal body, so it binds at every integer width.
+#[test]
+fn unsuffixed_literal_returns_bind_at_the_declared_width() {
+    let source = "module Widths\n\
+                  def narrow() -> i8 = -128\n\
+                  def wide() -> i64 = 9007199254740993\n\
+                  narrow_value = narrow()\n\
+                  wide_value = wide()\n";
+    check_eval_and_run(
+        source,
+        "narrow_value = -128\nwide_value = 9007199254740993\n",
+    );
+}
+
 #[test]
 fn integer_literal_return_remains_callable_through_aliases() {
     check_eval_and_run(
@@ -137,7 +152,7 @@ fn invalid_literal_width_and_return_type_are_rejected_before_codegen() {
         ("def anchor() -> i32 = 2147483648i32", "ch"),
         ("def anchor() -> i64 = 9223372036854775808i64", "ch"),
         ("def anchor() -> bool = 7", "ch"),
-        ("def anchor() -> i8 = 7", "ch"),
+        ("def anchor() -> i8 = 128", "ch"),
         // Metadata alone may not reinterpret an integer atom as a float.
         ("(def {} answer (lit {type: (t-prim {} f32)} 7))", "dp"),
     ] {
