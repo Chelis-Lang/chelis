@@ -1,7 +1,7 @@
 //! Naming-convention lint for the Chelis ecosystem.
 //!
 //! Language naming and style rules live in `chelis/spec/01-nomenclature.md`.
-//! Repository workflow conventions may instead be owned by `CONTRIBUTING.md`.
+//! Repository workflow conventions live in `docs/maintainer_guide.md`.
 //! This crate translates each rule into an executable check, walks a target
 //! tree, and reports violations with `file:line:col: rule_id: message`
 //! references.
@@ -118,7 +118,7 @@ pub trait Rule: Send + Sync {
     fn id(&self) -> &str;
 
     /// Owning documentation reference for this rule, for example `"§6.2"` in
-    /// `spec/01-nomenclature.md` or `"CONTRIBUTING.md § Declarative Naming"`.
+    /// `spec/01-nomenclature.md` or `"docs/maintainer_guide.md § Declarative Naming"`.
     /// Printed alongside violations so readers can find the rule.
     fn spec_ref(&self) -> &str;
 

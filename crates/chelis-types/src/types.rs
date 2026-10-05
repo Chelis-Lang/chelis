@@ -1028,6 +1028,26 @@ pub enum CollectionConstraint {
 }
 
 impl CollectionConstraint {
+    /// Whether deciding this relation at a value's application sees every
+    /// operand fact the direct call's checker reads ([04-INF-9]). `concat`
+    /// receives the call's axis expression and visible list elements, and
+    /// `split_keys` its statically folded count, as call evidence
+    /// (`CollectionCallEvidence`). The other relations read operand types
+    /// alone. A relation that a direct checker reads more of than this
+    /// declares cannot make its builtin a value.
+    pub fn transports_static_operand_rule(&self) -> bool {
+        match self {
+            Self::SplitKeys { .. }
+            | Self::Len { .. }
+            | Self::Index { .. }
+            | Self::Append { .. }
+            | Self::Concat { .. }
+            | Self::KeyFromSeed { .. }
+            | Self::SplitKey { .. }
+            | Self::FoldIn { .. } => true,
+        }
+    }
+
     /// The builtin this constraint belongs to, for diagnostics.
     pub fn builtin(&self) -> &'static str {
         match self {

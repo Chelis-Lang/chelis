@@ -148,6 +148,25 @@ pub(super) fn infer_app(
     result
 }
 
+/// Infer an application's callee. Every application route infers its callee
+/// here, so the Var rule can tell a builtin called by name from a builtin
+/// named as a value ([04-INF-9], [04-LIN-9]).
+pub(super) fn infer_callee(
+    callee: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    product.callee_reference = matches!(
+        callee.carrier(),
+        chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
+    );
+    infer_expr(callee, env, vg, subst, adt_reg, errors, product)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_app_inner(
     expr: &deep::Expr,
@@ -354,11 +373,7 @@ fn infer_app_inner(
             }
         }
     } else {
-        product.callee_reference = matches!(
-            kids[0].carrier(),
-            chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
-        );
-        infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
+        infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // The constructor callee no longer passes through `infer_expr`, but it is
     // still a runtime expression owner and must contribute the same fitness
@@ -927,6 +942,7 @@ fn infer_app_inner(
             &callee_collection_contracts,
             &alternatives,
             tensor_concat,
+            split_keys_call_count(kids, env),
         );
     }
     let related_results = product

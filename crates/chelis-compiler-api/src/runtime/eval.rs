@@ -1712,8 +1712,10 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
 
-        // `dropout` is not in the host builtin table: every dropout the host
-        // walk reaches draws here from the interpreter's handler.
+        // A `dropout` application draws here, ahead of the generic builtin
+        // route, so its declared-result claims are checked against the draw.
+        // `eval_builtin`'s `dropout` arm runs the same kernel for any other
+        // route that dispatches the builtin by name.
         if var_name(func) == Some("dropout") && self.active_builtin_symbol("dropout") {
             let mut args = Vec::with_capacity(kids.len().saturating_sub(1));
             for arg in &kids[1..] {
@@ -3602,6 +3604,7 @@ impl<'a> EvalContext<'a> {
             "gt" => ordered_compare(args, CompareOp::Gt, "gt"),
             "gte" => ordered_compare(args, CompareOp::Gte, "gte"),
             "lte" => ordered_compare(args, CompareOp::Lte, "lte"),
+            "dropout" => self.eval_dropout_builtin(args),
             "uniform_like" => {
                 let key = expect_key_arg(args, 0, "uniform_like")?;
                 let template = expect_tensor_arg(args, 1)?;

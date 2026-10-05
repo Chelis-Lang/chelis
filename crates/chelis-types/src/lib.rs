@@ -47,6 +47,8 @@ pub mod unsupported;
 mod rejection_registry_generated;
 
 pub mod builtin_discovery;
+#[cfg(test)]
+mod builtin_value_contract_tests;
 mod builtins;
 /// Source architecture guard for the `infer` module tree. Test-only: it
 /// inspects source layout, so it has no place in a release build.
@@ -58,8 +60,9 @@ pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
     COMPARISON_OPS, CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting,
-    Realizability, ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys,
-    prelude_adt_defs, realizability, shape_class,
+    Realizability, ShapeClass, axis_argument_layout, builtin_call_effect, builtin_decl,
+    builtin_env, builtin_env_names, builtin_value_contract_carried, case_keys, prelude_adt_defs,
+    realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
@@ -98,7 +101,10 @@ pub use infer::{
     reset_grow_segment_bytes_for_test, resolve_declared_surface, run_on_grown_stack,
     set_grow_segment_bytes_for_test,
 };
-pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use linearity::{
+    LinearityInfo, check_linearity, check_linearity_with_context,
+    param_names as lexical_param_names, pattern_names as lexical_pattern_names,
+};
 pub use observation::{ElementRef, format_element, format_key, format_key_bits};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,

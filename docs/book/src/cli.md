@@ -15,7 +15,7 @@ forms.
 | `chelis surf FILE.dp` | Prints canonical Surf for Deep input. |
 | `chelis validate --surf FILE.ch` | Checks Surf syntax against the conformance grammar. Use `--deep` for Deep or `--desugar` to validate the Deep form of Surf input. |
 | `chelis eval --file FILE` | Evaluates a `.ch` or `.dp` file. `chelis eval 'EXPR'` evaluates an inline expression. |
-| `chelis build FILE.ch --target c --output out/` | Builds a native executable or static library for a target. |
+| `chelis build FILE.ch --target c --output out/` | Builds a native executable or static library. C is the default; [HIP and Metal](backends.md#gpu-backends) are experimental GPU targets. |
 | `chelis test` | Runs tests in the current Reef package; see [Testing](testing.md). |
 | `chelis prove` | Checks properties; see [Checking Properties](proving.md). |
 | `chelis reef` | Manages packages; see [Reef and Packages](reef.md). |

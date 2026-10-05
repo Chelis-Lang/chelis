@@ -87,22 +87,29 @@ fn assert_values(formal: bool, body: &str, captured_bits: &str, transcript: &[&s
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["schema_version"], 4);
     let mut expected = Vec::new();
-    // Existing manifest observes main and out independently; both calls matter.
-    for entry in ["main", "out"] {
-        if formal {
-            expected.push((format!("{entry}.0"), tensor(&[], &["41900000"])));
-        } else {
-            expected.push((format!("{entry}.0.0"), tensor(&[], &["41900000"])));
-            expected.push((format!("{entry}.0.1"), tensor(&[], &[captured_bits])));
-        }
-        // `uniform_like` over 2 f32 elements keyed by the fifth remainder of
-        // the `split_key` chain from `key_from_seed(42)` (0xb06b4e4bcc67415d),
-        // from `key_ref.py`/`slice2_ref.py`.
-        expected.push((
-            format!("{entry}.1"),
-            tensor(&[2], &["3edc4654", "3f027eac"]),
-        ));
+    // `entry` prints, so `alias = entry` carries its IO ([04-INF-9]: an alias
+    // performs what it names, as a lambda would) and `main` is effectful. An
+    // effectful nullary declaration is a callable, not a value root
+    // (`chelis_effects::realizability::collect_manifest_entries`): observing
+    // it would run an effect that an unselected declaration runs zero times.
+    // Only `out` is a root, so `entry` runs once. Before chelis#3149 the alias
+    // hid the IO, `main` was auto-applied as a root, and `entry` ran twice;
+    // `pure_alias_chain_still_auto_applies_main_as_a_root` keeps that case
+    // for a pure chain.
+    let entry = "out";
+    if formal {
+        expected.push((format!("{entry}.0"), tensor(&[], &["41900000"])));
+    } else {
+        expected.push((format!("{entry}.0.0"), tensor(&[], &["41900000"])));
+        expected.push((format!("{entry}.0.1"), tensor(&[], &[captured_bits])));
     }
+    // `uniform_like` over 2 f32 elements keyed by the fifth remainder of
+    // the `split_key` chain from `key_from_seed(42)` (0xb06b4e4bcc67415d),
+    // from `key_ref.py`/`slice2_ref.py`.
+    expected.push((
+        format!("{entry}.1"),
+        tensor(&[2], &["3edc4654", "3f027eac"]),
+    ));
     let roots = result["roots"].as_array().unwrap();
     assert_eq!(roots.len(), expected.len());
     for (index, (root, (name, value))) in roots.iter().zip(&expected).enumerate() {
@@ -126,7 +133,7 @@ fn assert_values(formal: bool, body: &str, captured_bits: &str, transcript: &[&s
 
 #[test]
 fn formal_shadow_keeps_default_style_admission_and_no_initializer() {
-    assert_values(true, "sum(weights, seq)", "", &["entry", "entry"]);
+    assert_values(true, "sum(weights, seq)", "", &["entry"]);
 }
 
 #[test]
@@ -135,7 +142,7 @@ fn dead_capture_keeps_default_style_admission_and_no_initializer() {
         false,
         "(sum(x, seq), if true then sum(baseline, 0i32) else sum(weights, 0i32))",
         "41900000",
-        &["entry", "entry"],
+        &["entry"],
     );
 }
 
@@ -145,8 +152,57 @@ fn selected_capture_preserves_values_and_initializer_events() {
         false,
         "(sum(x, seq), sum(weights, 0i32))",
         "41000000",
-        &["entry", "initialize", "entry"],
+        &["entry", "initialize"],
     );
+}
+
+/// The positive control for the expectations above: through the same
+/// `alias = entry; def main() = alias(...); out = main()` shape, a pure
+/// `entry` leaves `main` a value root that evaluation auto-applies, while an
+/// `entry` that prints makes `main` a callable and leaves only `out`.
+#[test]
+fn pure_alias_chain_still_auto_applies_main_as_a_root() {
+    for (entry_body, roots, transcript) in [
+        (
+            "add(x, x)",
+            vec!["main", "out"],
+            // A program that performs no effect reports no transcript.
+            Value::Null,
+        ),
+        (
+            "{\n  _ = print(\"entry\")\n  add(x, x)\n}",
+            vec!["out"],
+            json!(["entry"]),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("alias_roots.ch");
+        std::fs::write(
+            &file,
+            format!(
+                "def entry(x: tensor[2, f32]) -> tensor[2, f32] = {entry_body}\n\
+                 alias = entry\n\
+                 def main() = alias(to_tensor([1.0f32, 2.0f32]))\n\
+                 out = main()\n"
+            ),
+        )
+        .unwrap();
+        let path = file.to_str().unwrap();
+        success(dir.path(), &["fmt", "--inplace", path]);
+        let output = success(
+            dir.path(),
+            &["eval", "--json", "--timeout", "10", "--file", path],
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let names: Vec<&str> = result["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|root| root["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, roots, "{entry_body}: {result}");
+        assert_eq!(result["transcript"], transcript, "{entry_body}: {result}");
+    }
 }
 
 #[test]

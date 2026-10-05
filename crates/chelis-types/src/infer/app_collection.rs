@@ -307,7 +307,7 @@ impl CollectionDecision {
 ///
 pub(crate) fn decide_collection_constraint(
     constraint: &CollectionConstraint,
-    tensor_concat: Option<&TensorConcatCallEvidence>,
+    evidence: Option<&CollectionCallEvidence>,
     subst: &Subst,
 ) -> Result<Option<CollectionDecision>, String> {
     let result = constraint.result().clone();
@@ -365,7 +365,18 @@ pub(crate) fn decide_collection_constraint(
                 Type::Tensor(dims, _) => dims,
                 _ => vec![],
             };
-            dims.push(Dim::Wildcard);
+            // [05-OP-71]: a static count is the appended extent and a static
+            // negative count is refused, as the direct checker reads them.
+            dims.push(match evidence {
+                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) if *count < 0 => {
+                    return Err(format!(
+                        "split_keys argument 2: expected non-negative count, got {count} \
+                         ([05-OP-71])"
+                    ));
+                }
+                Some(CollectionCallEvidence::SplitKeysCount(Some(count))) => Dim::Lit(*count),
+                _ => Dim::Wildcard,
+            });
             Ok(Some(CollectionDecision::RequiredEquality {
                 actual: Type::Tuple(vec![count.clone(), result.clone()]),
                 expected: Type::Tuple(vec![
@@ -433,9 +444,12 @@ pub(crate) fn decide_collection_constraint(
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
                 if lhs_name == "List" && lhs_args.len() == 1 =>
             {
-                let (raw_axis, list_info) = tensor_concat
-                    .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
-                    .unwrap_or((None, ConcatListInfo::BindingLen(None)));
+                let (raw_axis, list_info) = match evidence {
+                    Some(CollectionCallEvidence::TensorConcat(evidence)) => {
+                        (evidence.raw_axis, evidence.list_info.clone())
+                    }
+                    _ => (None, ConcatListInfo::BindingLen(None)),
+                };
                 tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(
                     |produced| {
                         Some(CollectionDecision::ProducedResult {
@@ -521,6 +535,25 @@ pub(super) enum ConcatListInfo {
     /// come from the §4.5.2 joined element type, so the sum is
     /// `joined extent x length` and requires uniform extents.
     BindingLen(Option<usize>),
+}
+
+/// Static call-site evidence with which a consumed transported relation is
+/// decided: what the direct checker reads from argument expressions rather
+/// than from their types. A checked function value carries the operation
+/// rule; its application contributes this evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CollectionCallEvidence {
+    TensorConcat(TensorConcatCallEvidence),
+    /// [05-OP-71]: `split_keys`'s count, when its expression folds to a
+    /// static integer.
+    SplitKeysCount(Option<i64>),
+}
+
+/// The static count of one already-inferred `split_keys`-shaped application,
+/// read exactly as `check_split_keys_signature` reads a direct call's.
+pub(super) fn split_keys_call_count(kids: &[deep::Expr], env: &Env) -> Option<i64> {
+    kids.get(2)
+        .and_then(|count| fold_static_int_expr(count, |name| env.static_size_value(name)))
 }
 
 /// Read the tensor-concat evidence from one already-inferred application.

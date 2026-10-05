@@ -2,7 +2,7 @@
 
 This guide is for building and changing the Chelis compiler from a checkout.
 For a release toolchain or a downstream shell, use the [install guide](book/src/install.md).
-Read [CONTRIBUTING.md](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md)
+Read the [maintainer guide](maintainer_guide.md) and [AGENTS.md](../AGENTS.md)
 before preparing a change.
 
 ## Native toolchain

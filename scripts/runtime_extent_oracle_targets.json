@@ -1058,7 +1058,7 @@
         "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
         "window_reduction_contracts_reject_invalid_public_calls"
       ],
-      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, and all four window reductions to enforce their checked contracts through direct and aliased CLI calls."
+      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, all four window reductions to enforce their checked contracts through direct CLI calls, and every alias of one to be refused by name."
     },
     {
       "phase": "b",
@@ -1070,11 +1070,11 @@
         "mode": "all"
       },
       "expected": [
-        "checked_library_round_trips_preserve_generic_and_primitive_function_values",
-        "checked_library_round_trips_preserve_window_reduction_contracts",
+        "checked_libraries_refuse_builtins_applicable_only_by_name",
+        "checked_library_round_trips_preserve_generic_function_values",
         "insufficient_authored_contracts_cannot_be_published_as_checked_libraries"
       ],
-      "note": "Checked stdlib and dependency contexts preserve authored, primitive-operation and window-reduction family restrictions through serialization, and refuse to publish insufficient authored contracts."
+      "note": "Checked stdlib and dependency contexts preserve authored family restrictions through serialization, refuse to publish a builtin that is applicable only by name as a value, and refuse to publish insufficient authored contracts."
     },
     {
       "phase": "b",

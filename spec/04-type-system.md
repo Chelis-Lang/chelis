@@ -1045,6 +1045,23 @@ specification requires a runtime check.
 > specification. Calls SHALL satisfy the callee's checked contract, including
 > in recursive and indirect calls, without reconstructing admission
 > requirements by inspecting the callee's body.
+>
+> A builtin is a function value exactly when its whole operation contract
+> travels with the value: its type scheme states that contract completely, or
+> the scheme carries the operation's checked relation between operands and
+> result. A builtin named as a value performs, for effect checking, the
+> effects a call to it performs, as an anonymous function that calls it does.
+> A builtin whose contract needs anything more, such as a statically
+> resolvable axis ([05-AXIS-1]), an operand restriction, or a result type that
+> a rule outside its scheme computes from the operand types, is applicable
+> only by name. Naming
+> such a builtin anywhere other than as the callee of an application is a
+> `TypeMismatch`, whether the name is bound, passed as an argument or as the
+> callback of a higher-order operation or transform, placed in an aggregate,
+> or returned. The diagnostic names the builtin and suggests an explicitly
+> typed lambda that calls it, such as `fn (x: tensor[3, f32]) -> sum(x, 0i32)`.
+> A lexical binding that reuses a builtin's name is an ordinary value and is
+> not affected.
 
 For example, a generic function applying `mean` to `tensor[3, p]` requires
 `p:Float`; a bare `p` or `p:Numeric` admits types that the operation rejects.
