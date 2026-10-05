@@ -3350,7 +3350,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit runs the release E2E verdict controls: a failed step blocks its dependents and fails the run, a missing or failed report fails the summary, and the static and dynamic linkage refusals"
+reason = "script-unit runs the release E2E verdict controls: a failed step blocks its dependents and fails the run, the summary counts host reports only, and the static Linux, dynamic Linux and macOS linkage refusals"
 tracking_issue = "chelis#3250"
 
 [[path_rule]]

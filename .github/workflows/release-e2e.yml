@@ -58,12 +58,15 @@ jobs:
               echo "::error::give a tag or a candidate run, not both"
               exit 1
             fi
-            workflow="$(gh run view "$CANDIDATE_RUN" --repo "$GITHUB_REPOSITORY" --json workflowName --jq .workflowName)"
-            if [ "$workflow" != release ]; then
-              echo "::error::run $CANDIDATE_RUN is a $workflow run, not a release.yml run"
+            run="$(gh run view "$CANDIDATE_RUN" --repo "$GITHUB_REPOSITORY" \
+              --json workflowName,event,headSha --jq '[.workflowName, .event, .headSha] | join("\t")')"
+            IFS=$'\t' read -r workflow event sha <<< "$run"
+            # Only a dispatch run's archives carry the dev-<sha8> label; a tag
+            # run's are the published release, checked with `tag`.
+            if [ "$workflow" != release ] || [ "$event" != workflow_dispatch ]; then
+              echo "::error::run $CANDIDATE_RUN is a $workflow $event run; candidate_run takes a release.yml dispatch run"
               exit 1
             fi
-            sha="$(gh run view "$CANDIDATE_RUN" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)"
             echo "ref=$sha" >> "$GITHUB_OUTPUT"
           elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "ref=$TAG" >> "$GITHUB_OUTPUT"

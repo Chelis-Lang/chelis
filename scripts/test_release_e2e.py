@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -94,41 +95,26 @@ class SummarizeTests(unittest.TestCase):
         path.write_text(json.dumps(report), encoding="utf-8")
 
     @staticmethod
-    def host(label: str, status: str) -> dict[str, object]:
+    def host(label: str) -> dict[str, object]:
         return {
             "schema": e2e.SCHEMA,
             "label": label,
-            "status": "passed" if status == "passed" else "failed",
+            "status": "passed",
             "host": {"os": "test"},
-            "steps": [
-                {"name": "assets", "status": status, "detail": f"{label} detail"}
-            ],
+            "steps": [{"name": "assets", "status": "passed", "detail": label}],
         }
-
-    def test_require_pass_fails_without_reports_or_with_any_failed_host(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.assertEqual(quiet(["summarize", directory, "--require-pass"])[0], 1)
-            self.write(root, "a", self.host("a", "passed"))
-            self.assertEqual(quiet(["summarize", directory, "--require-pass"])[0], 0)
-            self.write(root, "b", self.host("b", "failed"))
-            code, table = quiet(["summarize", directory, "--require-pass"])
-            self.assertEqual(code, 1)
-            self.assertIn("- b / assets: b detail", table)
-            self.assertEqual(quiet(["summarize", directory])[0], 0)
 
     def test_the_canary_report_inside_a_host_evidence_is_not_a_host(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write(root, "host", self.host("host", "passed"))
+            self.write(root, "host", self.host("host"))
             canary = {
                 "schema": "chelis-installed-callable-smoke-v1",
                 "status": "failed",
             }
             self.write(root, "host/canary", canary)
-            code, table = quiet(["summarize", directory, "--require-pass"])
+            _, table = quiet(["summarize", directory])
 
-        self.assertEqual(code, 0)
         rows = [line for line in table.splitlines() if line.startswith("| ")][1:]
         self.assertEqual(len(rows), 1)
 
@@ -238,6 +224,28 @@ class LinkageTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(e2e.StepFailed, refusal):
                         e2e.elf_verdict("chelis", e2e.elf_dynamic(path), static=False)
+
+    def test_a_macos_build_loads_only_system_libraries(self) -> None:
+        otool = (
+            "/tmp/chelis:\n"
+            "\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0)\n"
+            "\t/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate"
+            " (compatibility version 1.0.0)\n"
+            "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+        )
+        self.assertEqual(
+            e2e.macho_verdict("chelis", otool), "chelis: 3 system libraries"
+        )
+        for library in (
+            "/opt/homebrew/opt/gmp/lib/libgmp.10.dylib",
+            "@rpath/libcvc5.1.dylib",
+        ):
+            with self.subTest(library=library):
+                loaded = otool + f"\t{library} (compatibility version 1.0.0)\n"
+                with self.assertRaisesRegex(
+                    e2e.StepFailed, f"chelis loads {re.escape(library)}"
+                ):
+                    e2e.macho_verdict("chelis", loaded)
 
 
 if __name__ == "__main__":

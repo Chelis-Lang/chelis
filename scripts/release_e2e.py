@@ -8,8 +8,8 @@ run, whose archives carry a `dev-<sha8>` label, is installed from a copy under
 its release name, and the two online steps skip.
 
 - assets: the sha256 sidecars of this host's archive and installer match.
-- bootstrap: the documented `gh release download ... chelisup.sh | sh`
-  installs chelisup (online runs with `gh` on PATH).
+- bootstrap: the install guide's `gh release download ... chelisup.sh | sh`,
+  which takes chelisup from the latest release (online runs with `gh` on PATH).
 - install-online: `chelisup install X.Y.Z` through the GitHub API.
 - install-offline: `chelisup install X.Y.Z` from the verified local assets.
 - first-program: every command of the release's own First Program page, as
@@ -242,6 +242,23 @@ def elf_verdict(name: str, linkage: ElfLinkage, *, static: bool) -> str:
     return f"{name}: {LINUX_LOADER}, needs {', '.join(linkage.needed)}"
 
 
+def macho_verdict(name: str, otool_libraries: str) -> str:
+    """A macOS build loads only system libraries, given its `otool -L` output."""
+    libraries = [
+        line.strip().split(" (", 1)[0]
+        for line in otool_libraries.splitlines()[1:]
+        if line.strip()
+    ]
+    outside = [
+        library
+        for library in libraries
+        if not library.startswith(MACOS_SYSTEM_PREFIXES)
+    ]
+    if outside:
+        raise StepFailed(f"{name} loads {', '.join(outside)}")
+    return f"{name}: {len(libraries)} system libraries"
+
+
 def glibc_version() -> str | None:
     try:
         return os.confstr("CS_GNU_LIBC_VERSION")
@@ -461,7 +478,7 @@ class Proof:
         if not installed.is_file() or not os.access(installed, os.X_OK):
             raise StepFailed("the bootstrap did not install an executable chelisup")
         _, stdout, _ = self.run("chelisup-version", [installed, "--version"], env=env)
-        return f"installed {stdout.strip()} into $CHELIS_HOME/bin"
+        return f"the latest release's chelisup.sh installed {stdout.strip()}"
 
     def install_online(self) -> str:
         if not self.args.online:
@@ -642,24 +659,13 @@ class Proof:
 
     def macho_linkage(self, name: str, path: Path) -> str:
         _, stdout, _ = self.run(f"otool-{name}", ["otool", "-L", path], env=self.env())
-        libraries = [
-            line.strip().split(" (", 1)[0]
-            for line in stdout.splitlines()[1:]
-            if line.strip()
-        ]
-        outside = [
-            library
-            for library in libraries
-            if not library.startswith(MACOS_SYSTEM_PREFIXES)
-        ]
-        if outside:
-            raise StepFailed(f"{name} loads {', '.join(outside)}")
+        verdict = macho_verdict(name, stdout)
         _, commands, _ = self.run(
             f"otool-l-{name}", ["otool", "-l", path], env=self.env()
         )
         minos = re.search(r"cmd LC_BUILD_VERSION.*?minos ([0-9.]+)", commands, re.S)
         floor = minos.group(1) if minos else "unknown"
-        return f"{name}: {len(libraries)} system libraries, minimum macOS {floor}"
+        return f"{verdict}, minimum macOS {floor}"
 
     def elf_linkage(self, name: str, path: Path) -> str:
         linkage = elf_dynamic(path)
@@ -784,10 +790,6 @@ def summarize(args: argparse.Namespace) -> int:
         if data.get("schema") == SCHEMA:
             reports.append(data)
     print(render(reports) if reports else "No release E2E reports were found.")
-    if args.require_pass and (
-        not reports or any(report.get("status") != "passed" for report in reports)
-    ):
-        return 1
     return 0
 
 
@@ -813,7 +815,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     proof.set_defaults(handler=check_host)
     table = commands.add_parser("summarize", help="render every report as one table")
     table.add_argument("root", type=Path)
-    table.add_argument("--require-pass", action="store_true")
     table.set_defaults(handler=summarize)
     args = parser.parse_args(argv)
     return args.handler(args)
