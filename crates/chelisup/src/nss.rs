@@ -9,7 +9,9 @@
 //! databases it uses at the services built into libc, so lookups read
 //! `/etc/hosts`, `/etc/passwd`, `/etc/group`, and the name servers in
 //! `/etc/resolv.conf`, and never load a plugin. Dynamic builds keep the host's
-//! configuration.
+//! configuration. The release's static job runs both binaries' first host
+//! lookup in Fedora and Arch images to check this
+//! (`scripts/verify_static_nss.py`).
 
 /// Restrict this process's host, user, and group lookups to glibc's built-in
 /// `files` and `dns` services. It changes nothing except in the static Linux

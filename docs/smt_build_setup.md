@@ -223,7 +223,11 @@ binary discharges property obligations through cvc5 instead of degrading to the
 solver-free fuzz path, and carries a sealed runtime whose export the tarball
 ships (`spec/08-backends.md` §2.1). The static job adds `--target
 x86_64-unknown-linux-gnu` with `RUSTFLAGS=-C target-feature=+crt-static`, which
-links glibc, libstdc++, and cvc5 into a static-pie executable. Each release job:
+links glibc, libstdc++, and cvc5 into a static-pie executable. It refuses a
+`chelis` or `chelisup` that names a program interpreter or a shared library, and
+`scripts/verify_static_nss.py` runs each binary's first GitHub request in pinned
+Fedora and Arch images whose `hosts` lines name NSS plugins: the lookup must fail
+as an ordinary error, not end the process with a signal. Each release job:
 
 - installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
   uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot

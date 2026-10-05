@@ -1492,10 +1492,11 @@ REVIEWED: tuple[Row, ...] = (
             '"archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",',
             '(output / "libchelis_runtime.a").write_bytes(b"swapped")',
             '"\'out dir/libchelis_runtime.a\' -lm -lpthread -ldl\\n"',
+            '"out/libchelis_runtime.a -lm -framework Accelerate\\n"',
         ),
         disposition="not-lookup",
         reason=(
-            "constructs a coherent compiler export and package, crosses each public header and the archive to prove rejection, tests the canary's installed/staged archive checks, and feeds its link-requirements parser a build line that names the archive"
+            "constructs a coherent compiler export and package, crosses each public header and the archive to prove rejection, tests the canary's installed/staged archive checks, and feeds its link-requirements parser build lines, with and without a leading SDK assignment, that name the archive"
         ),
     ),
     Row(

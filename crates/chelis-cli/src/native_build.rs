@@ -270,13 +270,33 @@ fn install_guidance(stage: &str, target: &str) -> &'static str {
     }
 }
 
+/// Print `command` as a shell line. A native tool gets the allowlisted
+/// variables from this process's environment, which whatever runs the line
+/// has too, plus any the build sets itself: the selected SDK on macOS. Those
+/// go through `env`, so the line runs as the build did whether a shell runs it
+/// or a program executes its words directly.
 fn print_command(label: &str, command: &mut Command) {
+    let assignments: Vec<String> = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            let inherited = chelis_backend_c::toolchain::TOOL_ENVIRONMENT
+                .iter()
+                .any(|allowed| name == OsStr::new(allowed));
+            let value = value.filter(|_| !inherited)?;
+            Some(format!("{}={}", name.to_string_lossy(), shell_word(value)))
+        })
+        .collect();
+    let env = (!assignments.is_empty()).then(|| "env".to_string());
     let argv = std::iter::once(command.get_program())
         .chain(command.get_args())
-        .map(shell_word)
+        .map(shell_word);
+    let line = env
+        .into_iter()
+        .chain(assignments)
+        .chain(argv)
         .collect::<Vec<_>>()
         .join(" ");
-    println!("{label}: {argv}");
+    println!("{label}: {line}");
 }
 
 fn shell_word(word: &OsStr) -> String {

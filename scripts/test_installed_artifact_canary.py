@@ -270,6 +270,12 @@ class ProcessTests(unittest.TestCase):
             "'out dir/libchelis_runtime.a' -lm -lpthread -ldl\n"
         )
         self.assertEqual(canary.reported_link_flags(stdout), ["-lm", "-lpthread", "-ldl"])
+        # macOS: the build runs the compiler through `env` with the SDK it gives its tools.
+        macos = (
+            "Link requirements (after module archive): env SDKROOT='/SDKs/Mac OS X.sdk' clang "
+            "out/libchelis_runtime.a -lm -framework Accelerate\n"
+        )
+        self.assertEqual(canary.reported_link_flags(macos), ["-lm", "-framework", "Accelerate"])
         for broken in ("Wrote out/callable.c\n",
                        "Link requirements (after module archive): cc out/libother.a -lm\n",
                        stdout + stdout):
