@@ -126,7 +126,7 @@ pub fn round_to_f32(x: f32, places: i64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decimal_parse_reference::{
+    use crate::decimal_parse::tests::reference::{
         ratio_to_ieee_bits as reference_ratio_to_ieee_bits,
         rounded_quotient as reference_rounded_quotient, Rounded as ReferenceRounded,
     };

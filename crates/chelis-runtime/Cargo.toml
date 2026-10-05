@@ -40,9 +40,9 @@ chelis-types = { workspace = true }
 # storage conversions, whose production lane is this crate's finalization.
 chelis-crmath = { workspace = true }
 # Test-only: the oracle for the differential tests of the exact decimal parse
-# (`src/decimal_parse_reference.rs`). The runtime itself must not link it:
-# num-bigint's size estimates call host `exp`, `log`, `log2` and `cbrt`
-# (chelis#2963).
+# and `round_to` (the `reference` module in `src/decimal_parse.rs`'s tests).
+# The runtime itself must not link it: num-bigint's size estimates call host
+# `exp`, `log`, `log2` and `cbrt` (chelis#2963).
 num-bigint = "0.4"
 
 # chelis#3032: the sort-tuple ownership tests read the allocation ledger, so

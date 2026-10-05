@@ -21,8 +21,6 @@ use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
 pub mod build_record;
 mod decimal_parse;
-#[cfg(test)]
-mod decimal_parse_reference;
 pub mod dtype_header;
 mod element;
 pub mod host_assert;
