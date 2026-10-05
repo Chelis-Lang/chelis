@@ -85,6 +85,7 @@ const CHECK_KIND_SPELLINGS: &[&str] = &[
     "OpaqueTypeViolation",
     "ReservedLinkerName",
     "BuiltinShadowing",
+    "ReservedName",
     "UnknownForm",
     "MalformedForm",
     "Other",

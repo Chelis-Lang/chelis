@@ -76,3 +76,72 @@ pub(super) fn non_finite_literal_error(atom: &deep::Atom, prim: Prim) -> CheckEr
         vec![suggestion],
     )
 }
+
+/// A repair note for a value whose literal dtype disagrees with a declared or
+/// ascribed numeric primitive (`spec/04-type-system.md` §5.3, §5.6). When the
+/// value is a literal, the annotation only checks its suffix or default, so
+/// the note names the suffixed spelling. When a literal stands inside the
+/// value, a declaration states no dtype for it: only a literal that is the
+/// whole initializer takes the declared dtype.
+pub(super) fn literal_dtype_hint(value: &deep::Expr, declared: &Type) -> Option<String> {
+    let Type::Prim(prim) = declared else {
+        return None;
+    };
+    if !prim.is_numeric() {
+        return None;
+    }
+    let admits = |atom: &deep::Atom| match atom {
+        deep::Atom::Int(_) => true,
+        deep::Atom::Float(_) => prim.is_float(),
+        _ => false,
+    };
+    // An ascribed literal sits in a one-expression block that owns the
+    // ascribed type.
+    let inner = match stamped_parts(value) {
+        Some((DeepTag::Block, _, [child])) => child,
+        _ => value,
+    };
+    if let Some((DeepTag::Lit, _, [deep::Expr::Atom(atom, _)])) = stamped_parts(inner)
+        && admits(atom)
+    {
+        return Some(format!(
+            "an ascription or declaration checks a literal's suffix or default and does not \
+             select its dtype (spec/04-type-system.md \u{00a7}5.3); write `{}{}`",
+            render_numeric_atom(atom),
+            prim.name()
+        ));
+    }
+    let atom = first_numeric_literal(inner, &admits)?;
+    Some(format!(
+        "a declaration states the dtype only of a literal that is its whole initializer \
+         (spec/04-type-system.md \u{00a7}5.6); suffix a literal inside an expression, such as \
+         `{}{}`",
+        render_numeric_atom(atom),
+        prim.name()
+    ))
+}
+
+fn first_numeric_literal<'a>(
+    expr: &'a deep::Expr,
+    admits: &dyn Fn(&deep::Atom) -> bool,
+) -> Option<&'a deep::Atom> {
+    stack_guard!("first_numeric_literal", expr, None);
+    match expr {
+        deep::Expr::BareList(elements, _) => {
+            return elements
+                .iter()
+                .find_map(|element| first_numeric_literal(element, admits));
+        }
+        deep::Expr::MetaExpr(meta, _) => return first_numeric_literal(&meta.expr, admits),
+        _ => {}
+    }
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Lit {
+        return match kids {
+            [deep::Expr::Atom(atom, _)] if admits(atom) => Some(atom),
+            _ => None,
+        };
+    }
+    kids.iter()
+        .find_map(|kid| first_numeric_literal(kid, admits))
+}

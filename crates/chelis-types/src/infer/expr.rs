@@ -626,10 +626,13 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             if let Err(error) = unify(&result, &declared, subst) {
                 let expected = subst.apply(&declared);
                 let got = subst.apply(&result);
+                let hint = super::literal_width::literal_dtype_hint(expr, &expected)
+                    .map(|hint| format!("; {hint}"))
+                    .unwrap_or_default();
                 let mut diagnostic = CheckError::with_types(
                     check_error_kind_from_type_error_kind(&error.kind),
                     format!(
-                        "expression ascription does not match value: expected {expected}, got {got}"
+                        "expression ascription does not match value: expected {expected}, got {got}{hint}"
                     ),
                     expected.to_string(),
                     got.to_string(),

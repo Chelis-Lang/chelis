@@ -179,7 +179,15 @@ fn infer_app_inner(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
 ) -> Type {
-    let kids = node.children_slice();
+    let all_kids = node.children_slice();
+    // spec/05 [05-OP-57]: `to_tensor(xs, T)` checks as `to_tensor(xs)` whose
+    // List leaf dtype is the type-node child `T` (spec/03 §6.4).
+    let dtype_child = to_tensor_dtype_child(all_kids, env);
+    let kids = if dtype_child.is_some() {
+        &all_kids[..2]
+    } else {
+        all_kids
+    };
     if kids.is_empty() {
         return malformed_form(node, "app", "a callee expression", errors);
     }
@@ -208,6 +216,13 @@ fn infer_app_inner(
     let func_name = source_func_name.clone().filter(|name| {
         !builtins::BUILTIN_NAMES.contains(&name.as_str()) || !env.is_lexically_bound(name)
     });
+
+    // spec/03 §6.4: Deep states every `to_tensor` element's dtype.
+    if matches!(func_name.as_deref(), Some("to_tensor"))
+        && let Some(element) = kids.get(1).and_then(untyped_to_tensor_element)
+    {
+        return report(errors, untyped_to_tensor_element_error(element));
+    }
 
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(expr, node, env, vg, subst, adt_reg, errors, product);
@@ -452,6 +467,14 @@ fn infer_app_inner(
             }
         })
         .collect();
+
+    if let Some(dtype_child) = dtype_child
+        && let Some(argument) = arg_tys.first()
+        && let Err(rejected) =
+            require_to_tensor_leaf(expr, dtype_child, argument, env, vg, subst, adt_reg, errors)
+    {
+        return_with_collection_cleanup!(rejected);
+    }
 
     // [05-OP-67]: `drop` is the one-argument linearity consume and returns
     // unit for every operand type. Its arity is exact here rather than in

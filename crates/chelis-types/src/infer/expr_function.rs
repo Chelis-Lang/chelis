@@ -557,6 +557,9 @@ pub(super) fn infer_let(
                                     &got,
                                     &expected,
                                 )
+                                .or_else(|| {
+                                    super::literal_width::literal_dtype_hint(rhs_expr, &expected)
+                                })
                                 .map(|note| format!("; {note}"))
                                 .unwrap_or_default();
                                 let mut diagnostic = CheckError::with_types(

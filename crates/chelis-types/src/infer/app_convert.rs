@@ -489,3 +489,170 @@ pub(super) fn finish_conversion_app(
     }
     None
 }
+
+/// spec/05 [05-OP-57] and spec/03 §6.4: the dtype child of
+/// `to_tensor(xs, T)`, a type node in the call's third position. The call
+/// checks as `to_tensor(xs)` whose List leaf dtype is `T`.
+pub(super) fn to_tensor_dtype_child<'a>(
+    kids: &'a [deep::Expr],
+    env: &Env,
+) -> Option<&'a deep::Expr> {
+    let [callee, _, dtype] = kids else {
+        return None;
+    };
+    let (DeepTag::Var, _, parts) = stamped_parts(callee)? else {
+        return None;
+    };
+    if parts.first().and_then(symbol_name) != Some("to_tensor")
+        || env.is_lexically_bound("to_tensor")
+    {
+        return None;
+    }
+    matches!(
+        stamped_parts(dtype),
+        Some((DeepTag::TPrim | DeepTag::TVar, _, _))
+    )
+    .then_some(dtype)
+}
+
+/// spec/03 §6.4: Deep has no dtype-stating constructs, so a numeric literal
+/// element of a `to_tensor` argument with no `type` metadata has no dtype.
+/// Returns the first such element of a literal `Cons` chain, recursively
+/// through nested chains.
+pub(super) fn untyped_to_tensor_element(argument: &deep::Expr) -> Option<&deep::Expr> {
+    stack_guard!("untyped_to_tensor_element", argument, None);
+    let mut tail = argument;
+    loop {
+        let (DeepTag::App, _, parts) = stamped_parts(tail)? else {
+            return None;
+        };
+        let [cons, head, rest] = parts else {
+            return None;
+        };
+        let (DeepTag::Var, _, callee) = stamped_parts(cons)? else {
+            return None;
+        };
+        if callee.first().and_then(symbol_name) != Some("Cons") {
+            return None;
+        }
+        match stamped_parts(head) {
+            Some((
+                DeepTag::Lit,
+                meta,
+                [deep::Expr::Atom(deep::Atom::Int(_) | deep::Atom::Float(_), _)],
+            )) if meta.ty().is_none() => {
+                return Some(head);
+            }
+            Some((DeepTag::App, _, _)) => {
+                if let Some(element) = untyped_to_tensor_element(head) {
+                    return Some(element);
+                }
+            }
+            _ => {}
+        }
+        tail = rest;
+    }
+}
+
+/// The diagnostic for an untyped Deep literal element of `to_tensor`.
+pub(super) fn untyped_to_tensor_element_error(element: &deep::Expr) -> CheckError {
+    let error = CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        "Deep literal element of `to_tensor` has no `type` metadata; tensor elements have no \
+         default dtype (spec/03-deep-syntax.md §6.4)"
+            .to_string(),
+        vec!["give the literal a `type`, such as `(lit {type: (t-prim {} f32)} 1.5)`".to_string()],
+    );
+    match TypeDiagnosticLocation::from_expr(element) {
+        Some(location) => location.attach(error),
+        None => error,
+    }
+}
+
+/// [05-OP-57]: a written `T` states the leaf dtype, which the List's leaf
+/// SHALL equal; `to_tensor` never converts. The leaf of a List whose element
+/// type is still open takes `T`, which is how an empty List gets its dtype.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn require_to_tensor_leaf(
+    expr: &deep::Expr,
+    dtype_child: &deep::Expr,
+    argument: &Type,
+    env: &Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(), Type> {
+    let dtype = {
+        let mut resolver = DeepTypeResolver::new(
+            TypeUseSite::Annotation,
+            annotation_binder_mode(env),
+            adt_reg.resolution_env(),
+            vg,
+            errors,
+        )
+        .with_diagnostic_owner(expr);
+        match resolver.resolve(dtype_child) {
+            Ok(dtype) => dtype.into_type(),
+            Err(witness) => return Err(propagate(&witness)),
+        }
+    };
+    // A `t-var` child names a dtype binder; a `t-prim` child must name a
+    // tensor-element primitive.
+    let binder = matches!(stamped_parts(dtype_child), Some((DeepTag::TVar, _, _)));
+    let is_dtype =
+        binder || matches!(&dtype, Type::Prim(prim) if prim.is_numeric() || *prim == Prim::Bool);
+    let at_expr = |error: CheckError| match TypeDiagnosticLocation::from_expr(expr) {
+        Some(location) => location.attach(error),
+        None => error,
+    };
+    if !is_dtype {
+        return Err(report(
+            errors,
+            at_expr(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "to_tensor's dtype argument must be a tensor-element dtype or a dtype \
+                     binder, not {dtype} ([05-OP-57])"
+                ),
+                vec![],
+            )),
+        ));
+    }
+    let mut leaf = subst.apply(argument);
+    let mut depth = 0usize;
+    while let Type::Adt(name, arguments) = &leaf
+        && name == "List"
+        && let [element] = arguments.as_slice()
+    {
+        leaf = subst.apply(element);
+        depth += 1;
+    }
+    // A non-List argument is the conversion rule's to reject or defer.
+    if depth == 0 {
+        return Ok(());
+    }
+    // A dtype binder ranges over every member of its bound, so a concrete
+    // leaf never equals it; unifying would narrow the binder instead.
+    let binder_against_concrete = binder && matches!(leaf, Type::Prim(_));
+    if binder_against_concrete || unify(&leaf, &dtype, subst).is_err() {
+        let leaf = subst.apply(&leaf);
+        let dtype = subst.apply(&dtype);
+        return Err(report(
+            errors,
+            at_expr(CheckError::with_types(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "to_tensor's dtype argument states {dtype}, but the List's leaf dtype is \
+                     {leaf}, and to_tensor never converts ([05-OP-57]); write \
+                     to_tensor(xs, {leaf}), or convert the result with \
+                     cast(to_tensor(xs, {leaf}), {dtype})"
+                ),
+                dtype.to_string(),
+                leaf.to_string(),
+                vec![],
+            )),
+        ));
+    }
+    Ok(())
+}
