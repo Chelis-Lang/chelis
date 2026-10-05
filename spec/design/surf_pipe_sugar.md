@@ -34,12 +34,26 @@ Deep vocabulary and ingress reject the retired node.
 
 `chelis migrate pipes --baseline-compiler OLD --inplace PATH...` is the reusable
 shell/downstream migration surface. It obtains literal dtypes and expanded Deep
-from the previous compiler, suffixes unsuffixed numbers within seeds, and checks
+from the previous compiler, suffixes only unsuffixed seed numbers whose dtype
+would change (including signed literals), and checks
 normalized expanded Deep equality before atomic batch replacement. Missing evidence
 or an unpreservable comment rejects the migration. `--check` performs the same
-proof and rejects files needing edits. The old reader is quarantined to migration;
+proof and rejects files needing edits. `--keep-going` explicitly selects
+independent files: valid files may be migrated even when another file fails;
+the command attempts all paths, reports success/failure counts and exits
+nonzero on any failure. The default remains a complete batch transaction.
+Historical normalization retains authored lambda stages as applied values:
+the old compiler marked some authored lambdas like its synthesized wrappers,
+so their source spans distinguish them. The old reader is quarantined to migration;
 normal parser/stamper entry points reject retired `pipe` nodes, with Deep 0.20
 named in the diagnostic.
+
+Run this migration with the pinned previous compiler before applying A1's
+literal-entry changes (chelis#3164). Both changes belong to the same release;
+their implementation and migration order is pipe normalization, proved
+downstream migration, then A1 entry updates. A compiler with both changes
+cannot certify the old whole-file graph until unrelated A1 migrations have
+also been made, so retain the pre-A1 pipe-migration tool for this step.
 
 The Deep node/metadata enum changes and Surf stage representation change bump the
 library, stdlib, context and shell-package envelopes. Text Deep has no envelope

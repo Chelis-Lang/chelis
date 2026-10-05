@@ -429,7 +429,26 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
             "{lane} must report the checked Float-family rejection; got: {diagnostic}"
         );
     }
-    assert_eq!(c_err, h_err, "C vs HIP checker diagnostics must agree");
+    let location_independent = |text: &str| {
+        text.lines()
+            .map(|line| {
+                if line.starts_with("  --> ") {
+                    let mut parts = line.rsplitn(3, ':');
+                    let column = parts.next().unwrap();
+                    let row = parts.next().unwrap();
+                    format!("  --> <source>:{row}:{column}")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        location_independent(&c_err),
+        location_independent(&h_err),
+        "C vs HIP checker diagnostics must agree apart from the independently created source paths"
+    );
 }
 
 /// Text admission rejects unknown effect kinds before either execution lane.

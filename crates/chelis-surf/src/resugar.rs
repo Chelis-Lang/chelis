@@ -2725,18 +2725,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            // Binder adoption re-applies on re-desugaring; only concrete
-            // targets can require an explicit default suffix.
-            let precision_target = primitive_type_name(&node.children[1]);
-            let operand = if let Ok(literal) = node_ref(&node.children[0])
-                && literal.tag == DeepTag::Lit
-                && let Some(precision) = precision_target
-                && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
-            {
-                resugar_literal_with_default_suffix(literal)?
-            } else {
-                resugar_expression_inner(&node.children[0])?
-            };
+            let operand = resugar_cast_operand(&node.children[0], target)?;
             Ok(Expr::Cast(
                 Box::new(operand),
                 target.to_string(),
@@ -2940,9 +2929,6 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
 enum SuffixSpelling {
     /// The literal's own `surf_literal_style` decides.
     Authored,
-    /// The position re-derives a non-default dtype, so a default `i32` or
-    /// `f32` suffix is semantic and prints.
-    DefaultSemantic,
     /// The position re-derives a dtype the literal does not have, so every
     /// suffix prints, even on a literal authored unsuffixed elsewhere.
     Every,
@@ -2950,10 +2936,6 @@ enum SuffixSpelling {
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     resugar_literal_impl(node, SuffixSpelling::Authored)
-}
-
-fn resugar_literal_with_default_suffix(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
-    resugar_literal_impl(node, SuffixSpelling::DefaultSemantic)
 }
 
 fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<Expr, ResugarError> {
@@ -2999,6 +2981,11 @@ fn resugar_literal_impl(node: NodeRef<'_>, spelling: SuffixSpelling) -> Result<E
         ));
     }
     let literal = match (&node.children[0], suffix) {
+        (DeepExpr::Atom(Atom::Int(value), _), Some(suffix))
+            if integer_literal_source(node.meta) && spelling == SuffixSpelling::Every =>
+        {
+            Literal::TypedInt(*value, suffix)
+        }
         (DeepExpr::Atom(Atom::Int(value), _), Some(_)) if suppress_suffix => Literal::Int(*value),
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) if suffix.is_float() => {
             let rounded = round_integer_at_float_width(*value, suffix);
@@ -3078,24 +3065,40 @@ fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
     }
 }
 
-fn default_literal_suffix_is_semantic_in_cast(
-    node: &NodeRef<'_>,
-    precision: &str,
-) -> Result<bool, ResugarError> {
-    let suffix = literal_suffix(node.meta)?;
-    let numeric_target = matches!(
-        precision,
-        "f32" | "f64" | "bf16" | "f16" | "i8" | "i16" | "i32" | "i64"
-    );
-    Ok(match (&node.children[0], suffix) {
-        (DeepExpr::Atom(Atom::Float(_), _), Some(LiteralSuffix::F32)) => {
-            matches!(precision, "f64" | "bf16" | "f16")
+fn resugar_cast_operand(expr: &DeepExpr, target: &str) -> Result<Expr, ResugarError> {
+    if let Ok(node) = node_ref(expr) {
+        if node.tag == DeepTag::Lit
+            && literal_suffix(node.meta)?.is_some_and(|dtype| dtype.as_str() != target)
+        {
+            // A direct (possibly signed) literal would adopt the cast target
+            // on rereading. Its original width is semantic, including when a
+            // macro authored it unsuffixed or the target is a dtype binder.
+            return resugar_literal_impl(node, SuffixSpelling::Every);
         }
-        (DeepExpr::Atom(Atom::Int(_), _), Some(LiteralSuffix::I32)) => {
-            numeric_target && precision != "i32"
+        if node.tag == DeepTag::App
+            && node.children.len() == 2
+            && let Ok(callee) = node_ref(&node.children[0])
+            && callee.tag == DeepTag::Var
+            && name_child(&callee, 0)? == "neg"
+            && let Ok(literal) = node_ref(&node.children[1])
+            && literal.tag == DeepTag::Lit
+        {
+            let spelling =
+                if literal_suffix(literal.meta)?.is_some_and(|dtype| dtype.as_str() != target) {
+                    SuffixSpelling::Every
+                } else {
+                    SuffixSpelling::Authored
+                };
+            // Keep the authored neg call as an operation. A signed literal
+            // would also collapse this operation during contextual typing.
+            return Ok(Expr::Apply(
+                Box::new(Expr::Var("neg".into(), callee.span)),
+                vec![resugar_literal_impl(literal, spelling)?],
+                node.span,
+            ));
         }
-        _ => false,
-    })
+    }
+    resugar_expression_inner(expr)
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {

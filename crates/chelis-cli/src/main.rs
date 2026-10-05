@@ -448,6 +448,9 @@ enum MigrateCommand {
         check: bool,
         #[arg(long)]
         inplace: bool,
+        /// Process files independently; report every failure and exit nonzero.
+        #[arg(long)]
+        keep_going: bool,
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
@@ -942,8 +945,9 @@ fn main() {
                 baseline_compiler,
                 check,
                 inplace,
+                keep_going,
                 paths,
-            } => cmd_migrate_pipes(&baseline_compiler, &paths, check, inplace),
+            } => cmd_migrate_pipes(&baseline_compiler, &paths, check, inplace, keep_going),
             MigrateCommand::Surf {
                 from,
                 check,
@@ -1285,17 +1289,23 @@ fn cmd_migrate_pipes(
     paths: &[PathBuf],
     check: bool,
     inplace: bool,
+    keep_going: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if check && inplace {
         return Err("`migrate pipes` cannot combine --check and --inplace".into());
+    }
+    if keep_going && !check && !inplace {
+        return Err("--keep-going requires --check or --inplace".into());
     }
     if !check && !inplace && paths.len() != 1 {
         return Err(
             "printing migration requires one path; use --check or --inplace for a batch".into(),
         );
     }
-    let mut staged = Vec::new();
-    for path in paths {
+    let prepare = |path: &Path| -> Result<(PathBuf, String, String), Box<dyn std::error::Error>> {
+        if inplace {
+            preflight_migration_target(path)?;
+        }
         let original = fs::read_to_string(path)?;
         let output = std::process::Command::new(baseline_compiler)
             .args(["deep", "--flat"])
@@ -1318,9 +1328,65 @@ fn cmd_migrate_pipes(
         let expected = chelis_deep::printer::print_canonical(&normalize(&migration.baseline)?);
         let actual = chelis_deep::printer::print_canonical(&normalize(&current)?);
         if actual != expected {
-            return Err(format!("{}: migration rejected: expanded Deep differs from the previous compiler; no files written", path.display()).into());
+            return Err(
+                "migration rejected: expanded Deep differs from the previous compiler".into(),
+            );
         }
-        staged.push((path.clone(), original, migration.source));
+        Ok((path.to_path_buf(), original, migration.source))
+    };
+    let mut staged = Vec::new();
+    let mut blocked = Vec::new();
+    let mut succeeded = 0;
+    for path in paths {
+        let result = prepare(path).and_then(|migration| {
+            if keep_going {
+                if check && migration.1 != migration.2 {
+                    return Err("pipe migration required".into());
+                }
+                if inplace {
+                    persist_migrations_atomically(std::slice::from_ref(&migration))?;
+                }
+                eprintln!(
+                    "{}: {}",
+                    path.display(),
+                    if inplace { "migrated" } else { "unchanged" }
+                );
+            } else {
+                staged.push(migration);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => succeeded += 1,
+            Err(error) => {
+                let message = if keep_going {
+                    error.to_string().replace(
+                        "no migration files were changed",
+                        "this file was not modified",
+                    )
+                } else {
+                    error.to_string()
+                };
+                blocked.push(format!("{}: {message}", path.display()));
+            }
+        }
+    }
+    if keep_going {
+        eprintln!(
+            "pipe migration: {succeeded} succeeded, {} failed",
+            blocked.len()
+        );
+    }
+    if !blocked.is_empty() {
+        return Err(format!(
+            "{}{}",
+            blocked.join("\n"),
+            if keep_going { "" } else { "; no files written" }
+        )
+        .into());
+    }
+    if keep_going {
+        return Ok(());
     }
     if check {
         let stale: Vec<_> = staged

@@ -234,6 +234,12 @@ fn every_mixed_operator_requires_grouping() {
         "out = x |> f: i32\n",
         "out = x with { a: y } |> f\n",
         "out = match x |> f with { | _ => x }\n",
+        "out = x |> f.1\n",
+        "out = x |> r.f\n",
+        "out = r.f |> g\n",
+        "out = M.f(x) |> g\n",
+        "out = if c then x |> f else y\n",
+        "out = fn (v) -> v |> f\n",
     ] {
         assert!(parse_str(source).is_err(), "{source}");
     }
@@ -247,6 +253,12 @@ fn grouped_pipes_preserve_fmt_and_surface_retraction() {
         "out = (if c then a else b) |> f\n",
         "out = x |> (fn (v) -> v + y)\n",
         "out = x |> f(a + b) |> g\n",
+        "out = x |> (f.1)\n",
+        "out = (x |> f).1\n",
+        "out = (r.f) |> g\n",
+        "out = (M.f(x)) |> g\n",
+        "out = if c then (x |> f) else y\n",
+        "out = fn (v) -> (v |> f)\n",
     ] {
         let formatted = format_source(source).expect("format");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
@@ -289,7 +301,7 @@ fn migration_preserves_literal_dtype_and_old_grouping() {
         "out = 2.0 * x |> f\n",
         "(def {} out (pipe {} (app {} (var {} mul) (lit {span: \"surf:6..9\", type: (t-prim {} f32)} 2.0) (var {} x)) (var {} f)))",
     ).unwrap();
-    assert_eq!(migration.source, "out = (2.0f32 * x) |> f\n");
+    assert_eq!(migration.source, "out = (2.0 * x) |> f\n");
     assert_eq!(
         meaning(&migration.source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&migration.baseline).unwrap())
@@ -297,11 +309,42 @@ fn migration_preserves_literal_dtype_and_old_grouping() {
 }
 
 #[test]
+fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
+    let source = "out = cast(-1.0, f32) |> f\n";
+    let previous = "(def {} out (pipe {} (cast {} (lit {span: \"surf:11..15\", type: (t-prim {} f32)} -1.0) (t-prim {} f32)) (var {} f)))";
+    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    assert_eq!(migrated.source, source);
+    assert_eq!(
+        meaning(source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+    );
+    assert!(
+        chelis_surf::pipe_migration::prepare(
+            source,
+            "(def {} out (pipe {} (var {} x) (var {} f)))"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn migration_keeps_authored_first_argument_lambdas_as_values() {
+    let source = "out = x |> (fn (v) -> h(v))\n";
+    let previous = "(def {} out (pipe {} (var {} x) (fn {span: \"surf:12..26\", surf_pipe_stage: \"call-first\"} (params {} v) (app {} (var {} h) (var {} v)))))";
+    let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
+    assert_eq!(
+        meaning(source),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
+    );
+    assert!(print_canonical(&migrated.baseline).contains("(fn "));
+}
+
+#[test]
 fn migration_uses_validated_metadata_without_erasing_extensions() {
     let source = "out = 0.1 |> f\n";
     let previous = "(def {} out (pipe {} (lit {span: \"surf:6..9\", type: (t-prim {} f32), surf_literal_style: \"unsuffixed\", audit_note: \"literal\"} 0.1) (var {span: \"surf:13..14\"} f)))";
     let migration = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
-    assert_eq!(migration.source, "out = 0.1f32 |> f\n");
+    assert_eq!(migration.source, "out = 0.1 |> f\n");
     let baseline = print_canonical(&migration.baseline);
     assert!(baseline.contains("audit_note"));
     assert!(baseline.contains("literal"));
@@ -333,7 +376,7 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
         "(def {{}} out (let {{}} (bind {{}} x (pipe {{surf_binding_type: \"inferred\"}} {literal} (var {{}} f))) (var {{}} x)))"
     );
     let migrated = chelis_surf::pipe_migration::prepare(source, &previous).unwrap();
-    assert!(migrated.source.contains("0.1f32 |> f"));
+    assert!(migrated.source.contains("0.1 |> f"));
     assert!(print_canonical(&migrated.baseline).contains("surf_binding_type"));
     assert_eq!(
         meaning(&migrated.source),

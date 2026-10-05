@@ -6690,7 +6690,7 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
                 .iter()
                 .map(|stage| {
                     Ok(crate::schema::WireSurfPipeStage {
-                        syntax: stage.syntax,
+                        syntax: stage.syntax.into(),
                         expression: wire_expr(stage)?,
                     })
                 })

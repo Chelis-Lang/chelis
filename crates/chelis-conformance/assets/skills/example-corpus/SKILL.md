@@ -64,7 +64,7 @@ Spellings that are hard errors, not style:
 - Non-primary transform arguments are named: `grad(f, wrt=x)`,
   `vmap(f, axis=n)`; axis zero is bare `vmap(f)`.
 - Pipe stages use first-argument insertion: `x |> f(y)` means `f(x, y)`. Use
-  `x |> fn (v) -> f(y, v)` when the piped value belongs in a later position.
+  `x |> (fn (v) -> f(y, v))` when the piped value belongs in a later position.
 
 Style the lint rules enforce:
 

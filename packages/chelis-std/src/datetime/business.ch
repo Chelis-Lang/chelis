@@ -108,7 +108,7 @@ def business_select(cal: BusinessCalendar, ordinal: i64) -> i64 = {
 }
 -- Whether a day of the horizon is a business day.
 def is_business_at(cal: BusinessCalendar, epoch_day: i64) -> bool =
-  if (cal.weekmask |> weekmask_flags |> weekmask_has(epoch_day)) then {
+  if ((cal.weekmask) |> weekmask_flags |> weekmask_has(epoch_day)) then {
     position = holidays_before(cal.holidays, epoch_day)
     if lt(position, len(cal.holidays)) then neq(index(cal.holidays, position), epoch_day) else true
   } else false

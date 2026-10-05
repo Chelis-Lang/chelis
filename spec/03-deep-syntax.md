@@ -1,5 +1,9 @@
 # spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
+The Deep format profile is `0.20`. Pipes are Surf sugar and have no Deep node
+or spelling-restoration annotation. Versioned transports MUST reject a payload
+from the preceding pipe-node profile before decoding it as this profile.
+
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
 The 61-tag vocabulary documented here is closed. A form outside that vocabulary is not

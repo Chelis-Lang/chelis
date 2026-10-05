@@ -79,7 +79,8 @@ fn pipe_stage_wire_preserves_syntax_without_synthesized_binders() {
     else {
         panic!("authored pipe is preserved")
     };
-    use chelis_surf::ast::{CastMode, PipeStageSyntax as S};
+    use chelis_compiler_api::schema::WirePipeStageSyntax as S;
+    use chelis_deep::CastMode;
     assert_eq!(
         stages.iter().map(|stage| stage.syntax).collect::<Vec<_>>(),
         vec![

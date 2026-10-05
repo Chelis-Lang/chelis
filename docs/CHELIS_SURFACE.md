@@ -683,7 +683,7 @@ not replace the selected backend's admission check.
 | `cost` | Report lowered-IR copy cost (`--json`) | no |
 | `deep` | Desugar Surf → Deep s-expr (`--annotate`) | no |
 | `surf` | Resugar well-formed public Deep → canonical Surf; invalid or unpreservable metadata is an error | no |
-| `migrate` | Explicit `surf`/`deep` source migrations from a named older grammar; normal parsing does not silently migrate | command-specific |
+| `migrate` | Explicit `surf`/`deep` source migrations, plus `pipes --baseline-compiler OLD` with whole-file Deep proof; pipe migration defaults to an atomic batch, with explicit `--keep-going` for independent files and a nonzero exit on any failure | command-specific |
 | `prove` | `@property` verifier (`--tier`, `--samples`, `--seed`, `--smt-timeout`, `--capabilities`); see §12 | no |
 | `test` | Run Chelis-native tests (`--filter`, `--json`, `--jobs`, `--expect`, `--batch-mode`) | no |
 | `tide` | REPL / HTTP API / MCP / LSP entry points (`serve`, `lsp`, and MCP mode) | no |

@@ -73,7 +73,7 @@ RANDOM_INSTANTS = 40
 
 PRELUDE = """\
 def parse_ints(text: string) -> List[i64] = {
-  folded = fold(fn (acc: (List[i64], i64, bool, bool), idx: i64) -> if text |> string_slice(idx, 1i64) |> eq(",") then (append(acc.0, if acc.2 then neg(acc.1) else acc.1), 0i64, false, false) else if text |> string_slice(idx, 1i64) |> eq("-") then (acc.0, acc.1, true, acc.3) else (acc.0, acc.1 |> mul(10i64) |> add(sub(char_code(string_slice(text, idx, 1i64)), 48i64)), acc.2, true), ([], 0i64, false, false), range(0i64, string_len(text)))
+  folded = fold(fn (acc: (List[i64], i64, bool, bool), idx: i64) -> if (text |> string_slice(idx, 1i64) |> eq(",")) then (append(acc.0, if acc.2 then neg(acc.1) else acc.1), 0i64, false, false) else if (text |> string_slice(idx, 1i64) |> eq("-")) then (acc.0, acc.1, true, acc.3) else (acc.0, (acc.1) |> mul(10i64) |> add(sub(char_code(string_slice(text, idx, 1i64)), 48i64)), acc.2, true), ([], 0i64, false, false), range(0i64, string_len(text)))
   if folded.3 then append(folded.0, if folded.2 then neg(folded.1) else folded.1) else folded.0
 }
 def offset_rows(tz: TimeZone, seconds: List[i64]) -> List[i64] = map(fn (s: i64) -> offset_seconds(time_zone_offset_at(tz, instant_from_unix(s, 0i64))), seconds)
@@ -84,15 +84,15 @@ def resolution_row(tz: TimeZone, civil: i64, policy: Disambiguation) -> List[i64
     | None => [0i64, 0i64]
   }
 }
-def resolution_rows(tz: TimeZone, civils: List[i64]) -> List[i64] = fold(fn (acc: List[i64], civil: i64) -> acc |> concat(resolution_row(tz, civil, EarlierInstant)) |> concat(resolution_row(tz, civil, LaterInstant)) |> concat(resolution_row(tz, civil, CompatibleInstant)) |> concat(resolution_row(tz, civil, RejectNonUniqueLocal)), [], civils)
-def text_rows(tz: TimeZone, seconds: List[i64]) -> string = fold(fn (acc: string, s: i64) -> if eq(acc, "") then zoned_to_string(zoned(instant_from_unix(s, 0i64), tz)) else acc |> string_concat("|") |> string_concat(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), "", seconds)
+def resolution_rows(tz: TimeZone, civils: List[i64]) -> List[i64] = fold(fn (acc: List[i64], civil: i64) -> (acc |> concat(resolution_row(tz, civil, EarlierInstant)) |> concat(resolution_row(tz, civil, LaterInstant)) |> concat(resolution_row(tz, civil, CompatibleInstant)) |> concat(resolution_row(tz, civil, RejectNonUniqueLocal))), [], civils)
+def text_rows(tz: TimeZone, seconds: List[i64]) -> string = fold(fn (acc: string, s: i64) -> if eq(acc, "") then zoned_to_string(zoned(instant_from_unix(s, 0i64), tz)) else (acc |> string_concat("|") |> string_concat(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz)))), "", seconds)
 def utc_text_row(tz: TimeZone, text: string) -> string =
   zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, UseWrittenOffset))
   |> string_concat("|")
   |> string_concat(zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, UseZoneRules)))
   |> string_concat("|")
   |> string_concat(zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, RejectOffsetMismatch)))
-def utc_text_rows(tz: TimeZone, texts: List[string]) -> string = fold(fn (acc: string, text: string) -> if eq(acc, "") then utc_text_row(tz, text) else acc |> string_concat("|") |> string_concat(utc_text_row(tz, text)), "", texts)
+def utc_text_rows(tz: TimeZone, texts: List[string]) -> string = fold(fn (acc: string, text: string) -> if eq(acc, "") then utc_text_row(tz, text) else (acc |> string_concat("|") |> string_concat(utc_text_row(tz, text))), "", texts)
 def round_trip_rows(tz: TimeZone, seconds: List[i64]) -> List[i64] = map(fn (s: i64) -> if and(eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, UseWrittenOffset), zoned(instant_from_unix(s, 0i64), tz)), eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, RejectOffsetMismatch), zoned(instant_from_unix(s, 0i64), tz))) then 1i64 else 0i64, seconds)
 """
 

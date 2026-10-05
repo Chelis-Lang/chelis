@@ -1525,7 +1525,12 @@ fn format_pipe_seed(seed: &Expr) -> String {
         | Expr::If(..)
         | Expr::Match(..)
         | Expr::Lambda(..)
-        | Expr::RecordUpdate(..) => format!("({})", format_expr(seed)),
+        | Expr::RecordUpdate(..)
+        | Expr::Access(..)
+        | Expr::TupleGet(..) => format!("({})", format_expr(seed)),
+        Expr::Apply(head, _, _) if matches!(&**head, Expr::Access(..) | Expr::TupleGet(..)) => {
+            format!("({})", format_expr(seed))
+        }
         _ => wrap_if_absorbs(seed, Trailer::Pipe),
     }
 }

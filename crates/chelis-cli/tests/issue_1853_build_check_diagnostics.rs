@@ -132,10 +132,24 @@ fn assert_build_renders_check_diagnostics(program: &str, name: &str, expected_co
         .map(expected_line)
         .collect::<Vec<_>>()
         .join("\n");
+    let mut expected = format!("error: Check errors: Type errors:\n{expected}");
+    for error in &errors {
+        if let Some(offset) = error["span"]["offset"].as_u64() {
+            let offset = offset as usize;
+            let line = program[..offset].bytes().filter(|&b| b == b'\n').count() + 1;
+            let start = program[..offset].rfind('\n').map_or(0, |index| index + 1);
+            let column = program[start..offset].chars().count() + 1;
+            let source = program[start..].lines().next().unwrap();
+            expected.push_str(&format!(
+                "\n  --> {path}:{line}:{column}\n  {line} | {source}\n    | {}^",
+                " ".repeat(column - 1)
+            ));
+        }
+    }
+    expected.push('\n');
     assert_eq!(
-        build.stderr,
-        format!("error: Check errors: Type errors:\n{expected}\n"),
-        "build stderr must be check's diagnostics, one line each"
+        build.stderr, expected,
+        "one projected summary and authored excerpt per located diagnostic, in checker order"
     );
 }
 

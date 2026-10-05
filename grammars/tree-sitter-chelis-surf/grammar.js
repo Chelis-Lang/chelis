@@ -275,10 +275,16 @@ module.exports = grammar({
 
     _pipe_operand: ($) => choice(
       $.with_handler_expression, $.block_expression, $.par_expression,
-      $.do_expression, $.call_expression, $.field_expression,
+      $.do_expression, alias($._pipe_call_expression, $.call_expression),
       $.transform_expression, $.quote_expression, $.primary_expression,
     ),
     _open_form_expression: ($) => choice($.lambda_expression, $._non_pipe_operand),
+
+    // Postfix access outside a delimited argument would mix with the pipe.
+    _pipe_call_expression: ($) => prec.left(PREC.call, seq(
+      field("function", choice($.primary_expression, $.transform_expression, $.quote_expression)),
+      $.call_arguments,
+    )),
 
     if_expression: ($) =>
       seq(

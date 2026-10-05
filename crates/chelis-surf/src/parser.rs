@@ -2123,6 +2123,7 @@ impl Parser {
                 | TokenKind::Bang
                 | TokenKind::Amp
                 | TokenKind::Colon
+                | TokenKind::Dot
                 | TokenKind::If
                 | TokenKind::Match
                 | TokenKind::Fn => mixed = true,

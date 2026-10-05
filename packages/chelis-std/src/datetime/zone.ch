@@ -692,7 +692,7 @@ def tags_problem(text: string, tags: List[(string, string, bool)]) -> string = {
   unknown = filter(fn (tag: (string, string, bool)) -> and(tag.2, neq(tag.0, "u-ca")), tags)
   conflicted = filter(fn (tag: (string, string, bool)) -> key_conflicts(tags, tag.0), tags)
   calendars = filter(fn (tag: (string, string, bool)) -> eq(tag.0, "u-ca"), tags)
-  if gt(len(unknown), 0i64) then joined([quoted(text), " has the unknown critical annotation ", quoted(joined([index(unknown, 0i64).0, "=", index(unknown, 0i64).1]))]) else if gt(len(conflicted), 0i64) then joined([quoted(text), " gives the critical key ", quoted(index(conflicted, 0i64).0), " more than one value"]) else if eq(len(calendars), 0i64) then "" else if (index(calendars, 0i64).1
+  if gt(len(unknown), 0i64) then joined([quoted(text), " has the unknown critical annotation ", quoted(joined([index(unknown, 0i64).0, "=", index(unknown, 0i64).1]))]) else if gt(len(conflicted), 0i64) then joined([quoted(text), " gives the critical key ", quoted(index(conflicted, 0i64).0), " more than one value"]) else if eq(len(calendars), 0i64) then "" else if ((index(calendars, 0i64).1)
   |> eq("iso8601")
   |> or(eq(index(calendars, 0i64).1, "gregory"))) then "" else joined([quoted(text), " names the calendar ", quoted(index(calendars, 0i64).1), ", not iso8601 or gregory"])
 }
@@ -801,7 +801,7 @@ def written_offset_resolution(zt: ZonedText, tz: TimeZone, conflict: OffsetConfl
   }
     | UseWrittenOffset => if (trial |> in_span(-377705030401i64, 253402214400i64) |> not) then ("overflow", joined([shown, " is outside the supported instant range"]), 0i64) else {
     (covered, actual) = offset_in_force(tz, trial)
-    if not(covered) then ("domain", uncovered_text(tz, trial, nanosecond), 0i64) else if (zt.critical |> and(neq(actual, written))) then ("domain", joined([shown, " has a critical zone annotation, but ", quoted(tz.name), " has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
+    if not(covered) then ("domain", uncovered_text(tz, trial, nanosecond), 0i64) else if ((zt.critical) |> and(neq(actual, written))) then ("domain", joined([shown, " has a critical zone annotation, but ", quoted(tz.name), " has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
   }
     | RejectOffsetMismatch => {
     (kind, detail, _) = local_resolution(tz, civil, nanosecond, EarlierInstant)

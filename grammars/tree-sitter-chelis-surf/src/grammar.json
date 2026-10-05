@@ -1710,12 +1710,13 @@
           "name": "do_expression"
         },
         {
-          "type": "SYMBOL",
-          "name": "call_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "field_expression"
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_pipe_call_expression"
+          },
+          "named": true,
+          "value": "call_expression"
         },
         {
           "type": "SYMBOL",
@@ -1743,6 +1744,40 @@
           "name": "_non_pipe_operand"
         }
       ]
+    },
+    "_pipe_call_expression": {
+      "type": "PREC_LEFT",
+      "value": 11,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "FIELD",
+            "name": "function",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "primary_expression"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "transform_expression"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "quote_expression"
+                }
+              ]
+            }
+          },
+          {
+            "type": "SYMBOL",
+            "name": "call_arguments"
+          }
+        ]
+      }
     },
     "if_expression": {
       "type": "SEQ",

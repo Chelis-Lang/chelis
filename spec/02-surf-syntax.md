@@ -8,8 +8,11 @@ Deep desugaring shown as **⟹** with the target Deep s-expression.
 
 ### 0.1 Canonical Surf and the bidirectional contract
 
-Canonical Surf is the one repository and output spelling for each grammatical
-construct. The normal parser also accepts the explicitly value-preserving
+Canonical Surf defines the formatting of each grammatical construct, rather
+than one spelling per program. Authored operator sugar, including `|>`, is
+preserved by `fmt`. Deep decompilation prints calls for normalized pipes and
+canonical operator sugar for recognized operator builtins. The
+normal parser also accepts the explicitly value-preserving
 input families in P10-P12: numeric radix/digit-separator/exponent spellings,
 float bodies carrying decimal digits beyond the shortest round-trippable
 spelling, equivalent valid string escapes, whitespace before a parenthesized
@@ -28,6 +31,12 @@ Before replacing any input, the command MUST preflight every path and reject a
 symbolic link or a file with multiple hard links. Each individual replacement
 MUST be atomic. If a later replacement fails, every earlier replacement MUST be
 restored byte-for-byte before the command reports failure.
+For `migrate pipes`, explicit `--keep-going` with `--check` or `--inplace`
+selects independent per-file processing instead: every file MUST receive its
+own complete expanded-Deep preservation proof; a rejected file MUST remain
+unchanged, later files MUST still be attempted, and any failure MUST produce
+a nonzero exit with a per-file failure summary. The default remains a batch
+transaction.
 Migration MUST NOT guess a replacement for an identifier that v0.19 reserves.
 It MUST reject that input with a diagnostic directing the author to rename the
 identifier manually before rerunning migration.
@@ -86,8 +95,8 @@ normalize_deep(desugar(resugar(desugar(surf))))
   = normalize_deep(desugar(surf))
 ```
 
-The formatting law is syntactic: it chooses one repository spelling from any
-parser-accepted Surf input. The third law is the semantic retraction after
+The formatting law is syntactic: it chooses a stable spelling for the authored
+Surf constructs. The third law is the semantic retraction after
 Deep has erased comments, whitespace, and distinctions among equivalent Surf
 sugars; it does not require `resugar(desugar(surf))` to reproduce authored
 bytes. It compares macro programs after expansion, because public Deep is
@@ -112,14 +121,19 @@ laws do not authorize dropping or reconstructing the operative child.
 > lambdas remain function values applied to the carried expression; no
 > arbitrary beta reduction or capture-prone substitution is permitted.
 
-> **[02-PIPE-2]** A pipe operand SHALL be explicitly grouped when it contains
-> an unparenthesized non-pipe binary or unary operator, type ascription,
-> record update, or open-ended `if`, `match`, or lambda form. Parentheses,
+> **[02-PIPE-2]** Pipes SHALL NOT mix at the same ungrouped expression boundary
+> with non-pipe binary or unary operators, postfix field access or tuple
+> projection (including qualified callees), type ascription, record update,
+> or open-ended `if`, `match`, or lambda forms. This rule is symmetric:
+> a pipe in an ungrouped condition, branch, scrutinee, or lambda body also
+> requires grouping. Parentheses,
 > argument lists, and delimited blocks establish independent expression
 > boundaries. Thus `(a * b) |> f`, `a * (b |> f)`,
 > `(if c then a else b) |> f`, and `x |> (fn (v) -> v + y)` are valid;
 > `a * b |> f`, `-x |> f`, `if c then a else b |> f`, and
-> `x |> fn (v) -> v + y` are rejected with a grouping diagnostic.
+> `x |> fn (v) -> v + y`, `x |> f.1`, and `r.field |> f` are rejected with
+> a grouping diagnostic. `x |> (f.1)`, `(x |> f).1`, `(r.field) |> f`,
+> `if c then (x |> f) else y`, and `fn (v) -> (v |> f)` are valid.
 
 > **[02-PIPE-3]** Formatting SHALL preserve authored pipe sugar and comments,
 > be type-independent and idempotent. Deep SHALL contain only the normalized

@@ -167,6 +167,48 @@ fn pipe_cast_and_call_cast_have_the_same_bits_and_canonical_source() {
 }
 
 #[test]
+fn macro_signed_cast_operands_preserve_exact_values_after_decompilation() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("macro-cast.ch");
+    for source in [
+        "macro mh() = neg(1.1)\nout = mh() |> cast(f64)\n",
+        "macro mh() = neg(1.1f16)\nout = mh() |> cast(f64)\n",
+        "macro mh() = neg(1.1)\ndef f[p: Float](x: p) -> p = mh() |> cast(p)\nout = f(0.0f64)\n",
+        "macro mh() = neg(1.1f64)\nout = mh() |> cast(f64)\n",
+    ] {
+        fs::write(&path, source).unwrap();
+        let original = run(&["eval", "--json", "--file", path.to_str().unwrap()]);
+        assert!(original.status.success(), "{source}: {original:?}");
+        let dp = directory.path().join("macro-cast.dp");
+        fs::write(&dp, deep(&path)).unwrap();
+        let surf = run(&["surf", dp.to_str().unwrap()]);
+        assert!(surf.status.success(), "{source}: {surf:?}");
+        fs::write(&path, &surf.stdout).unwrap();
+        let back = run(&["eval", "--json", "--file", path.to_str().unwrap()]);
+        assert!(back.status.success(), "{source}: {back:?}");
+        let original: serde_json::Value = serde_json::from_slice(&original.stdout).unwrap();
+        let back: serde_json::Value = serde_json::from_slice(&back.stdout).unwrap();
+        assert_eq!(
+            original["roots"][0]["value"],
+            back["roots"][0]["value"],
+            "{source}\n{}",
+            String::from_utf8_lossy(&surf.stdout)
+        );
+        let normalized = |text: &str| {
+            let expressions = chelis_deep::parse_and_stamp_file(text).unwrap();
+            chelis_deep::printer::print_canonical(
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&expressions).unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&fs::read_to_string(&dp).unwrap()),
+            normalized(&deep(&path)),
+            "macro cast retraction: {source}"
+        );
+    }
+}
+
+#[test]
 fn authored_stage_errors_retain_original_source_locations() {
     let dir = tempdir().unwrap();
     for (name, source, kind, stage) in [
@@ -293,6 +335,60 @@ fn migration_requires_old_dtype_evidence_and_checks_the_entire_batch_before_writ
         fs::read_to_string(&second).unwrap(),
         "out = 0.2 |> cast(f64)\n"
     );
+    let third = dir.path().join("third.ch");
+    fs::write(&third, source).unwrap();
+    let audit = run(&[
+        args.as_slice(),
+        &[
+            "--keep-going",
+            "--check",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            third.to_str().unwrap(),
+        ],
+    ]
+    .concat());
+    assert!(!audit.status.success());
+    let audit_report = String::from_utf8_lossy(&audit.stderr);
+    assert!(audit_report.contains("0 succeeded, 3 failed"));
+    for path in [&first, &second, &third] {
+        assert!(audit_report.contains(path.to_str().unwrap()));
+    }
+    assert_eq!(fs::read_to_string(&first).unwrap(), source);
+    assert_eq!(fs::read_to_string(&third).unwrap(), source);
+    let invalid = run(&[args.as_slice(), &["--keep-going", first.to_str().unwrap()]].concat());
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("requires --check or --inplace"));
+    let independent = run(&[
+        args.as_slice(),
+        &[
+            "--keep-going",
+            "--inplace",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            third.to_str().unwrap(),
+        ],
+    ]
+    .concat());
+    assert!(
+        !independent.status.success(),
+        "a per-file failure still fails the command"
+    );
+    assert!(
+        String::from_utf8_lossy(&independent.stderr).contains("2 succeeded, 1 failed"),
+        "{independent:?}"
+    );
+    for good in [&first, &third] {
+        assert_eq!(
+            fs::read_to_string(good).unwrap(),
+            "out = 0.1f32 |> cast(f64)\n"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&second).unwrap(),
+        "out = 0.2 |> cast(f64)\n"
+    );
+    fs::write(&first, source).unwrap();
     let inplace = run(&[args.as_slice(), &["--inplace", first.to_str().unwrap()]].concat());
     assert!(inplace.status.success(), "{inplace:?}");
     assert_eq!(

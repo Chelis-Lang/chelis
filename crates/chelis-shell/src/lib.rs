@@ -209,7 +209,12 @@ pub fn decode_shell(bytes: &[u8]) -> Result<ShellPackage, bincode::Error> {
     let version = u32::from_le_bytes(version_bytes);
     if version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}; Deep 0.20 removes pipe nodes; regenerate the shell package"
+            "shell format version {version} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            if version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     let payload = &bytes[SHELL_MAGIC.len() + 4..];
@@ -248,8 +253,13 @@ pub fn read_shell(path: &Path) -> Result<ShellPackage, Box<dyn std::error::Error
 pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
     if shell.format_version != SHELL_FORMAT_VERSION {
         return Err(validation_error(&format!(
-            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}; Deep 0.20 removes pipe nodes; regenerate the shell package",
-            shell.format_version
+            "payload format version {} is unsupported; expected {SHELL_FORMAT_VERSION}; {}regenerate the shell package",
+            shell.format_version,
+            if shell.format_version == 6 {
+                "Deep 0.20 removes pipe nodes; "
+            } else {
+                ""
+            }
         )));
     }
     validate_nonempty_trimmed("package.name", &shell.package.name)?;
@@ -682,7 +692,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 7; regenerate the shell package"
         );
     }
 
@@ -694,7 +704,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 7; regenerate the shell package"
         );
     }
 
@@ -710,7 +720,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 5 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
+            "invalid shell envelope: shell format version 5 is unsupported; expected 7; regenerate the shell package"
         );
     }
 

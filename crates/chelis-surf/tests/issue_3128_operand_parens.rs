@@ -118,8 +118,7 @@ fn an_open_tailed_ascription_operand_is_parenthesized() {
 
 #[test]
 fn closed_operands_stay_bare() {
-    // Negative controls: none of these needs grouping, and the printer adds
-    // none.
+    // These retain exactly their required grouping; no additional groups.
     for body in [
         "(-x) |> f",
         "(x + 1.0) |> f",
@@ -136,6 +135,8 @@ fn closed_operands_stay_bare() {
         "(r with { f: x }) |> g",
         "(x, x) |> f",
         "do { x; x } |> f",
+        "(f(x) : f32)",
+        "(x : f32)",
     ] {
         assert_round_trips(body, body);
     }

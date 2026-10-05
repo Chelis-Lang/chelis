@@ -1717,9 +1717,31 @@ pub struct WireParam {
 }
 
 /// Authored pipe-stage syntax; normalization consumes this before literal typing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WirePipeStageSyntax {
+    Callable,
+    CallFirst,
+    Cast(chelis_deep::CastMode),
+    Copy,
+    Realize,
+}
+
+impl From<chelis_surf::ast::PipeStageSyntax> for WirePipeStageSyntax {
+    fn from(syntax: chelis_surf::ast::PipeStageSyntax) -> Self {
+        use chelis_surf::ast::PipeStageSyntax as S;
+        match syntax {
+            S::Callable => Self::Callable,
+            S::CallFirst => Self::CallFirst,
+            S::Cast(mode) => Self::Cast(mode),
+            S::Copy => Self::Copy,
+            S::Realize => Self::Realize,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireSurfPipeStage {
-    pub syntax: chelis_surf::ast::PipeStageSyntax,
+    pub syntax: WirePipeStageSyntax,
     pub expression: WireSurfExpr,
 }
 

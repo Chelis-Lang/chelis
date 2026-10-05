@@ -191,7 +191,7 @@ impl std::fmt::Display for CacheError {
             CacheError::UnsupportedVersion { stored, expected } => write!(
                 f,
                 "cache file format version {stored} not supported by this binary \
-                 (expects {expected}); Deep 0.20 removes pipe nodes; regenerate with the current compiler"
+                 (expects {expected}); regenerate with the current compiler"
             ),
         }
     }
@@ -546,12 +546,17 @@ mod tests {
             envelope.version = 2;
             envelope.payload = vec![0xff];
         });
+        let error = load::<StdLibContext>(&path, key(2)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cache file format version 2 not supported by this binary (expects 1); regenerate with the current compiler"
+        );
         assert!(matches!(
-            load::<StdLibContext>(&path, key(2)),
-            Err(CacheError::UnsupportedVersion {
+            error,
+            CacheError::UnsupportedVersion {
                 stored: 2,
                 expected: 1
-            })
+            }
         ));
     }
 

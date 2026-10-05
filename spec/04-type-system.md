@@ -2887,7 +2887,10 @@ the same diagnostics.
 > `kind` vocabulary member, its `message`, and its location as
 > [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
 > own line, in the order the checker reported it, so a rejection carrying
-> `N` diagnostics renders `N` lines. A debug rendering of a
+> `N` diagnostics renders `N` diagnostic summary lines. A renderer MAY
+> accompany them with excerpts of the authored source, identified by path,
+> line and column; an excerpt SHALL NOT show a synthesized expression in
+> place of the authored text. A debug rendering of a
 > producer-internal value is not a conforming rendering: it publishes
 > field names, absent-value markers, and variant spellings that
 > [04-FIT-14] keeps off the published interface. A diagnostic that cannot

@@ -2323,10 +2323,6 @@
           "named": true
         },
         {
-          "type": "field_expression",
-          "named": true
-        },
-        {
           "type": "par_expression",
           "named": true
         },
@@ -2375,10 +2371,6 @@
           },
           {
             "type": "do_expression",
-            "named": true
-          },
-          {
-            "type": "field_expression",
             "named": true
           },
           {

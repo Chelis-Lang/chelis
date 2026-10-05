@@ -243,6 +243,12 @@ mod tests {
             "out = (r with { a: x }) |> f\n",
             "out = x |> (r with { a: f })\n",
             "out = (x |> f) with { a: y }\n",
+            "out = x |> (f.1)\n",
+            "out = (x |> f).1\n",
+            "out = (r.f) |> g\n",
+            "out = (M.f(x)) |> g\n",
+            "out = if c then (x |> f) else y\n",
+            "out = fn (v) -> (v |> f)\n",
         ] {
             assert_surf_parser_parity(source, true);
             let formatted = chelis_surf::format::format_source(source).unwrap();
@@ -278,6 +284,11 @@ mod tests {
             "out = x: i32 |> f\n",
             "out = x |> f: i32\n",
             "out = x with { a: y } |> f\n",
+            "out = x |> f.1\n",
+            "out = x |> r.f\n",
+            "out = r.f |> g\n",
+            "out = M.f(x) |> g\n",
+            "out = if c then x |> f else y\n",
         ] {
             assert_surf_parser_parity(source, false);
         }
