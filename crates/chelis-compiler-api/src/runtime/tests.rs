@@ -4700,6 +4700,52 @@ mod issue_2207_routing_lowering_context {
     }
 }
 
+/// The rank-polymorphic local-site parity oracle must reach named-axis
+/// routing. A host-only execution could satisfy the CLI answer while leaving
+/// that route free to drop checker-owned claims again (chelis#3092).
+#[test]
+fn rank_polymorphic_local_sites_reach_the_named_axis_route() {
+    use crate::compiler::eval_selected;
+    use crate::schema::{EvalRequest, SourceKind};
+
+    for (later_size, must_trap) in [(3, false), (4, true)] {
+        super::named_axis::reset_named_axis_routes();
+        let source = format!(
+            "def f[r, h](v: &tensor[..r, f32]) -> tensor[..r, h, f32] = {{\n\
+             \x20 a: tensor[..r, h, f32] = insert(v, h, 3i64)\n\
+             \x20 b: tensor[..r, h, f32] = insert(v, h, {later_size}i64)\n\
+             \x20 _ = b\n\
+             \x20 a\n\
+             }}\n\
+             out = f(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n"
+        );
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source,
+                bindings: Default::default(),
+            },
+            &["out".to_string()],
+        );
+        assert_eq!(
+            super::named_axis::named_axis_routes(),
+            1,
+            "the rank-polymorphic call must reach the checked route"
+        );
+        if must_trap {
+            let error = result.expect_err("the disagreeing later site traps");
+            assert!(
+                error.errors.iter().any(|diagnostic| diagnostic
+                    .message
+                    .contains("extent `h`: claimed = 3, insert axis 2 = 4")),
+                "the disagreement must identify the realized axis and expected extent"
+            );
+        } else {
+            assert!(result.is_ok(), "the agreeing later site executes");
+        }
+    }
+}
+
 /// chelis#2439: a `grad` application prepared a fresh subexpression lowering
 /// context, which copies and folds every definition in the program, standard
 /// library included. The context is now a fact of the evaluation context, so

@@ -33,6 +33,7 @@ use std::rc::Rc;
 use chelis_deep::DeepTag;
 use chelis_deep::ast::Expr;
 use chelis_ir::lower::SubexprLoweringContext;
+use chelis_types::CheckedProgram;
 use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
@@ -223,18 +224,21 @@ impl ProgramScope {
         self.transform_lowering_context.get_or_init(build).clone()
     }
 
-    /// The lowering context named-axis routing uses, built on first use and
-    /// reused for the scope's lifetime (chelis#2207).
-    ///
-    /// This is the context `chelis_ir::lower::try_lower_subexpr_program`
-    /// builds for itself from the same two tables, so routing through it
-    /// lowers exactly as that entry does.
-    pub(super) fn routing_lowering_context(&self) -> SubexprLoweringContext {
+    /// The checked lowering context named-axis routing uses, built on first
+    /// use and reused for the scope's lifetime (chelis#2207, chelis#3092).
+    /// This constructor requires the checked artifact because its local-site
+    /// obligations are independent of the type environment.
+    pub(super) fn routing_lowering_context(
+        &self,
+        checked: &CheckedProgram,
+        declared_signatures: &UnordMap<String, Expr>,
+    ) -> SubexprLoweringContext {
         self.routing_lowering_context
             .get_or_init(|| {
-                SubexprLoweringContext::over_program(
-                    self.type_env.as_ref().clone(),
+                SubexprLoweringContext::from_checked_program(
+                    checked,
                     self.defs.as_ref().clone(),
+                    declared_signatures.clone(),
                 )
             })
             .clone()
