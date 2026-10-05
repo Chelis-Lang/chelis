@@ -75,7 +75,8 @@ knowledge belongs in external libraries.
 | Vectorized date and instant columns | `Std.Datetime.Columns` |
 | Zone rules as values; zone-aware conversion | `Std.Datetime.Zone` |
 | Reading the wall clock and a monotonic clock | `Std.Datetime.Clock` |
-| IANA tz data; public, bank and market holiday calendars | the `bed` repository (§13) |
+| IANA tz data | the `meridian` package (§13) |
+| Public, bank and market holiday calendars | the `shoreleave` package (§13) |
 | Day counts, tenors, spot lags, schedules, finance-only rolls | Shoals (§14) |
 
 ## 3. Principles as applied here
@@ -1054,32 +1055,41 @@ stays under 2^40 seconds, and `duration` normalizes it without failing. The modu
 not the import: the clock builtins are callable from any program, as `process_run` is,
 and every caller carries `IO`.
 
-## 13. The `bed` repository: external data (stages S4b and S7)
+## 13. Bed packages: external data (stages S4b and S7)
 
-`bed` (as in seabed) is a Chelis-Lang repository. It is framed broadly: it holds external data that Chelis programs consume as
-declared inputs, meaning data whose truth is set outside any program by a legislature, a
-standards body or an exchange, and synced from that upstream on the upstream's schedule.
-Date and time data is its first content, not its definition.
+The bed packages (as in seabed) hold external data that Chelis programs consume as
+declared inputs: data whose truth is set outside any program by a legislature, a
+standards body, a government or an exchange, and synced from that upstream on the
+upstream's schedule. `bed` names the family, not a repository. Date and time data is
+its first content, not its definition; other data of this kind fits the same frame
+later (currency codes, market identifier codes, the IERS leap-second table).
 
-Every package in `bed` follows the same rules:
-- a sync generator (Python under uv, with tests) builds the package from one pinned
-  upstream release;
-- the package records its provenance (source, upstream release or retrieval date) and
-  exposes its data version as a value;
-- the package's version is derived from the upstream release, independently of the
-  compiler's;
-- where the data covers a span of time, the values it produces carry that span, and
-  nothing is extrapolated silently.
+**One repository per package.** Each bed package is a shell in its own Chelis-Lang
+repository, named after the package. Reef's GitHub release discovery requires the
+repository name to equal the package name, and the shell contract's audit reads one
+package's manifest, agent contract and workflows from one repository root. The two
+packages are `meridian` (tzdata, S4b) and `shoreleave` (business-day calendars, S7).
 
-Other data of this kind fits the same frame later (currency codes, market identifier
-codes, the IERS leap-second table), but this design commits only to the two packages
-below.
+Every bed package follows the same rules:
+- **Generator.** A sync generator (Python under uv, with tests) builds the package
+  from pinned upstream snapshots. Each fetched document is stored in the repository,
+  with its URL, retrieval date and SHA-256 recorded in a manifest, and generation
+  reads only those snapshots, so it is reproducible offline. A parser fails on any
+  shape or name it does not recognize rather than yielding less data.
+- **Provenance as values.** The package exposes where its data came from and its
+  data version or date as values.
+- **Versions.** The package version is a plain semantic version, independent of the
+  compiler's and of the data's own versioning; the data version is a value, not the
+  package version.
+- **Spans.** Where the data covers a span of time, the values it produces carry that
+  span, and nothing is extrapolated silently.
+- **Sync.** A scheduled workflow re-fetches the upstream and proposes any change as a
+  pull request whose description lists the changed data; a fetch or parse failure
+  fails the run and opens an issue.
 
-**tzdata (S4b):**
-- A generator (Python under uv, with tests) builds the package from a pinned IANA
-  release.
-- The package's version records that release (for example `2026b`), and the package
-  exposes it as `tzdata_version() -> string`.
+**meridian (tzdata, S4b):**
+- The generator builds the package from a pinned IANA release, which the package
+  exposes as `tzdata_version() -> string` (for example `"2026b"`).
 - Lookup is by exact IANA name, case-sensitive. Backward-compatible link names resolve
   to their target zone and keep the target's canonical name.
 - How the bytes reach `time_zone_from_tzif` is decided by an S4b spike. Generated Chelis
@@ -1087,23 +1097,36 @@ below.
   package small. The spike measures compile and evaluation cost, and records the choice
   here.
 
-**Holidays (S7):**
-- One `BusinessCalendar` producer per jurisdiction or market:
-  - bank and public holidays, e.g. England and Wales, US federal, Japan, New South Wales,
-    Hong Kong;
-  - market calendars, e.g. NYSE, SIFMA, TARGET2.
-- Shoals' current tables are the starting list. They are rebuilt with observance rules
-  and corrected.
-- **Provenance:** each calendar names its source and retrieval date.
-- **Horizon:** each calendar's horizon is the span its source actually publishes.
+**shoreleave (business-day calendars, S7):**
+- One `BusinessCalendar` producer per jurisdiction or market, each built from that
+  authority's own publication:
+  - bank and public holidays: `england_and_wales()`, `us_federal()`, `japan_bank()`,
+    `new_south_wales()`, `hong_kong()`;
+  - market calendars: `nyse()`, `sifma()`, `target()`.
+- **Horizon.** Each calendar's horizon is the span its source publishes. A query
+  outside it fails `domain`, and the `try_` forms return `None`.
+- **Rules where the law fixes the days.** TARGET's closing days and New South Wales's
+  standard holidays are generated from their rules, and generation fails unless the
+  published days equal the rule's plus the days published as one-offs.
+- **One-offs only from data.** Holidays proclaimed, declared or ordered for one
+  occasion (a state funeral, a ministerial order, an executive order closing federal
+  agencies) come only from snapshots, never from a rule.
 - **Projections are named, never silent.** Extending a calendar past its published
-  years by applying its rules is offered only as a separately named producer
-  (`…_projected(until_year)`), so a projection is visible in the program text.
-- Lunar and announced holidays have no rule, so a projected calendar cannot include them
-  and says so.
+  years by applying its rules is offered only as a separately named producer,
+  `<calendar>_projected(until_year)` with a `try_` form, so a projection is visible in
+  the program text. A projection has no lunar, solar-term or announced holiday, since
+  no rule states one, and each calendar documents what its projection omits.
+- **Provenance.** Each calendar exposes `<calendar>_source()`,
+  `<calendar>_source_urls()`, `<calendar>_retrieved()` (the retrieval date of its
+  oldest document) and `<calendar>_snapshot_sha256s()`; the package exposes
+  `shoreleave_version()`. A generated listing per calendar names every parsed entry
+  (holiday, exclusion with its reason, early close with its time), so a regeneration
+  that changes a date shows as a changed line in review. A calendar holds the
+  announced closures published by its retrieval date and no later.
+- Early closes are business days: `BusinessCalendar` has no half-day kind.
 
-**Versioning.** Under the shell contract both packages pin `compiler = "=X.Y.Z"`, so they
-are re-released for every compiler release as well as for every data release. This is
+**Versioning.** Under the shell contract each package pins `compiler = "=X.Y.Z"`, so
+it is re-released for every compiler release as well as for every data release. This is
 accepted, since `reef conform bump` automates it. It will be revisited if the churn proves
 costly.
 
@@ -1195,10 +1218,10 @@ whose cut-overs are S6 and S8.
 | S2 (#2860) | chelis | `Std.Datetime.Business` (§9) | S1 |
 | S3 (#2861) | chelis | `Std.Datetime.Columns` (§10) | S1 |
 | S4a (#2862) | chelis | `Std.Datetime.Zone` (§11) | S1 |
-| S4b | bed | tzdata package (§13) | S4a's constructor |
+| S4b | meridian | tzdata package (§13) | S4a's constructor |
 | S5 (#2863) | chelis | `Std.Datetime.Clock` (§12) | S1 |
 | S6 (shoals#104) | shoals | finance layer on Std (§14) | S2 and S7 released; maintainer go-ahead |
-| S7 | bed | holidays package (§13) | S2 in a release |
+| S7 | shoreleave | holidays package (§13) | S2 in a release |
 | S8 (hello-chelis#40) | hello-chelis, coral | `datetimecal` example rewritten; coral time-index issue filed | S1 released; maintainer go-ahead |
 
 **Parallelism.** S2, S3, S4a and S5 are written in parallel once S1 merges.
@@ -1208,7 +1231,7 @@ whose cut-overs are S6 and S8.
   rebuilds the compiler, and their builds are sequenced.
 
 **Downstream hold.** The Shoals and hello-chelis cut-overs (S6, S8) wait until the chelis
-and `bed` stages are finished, or until a maintainer approves an earlier cut-over. Until
+and bed-package stages are finished, or until a maintainer approves an earlier cut-over. Until
 S6, Shoals keeps its own date layer.
 
 ## 17. Verification
