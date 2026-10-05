@@ -9,8 +9,45 @@ chelis build app.ch --output out/
 ./out/app
 ```
 
-For a program supported by a GPU target, use `--target hip` or `--target metal`
-instead. The selected target determines which operations and dtypes can be built;
+## GPU backends
+
+Chelis includes experimental backends for AMD GPUs via HIP and Apple GPUs via
+Metal. Both emit device kernels and host code for GPU execution and are
+under active development. Expect rough edges: some programs may fail during
+native compilation or at runtime, or produce incorrect results. For production workloads, use the default
+CPU backend (`c`). Bug reports for either GPU backend are welcome on the
+[issue tracker](https://github.com/Chelis-Lang/chelis/issues).
+
+### Building with a GPU backend
+
+Both emitters are included in a normal CLI build; no `hip` or `metal` Cargo
+feature is required. After following the [source-build prerequisites](install.md#build-from-a-checkout),
+build the CLI from the repository root:
+
+```sh
+cargo build -p chelis-cli
+```
+
+Select the GPU target when building a program with that CLI:
+
+```sh
+./target/debug/chelis build app.ch --target hip --output out/hip/
+./target/debug/chelis build app.ch --target metal --output out/metal/
+```
+
+HIP native builds require a compatible ROCm/HIP toolchain with `hipcc` and
+`hiprtc`. The HIP tensor runtime also requires matching official hipBLAS 3+
+headers and libraries. Metal native builds require macOS and Apple's compiler and framework
+toolchain. Executing device kernels requires a compatible AMD or Apple GPU,
+respectively. See [native build prerequisites](install.md#native-build-prerequisites).
+
+`build` compiles but does not run the program. Run the resulting executable,
+or link the static library into a caller that supplies its inputs. Add `--emit-c`
+to generate sources without invoking the native toolchain, including on a host
+without the target SDK. `chelis eval --target hip` and `--target metal` select
+target capabilities for host evaluation; they do not execute GPU kernels.
+
+The selected target determines which operations and dtypes can be built;
 a successful `chelis check` alone does not guarantee that every target admits the
 program. See [Backend selection and requirements](https://github.com/Chelis-Lang/chelis/blob/main/spec/08-backends.md)
 and the [dtype support matrix](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md).
