@@ -8497,25 +8497,23 @@ impl<'program> LowerCtx<'program> {
         };
         match name {
             "sum" => {
-                // An explicit accumulator applies at every stage, and each
-                // stage finalizes at `sum_result(q, a)` of its input `q`.
-                let (op, output_ty) = match accumulator {
-                    Some(accumulator) => (
+                // Each stage accumulates in the explicit accumulator or the
+                // default for its input `q`, and finalizes at
+                // `sum_result(q, a)`: i32 for an i8 or i16 stage, the input
+                // dtype for bf16 and f16 (spec/04 §5.7.1).
+                let op = match accumulator {
+                    Some(accumulator) => {
                         RiscOp::sum_with_accumulator(axis, input_ty.precision, accumulator)
-                            .expect("checked variadic sum accumulator"),
-                        TensorType {
-                            precision: input_ty.precision.sum_result_precision(accumulator),
-                            ..output_ty
-                        },
-                    ),
-                    None => (
-                        RiscOp::sum_default(axis, input_ty.precision)
-                            .expect("checked variadic sum dtype"),
-                        output_ty,
-                    ),
-                };
+                    }
+                    None => RiscOp::sum_default(axis, input_ty.precision),
+                }
+                .expect("checked variadic sum accumulator");
                 let RiscOp::Sum { accumulator, .. } = op else {
                     unreachable!("the sum constructors return Sum");
+                };
+                let output_ty = TensorType {
+                    precision: input_ty.precision.sum_result_precision(accumulator),
+                    ..output_ty
                 };
                 let sum = self.dag.add_node(
                     self.owner(),

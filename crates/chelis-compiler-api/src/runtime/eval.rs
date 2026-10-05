@@ -1744,7 +1744,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 3
             && kids[2..].iter().any(|axis| var_name(axis).is_some())
         {
-            return self.eval_named_axis_reduction_app(reduce_name, kids);
+            return self.eval_named_axis_reduction_app(reduce_name, kids, node.metadata);
         }
 
         // chelis#339 site A twin: a named-axis EXPAND app — the axis slot
@@ -1758,7 +1758,7 @@ impl<'a> EvalContext<'a> {
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
         {
-            return self.eval_named_axis_reduction_app(expand_name, kids);
+            return self.eval_named_axis_reduction_app(expand_name, kids, node.metadata);
         }
 
         let arg_type_exprs = kids[1..]

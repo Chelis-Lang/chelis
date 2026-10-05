@@ -9434,39 +9434,54 @@ fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
 /// and `einsum`, and every float pair of `matmul`, written with Surf's
 /// `accumulator=` argument, prints the same values in eval and in a built
 /// executable. The f32-with-f64 rows and the i32-with-i64 rows print a total
-/// only the wider accumulator holds (16777218 and 2147483648).
+/// only the wider accumulator holds (16777218 and 2147483648). The named-axis
+/// form keeps the accumulator at every stage, and its default i8 total is the
+/// i32 sum_result rather than a trap.
 #[test]
 fn explicit_accumulator_pairs_agree_in_eval_and_c() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pairs.ch");
-    write_file(
-        &path,
-        include_str!("fixtures/explicit_accumulator/pairs.ch"),
-    );
-    let expected = include_str!("fixtures/explicit_accumulator/pairs.expected");
-    let eval = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["eval", "--file", path.to_str().unwrap()])
-        .output()
-        .expect("run chelis eval");
-    assert!(eval.status.success(), "eval: {eval:?}");
-    assert_eq!(String::from_utf8_lossy(&eval.stdout), expected, "eval");
-    let out_dir = dir.path().join("pairs_out");
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "-o",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let run = StdCommand::new(out_dir.join("pairs"))
-        .output()
-        .expect("compiled program should run");
-    assert!(run.status.success(), "run: {run:?}");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "C");
+    for (stem, source, expected) in [
+        (
+            "pairs",
+            include_str!("fixtures/explicit_accumulator/pairs.ch"),
+            include_str!("fixtures/explicit_accumulator/pairs.expected"),
+        ),
+        (
+            "named_axes",
+            include_str!("fixtures/explicit_accumulator/named_axes.ch"),
+            include_str!("fixtures/explicit_accumulator/named_axes.expected"),
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("run chelis eval");
+        assert!(eval.status.success(), "{stem} eval: {eval:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&eval.stdout),
+            expected,
+            "{stem} eval"
+        );
+        let out_dir = dir.path().join(format!("{stem}_out"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = StdCommand::new(out_dir.join(stem))
+            .output()
+            .expect("compiled program should run");
+        assert!(run.status.success(), "{stem} run: {run:?}");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "{stem} C");
+    }
 }
 
 /// chelis#3009: a `sum`-family rejection decided after the call was checked

@@ -143,6 +143,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         reduce_name: &str,
         kids: &[Expr],
+        metadata: &Metadata,
     ) -> Result<RuntimeValue, String> {
         let operand_expr = kids
             .get(1)
@@ -184,7 +185,16 @@ impl<'a> EvalContext<'a> {
             make_var_with_type(placeholder, &operand_type, span),
         ];
         app_children.extend(kids[2..].iter().cloned());
-        let app_expr = Expr::node(DeepTag::App, Metadata::default(), app_children, span);
+        // The staged call keeps the authored accumulator (spec/04 §5.7).
+        let mut app_metadata = Metadata::default();
+        if let Some(accumulator) = metadata.accumulator() {
+            app_metadata
+                .insert(chelis_deep::annotations::MetadataValue::Accumulator(
+                    accumulator.clone(),
+                ))
+                .map_err(|error| format!("{reduce_name} accumulator: {error}"))?;
+        }
+        let app_expr = Expr::node(DeepTag::App, app_metadata, app_children, span);
         let scoped = UnordMap::from([(placeholder.to_string(), operand_type)]);
         let staged = UnordMap::from([(placeholder.to_string(), operand.value.clone())]);
         self.route_named_axis_expr(&app_expr, scoped, staged, reduce_name)
