@@ -239,6 +239,8 @@ fn report_substitution_ledgers(
     // attribution local and prevents one declaration's deferrals from leaking
     // into the next.
     validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
+    // chelis#3180: a `drop` operand pinned to a borrow after its call.
+    validate_deferred_drop_operands(subst, errors);
     // chelis#3009: a `sum`-family result whose precision variable nothing
     // bound is decided over that variable's dtypes before the ledger reports.
     subst.decide_pending_sum_results(None);

@@ -126,3 +126,100 @@ def f(x: &tensor[4, f32]) -> i32 =
         "drop of a copy of a borrowed parameter",
     );
 }
+
+// A `drop` operand that is still an inference variable at the call is
+// re-checked against the declaration's final substitution, so a borrow that
+// pins that same variable later is refused too. A borrow that reaches `drop`
+// by instantiating a generalized binding's type scheme is chelis#3200.
+
+#[test]
+fn an_ascribed_lambda_dropping_a_borrowed_parameter_is_a_type_error() {
+    assert_borrowed_drop_operand(
+        r#"
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
+  {
+    g: (&tensor[4, f32]) -> unit = fn (y) -> drop(y)
+    c = g(&x)
+    x
+  }
+"#,
+        "ascribed lambda over a borrow",
+    );
+}
+
+#[test]
+fn an_immediately_applied_lambda_dropping_a_borrow_is_a_type_error() {
+    assert_borrowed_drop_operand(
+        r#"
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
+  {
+    c = (fn (y) -> drop(y))(&x)
+    x
+  }
+"#,
+        "immediately applied lambda over &x",
+    );
+}
+
+#[test]
+fn an_ascribed_lambda_dropping_an_owned_parameter_type_checks() {
+    assert_type_checks(
+        r#"
+def f(x: tensor[4, f32]) -> i32 =
+  {
+    g: (tensor[4, f32]) -> unit = fn (y) -> drop(y)
+    c = g(x)
+    1
+  }
+"#,
+        "ascribed lambda over an owned tensor",
+    );
+}
+
+#[test]
+fn an_immediately_applied_lambda_dropping_an_owned_value_type_checks() {
+    assert_type_checks(
+        r#"
+def f(x: tensor[4, f32]) -> i32 =
+  {
+    c = (fn (y) -> drop(y))(x)
+    1
+  }
+"#,
+        "immediately applied lambda over an owned tensor",
+    );
+}
+
+#[test]
+fn a_generalized_dropping_lambda_stays_polymorphic() {
+    // The re-check must not hold the lambda's operand variable monomorphic.
+    assert_type_checks(
+        r#"
+def f(x: tensor[4, f32]) -> i32 =
+  {
+    g = fn (y) -> drop(y)
+    a = g(1)
+    b = g(true)
+    c = g(x)
+    1
+  }
+"#,
+        "one dropping lambda used at i32, bool and an owned tensor",
+    );
+}
+
+#[test]
+fn a_generic_dropping_function_at_an_owned_type_type_checks() {
+    assert_type_checks(
+        r#"
+def kill[T](y: T) -> unit = drop(y)
+def f(x: tensor[4, f32]) -> i32 =
+  {
+    a = kill(1)
+    c = kill(x)
+    1
+  }
+"#,
+        "generic kill at i32 and an owned tensor",
+    );
+}
