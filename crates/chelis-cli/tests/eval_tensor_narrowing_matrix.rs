@@ -193,7 +193,7 @@ fn c_f32_tensor_add_rounds_to_f32() {
     let line = c_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = add(x, y)\n\
-         out = print(f(to_tensor([0.1, 1.0]), to_tensor([0.2, 2.0])))\n",
+         out = print(f(to_tensor([0.1, 1.0], f32), to_tensor([0.2, 2.0], f32)))\n",
         "c_f32_add",
     )
     .expect("C lane should run");
@@ -253,7 +253,7 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = tan(x)\n\
-         out = print(f(to_tensor([1.5, 3.0])))\n",
+         out = print(f(to_tensor([1.5, 3.0], f32)))\n",
     )
     .expect("eval should run");
     // chelis#729 Phase 0: the domain checker states the same
@@ -278,7 +278,7 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
-         out = print(f(to_tensor([1.5, 3.0])))\n",
+         out = print(f(to_tensor([1.5, 3.0], f32)))\n",
     )
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_sqrt");
@@ -353,7 +353,7 @@ fn eval_f32_tensor_add_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = add(x, y)\n\
-         out = print(f(to_tensor([0.1, 1.0]), to_tensor([0.2, 2.0])))\n",
+         out = print(f(to_tensor([0.1, 1.0], f32), to_tensor([0.2, 2.0], f32)))\n",
     )
     .expect("eval should run");
     // chelis#729 Phase 0: 0.30000000447034836 is not an f32 value; the
@@ -372,7 +372,7 @@ fn eval_f32_tensor_div_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = div(x, y)\n\
-         out = print(f(to_tensor([1.0, 2.0]), to_tensor([3.0, 3.0])))\n",
+         out = print(f(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 3.0], f32)))\n",
     )
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_div");
@@ -390,7 +390,7 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = recip(x)\n\
-         out = print(f(to_tensor([1.5, 3.0])))\n",
+         out = print(f(to_tensor([1.5, 3.0], f32)))\n",
     )
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_recip");

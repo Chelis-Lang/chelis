@@ -128,7 +128,8 @@ fn compiles_as_object(target: &str, built: &Built) {
 }
 
 fn assert_keeps_authored_signature(target: &str, parameter: &str, c_parameter: &str) {
-    let source = format!("def f({parameter}) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n");
+    let source =
+        format!("def f({parameter}) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n");
     let built = build(target, &source);
     let declarations = header_declarations(target, &built);
     let expected = format!("chelis_tensor* {}({c_parameter});", authored_c_symbol("f"));
@@ -177,7 +178,7 @@ fn metal_keeps_every_definition_whose_parameter_the_dag_entry_cannot_carry() {
 /// The Deep build dispatch (`cmd_build_deep`) takes the same rule.
 #[test]
 fn the_deep_build_keeps_a_string_parameter_definition_on_both_device_targets() {
-    let source = "def f(s: string) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n";
+    let source = "def f(s: string) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n";
     for target in ["hip", "metal"] {
         let built = build_deep(target, source);
         let declarations = header_declarations(target, &built);
@@ -194,7 +195,7 @@ fn the_deep_build_keeps_a_string_parameter_definition_on_both_device_targets() {
 #[test]
 fn a_data_type_parameter_keeps_its_definition_on_both_device_targets() {
     let source = "type Pair =\n  | Pair { a: i64, b: i64 }\n\
-                  def f(p: Pair) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n";
+                  def f(p: Pair) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n";
     for target in ["hip", "metal"] {
         let built = build(target, source);
         let declarations = header_declarations(target, &built);
@@ -233,7 +234,7 @@ fn a_string_parameter_beside_a_tensor_parameter_keeps_both() {
 fn hip_keeps_carried_parameters_on_its_dag_entry() {
     assert_stays_a_dag_entry(
         "hip",
-        "def f(n: i64) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def f(n: i64) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n",
     );
     assert_stays_a_dag_entry(
         "hip",

@@ -94,7 +94,7 @@ fn write_value_provider(root: &Path) {
         &root.join("src/provider.ch"),
         "module Scope.Provider\n\
          export (borrowed)\n\
-         def borrowed() -> tensor[1, f32] = to_tensor([7.0])\n",
+         def borrowed() -> tensor[1, f32] = to_tensor([7.0], f32)\n",
     );
 }
 
@@ -439,8 +439,8 @@ fn lexical_locals_and_builtins_remain_exact_positive_controls() {
         "module Scope.Main\n\
          export (main)\n\
          def main() -> tensor[1, f32] = {\n\
-           local = to_tensor([2.0])\n\
-           add(local, to_tensor([3.0]))\n\
+           local = to_tensor([2.0], f32)\n\
+           add(local, to_tensor([3.0], f32))\n\
          }\n",
     );
     assert_all_value_lanes_pass(&root, &entry);

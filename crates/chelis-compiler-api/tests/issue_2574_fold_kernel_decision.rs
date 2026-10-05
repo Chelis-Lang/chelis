@@ -26,15 +26,15 @@ use chelis_compiler_api::schema::{
 };
 use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
-const ITEMS: &str = "[to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])]";
+const ITEMS: &str = "[to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)]";
 
 /// A block body whose tail is the fold, with `y` bound in the block.
 fn block_tail(callback_result: &str) -> String {
     format!(
         "def case(flag: bool) -> tensor[3, f32] = {{\n  \
-         y = to_tensor([7.0, 8.0, 9.0])\n  \
+         y = to_tensor([7.0, 8.0, 9.0], f32)\n  \
          fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> {callback_result}, \
-         to_tensor([0.0, 0.0, 0.0]), {ITEMS})\n\
+         to_tensor([0.0, 0.0, 0.0], f32), {ITEMS})\n\
          }}\n\
          a = case(true)\n"
     )
@@ -45,7 +45,7 @@ fn block_bound(callback_result: &str) -> String {
     format!(
         "def case(flag: bool) -> tensor[3, f32] = {{\n  \
          s = fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> {callback_result}, \
-         to_tensor([0.0, 0.0, 0.0]), {ITEMS})\n  \
+         to_tensor([0.0, 0.0, 0.0], f32), {ITEMS})\n  \
          s\n\
          }}\n\
          a = case(true)\n"
@@ -130,20 +130,20 @@ fn a_fold_bound_in_a_block_and_returned_evaluates() {
 fn a_block_fold_returning_a_parameter_evaluates() {
     let source = "def case(y: tensor[3, f32]) -> tensor[3, f32] = {\n  \
                   s = fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> y, \
-                  to_tensor([0.0, 0.0, 0.0]), [to_tensor([1.0, 2.0, 3.0])])\n  \
+                  to_tensor([0.0, 0.0, 0.0], f32), [to_tensor([1.0, 2.0, 3.0], f32)])\n  \
                   s\n\
                   }\n\
-                  a = case(to_tensor([7.0, 8.0, 9.0]))\n";
+                  a = case(to_tensor([7.0, 8.0, 9.0], f32))\n";
     assert_eq!(kernel_decision(source, "case"), Ok(false));
     assert_eq!(eval_root(source), tensor([7.0, 8.0, 9.0]));
 }
 
 #[test]
 fn a_block_fold_returning_a_top_level_value_evaluates() {
-    let source = "g = to_tensor([7.0, 8.0, 9.0])\n\
+    let source = "g = to_tensor([7.0, 8.0, 9.0], f32)\n\
                   def case(flag: bool) -> tensor[3, f32] = {\n  \
                   s = fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> g, \
-                  to_tensor([0.0, 0.0, 0.0]), [to_tensor([1.0, 2.0, 3.0])])\n  \
+                  to_tensor([0.0, 0.0, 0.0], f32), [to_tensor([1.0, 2.0, 3.0], f32)])\n  \
                   s\n\
                   }\n\
                   a = case(true)\n";
@@ -157,7 +157,7 @@ fn a_head_position_fold_stays_host_and_evaluates() {
     let source = format!(
         "def case(flag: bool) -> tensor[3, f32] = \
          fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> (acc + x), \
-         to_tensor([0.0, 0.0, 0.0]), {ITEMS})\n\
+         to_tensor([0.0, 0.0, 0.0], f32), {ITEMS})\n\
          a = case(true)\n"
     );
     assert_eq!(kernel_decision(&source, "case"), Ok(false));
@@ -170,7 +170,7 @@ fn a_head_position_fold_stays_host_and_evaluates() {
 fn a_block_fold_over_a_local_seed_evaluates() {
     let source = format!(
         "def case(flag: bool) -> tensor[3, f32] = {{\n  \
-         s0 = to_tensor([0.0, 0.0, 0.0])\n  \
+         s0 = to_tensor([0.0, 0.0, 0.0], f32)\n  \
          fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> (acc + x), s0, {ITEMS})\n\
          }}\n\
          a = case(true)\n"
@@ -184,7 +184,7 @@ fn a_block_fold_over_a_local_seed_evaluates() {
 fn a_fold_reached_through_a_callee_evaluates() {
     let source = format!(
         "def g(flag: bool) -> tensor[3, f32] = {{\n  \
-         s0 = to_tensor([0.0, 0.0, 0.0])\n  \
+         s0 = to_tensor([0.0, 0.0, 0.0], f32)\n  \
          fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> (acc + x), s0, {ITEMS})\n\
          }}\n\
          def f(flag: bool) -> tensor[3, f32] = g(flag)\n\
@@ -199,7 +199,7 @@ fn a_fold_reached_through_a_callee_evaluates() {
 #[test]
 fn a_block_body_without_a_fold_stays_a_kernel() {
     let source = "def case(flag: bool) -> tensor[3, f32] = {\n  \
-                  y = to_tensor([7.0, 8.0, 9.0])\n  \
+                  y = to_tensor([7.0, 8.0, 9.0], f32)\n  \
                   (y + y)\n\
                   }\n\
                   a = case(true)\n";
@@ -214,8 +214,8 @@ fn a_block_body_without_a_fold_stays_a_kernel() {
 fn a_bound_block_fold_entry_evaluates() {
     let source = "def case(y: tensor[3, f32]) -> tensor[3, f32] = {\n  \
                   s = fold(fn (acc: tensor[3, f32], x: tensor[3, f32]) -> (acc + y), \
-                  to_tensor([0.0, 0.0, 0.0]), [to_tensor([1.0, 2.0, 3.0]), \
-                  to_tensor([4.0, 5.0, 6.0])])\n  \
+                  to_tensor([0.0, 0.0, 0.0], f32), [to_tensor([1.0, 2.0, 3.0], f32), \
+                  to_tensor([4.0, 5.0, 6.0], f32)])\n  \
                   s\n\
                   }\n";
     let result = eval_selected(

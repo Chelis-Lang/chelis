@@ -1,5 +1,5 @@
 def make() -> List[List[tensor[2, f32]]] = {
-  value = to_tensor([1.0, 2.0])
+  value = to_tensor([1.0, 2.0], f32)
   inner: List[tensor[2, f32]] = [value, value]
   [inner, inner]
 }

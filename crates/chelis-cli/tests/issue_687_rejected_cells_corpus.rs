@@ -197,7 +197,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "c_to_string_tensor",
         "def f(x: tensor[2, f32]) -> string = to_string(x)\n\
-         out = f(to_tensor([1.5, 2.5]))\n",
+         out = f(to_tensor([1.5, 2.5], f32))\n",
         "c",
         "error: unsupported: `to_string` of a `Tensor(TensorType { dims: [Lit(2)], precision: \
          F32 })`-typed value on `chelis build` host emission (codegen:c); unimplemented \
@@ -209,7 +209,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "c_nonliteral_window",
         "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n",
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64)\n",
         "c",
         "error: unsupported: a non-literal window list for `reduce_window_max` \
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
@@ -366,7 +366,7 @@ fn unrelated_lowering_rejection_retains_the_legacy_wrapper() {
     // keep executing the production lowering adapter's other branch.
     let program = "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_sum(x, [w], [s])\n\
-         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n";
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64)\n";
     let (ok, stderr, emitted) = build_target(program, "hip_window_sum_wrapper", "hip");
     assert!(!ok, "HIP runtime-window sum must be rejected");
     assert!(emitted.is_empty(), "rejected HIP build wrote: {emitted}");

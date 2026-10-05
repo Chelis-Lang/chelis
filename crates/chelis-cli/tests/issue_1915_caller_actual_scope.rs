@@ -11,7 +11,7 @@ const DIRECT: &str = include_str!("../../../examples/caller_actual_scope.ch");
 const CONCAT: &str = "module Formal_Alias\n\
 def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\n\
 def run[s](x: tensor[s, 2, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = softmax(second(y, x), -1)\n\
-output = run(to_tensor([[0.0, 1.0], [2.0, 0.0]]), to_tensor([[2.0], [-1.0]]))\n";
+output = run(to_tensor([[0.0, 1.0], [2.0, 0.0]], f32), to_tensor([[2.0], [-1.0]], f32))\n";
 
 fn assert_eval(source: &str, shape: &[usize], bits: &[&str]) {
     let dir = tempdir().unwrap();

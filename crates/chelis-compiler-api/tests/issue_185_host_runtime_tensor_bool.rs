@@ -111,8 +111,8 @@ fn issue185_tensor_and_rejects_non_bool_tensor_input() {
     // f32 tensors must be rejected — the typer pins the input precision
     // to bool.
     let src = r#"
-a = to_tensor([1.0, 2.0])
-b = to_tensor([3.0, 4.0])
+a = to_tensor([1.0, 2.0], f32)
+b = to_tensor([3.0, 4.0], f32)
 out = and(&a, &b)
 "#;
     let outcome = eval(EvalRequest {
@@ -129,8 +129,8 @@ out = and(&a, &b)
 #[test]
 fn issue185_tensor_or_rejects_non_bool_tensor_input() {
     let src = r#"
-a = to_tensor([1.0, 2.0])
-b = to_tensor([3.0, 4.0])
+a = to_tensor([1.0, 2.0], f32)
+b = to_tensor([3.0, 4.0], f32)
 out = or(&a, &b)
 "#;
     let outcome = eval(EvalRequest {
@@ -147,7 +147,7 @@ out = or(&a, &b)
 #[test]
 fn issue185_tensor_not_rejects_non_bool_tensor_input() {
     let src = r#"
-a = to_tensor([1.0, 2.0])
+a = to_tensor([1.0, 2.0], f32)
 out = not(&a)
 "#;
     let outcome = eval(EvalRequest {

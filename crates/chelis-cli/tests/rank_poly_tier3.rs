@@ -212,11 +212,11 @@ fn max_reduce_family_builds_runs_in_rank_poly_body() {
          def rprod(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = prod_seq(x)\n\
          def ramax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, i64] = amax_seq(x)\n\
          def ramin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, i64] = amin_seq(x)\n\
-         ox = rmax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         on = rmin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         op = rprod(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         oax = ramax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         oan = ramin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+         ox = rmax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         on = rmin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         op = rprod(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         oax = ramax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         oan = ramin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n";
     let backend = build_compile_run(source, "rank_poly_reduce_family");
     let tensors = parse_printed_tensors(&backend);
 
@@ -529,7 +529,7 @@ fn named_expand_trailing_spread_covered_collision_rejected_at_check() {
 fn named_expand_body_internal_collision_fails_loud_not_silent() {
     let source = "def wr[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = sum(insert(x, chan, 5i64, seq), chan)\n\
          def use_col(x: &tensor[chan, seq, f32]) -> tensor[chan, seq, f32] = wr(x)\n\
-         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          out = use_col(y)\n";
     // The check is clean — the gap this test pins.
     assert_clean(&check_json(source), "body-internal collision checks clean");
@@ -559,7 +559,7 @@ fn named_expand_body_internal_collision_fails_loud_not_silent() {
 #[test]
 fn named_expand_dvar_letter_collision_fails_loud() {
     let source = "def f[c](x: &tensor[c, seq, f32]) -> tensor[c, seq, c, f32] = insert(x, c, 4i64)\n\
-         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          out = f(y)\n";
     assert_clean(&check_json(source), "d-var letter collision checks clean");
     let stderr = build_expecting_failure(source, "dvar_letter_collision");
@@ -608,7 +608,7 @@ fn named_expand_size_must_be_compile_time_literal() {
 fn named_reduce_visible_anchor_with_spread_covered_duplicate_stays_correct() {
     let source = "def f[rest](x: &tensor[seq, ..rest, f32]) -> tensor[..rest, f32] = sum(x, seq)\n\
          def use_dup(x: &tensor[seq, hidden, seq, f32]) -> tensor[hidden, seq, f32] = f(x)\n\
-         y = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]])\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]], f32)\n\
          out = use_dup(y)\n";
     let backend = build_compile_run(source, "visible_anchor_dup");
     let tensors = parse_printed_tensors(&backend);
@@ -639,10 +639,10 @@ fn named_expand_builds_runs_and_evals() {
          def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n\
                   def w_lead[c](x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
                   def w_mid[c](x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = widen(x)\n\
-         out1 = a1(to_tensor([1.0, 2.0, 3.0]))\n\
-         out2 = a2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outl = w_lead(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         outm = w_mid(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         out1 = a1(to_tensor([1.0, 2.0, 3.0], f32))\n\
+         out2 = a2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outl = w_lead(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
+         outm = w_mid(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     let backend = build_compile_run(source, "named_expand_builds_runs");
     let tensors = parse_printed_tensors(&backend);
     // out1: [seq=3] -> [3, 1], data unchanged.
@@ -692,8 +692,8 @@ fn named_expand_under_grad_and_vmap_evals_and_matches_backend() {
     let source = "def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = insert(x, c, 3i64, seq)\n\
                   def inner[c](x: &tensor[seq, f32]) -> tensor[c, seq, f32] = widen(x)\n\
          def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(sum(widen(x), c), seq))\n\
-         out = vmap(inner)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         gr = grad(total)(to_tensor([1.0, 2.0]))\n";
+         out = vmap(inner)(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
+         gr = grad(total)(to_tensor([1.0, 2.0], f32))\n";
     assert_clean(&check_json(source), "expand grad/vmap matrix checks clean");
     let backend = build_compile_run(source, "named_expand_grad_vmap");
     let tensors = parse_printed_tensors(&backend);
@@ -1003,7 +1003,7 @@ fn named_expand_survives_fmt_round_trip() {
 #[test]
 fn top_level_named_expand_and_variadic_sum_eval_match_backend() {
     let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
-         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
          out_t = insert(y, one, 1i64)\n\
          out_a = insert(y, c, 3i64, seq)\n\
          out_vr = sum(y, batch, seq)\n";
@@ -1075,14 +1075,14 @@ fn variadic_reduce_builds_runs_and_evals() {
          def use_rp(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = rp(x)\n\
          def tot(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
          def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
-         y = to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]])\n\
+         y = to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]], f32)\n\
          out_d = direct(y)\n\
          out_s = swapped(y)\n\
          out_c = composed(y)\n\
          out_m = mboth(y)\n\
          out_x = xboth(y)\n\
          out_r = use_rp(y)\n\
-         gr = grad(tot)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         gr = grad(tot)(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
          out_v = vmap(vinner)(y)\n";
     // chelis#383 (CLOSED): `out_v` now uses the shared top-level `y`
     // BINDING, not an inline literal. `vmap(vinner)(y)` with a binding-typed
@@ -1152,10 +1152,10 @@ fn issue_383_vmap_two_stage_named_reduce_regression_matrix() {
     // binding ([2,2,2]); per-slice sum of [1,2,3,4]=10 and [5,6,7,8]=26.
     let forward = "def vsingle(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
          def vtwostage(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
-         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32)\n\
          out_two_binding = vmap(vtwostage)(y)\n\
          out_single_binding = vmap(vsingle)(y)\n\
-         out_inline = vmap(vtwostage)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+         out_inline = vmap(vtwostage)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32))\n";
     let backend = build_compile_run(forward, "issue_383_forward");
     let tensors = parse_printed_tensors(&backend);
     let expected: &[(&str, &[usize], &[f64])] = &[
@@ -1183,7 +1183,7 @@ fn issue_383_vmap_two_stage_named_reduce_regression_matrix() {
     // FD twin: grad of a two-stage `sum(x^2)` reduce, vmapped over the
     // top-level binding, must equal `2 y` on compiled C and Eval.
     let grad_src = "def vsq(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(mul(x, x), head), seq))\n\
-         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32)\n\
          out_grad_two = vmap(grad(vsq))(y)\n";
     let grad_backend = build_compile_run(grad_src, "issue_592_grad_vmap");
     let grad_tensors = parse_printed_tensors(&grad_backend);
@@ -1604,10 +1604,10 @@ fn named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4() {
          def r3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = reduce_seq(x)\n\
          def r4(x: &tensor[batch, depth, seq, hidden, f32]) -> tensor[batch, depth, hidden, f32] = reduce_seq(x)\n\
          def m3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = avg_seq(x)\n\
-         out2 = r2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         out3 = r3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         out4 = r4(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]]))\n\
-         outm = m3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+         out2 = r2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         out3 = r3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         out4 = r4(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]], f32))\n\
+         outm = m3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n";
     let backend = build_compile_run(source, "rank_poly_reduce_nonsquare");
     let tensors = parse_printed_tensors(&backend);
 
@@ -1649,7 +1649,7 @@ fn named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4() {
 fn eval_resolves_named_axis_issue_repro() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def use2(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = reduce_seq(x)\n\
-         out = use2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n";
+         out = use2(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n";
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "issue_338_repro");
     // [05-OBS-6] labels every root, including a single root. Pin the exact
@@ -1680,12 +1680,12 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
          def prod_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = prod_reduce(x, seq)\n\
          def amax_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmax_reduce(x, seq)\n\
          def amin_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmin_reduce(x, seq)\n\
-         outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outax = amax_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outan = amin_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outax = amax_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         outan = amin_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     let backend = build_compile_run(source, "concrete_named_reduce");
     let tensors = parse_printed_tensors(&backend);
     let expected: &[(&str, &[usize], &[f64])] = &[
@@ -1749,15 +1749,15 @@ fn named_axis_eval_parity_corners() {
          }\n\
          def pp(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = x |> sum(seq)\n\
          def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\
-         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         out_lp = lp(to_tensor([[1.0, 2.0], [3.0, 4.0]]), [1.0, 2.0])\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
+         out_lp = lp(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32), [1.0, 2.0])\n\
          out_tl = sum(y, seq)\n\
-         out_blk = blk(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         out_al = al(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         out_pp = pp(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_blk = blk(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
+         out_al = al(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
+         out_pp = pp(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
          out_tp = y |> relu |> sum(seq)\n\
-         outt = total(to_tensor([1.0, 2.0, 3.0]))\n\
-         gr = grad(total)(to_tensor([1.0, 2.0, 3.0]))\n";
+         outt = total(to_tensor([1.0, 2.0, 3.0], f32))\n\
+         gr = grad(total)(to_tensor([1.0, 2.0, 3.0], f32))\n";
     let backend = build_compile_run(source, "named_axis_parity_corners");
     let tensors = parse_printed_tensors(&backend);
     let expected: &[(&str, &[usize], &[f64])] = &[
@@ -1826,10 +1826,10 @@ fn vmap_over_rank_poly_named_reduce_evals_and_matches_backend() {
          def inner(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
          def total(x: &tensor[seq, hidden, f32]) -> f32 = tensor_to_scalar(sum(reduce_seq(x), hidden))\n\
          def sum_seq(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\
-         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         outc = vmap(sum_seq)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))\n\
-         gr = grad(total)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         gs = vmap(grad(total))(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         outc = vmap(sum_seq)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], f32))\n\
+         gr = grad(total)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n\
+         gs = vmap(grad(total))(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n";
     assert_clean(
         &check_json(source),
         "#351 vmap rank-poly matrix checks clean",
@@ -1889,10 +1889,10 @@ fn vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend() {
          def inner1[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = reduce_seq(x)\n\
          def innerm[a](x: &tensor[a, seq, hidden, f32]) -> tensor[a, hidden, f32] = reduce_seq(x)\n\
          def totalv[a](x: &tensor[a, seq, f32]) -> f32 = tensor_to_scalar(sum(reduce_seq(x * x), 0))\n\
-         outa = vmap(inner2)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]]))\n\
-         outb = vmap(inner1)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n\
-         outm = vmap(innerm)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]]))\n\
-         gv = vmap(grad(totalv))(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+         outa = vmap(inner2)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]], f32))\n\
+         outb = vmap(inner1)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32))\n\
+         outm = vmap(innerm)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]], f32))\n\
+         gv = vmap(grad(totalv))(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32))\n";
     assert_clean(&check_json(source), "#351 vmap dim-var matrix checks clean");
     let backend = build_compile_run(source, "vmap_dim_var_named_reduce");
     let tensors = parse_printed_tensors(&backend);
@@ -1948,8 +1948,8 @@ fn vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend() {
 fn vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def inner(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
-         out = vmap(inner, axis=1)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
-         outz = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+         out = vmap(inner, axis=1)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n\
+         outz = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n";
     assert_clean(&check_json(source), "#351 vmap axis-1 checks clean");
     let backend = build_compile_run(source, "vmap_axis1_rank_poly");
     let tensors = parse_printed_tensors(&backend);
@@ -1988,7 +1988,7 @@ fn vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend() {
 fn vmap_callee_dim_conflict_stays_rejected_not_ice() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def inner(x: &tensor[seq, 4, f32]) -> tensor[4, f32] = reduce_seq(x)\n\
-         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], f32))\n";
     let report = check_json(source);
     assert!(
         report["errors"]
@@ -2035,9 +2035,9 @@ fn unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals() {
          def m_exp(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_exp(x)\n\
          def m_relu(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_relu(x)\n\
          def m_neg(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_neg(x)\n\
-         out_exp = m_exp(to_tensor([[[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8], [0.9, 1.0, 1.1, 1.2]], [[0.2, 0.4, 0.6, 0.8], [1.0, 0.1, 0.3, 0.5], [0.7, 0.9, 1.1, 0.2]]]))\n\
-         out_relu = m_relu(to_tensor([[[-1.0, 2.0, -3.0, 4.0], [5.0, -6.0, 7.0, -8.0], [9.0, 10.0, -11.0, 12.0]], [[13.0, -14.0, 15.0, -16.0], [-17.0, 18.0, -19.0, 20.0], [21.0, -22.0, 23.0, -24.0]]]))\n\
-         out_neg = m_neg(to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]]))\n";
+         out_exp = m_exp(to_tensor([[[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8], [0.9, 1.0, 1.1, 1.2]], [[0.2, 0.4, 0.6, 0.8], [1.0, 0.1, 0.3, 0.5], [0.7, 0.9, 1.1, 0.2]]], f32))\n\
+         out_relu = m_relu(to_tensor([[[-1.0, 2.0, -3.0, 4.0], [5.0, -6.0, 7.0, -8.0], [9.0, 10.0, -11.0, 12.0]], [[13.0, -14.0, 15.0, -16.0], [-17.0, 18.0, -19.0, 20.0], [21.0, -22.0, 23.0, -24.0]]], f32))\n\
+         out_neg = m_neg(to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]], f32))\n";
     let backend = build_compile_run(source, "unary_elementwise_rank_poly");
     let tensors = parse_printed_tensors(&backend);
     // Hand-computed (exact arithmetic) for relu and neg; exp pinned by
@@ -2100,7 +2100,7 @@ fn unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals() {
 fn dim_var_formal_routes_and_matches_backend() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def w[a](x: &tensor[a, seq, hidden, f32]) -> tensor[a, hidden, f32] = reduce_seq(x)\n\
-         out = w(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]]))\n";
+         out = w(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]], f32))\n";
     let backend = build_compile_run(source, "dim_var_formal");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2139,7 +2139,7 @@ fn match_pattern_operand_is_a_pinned_gap() {
          def h(b: Box) -> tensor[batch, f32] = match b with {\n\
          \x20\x20\x20\x20| Wrap(v) => sum(v, seq)\n\
          \x20\x20}\n\
-         out = h(Wrap(to_tensor([[1.0, 2.0], [3.0, 4.0]])))\n";
+         out = h(Wrap(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)))\n";
     let backend = build_compile_run(source, "match_pattern_gap");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2175,7 +2175,7 @@ fn match_pattern_operand_is_a_pinned_gap() {
 #[test]
 fn pipe_rewriting_stage_then_named_reduce_eval_matches_backend() {
     let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
-         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32))\n\
          out = y |> permute(1, 0) |> sum(seq)\n";
     // Backend lane: green (permute carries the names through lowering).
     let backend = build_compile_run(source, "pipe_rewriting_gap");
@@ -2215,7 +2215,7 @@ fn named_reduce_over_literal_operand_builds_runs_evals() {
     // parse_printed_tensors / agreement oracle keys on (a single-root
     // program prints the bare value with no name prefix).
     let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
-         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          out = reduce_seq(src)\n";
     let backend = build_compile_run(source, "issue_388_named_reduce_literal");
     let tensors = parse_printed_tensors(&backend);
@@ -2241,7 +2241,7 @@ fn named_reduce_over_literal_operand_builds_runs_evals() {
 #[test]
 fn named_reduce_over_literal_operand_eval_exact() {
     let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
-         out = reduce_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         out = reduce_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "issue_388_eval_exact");
     assert_eq!(
@@ -2279,7 +2279,7 @@ fn named_reduce_unknown_axis_still_rejected() {
 #[test]
 fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
     let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, cast(1, i32))\n\
-         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          out = f(src)\n";
     let backend = build_compile_run(source, "issue_364_cast_axis");
     let tensors = parse_printed_tensors(&backend);
@@ -2310,7 +2310,7 @@ fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
 #[test]
 fn cast_axis_reduction_axis_two_rank_three() {
     let source = "def f[a, b, c](x: &tensor[a, b, c, f32]) -> tensor[a, b, f32] = sum(x, cast(2, i32))\n\
-         src = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])\n\
+         src = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]], f32)\n\
          out = f(src)\n";
     let backend = build_compile_run(source, "issue_364_cast_axis_two");
     let tensors = parse_printed_tensors(&backend);
@@ -2355,7 +2355,7 @@ fn cast_axis_reduction_axis_two_rank_three() {
 #[test]
 fn vmap_two_stage_named_reduce_top_level_binding_evals() {
     let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
-         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32)\n\
          out = vmap(vinner)(y)\n";
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "issue_383_vmap_two_stage");
@@ -2384,7 +2384,7 @@ fn vmap_two_stage_named_reduce_top_level_binding_evals() {
 #[test]
 fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
     let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
-         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32)\n\
          out = vmap(vinner)(y)\n";
     let backend = build_compile_run(source, "issue_383_vmap_build");
     let tensors = parse_printed_tensors(&backend);
@@ -2422,7 +2422,7 @@ fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
 #[test]
 fn vmap_two_stage_named_reduce_keyword_binding_builds_and_matches_backend() {
     let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
-         static = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         static = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], f32)\n\
          out = vmap(vinner)(static)\n";
     let backend = build_compile_run(source, "issue_383_vmap_keyword_binding");
     let tensors = parse_printed_tensors(&backend);
@@ -2458,8 +2458,8 @@ fn vmap_two_stage_named_reduce_keyword_binding_builds_and_matches_backend() {
 #[test]
 fn form3_shape_sourced_expand_matches_backend() {
     let source = "def bias_broadcast[n](x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
-         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-         bs = to_tensor([10.0, 20.0, 30.0, 40.0])\n\
+         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+         bs = to_tensor([10.0, 20.0, 30.0, 40.0], f32)\n\
          out = bias_broadcast(xs, bs)\n";
     let backend = build_compile_run(source, "issue_397_shape_sourced_expand");
     let tensors = parse_printed_tensors(&backend);
@@ -2489,7 +2489,7 @@ fn form3_shape_sourced_expand_matches_backend() {
 #[test]
 fn form3_scalar_param_expand_size_matches_backend() {
     let source = "def f(x: &tensor[seq, f32], k: i64) -> tensor[seq, chan, f32] = insert(x, 1, k)\n\
-         out = f(to_tensor([1.0, 2.0]), 3i64)\n";
+         out = f(to_tensor([1.0, 2.0], f32), 3i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_384_scalar_param_expand"),
         vec![2, 3],
@@ -2503,7 +2503,7 @@ fn form3_scalar_param_expand_size_matches_backend() {
 #[test]
 fn form3_scalar_param_expand_size_agrees_in_eval() {
     let source = "def bcast[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
-         out = bcast(to_tensor([1.0, 2.0]), cast(3, i64))\n";
+         out = bcast(to_tensor([1.0, 2.0], f32), cast(3, i64))\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_eval_agrees"),
         vec![3, 2],
@@ -2525,8 +2525,8 @@ fn form3_scalar_param_expand_size_agrees_in_eval() {
 #[test]
 fn form3_shape_dep_survives_vmap_rebuild() {
     let source = "def bcast[n](x: &tensor[n, f32], b: &tensor[f32]) -> tensor[n, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
-         xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-         bs = to_tensor([10.0, 20.0])\n\
+         xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
+         bs = to_tensor([10.0, 20.0], f32)\n\
          out = vmap(bcast)(xs, bs)\n";
     let backend = build_compile_run(source, "shape_dep_vmap");
     let tensors = parse_printed_tensors(&backend);
@@ -2606,7 +2606,7 @@ fn form3_chained_rank4_expand_matches_backend() {
         \x20 step2 = insert(step1, 2, w_dim)\n\
         \x20 insert(step2, 0, a_dim)\n\
         }\n\
-        out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, i64), cast(4, i64), cast(5, i64))\n";
+        out = broadcast_to_achw(to_tensor([1.0, 2.0], f32), cast(3, i64), cast(4, i64), cast(5, i64))\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_chained_achw"),
         vec![5, 2, 3, 4],
@@ -2637,8 +2637,8 @@ fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
         \x20 a_dim: i64 = shape(x, cast(0, i32))\n\
         \x20 insert(b, 0, a_dim)\n\
         }\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
     let json = check_json(source);
     assert_clean(
         &json,
@@ -2668,7 +2668,7 @@ fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
 /// `chelis-types/tests/issue_469_runtime_scalar_extent_check.rs` pins.
 #[test]
 fn form3_static_arithmetic_expand_size_accepted_at_check() {
-    let source = "b = to_tensor([1.0, 2.0])\n\
+    let source = "b = to_tensor([1.0, 2.0], f32)\n\
         some_count = sub(cast(4, i64), cast(1, i64))\n\
         out = insert(b, cast(0, i32), some_count)\n";
     assert_eq!(
@@ -2703,8 +2703,8 @@ fn form3_let_bound_shape_sourced_expand_matches_backend() {
         \x20 a_dim: i64 = shape(x, cast(0, i32))\n\
         \x20 insert(b, 0, a_dim)\n\
         }\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
     let backend = build_compile_run(source, "issue_469_let_bound_shape");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2751,8 +2751,8 @@ fn form3_shape_alias_expand_matches_backend() {
     ] {
         let source = format!(
             "{body}\
-             xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-             out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n"
+             xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+             out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n"
         );
         let name = format!("issue_469_shape_alias_{variant}");
         let backend = build_compile_run(&source, &name);
@@ -2785,8 +2785,8 @@ fn form3_shape_alias_axis_discriminator_matches_backend() {
         \x20 c: i64 = a\n\
         \x20 insert(b, 0, c)\n\
         }\n\
-        xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-        out = f(&xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+        xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
+        out = f(&xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
     let backend = build_compile_run(source, "issue_469_shape_alias_axis");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2815,8 +2815,8 @@ fn form3_shape_alias_rebound_to_runtime_scalar_uses_the_new_value() {
         \x20 c: i64 = k\n\
         \x20 insert(b, 0, c)\n\
         }\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]), 3i64)\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32), 3i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_469_alias_rebind"),
         vec![3, 4],
@@ -2835,7 +2835,7 @@ fn form3_shape_alias_rebound_to_runtime_scalar_uses_the_new_value() {
 /// tracking is a documented residual, fail-closed.)
 #[test]
 fn form3_static_arithmetic_expand_size_matches_backend() {
-    let source = "b = to_tensor([1.0, 2.0])\n\
+    let source = "b = to_tensor([1.0, 2.0], f32)\n\
         out = insert(b, cast(0, i32), sub(cast(4, i64), cast(1, i64)))\n";
     let backend = build_compile_run(source, "issue_469_static_arith");
     let tensors = parse_printed_tensors(&backend);
@@ -2874,7 +2874,7 @@ fn form3_let_bound_static_expand_size_builds_correct_extent() {
         \x20 k: i32 = cast(3, i32)\n\
         \x20 insert(b, 0, cast(k, i64))\n\
         }\n\
-        b = to_tensor([7.0, 8.0, 9.0])\n\
+        b = to_tensor([7.0, 8.0, 9.0], f32)\n\
         out = f(&b)\n";
     let backend = build_compile_run(source, "issue_469_let_bound_static");
     let tensors = parse_printed_tensors(&backend);
@@ -2921,8 +2921,8 @@ fn form3_let_bound_static_expand_size_builds_correct_extent() {
 #[test]
 fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
     let source = "def f[n, m](x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[m, 4, f32] = insert(b, 0, mul(shape(x, cast(0, i32)), cast(2, i64)))\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
     let backend = build_compile_run(source, "issue_1379_arith_over_shape");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2964,8 +2964,8 @@ fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
 #[test]
 fn form3_bias_broadcast_c_is_byte_deterministic() {
     let source = "def bias_broadcast[n](x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = bias_broadcast(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = bias_broadcast(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
     let first = build_c_source(source, "issue_469_determinism");
     let second = build_c_source(source, "issue_469_determinism");
     assert_eq!(
@@ -3046,7 +3046,7 @@ fn form3_chained_rank4_shape_sourced_expand_accepted_at_check() {
 #[test]
 fn form3_cast_wrapped_runtime_size_matches_backend() {
     let source = "def g[a, n](b: tensor[n, f32], a_dim: i32) -> tensor[a, n, f32] = insert(b, 0, cast(a_dim, i64))\n\
-        out = g(to_tensor([1.0, 2.0]), 3i32)\n";
+        out = g(to_tensor([1.0, 2.0], f32), 3i32)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_cast_wrapped"),
         vec![3, 2],
@@ -3063,7 +3063,7 @@ fn form3_let_bound_runtime_size_matches_backend() {
         \x20 d: i64 = a_dim\n\
         \x20 insert(b, 0, d)\n\
         }\n\
-        out = g(to_tensor([1.0, 2.0]), 3i64)\n";
+        out = g(to_tensor([1.0, 2.0], f32), 3i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_let_bound_runtime"),
         vec![3, 2],
@@ -3078,7 +3078,7 @@ fn form3_let_bound_runtime_size_matches_backend() {
 #[test]
 fn form3_arithmetic_over_runtime_size_matches_backend() {
     let source = "def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, add(a_dim, cast(1, i64)))\n\
-        out = g(to_tensor([1.0, 2.0]), 2i64)\n";
+        out = g(to_tensor([1.0, 2.0], f32), 2i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_arith_runtime"),
         vec![3, 2],
@@ -3111,7 +3111,7 @@ fn form3_function_call_inline_expand_size_matches_backend() {
         let source = format!(
             "def ident(x: i64) -> i64 = x\n\
             def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, {size})\n\
-            out = g(to_tensor([1.0, 2.0]), 3i64)\n"
+            out = g(to_tensor([1.0, 2.0], f32), 3i64)\n"
         );
         assert_eq!(
             runtime_extent_out_shape(&source, &format!("issue_397_call_{label}")),
@@ -3133,8 +3133,8 @@ fn form3_shape_to_runtime_rebind_uses_the_new_value() {
         \x20 len: i64 = k\n\
         \x20 insert(b, 0, len)\n\
         }\n\
-        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
-        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]), 3i64)\n";
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0], f32), 3i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_rebind_runtime"),
         vec![3, 4],
@@ -3149,10 +3149,10 @@ fn form3_shape_to_runtime_rebind_uses_the_new_value() {
 /// parameter's 3 on both lanes, not the outer `d`'s 2.
 #[test]
 fn form3_param_shadowing_shape_name_uses_the_param() {
-    let source = "xs = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n\
+    let source = "xs = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\n\
         d = shape(&xs, cast(0, i32))\n\
         def f[m, q](g: tensor[q, f32], d: i64) -> tensor[m, q, f32] = insert(g, 0, d)\n\
-        out = f(to_tensor([1.0, 2.0]), 3i64)\n";
+        out = f(to_tensor([1.0, 2.0], f32), 3i64)\n";
     assert_eq!(
         runtime_extent_out_shape(source, "issue_397_param_shadow"),
         vec![3, 2],
@@ -3193,7 +3193,7 @@ fn form3_sourceless_to_shape_rebind_expand_accepted_at_check() {
 #[test]
 fn negative_axis_softmax_resolves_to_last_axis() {
     let source = "def sm(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = softmax(x, -1)\n\
-         src = to_tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])\n\
+         src = to_tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]], f32)\n\
          out = sm(src)\n";
     let backend = build_compile_run(source, "neg_axis_softmax");
     let tensors = parse_printed_tensors(&backend);
@@ -3223,7 +3223,7 @@ fn negative_axis_softmax_resolves_to_last_axis() {
 #[test]
 fn negative_axis_reduce_lowers_to_last_axis_in_backend() {
     let source = "def red(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, -1)\n\
-         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          out = red(src)\n";
     let backend = build_compile_run(source, "neg_axis_reduce");
     let tensors = parse_printed_tensors(&backend);
@@ -3298,7 +3298,7 @@ fn grad_through_concrete_then_spread_named_reduce() {
     let source = "def sum_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def sum_rows[b](x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
          def loss_t3(x: tensor[2, 3, f32]) -> f32 = tensor_to_scalar(sum(sum_rows(&x), 0))\n\
-         out = grad(loss_t3)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         out = grad(loss_t3)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     assert_clean(&check_json(source), "#373 grad chain checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_concrete_then_spread");
@@ -3327,7 +3327,7 @@ fn forward_through_concrete_then_spread_named_reduce_control() {
     let source = "def sum_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def sum_rows[b](x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
          def fwd_ok(x: tensor[2, 3, f32]) -> tensor[2, f32] = sum_rows(&x)\n\
-         out = fwd_ok(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         out = fwd_ok(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     assert_clean(&check_json(source), "#373 forward control checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "forward_concrete_then_spread");
@@ -3353,7 +3353,7 @@ fn grad_through_leading_spread_named_reduce() {
     let source = "def sum_first[rest](x: &tensor[row, ..rest, f32]) -> tensor[..rest, f32] = sum(x, row)\n\
          def pick(x: &tensor[row, col, f32]) -> tensor[col, f32] = sum_first(x)\n\
          def loss(x: tensor[4, 2, f32]) -> f32 = tensor_to_scalar(sum(pick(&x), 0))\n\
-         out = grad(loss)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]))\n";
+         out = grad(loss)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]], f32))\n";
     assert_clean(&check_json(source), "#373 leading-spread grad checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_leading_spread");
@@ -3404,7 +3404,7 @@ fn grad_through_concrete_then_spread_named_reduce_values_are_axis_sensitive() {
            sq = r * r\n\
            tensor_to_scalar(sum(sq, 0))\n\
          }\n\
-         out = grad(loss)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         out = grad(loss)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     assert_clean(&check_json(source), "#373 axis-sensitive grad checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_axis_sensitive_values");

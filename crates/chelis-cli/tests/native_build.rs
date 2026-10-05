@@ -288,7 +288,7 @@ fn hip_and_metal_build_commands_include_support_and_ordered_flags() {
     let file = dir.path().join("tensor.ch");
     fs::write(
         &file,
-        "out = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+        "out = add(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     )
     .unwrap();
     // Native tools run with an allowlisted environment, so the recording
@@ -350,7 +350,7 @@ exit 1"#,
         }
         fs::write(
             &file,
-            "out = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+            "out = add(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
         )
         .unwrap();
         build(&file, &out)
@@ -371,7 +371,7 @@ fn cpu_observation_corpus_matches_eval_exactly() {
     let programs = [
         "wide = 9007199254740993i64\nflag = true\n",
         "out = (42i64, true, 2.5f64)\n",
-        "out = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+        "out = add(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
         "def main() -> i64 = 42i64\n",
         "def arithmetic(a: f64, b: f64, c: f64) -> f64 = add(mul(a, b), c)\nout = arithmetic(134217729.0f64, 134217727.0f64, -18014398509481984.0f64)\n",
     ];

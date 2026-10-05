@@ -59,7 +59,7 @@ fn safe_call_first_programs_reparse_and_preserve_execution() {
         ),
         (
             "special",
-            "result = to_tensor([3]) |> copy |> realize\n",
+            "result = to_tensor([3], i32) |> copy |> realize\n",
             "result = tensor(shape=[1], data=[3])\n",
         ),
     ] {

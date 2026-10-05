@@ -398,7 +398,7 @@ def f(c: Flag, t: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = match c 
     (a, b) = t
     add(realize(a), realize(a))
   }
-  | Off => to_tensor([0.0, 0.0, 0.0, 0.0])
+  | Off => to_tensor([0.0, 0.0, 0.0, 0.0], f32)
 }
 "#,
     );

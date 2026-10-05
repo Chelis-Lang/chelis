@@ -128,7 +128,7 @@ fn a_local_grad_wrapper_keeps_its_captured_scalars() {
 def lm_model(theta: tensor[2, f32], x: f32, y: f32) -> f32 = {\n\
   y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
   sub(y, y_hat)\n}\n\
-out = jac_row(lm_model, to_tensor([1.0, 2.0]), cast(1.0, f32), cast(3.0, f32))\n";
+out = jac_row(lm_model, to_tensor([1.0, 2.0], f32), cast(1.0, f32), cast(3.0, f32))\n";
     assert_eval(source, "out", "tensor(shape=[2], data=[-1.0, -1.0])");
 }
 
@@ -163,14 +163,15 @@ out = sum(wrapper(to_tensor([1.0f32, 2.0f32])), 0i32)\n";
     assert_both_lanes(source, "out", "6.0");
 }
 
-// chelis#1964.
+// chelis#1964. `to_tensor` is reserved (chelis#3164), so the shadowed builtin
+// is `neg`, whose builtin reading would print `-6.0`.
 
 #[test]
 fn a_local_function_shadows_a_same_named_builtin() {
     let source = "def const_col[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = {\n\
   nn = len(to_list(copy(spots)))\n\
-  to_tensor = fn (x: tensor[n, f64]) -> x\n\
-  reshape(to_tensor(cast(spots, f64)), [nn, cast(1, i64)])\n}\n\
+  neg = fn (x: tensor[n, f64]) -> x\n\
+  reshape(neg(cast(spots, f64)), [nn, cast(1, i64)])\n}\n\
 def total[n](spots: tensor[n, f32]) -> tensor[f64] = {\n  kc = const_col(spots)\n  sum(sum(kc, 0i32), 0i32)\n}\n\
 out = total(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     assert_both_lanes(source, "out", "6.0");

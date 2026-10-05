@@ -193,7 +193,7 @@ fn grad_over_an_integer_source_cast_is_accepted() {
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[4, f32]) -> tensor[4, f32] = grad(g, wrt=x)(x)\n\
-         out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
+         out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32)))\n";
     let line = eval_program(program)
         .expect("an integer-source cast under grad must not reject ([04-NUM-14])");
     assert!(

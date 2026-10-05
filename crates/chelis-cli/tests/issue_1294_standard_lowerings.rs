@@ -51,7 +51,7 @@ fn epsilon_adjoint_reverses_the_supplied_parameter() {
 
 #[test]
 fn batch_label_selection_uses_the_matching_diagonal() {
-    let source = "def paired_select(x: tensor[2,3,f32], labels: tensor[2,i32]) -> tensor[2,f32] = diagonal(gather(x,labels,1),0,1)\nx: tensor[2,3,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[2i64,3i64])\nlabels: tensor[2,i32] = to_tensor([0,2])\nresult = paired_select(x,labels)\n";
+    let source = "def paired_select(x: tensor[2,3,f32], labels: tensor[2,i32]) -> tensor[2,f32] = diagonal(gather(x,labels,1),0,1)\nx: tensor[2,3,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[2i64,3i64])\nlabels: tensor[2,i32] = to_tensor([0,2], i32)\nresult = paired_select(x,labels)\n";
     assert_eq!(parse_tensor_data(&evaluate(source), "result"), vec![1., 6.]);
     assert_eq!(
         parse_tensor_data(&build_and_run(source, "paired_labels"), "result"),
@@ -61,7 +61,7 @@ fn batch_label_selection_uses_the_matching_diagonal() {
 
 #[test]
 fn embedding_and_masking_do_not_compute_with_unselected_nonfinite_values() {
-    let source = "def embed(t: tensor[2,1,f32], i: tensor[1,i32]) -> tensor[1,1,f32] = gather(t,i,0)\ndef masked(m: tensor[1,bool], x: tensor[1,f32], fill: tensor[1,f32]) -> tensor[1,f32] = where(m,x,fill)\nt: tensor[2,1,f32] = reshape(to_tensor([3.0f32,div(0.0f32,0.0f32)]),[2i64,1i64])\ni: tensor[1,i32] = to_tensor([0])\nm: tensor[1,bool] = to_tensor([true])\nx: tensor[1,f32] = to_tensor([1.0f32])\nfill: tensor[1,f32] = to_tensor([div(-1.0f32,0.0f32)])\nselected = embed(t,i)\nresult = masked(m,x,fill)\n";
+    let source = "def embed(t: tensor[2,1,f32], i: tensor[1,i32]) -> tensor[1,1,f32] = gather(t,i,0)\ndef masked(m: tensor[1,bool], x: tensor[1,f32], fill: tensor[1,f32]) -> tensor[1,f32] = where(m,x,fill)\nt: tensor[2,1,f32] = reshape(to_tensor([3.0f32,div(0.0f32,0.0f32)]),[2i64,1i64])\ni: tensor[1,i32] = to_tensor([0], i32)\nm: tensor[1,bool] = to_tensor([true])\nx: tensor[1,f32] = to_tensor([1.0f32])\nfill: tensor[1,f32] = to_tensor([div(-1.0f32,0.0f32)])\nselected = embed(t,i)\nresult = masked(m,x,fill)\n";
     for actual in [
         evaluate(source),
         build_and_run(source, "selection_nonfinite"),
@@ -340,7 +340,7 @@ fn canonical_sum_preserves_integer_trap_occurrence_in_eval_and_c() {
                 .collect::<Vec<_>>()
                 .join(",");
             let source = format!(
-                "def f(x: tensor[8,{dtype}]) -> tensor[1,{dtype}] = insert(sum(x,0),0,1i64)\nx: tensor[8,{dtype}] = to_tensor([{values}])\nresult = f(x)\n"
+                "def f(x: tensor[8,{dtype}]) -> tensor[1,{dtype}] = insert(sum(x,0),0,1i64)\nx: tensor[8,{dtype}] = to_tensor([{values}], {dtype})\nresult = f(x)\n"
             );
             if !trapping {
                 for actual in [

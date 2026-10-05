@@ -95,7 +95,7 @@ def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
   tensor_to_scalar(sum(sq, 0))\n\
 }\n";
 
-const REPRO1_INPUT: &str = "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])";
+const REPRO1_INPUT: &str = "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)";
 /// `[[1,2,3],[4,5,6]]` flattened, for the live finite-difference.
 const REPRO1_INPUT_FLAT: [f64; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
 const REPRO1_INPUT_SHAPE: [usize; 2] = [2, 3];
@@ -120,7 +120,7 @@ def loss(x: tensor[2, 3, 2, f32]) -> f32 = {\n\
   sq = r * r\n\
   tensor_to_scalar(sum(sum(sq, 0), 0))\n\
 }\n\
-out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]]))\n";
+out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]], f32))\n";
 
 /// Spread-path ambiguous negative: same ambiguity routed through a Tier-3
 /// `sum_seq[..pre, seq, ..post]` callee, exercising the `extract_rank_var_bindings`
@@ -133,7 +133,7 @@ def loss(x: tensor[2, 3, 2, f32]) -> f32 = {\n\
   sq = r * r\n\
   tensor_to_scalar(sum(sum(sq, 0), 0))\n\
 }\n\
-out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]]))\n";
+out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]], f32))\n";
 
 /// Rank-3 UNIQUE-extent permute positive: formal `[a, b, seq]` with distinct
 /// extents (a=2, b=1, seq=3). `permute(x, 2, 0, 1)` -> `[seq=3, a=2, b=1]`; the
@@ -147,7 +147,7 @@ def loss(x: tensor[2, 1, 3, f32]) -> f32 = {\n\
   sq = r * r\n\
   tensor_to_scalar(sum(sum(sq, 0), 0))\n\
 }\n";
-const POS_RANK3_INPUT: &str = "to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]])";
+const POS_RANK3_INPUT: &str = "to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], f32)";
 
 /// RT-1 square/equal-extent negative: a `3x3` operand where the reduced axis's
 /// extent collides with the other axis. After `permute(x, 1, 0)` the recorded
@@ -178,7 +178,7 @@ def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
   tensor_to_scalar(sum(sq, 0))\n\
 }\n";
 
-const SQUARE_INPUT: &str = "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])";
+const SQUARE_INPUT: &str = "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], f32)";
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
@@ -320,8 +320,8 @@ fn central_finite_difference(prelude: &str, base: &[f64], shape: &[usize], stem:
             let mut dn = base.to_vec();
             up[i] += h;
             dn[i] -= h;
-            let lit_up = format!("to_tensor({})", nested_literal(&up, shape));
-            let lit_dn = format!("to_tensor({})", nested_literal(&dn, shape));
+            let lit_up = format!("to_tensor({}, f32)", nested_literal(&up, shape));
+            let lit_dn = format!("to_tensor({}, f32)", nested_literal(&dn, shape));
             let f_up = eval_scalar(&forward_source(prelude, &lit_up), &format!("{stem}_up{i}"));
             let f_dn = eval_scalar(&forward_source(prelude, &lit_dn), &format!("{stem}_dn{i}"));
             (f_up - f_dn) / (2.0 * h)

@@ -365,7 +365,7 @@ fn issue_345_negative_sig_dim_mismatch_via_eval_lane_is_type_error_not_ice() {
          sig relu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_fwd(x) = relu(x)\n\
          def f(x: tensor[2, f32]) -> tensor[3, f32] = relu_fwd(x)\n\
-         out = f(to_tensor([1.0, 2.0]))\n";
+         out = f(to_tensor([1.0, 2.0], f32))\n";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("issue345_neg_eval.ch");
     write_file(&path, source);

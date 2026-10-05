@@ -32,7 +32,7 @@
 //!     exemption in this PR.
 //!   * R4 HIGH (= issue #219): named-dim sigs with concrete callers
 //!     `def f(x: tensor[batch, hidden, f32]) = ...` then
-//!     `f(to_tensor([[1, 2, 3]]))` type-checks cleanly. This is the
+//!     `f(to_tensor([[1, 2, 3]], i32))` type-checks cleanly. This is the
 //!     Name <-> Lit unification arm.
 //!
 //! Discovery contract notes:
@@ -113,7 +113,7 @@ fn issue_218_r4_named_dim_sig_accepts_concrete_to_tensor_caller() {
     write_file(
         &path,
         "def f(x: tensor[batch, hidden, f32]) -> tensor[batch, hidden, f32] = copy(x)\n\
-         out = f(to_tensor([[1.0, 2.0, 3.0]]))\n",
+         out = f(to_tensor([[1.0, 2.0, 3.0]], f32))\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -154,7 +154,7 @@ fn issue_218_r4_var_position_distinct_concrete_args_still_errors() {
     write_file(
         &path,
         "def f[n, p](x: tensor[n, p], y: tensor[n, p]) -> tensor[n, p] = copy(y)\n\
-         out = f(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0, 5.0]))\n",
+         out = f(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0, 5.0], f32))\n",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -170,7 +170,7 @@ fn issue_218_r4_var_position_distinct_concrete_args_still_errors() {
 
 #[test]
 fn issue_218_r1_high1_negative_float_literal_in_to_tensor_recognized() {
-    // `to_tensor([0.5, -1.0, 2.0])` must type-check as
+    // `to_tensor([0.5, -1.0, 2.0], f32)` must type-check as
     // `tensor[3, f32]`. The IR's literal recognizer must see through
     // `(app (var neg) <inner>)` for the `-1.0` element.
     let dir = tempdir().expect("tempdir");
@@ -178,12 +178,12 @@ fn issue_218_r1_high1_negative_float_literal_in_to_tensor_recognized() {
     write_file(
         &path,
         "def g(x: tensor[3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([0.5, -1.0, 2.0])\n\
+           w = to_tensor([0.5, -1.0, 2.0], f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[3, f32]) -> tensor[3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([1.0, 1.0, 1.0]))\n",
+         out = compute_grad(to_tensor([1.0, 1.0, 1.0], f32))\n",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -195,19 +195,19 @@ fn issue_218_r1_high1_negative_float_literal_in_to_tensor_recognized() {
 
 #[test]
 fn issue_218_r1_high1_negative_int_literal_in_to_tensor_recognized() {
-    // Same as above but with int leaves: `to_tensor([-2, -1, 0, 1, 2])`
+    // Same as above but with int leaves: `to_tensor([-2, -1, 0, 1, 2], i32)`
     // must type-check and lower without routing to host.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("neg_int_literal.ch");
     write_file(
         &path,
         "def g(x: tensor[5, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([-2.0, -1.0, 0.0, 1.0, 2.0])\n\
+           w = to_tensor([-2.0, -1.0, 0.0, 1.0, 2.0], f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[5, f32]) -> tensor[5, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([1.0, 1.0, 1.0, 1.0, 1.0]))\n",
+         out = compute_grad(to_tensor([1.0, 1.0, 1.0, 1.0, 1.0], f32))\n",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -233,12 +233,12 @@ fn issue_218_r1_high2_matmul_then_reduction_grad_builds() {
     write_file(
         &path,
         "def g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([[1.0], [2.0], [3.0]])\n\
+           w = to_tensor([[1.0], [2.0], [3.0]], f32)\n\
            sum(sum(matmul(copy(x), w), 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n",
+         out = compute_grad(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32))\n",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -255,12 +255,12 @@ fn issue_218_r1_high2_matmul_then_reduction_grad_builds() {
 fn build_elementwise_program(activation: &str) -> String {
     format!(
         "def g(x: tensor[2, 3, f32]) -> tensor[f32] = {{\n\
-           w = to_tensor([[1.0], [2.0], [3.0]])\n\
+           w = to_tensor([[1.0], [2.0], [3.0]], f32)\n\
            sum(sum({activation}(matmul(copy(x), w)), 0), 0)\n\
          }}\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]))\n",
+         out = compute_grad(to_tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], f32))\n",
     )
 }
 
@@ -331,16 +331,16 @@ fn issue_218_r2_high_a_exp_between_matmul_and_sum_builds() {
 
 #[test]
 fn issue_218_r3_high_concat_distinct_axis_0_type_checks() {
-    // `concat([to_tensor([[1.0, 2.0, 3.0]]), to_tensor([[4.0, 5.0, 6.0],
-    //          [7.0, 8.0, 9.0]])], 0)`: the two literals share axis-1
+    // `concat([to_tensor([[1.0, 2.0, 3.0]], f32), to_tensor([[4.0, 5.0, 6.0],
+    //          [7.0, 8.0, 9.0]], f32)], 0)`: the two literals share axis-1
     // = 3 but differ on axis-0 (1 vs 2). The per-axis-join arm
     // produces `List<tensor[*, 3, f32]>` so concat can take it.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("concat_axis0.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([[1.0, 2.0, 3.0]]),\n\
-                       to_tensor([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])], 0)\n",
+        "out = concat([to_tensor([[1.0, 2.0, 3.0]], f32),\n\
+                       to_tensor([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], f32)], 0)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -358,8 +358,8 @@ fn issue_218_r3_high_concat_distinct_axis_1_type_checks() {
     let path = dir.path().join("concat_axis1.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([[1.0, 2.0]]),\n\
-                       to_tensor([[3.0, 4.0, 5.0, 6.0]])], 1)\n",
+        "out = concat([to_tensor([[1.0, 2.0]], f32),\n\
+                       to_tensor([[3.0, 4.0, 5.0, 6.0]], f32)], 1)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -377,7 +377,7 @@ fn issue_218_r3_high_concat_matching_concrete_dims_keeps_concrete_lit() {
     let path = dir.path().join("concat_matching.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([[1.0, 2.0]]), to_tensor([[3.0, 4.0]])], 0)\n",
+        "out = concat([to_tensor([[1.0, 2.0]], f32), to_tensor([[3.0, 4.0]], f32)], 0)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -396,7 +396,7 @@ fn issue_218_r3_cons_rank_mismatch_still_rejects() {
     let path = dir.path().join("concat_rank_mismatch.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([1.0, 2.0]), to_tensor([[3.0, 4.0]])], 0)\n",
+        "out = concat([to_tensor([1.0, 2.0], f32), to_tensor([[3.0, 4.0]], f32)], 0)\n",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -420,13 +420,13 @@ fn issue_218_r3_reshape_after_matmul_in_grad_body_builds() {
     write_file(
         &path,
         "def summed_g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([[1.0], [2.0], [3.0]])\n\
+           w = to_tensor([[1.0], [2.0], [3.0]], f32)\n\
            y = reshape(matmul(copy(x), w), [cast(2, i64), cast(1, i64)])\n\
            sum(sum(y, 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
            grad(summed_g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n",
+         out = compute_grad(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32))\n",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -443,18 +443,18 @@ fn issue_218_r3_reshape_after_matmul_in_grad_body_builds() {
 
 #[test]
 fn issue_218_basic_to_tensor_in_grad_body_builds() {
-    // Simplest case: `g(x) = sum(x * w)` where `w = to_tensor([1.0, 2.0])`.
+    // Simplest case: `g(x) = sum(x * w)` where `w = to_tensor([1.0, 2.0], f32)`.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("basic_grad.ch");
     write_file(
         &path,
         "def g(x: tensor[2, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([1.0, 2.0])\n\
+           w = to_tensor([1.0, 2.0], f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, f32]) -> tensor[2, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([3.0, 4.0]))\n",
+         out = compute_grad(to_tensor([3.0, 4.0], f32))\n",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

@@ -7,7 +7,7 @@ fn hip_build_stages_companion_once_and_c_build_excludes_it() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("companion.ch");
         let output = directory.path().join("out");
-        fs::write(&source, "x = to_tensor([1.0, 2.0])\ny = mul(x, x)\n").unwrap();
+        fs::write(&source, "x = to_tensor([1.0, 2.0], f32)\ny = mul(x, x)\n").unwrap();
         let result = Command::cargo_bin("chelis")
             .unwrap()
             .env("CHELIS_STYLE_GATE_DISABLE", "1")

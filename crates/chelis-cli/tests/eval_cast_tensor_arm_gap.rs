@@ -81,7 +81,7 @@ fn eval_cast_tensor_f32_to_f64() {
     let path = write_program(
         dir.path(),
         "cast_f32_to_f64.ch",
-        "result = cast(to_tensor([1.5, 2.5, 3.5]), f64)\n",
+        "result = cast(to_tensor([1.5, 2.5, 3.5], f32), f64)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
@@ -102,7 +102,7 @@ fn eval_cast_tensor_f64_to_f32() {
     let path = write_program(
         dir.path(),
         "cast_f64_to_f32.ch",
-        "result = cast(cast(to_tensor([1.5, 2.5, 3.5]), f64), f32)\n",
+        "result = cast(cast(to_tensor([1.5, 2.5, 3.5], f32), f64), f32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
@@ -122,7 +122,7 @@ fn eval_cast_tensor_fractional_f32_to_int32_traps() {
     let path = write_program(
         dir.path(),
         "cast_f32_to_int32.ch",
-        "result = cast(to_tensor([1.5, 2.5, 3.5]), i32)\n",
+        "result = cast(to_tensor([1.5, 2.5, 3.5], f32), i32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(!ok, "fractional f32->i32 must trap; stdout={stdout}");
@@ -134,14 +134,14 @@ fn eval_cast_tensor_fractional_f32_to_int32_traps() {
 
 #[test]
 fn eval_cast_tensor_int32_to_f32() {
-    // Integer source widens to f32. `to_tensor([1, 2, 3])` produces i64
+    // Integer source widens to f32. `to_tensor([1, 2, 3], i32)` produces i64
     // by default; the inner `cast(.., i32)` forces i32 source, the
     // outer cast exercises int-to-float widening.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
         "cast_int32_to_f32.ch",
-        "result = cast(cast(to_tensor([1, 2, 3]), i32), f32)\n",
+        "result = cast(cast(to_tensor([1, 2, 3], i32), i32), f32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(

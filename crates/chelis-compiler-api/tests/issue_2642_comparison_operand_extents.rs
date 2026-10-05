@@ -102,7 +102,7 @@ const POSITIVE: &[Case] = &[
     },
     Case {
         name: "declared_result_agrees_on_literals",
-        source: "module Demo.Main\ndef f(a: tensor[*, f32], b: tensor[*, f32]) -> tensor[2, bool] = eq(a, b)\nout = f(to_tensor([1.0, 2.0]), to_tensor([1.0, 5.0]))\n",
+        source: "module Demo.Main\ndef f(a: tensor[*, f32], b: tensor[*, f32]) -> tensor[2, bool] = eq(a, b)\nout = f(to_tensor([1.0, 2.0], f32), to_tensor([1.0, 5.0], f32))\n",
     },
 ];
 
@@ -163,7 +163,7 @@ const NEGATIVE: &[(Case, &str, &str)] = &[
     (
         Case {
             name: "declared_result_disagrees_on_literals",
-            source: "module Demo.Main\ndef f(a: tensor[*, f32], b: tensor[*, f32]) -> tensor[2, bool] = eq(a, b)\nout = f(to_tensor([1.0, 2.0, 3.0]), to_tensor([1.0, 5.0, 3.0]))\n",
+            source: "module Demo.Main\ndef f(a: tensor[*, f32], b: tensor[*, f32]) -> tensor[2, bool] = eq(a, b)\nout = f(to_tensor([1.0, 2.0, 3.0], f32), to_tensor([1.0, 5.0, 3.0], f32))\n",
         },
         "extent `2`: claimed = 2, eq axis 0 = 3\nnumeric trap: domain in eq at i64",
         "extent `2`: claimed = 2, eq axis 0 = 3\nnumeric trap: domain in eq at i64",

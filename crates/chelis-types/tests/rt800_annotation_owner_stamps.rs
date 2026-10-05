@@ -81,7 +81,7 @@ def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
   fold(step, state0, idxs)
 }
 
-out = f(to_tensor([1.0, 2.0, 3.0]))
+out = f(to_tensor([1.0, 2.0, 3.0], f32))
 "#,
     )
 }

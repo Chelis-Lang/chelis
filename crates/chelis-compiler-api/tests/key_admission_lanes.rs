@@ -44,7 +44,7 @@ fn lines(result: &EvalResult) -> Vec<String> {
 fn a_dropped_key_evaluates_and_runs_in_c() {
     let source = "def discard(k: key) = drop(k)\n\ndef keep(k: key, x: tensor[2, f32]) -> tensor[2, \
                   f32] = {\n  _ = drop(k)\n  x\n}\n\ndef main() = (discard(key_from_seed(1i64)), \
-                  keep(key_from_seed(2i64), to_tensor([1.0, 2.0])))\n";
+                  keep(key_from_seed(2i64), to_tensor([1.0, 2.0], f32)))\n";
     let evaluated = eval(request(source)).unwrap_or_else(|error| panic!("eval: {error:?}"));
     assert_eq!(
         lines(&evaluated),

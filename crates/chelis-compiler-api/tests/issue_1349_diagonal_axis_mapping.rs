@@ -174,7 +174,8 @@ fn sweep(shape: &[usize], op: &str) {
             } else {
                 reference_diagonal(shape, axis1, axis2)
             };
-            let source = format!("x = to_tensor({literal})\nout = {op}(x, {axis1}, {axis2})\n");
+            let source =
+                format!("x = to_tensor({literal}, f32)\nout = {op}(x, {axis1}, {axis2})\n");
             let result = eval_surf(&source);
             let out = root_tensor(&result, "out");
             let got_values = out.data.to_f64_lossy_vec();
@@ -237,12 +238,14 @@ fn trace_rank4_every_ordered_pair_matches_op33() {
 fn diagonal_and_trace_cube_axes_0_1_match_pinned_values() {
     let literal = ramp_literal(&[2, 2, 2]);
     let diag = eval_surf(&format!(
-        "x = to_tensor({literal})\nout = diagonal(x, 0, 1)\n"
+        "x = to_tensor({literal}, f32)\nout = diagonal(x, 0, 1)\n"
     ));
     let out = root_tensor(&diag, "out");
     assert_eq!(out.shape, vec![2, 2]);
     assert_eq!(out.data.to_f64_lossy_vec(), vec![0.0, 1.0, 6.0, 7.0]);
-    let trace = eval_surf(&format!("x = to_tensor({literal})\nout = trace(x, 0, 1)\n"));
+    let trace = eval_surf(&format!(
+        "x = to_tensor({literal}, f32)\nout = trace(x, 0, 1)\n"
+    ));
     let out = root_tensor(&trace, "out");
     assert_eq!(out.shape, vec![2]);
     assert_eq!(out.data.to_f64_lossy_vec(), vec![6.0, 8.0]);
@@ -255,7 +258,9 @@ fn diagonal_and_trace_cube_axes_0_1_match_pinned_values() {
 #[test]
 fn trace_non_adjacent_reversed_axes_honor_the_declared_shape() {
     let literal = ramp_literal(&[2, 3, 2, 5]);
-    let result = eval_surf(&format!("x = to_tensor({literal})\nout = trace(x, 2, 0)\n"));
+    let result = eval_surf(&format!(
+        "x = to_tensor({literal}, f32)\nout = trace(x, 2, 0)\n"
+    ));
     let out = root_tensor(&result, "out");
     let (want_shape, want_values) = reference_trace(&[2, 3, 2, 5], 2, 0);
     assert_eq!(want_shape, vec![3, 5], "reference self-check");
@@ -271,7 +276,7 @@ fn trace_non_adjacent_reversed_axes_honor_the_declared_shape() {
 fn diagonal_negative_axes_normalize_onto_the_repaired_mapping() {
     let literal = ramp_literal(&[2, 3, 4]);
     let result = eval_surf(&format!(
-        "x = to_tensor({literal})\nout = diagonal(x, -1, 0)\n"
+        "x = to_tensor({literal}, f32)\nout = diagonal(x, -1, 0)\n"
     ));
     let out = root_tensor(&result, "out");
     let (want_shape, want_values) = reference_diagonal(&[2, 3, 4], 2, 0);
@@ -290,7 +295,7 @@ fn diagonal_negative_axes_normalize_onto_the_repaired_mapping() {
 #[test]
 fn diagonal_equal_axes_reject() {
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\nout = diagonal(x, 1, 1)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\nout = diagonal(x, 1, 1)\n"),
         "diagonal with equal axes must reject"
     );
 }
@@ -298,7 +303,7 @@ fn diagonal_equal_axes_reject() {
 #[test]
 fn diagonal_out_of_range_axis_rejects() {
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\nout = diagonal(x, 0, 2)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\nout = diagonal(x, 0, 2)\n"),
         "diagonal with an out-of-range axis must reject"
     );
 }
@@ -306,7 +311,7 @@ fn diagonal_out_of_range_axis_rejects() {
 #[test]
 fn trace_equal_axes_reject() {
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\nout = trace(x, 0, 0)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\nout = trace(x, 0, 0)\n"),
         "trace with equal axes must reject"
     );
 }
@@ -314,7 +319,7 @@ fn trace_equal_axes_reject() {
 #[test]
 fn trace_out_of_range_axis_rejects() {
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\nout = trace(x, 5, 0)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\nout = trace(x, 5, 0)\n"),
         "trace with an out-of-range axis must reject"
     );
 }

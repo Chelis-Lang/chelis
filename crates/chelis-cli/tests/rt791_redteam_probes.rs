@@ -130,7 +130,7 @@ fn rt_p1a_unsupported_tensor_root_surfaces_in_eval() {
     let program = "module M.Main\n\
          def bad(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
          def good(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
-         out = print(good(to_tensor([1.0, -2.0, 3.0, -4.0])))\n";
+         out = print(good(to_tensor([1.0, -2.0, 3.0, -4.0], f32)))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => {
             assert!(
@@ -222,8 +222,8 @@ fn rt_p1b_host_classified_def_is_host_correct_or_loud() {
 #[test]
 fn rt_p1b_inline_forward_exact_output_no_fabricated_roots() {
     let program = "module M.Main\n\
-         out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
-         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), i64)), f32)), 0))\n";
+         out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4], f32), \
+         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0], f32), i64)), f32)), 0))\n";
     let stdout = eval_full(program, ".ch").expect("the inline host forward must evaluate");
     let first = stdout.lines().next().unwrap_or_default();
     // Re-baselined at the chelis#792 rebase ([05-OBS-4]): a rank-0 eval
@@ -319,7 +319,7 @@ fn rt_p2_dead_wrapper_stub_gradient_still_correct() {
     }
     let program = "module M.Main\n\
          def loss(w: tensor[4, f32]) -> tensor[f32] = sum(mul(copy(w), w), 0)\n\
-         g = grad(loss)(to_tensor([1.0, 2.0, 3.0, 4.0]))\n\
+         g = grad(loss)(to_tensor([1.0, 2.0, 3.0, 4.0], f32))\n\
          out = print(g)\n";
     match c_run(program, "rt_dead_stub") {
         Ok((ran_ok, stdout, run_stderr)) => {
@@ -358,7 +358,7 @@ fn rt_keep5_taken_fail_branch_never_yields_values() {
     let program = "module M.Main\n\
          def f(x: tensor[4, f32], t: bool) -> tensor[4, f32] = \
          if t then fail(\"boom\") else relu(x)\n\
-         out = print(f(to_tensor([1.0, 2.0, 3.0, 4.0]), true))\n";
+         out = print(f(to_tensor([1.0, 2.0, 3.0, 4.0], f32), true))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => assert!(
             !stderr.trim().is_empty(),
@@ -488,7 +488,7 @@ fn rt_p4_effect_kind_bytes_agree_across_lanes() {
 fn rt_control_float_cos_still_works_both_lanes() {
     let program = "module M.Main\n\
          def run(x: tensor[2, f32]) -> tensor[2, f32] = cos(x)\n\
-         out = print(run(to_tensor([0.0, 1.0])))\n";
+         out = print(run(to_tensor([0.0, 1.0], f32)))\n";
     let stdout = eval_full(program, ".ch").expect("float cos must evaluate");
     assert!(
         stdout.contains("data=[1.0, 0.5403"),

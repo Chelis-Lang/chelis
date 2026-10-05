@@ -83,7 +83,7 @@ fn a_constant_definition_keeps_every_parameter_the_dag_entry_cannot_carry() {
 fn a_definition_whose_parameters_are_dag_inputs_stays_a_dag_entry() {
     let mut failures = Vec::new();
     for source in [
-        "def f(x: tensor[3, f32]) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def f(x: tensor[3, f32]) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n",
         "def f(x: i64) -> i64 = 1i64\n",
         "def f(s: bool) -> tensor[1, bool] = insert(scalar_to_tensor(s), 0, 1i64)\n",
         "def f(x: tensor[3, f32], k: f32) -> tensor[3, f32] = x\n",

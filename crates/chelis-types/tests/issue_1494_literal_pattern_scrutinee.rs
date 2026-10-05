@@ -234,7 +234,7 @@ fn literal_pattern_against_a_non_primitive_scrutinee_rejects() {
         (
             "def g(n: tensor[3, i32]) -> tensor[3, i32] = add(n, n)\n\
              \n\
-             r: f32 = match g(to_tensor([1, 2, 3])) with {\n\
+             r: f32 = match g(to_tensor([1, 2, 3], i32)) with {\n\
              \x20 | 1 => 1.5\n\
              \x20 | _ => 2.5\n\
              }\n",
@@ -547,7 +547,7 @@ fn non_literal_patterns_are_untouched() {
     accepts(
         "def g(n: tensor[3, i32]) -> tensor[3, i32] = add(n, n)\n\
          \n\
-         r: tensor[3, i32] = match g(to_tensor([1, 2, 3])) with {\n\
+         r: tensor[3, i32] = match g(to_tensor([1, 2, 3], i32)) with {\n\
          \x20 | x => x\n\
          }\n",
         "variable pattern over a tensor scrutinee",

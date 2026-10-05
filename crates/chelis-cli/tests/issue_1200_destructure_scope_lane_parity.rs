@@ -106,7 +106,7 @@ def run(v: tensor[4, f32]) -> tensor[4, f32] = {
   _ = realize(v)
   realize(v)
 }
-out = run(to_tensor([1.0, 2.0, 3.0, 4.0]))
+out = run(to_tensor([1.0, 2.0, 3.0, 4.0], f32))
 "#,
         "issue1200_shape_b",
         &[1.0, 2.0, 3.0, 4.0],
@@ -125,7 +125,7 @@ def run(p: tensor[4, f32], q: tensor[4, f32]) -> tensor[4, f32] = {
   r2: tensor[4, f32] = realize(p)
   add(r1, r2)
 }
-out = run(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([9.0, 9.0, 9.0, 9.0]))
+out = run(to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([9.0, 9.0, 9.0, 9.0], f32))
 "#,
         "issue1200_shape_c",
         &[2.0, 4.0, 6.0, 8.0],
@@ -143,7 +143,7 @@ def run(v: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
   r: tensor[4, f32] = realize(v)
   add(add(a, b), r)
 }
-out = run(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))
+out = run(to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([10.0, 20.0, 30.0, 40.0], f32))
 "#,
         "issue1200_shape_d",
         &[12.0, 24.0, 36.0, 48.0],
@@ -242,7 +242,7 @@ def run(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
   r1: tensor[4, f32] = realize(a)
   realize(a)
 }
-out = run((to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([5.0, 6.0, 7.0, 8.0])))
+out = run((to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([5.0, 6.0, 7.0, 8.0], f32)))
 "#,
         ),
     );

@@ -341,7 +341,7 @@ fn canary_vmap_int64_roots_keep_integer_precision() {
          def f(xs: tensor[3, 1, i64]) -> tensor[3, i64] = \
          vmap(fn (r: tensor[1, i64]) -> \
          add(tensor_to_scalar(sum(r, 0)), cast(1, i64)))(xs)\n\
-         out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]]), i64))))\n",
+         out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]], f32), i64))))\n",
         ".ch",
     )
     .expect("census row 14: vmap over i64 must evaluate");

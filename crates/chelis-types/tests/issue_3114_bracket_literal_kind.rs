@@ -273,7 +273,9 @@ fn every_bracket_literal_spelling_keeps_its_kind_and_round_trips() {
                 for spelling in [Spelling::Bare, Spelling::ToTensor] {
                     let written = match spelling {
                         Spelling::Bare => literal.to_string(),
-                        Spelling::ToTensor => format!("to_tensor({literal})"),
+                        // spec/04 §5.6: a `to_tensor` element states its
+                        // dtype; `f32` keeps the literal default's value.
+                        Spelling::ToTensor => format!("to_tensor({literal}, f32)"),
                     };
                     let Some(body) = (position.render)(&written, declared_type(declared, nested))
                     else {
@@ -344,34 +346,27 @@ fn a_list_value_under_a_tensor_declaration_resugars_as_constructor_calls() {
 }
 
 /// chelis#3145 round 2 (V-1): a declared tensor value prints as the explicit
-/// `to_tensor([...])` call, so it re-reads identically whether `to_tensor`
-/// names the intrinsic or a lexical binding. A bare bracket there would be
-/// converted through the intrinsic, which a lexical `to_tensor` (a block
-/// binding, a parameter of the function, or an outer parameter) refuses.
+/// `to_tensor([...])` call, and re-reads identically. `to_tensor` is reserved
+/// (spec/04 §8.6), so the call always names the intrinsic.
 #[test]
-fn a_declared_tensor_value_round_trips_whatever_to_tensor_names() {
-    const TT: &str = "def tt[p: Float](l: List[p]) -> tensor[2, p] = to_tensor(l)\n";
+fn a_declared_tensor_value_round_trips_through_the_explicit_spelling() {
     for source in [
-        format!(
-            "{TT}r = {{\n  to_tensor = tt\n  xs: tensor[2, f32] = to_tensor([1.1, 2.2])\n  xs\n}}\n"
-        ),
-        format!(
-            "{TT}r = {{\n  to_tensor = tt\n  xs: tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n  xs\n}}\n"
-        ),
-        "def g(to_tensor: (List[f64]) -> tensor[2, f64]) -> tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n"
-            .to_string(),
-        "def g(to_tensor: (List[f64]) -> tensor[2, f64], u: i32) -> tensor[2, f64] = {\n  xs: tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n  xs\n}\n"
-            .to_string(),
+        "r = {\n  xs: tensor[2, f32] = to_tensor([1.1, 2.2], f32)\n  xs\n}\n".to_string(),
+        "r = {\n  xs: tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n  xs\n}\n".to_string(),
+        "def g() -> tensor[2, f64] = to_tensor([1.1f64, 2.2f64])\n".to_string(),
+        "xs: tensor[2, f64] = [1.1, 2.2]\n".to_string(),
     ] {
         let original = deep(&source);
         let resugared = format_program(&resugar_program(&original).expect("Deep resugars"));
         let decls = parse_str(&resugared).unwrap_or_else(|error| panic!("{error}\n{resugared}"));
         let redesugared = desugar_program(&decls)
             .unwrap_or_else(|error| panic!("{source} no longer desugars: {error}\n{resugared}"));
-        let reexpanded =
-            chelis_macros::expand_program(&redesugared, &chelis_macros::ExpansionOptions::default())
-                .expect("expand")
-                .into_exprs();
+        let reexpanded = chelis_macros::expand_program(
+            &redesugared,
+            &chelis_macros::ExpansionOptions::default(),
+        )
+        .expect("expand")
+        .into_exprs();
         assert_eq!(
             normalized(&reexpanded),
             normalized(&original),
@@ -395,8 +390,8 @@ fn an_adopted_signed_minimum_round_trips_in_the_explicit_spelling() {
             "values: tensor[2, i16] = to_tensor([(-32767i16 - 1i16), 1i16])\n",
         ),
         (
-            "values = cast(to_tensor([-128, 1]), i8)\n",
-            "values = cast(to_tensor([-128, 1]), i8)\n",
+            "values = cast(to_tensor([-128, 1], i32), i8)\n",
+            "values = cast(to_tensor([-128, 1], i32), i8)\n",
         ),
     ] {
         let original = deep(source);

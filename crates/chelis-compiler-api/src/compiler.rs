@@ -9132,7 +9132,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     #[test]
     fn issue_864_cast_constructed_f64_root_agrees_with_host_value() {
         let source = "module M.Main\n\
-            def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
+            def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3], f32), f64)\n\
             shown = print(mk())\n\
             troot = mk()\n";
 
@@ -9175,7 +9175,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     #[test]
     fn issue_864_f32_cast_root_keeps_f32_dtype() {
         let source = "module M.Main\n\
-            def mk() -> tensor[2, f32] = cast(to_tensor([0.1, 0.3]), f32)\n\
+            def mk() -> tensor[2, f32] = cast(to_tensor([0.1, 0.3], f32), f32)\n\
             troot = mk()\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         let root_id = *compiled

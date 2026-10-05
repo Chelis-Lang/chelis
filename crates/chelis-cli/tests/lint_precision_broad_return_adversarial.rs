@@ -393,8 +393,8 @@ fn sr_leak_a_dim_var_mismatch_silently_passes() {
            z = y\n  \
            z\n\
          }\n\
-         x_in = to_tensor([1.0, 2.0])\n\
-         y_in = to_tensor([3.0, 4.0, 5.0])\n\
+         x_in = to_tensor([1.0, 2.0], f32)\n\
+         y_in = to_tensor([3.0, 4.0, 5.0], f32)\n\
          result = f(&x_in, &y_in)\n",
     );
     fmt_inplace(&path);

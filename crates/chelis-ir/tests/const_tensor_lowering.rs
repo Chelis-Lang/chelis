@@ -1,4 +1,4 @@
-//! Verify that `to_tensor([1.0, 2.0, 3.0])` with non-uniform data
+//! Verify that `to_tensor([1.0, 2.0, 3.0], f32)` with non-uniform data
 //! lowers to a single `ConstTensor` node instead of a Const+Pad+Add tree.
 
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
@@ -126,14 +126,16 @@ fn overflowing_negated_literal_raises_the_finalize_diagnostic() {
 
 /// chelis#1123 red-team finding 3: a literal mixing an explicit cast with a
 /// bare integer literal stages Typed + Raw, whose uniformity keys differ by
-/// construction, so lowering takes the ConstTensor path even though the
+/// construction (the cast's operand is suffixed so the cast keeps its node;
+/// a primitive cast of an unsuffixed literal is the literal, spec/03 §6.4),
+/// so lowering takes the ConstTensor path even though the
 /// finalized elements are equal. Values are identical to a Const splat;
 /// pinned so the node shape is a recorded decision, not an accident.
 #[test]
 fn mixed_cast_and_bare_integer_literal_lowers_to_const_tensor() {
     let source = r#"
 def main() -> tensor[2, i32] =
-  to_tensor([cast(1, i32), 1])
+  to_tensor([cast(1i64, i32), 1], i32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let data = dag
@@ -152,7 +154,7 @@ def main() -> tensor[2, i32] =
 fn to_tensor_non_uniform_lowers_to_const_tensor() {
     let source = r#"
 def main() -> tensor[3, f32] =
-  to_tensor([1.0, 2.0, 3.0])
+  to_tensor([1.0, 2.0, 3.0], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -184,7 +186,7 @@ def main() -> tensor[3, f32] =
 fn const_tensor_evaluates_correctly() {
     let source = r#"
 def main() -> tensor[3, f32] =
-  to_tensor([1.0, 2.0, 3.0])
+  to_tensor([1.0, 2.0, 3.0], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -202,7 +204,7 @@ def main() -> tensor[3, f32] =
 fn to_tensor_uniform_stays_as_const() {
     let source = r#"
 def main() -> tensor[3, f32] =
-  to_tensor([5.0, 5.0, 5.0])
+  to_tensor([5.0, 5.0, 5.0], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -233,7 +235,7 @@ def main() -> tensor[3, f32] =
 fn to_tensor_single_element_is_const_not_const_tensor() {
     let source = r#"
 def main() -> tensor[1, f32] =
-  to_tensor([42.0])
+  to_tensor([42.0], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -285,7 +287,7 @@ def make_tensor(x: f32, y: f32) -> tensor[2, f32] =
 fn const_tensor_negative_values_evaluate_correctly() {
     let source = r#"
 def main() -> tensor[4, f32] =
-  to_tensor([-1.0, 0.0, -3.5, 2.5])
+  to_tensor([-1.0, 0.0, -3.5, 2.5], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -303,7 +305,7 @@ def main() -> tensor[4, f32] =
 fn const_tensor_materializes_f32_values_at_f32_width() {
     let source = r#"
 def main() -> tensor[3, f32] =
-  to_tensor([0.1, 0.2, 0.3])
+  to_tensor([0.1, 0.2, 0.3], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -384,7 +386,7 @@ def main() -> tensor[3, f64] =
 fn to_tensor_2d_non_uniform_lowers_to_const_tensor() {
     let source = r#"
 def main() -> tensor[2, 3, f32] =
-  to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+  to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -414,7 +416,7 @@ def main() -> tensor[2, 3, f32] =
 fn const_tensor_through_grad_is_zero() {
     let source = r#"
 def f(x: tensor[3, f32]) -> f32 = {
-    c = to_tensor([1.0, 2.0, 3.0])
+    c = to_tensor([1.0, 2.0, 3.0], f32)
     tensor_to_scalar(sum(mul(x, c), 0))
 }
 
@@ -457,7 +459,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
 fn const_tensor_passes_dag_verification() {
     let source = r#"
 def main() -> tensor[3, f32] =
-  to_tensor([1.0, 2.0, 3.0])
+  to_tensor([1.0, 2.0, 3.0], f32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let errors = verify::verify(&dag);
@@ -472,7 +474,7 @@ def main() -> tensor[3, f32] =
 fn const_tensor_integer_values() {
     let source = r#"
 def main() -> tensor[4, i32] =
-  to_tensor([10, 20, 30, 40])
+  to_tensor([10, 20, 30, 40], i32)
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
@@ -499,7 +501,7 @@ fn grad_dangling_node_is_preexisting_not_const_tensor_specific() {
     // Use UNIFORM values (regular Const path, no ConstTensor).
     let source_uniform = r#"
 def f(x: tensor[3, f32]) -> f32 = {
-    c = to_tensor([2.0, 2.0, 2.0])
+    c = to_tensor([2.0, 2.0, 2.0], f32)
     tensor_to_scalar(sum(mul(x, c), 0))
 }
 def main(x: tensor[3, f32]) -> tensor[3, f32] =
@@ -511,7 +513,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     // Use NON-UNIFORM values (ConstTensor path).
     let source_nonuniform = r#"
 def f(x: tensor[3, f32]) -> f32 = {
-    c = to_tensor([1.0, 2.0, 3.0])
+    c = to_tensor([1.0, 2.0, 3.0], f32)
     tensor_to_scalar(sum(mul(x, c), 0))
 }
 def main(x: tensor[3, f32]) -> tensor[3, f32] =

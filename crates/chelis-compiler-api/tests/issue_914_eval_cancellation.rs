@@ -49,7 +49,7 @@ use chelis_compiler_api::{
 const HOST_PROGRAM: &str = "def answer() -> i32 = 6 * 7\n\nresult = answer()\n";
 
 /// A tensor-lane program: the work lands in the DAG evaluator.
-const TENSOR_PROGRAM: &str = "result = sum(to_tensor([1.0, 2.0, 3.0]), 0)\n";
+const TENSOR_PROGRAM: &str = "result = sum(to_tensor([1.0, 2.0, 3.0], f32), 0)\n";
 
 fn request(source: &str) -> EvalRequest {
     EvalRequest {

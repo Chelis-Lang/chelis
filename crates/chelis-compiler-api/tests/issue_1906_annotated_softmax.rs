@@ -27,7 +27,7 @@ fn program(annotated: bool, helper: bool, unequal: bool) -> String {
         "[[2.0, 3.0], [-1.0, 2.0]]"
     };
     format!(
-        "{JOIN}def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]){result} = softmax({body}, -1)\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]]), to_tensor({right}))\n"
+        "{JOIN}def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]){result} = softmax({body}, -1)\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]], f32), to_tensor({right}, f32))\n"
     )
 }
 
@@ -141,7 +141,7 @@ fn invalid_concat_axis_still_rejects() {
 
 #[test]
 fn host_admission_preserves_shared_runtime_row_guard() {
-    let source = "def probabilities(x: tensor[extent, *, f32], y: tensor[extent, *, f32]) -> tensor[extent, *, f32] = softmax(concat([x, y], 1i32), -1)\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]]), to_tensor([[2.0]]))\n";
+    let source = "def probabilities(x: tensor[extent, *, f32], y: tensor[extent, *, f32]) -> tensor[extent, *, f32] = softmax(concat([x, y], 1i32), -1)\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]], f32), to_tensor([[2.0]], f32))\n";
     let error = eval_selected(
         EvalRequest {
             source_kind: SourceKind::Surf,
@@ -179,7 +179,7 @@ fn rejected(source: String, expected: &str) {
 
 #[test]
 fn host_admission_preserves_keyed_draws() {
-    let source = "def probabilities[s](k: key, x: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n _ = uniform_like(k, x, 0.0f32, 1.0f32)\n softmax(concat([x, x], 1i32), -1)\n}\ndef run() = {\n x = to_tensor([[0.0, 1.0], [2.0, 0.0]])\n (a, b) = split_key(key_from_seed(42i64))\n first = probabilities(a, copy(x))\n next = uniform_like(b, x, 0.0f32, 1.0f32)\n (first, next)\n}\noutput = run()\n";
+    let source = "def probabilities[s](k: key, x: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n _ = uniform_like(k, x, 0.0f32, 1.0f32)\n softmax(concat([x, x], 1i32), -1)\n}\ndef run() = {\n x = to_tensor([[0.0, 1.0], [2.0, 0.0]], f32)\n (a, b) = split_key(key_from_seed(42i64))\n first = probabilities(a, copy(x))\n next = uniform_like(b, x, 0.0f32, 1.0f32)\n (first, next)\n}\noutput = run()\n";
     let execute = |source: String| {
         eval(EvalRequest {
             source_kind: SourceKind::Surf,

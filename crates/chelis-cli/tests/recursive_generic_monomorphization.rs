@@ -840,7 +840,7 @@ fn published_header_omits_specialized_symbols() {
 fn authored_mono_shaped_name_stays_in_the_published_surface() {
     const SOURCE: &str = "\
 def authored__mono_0123456789abcdef(x: tensor[2, f32]) -> tensor[2, f32] = x
-out = authored__mono_0123456789abcdef(to_tensor([1.0, 2.0]))
+out = authored__mono_0123456789abcdef(to_tensor([1.0, 2.0], f32))
 ";
     let (_dir, out_dir) = build_ok(SOURCE, "authored_mono_name");
     let header = fs::read_to_string(out_dir.join("authored_mono_name.h"))
@@ -957,7 +957,7 @@ type Box[a] =
 def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
 def measure[n](t: tensor[n, f32]) -> i32 = depth(Full { value: t }, 2)
-def concrete() -> i32 = measure(to_tensor([1.0, 2.0]))
+def concrete() -> i32 = measure(to_tensor([1.0, 2.0], f32))
 out = print(concrete())
 ";
 

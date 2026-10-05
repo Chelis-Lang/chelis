@@ -202,7 +202,7 @@ fn working_neighbors_still_build_and_run() {
     let got = c_run_first_line(
         "module M.Main\n\
          def f(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
-         out = print(f(to_tensor([-1.0, 2.0, -3.0, 4.0])))\n",
+         out = print(f(to_tensor([-1.0, 2.0, -3.0, 4.0], f32)))\n",
         "ctl_relu_p1",
     )
     .expect("tensor relu must keep building and running");
@@ -220,7 +220,7 @@ fn working_neighbors_still_build_and_run() {
 fn to_string_of_tensor_and_list_is_rejected_branded() {
     let tensor_program = "module M.Main\n\
          def f(x: tensor[2, f32]) -> string = to_string(x)\n\
-         out = print(f(to_tensor([1.5, 2.5])))\n";
+         out = print(f(to_tensor([1.5, 2.5], f32)))\n";
     assert_eq!(
         eval_first_line(tensor_program).expect("eval stringifies tensors"),
         "tensor(shape=[2], data=[1.5, 2.5])"

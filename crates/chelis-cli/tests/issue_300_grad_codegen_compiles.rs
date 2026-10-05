@@ -136,7 +136,7 @@ def f(x: tensor[2, f32]) -> f32 = {\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-out = df(to_tensor([3.0, 4.0]))\n";
+out = df(to_tensor([3.0, 4.0], f32))\n";
 
     let build = chelis_build_c(source, "repro");
     let kernel_c = build.path().join("repro.c");
@@ -158,7 +158,7 @@ def h(x: tensor[2, f32]) -> f32 = {\n  \
   k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
-out = h(to_tensor([3.0, 4.0]))\n";
+out = h(to_tensor([3.0, 4.0], f32))\n";
 
     let build = chelis_build_c(source, "fwd");
     let kernel_c = build.path().join("fwd.c");
@@ -183,7 +183,7 @@ def scale(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
   k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))\n  \
   mul(x, k)\n\
 }\n\
-out = scale(to_tensor([3.0, 4.0]))\n";
+out = scale(to_tensor([3.0, 4.0], f32))\n";
 
     let build = chelis_build_c(source, "scale");
     let kernel_c = build.path().join("scale.c");
@@ -237,7 +237,7 @@ def scale64(x: tensor[2, f64]) -> tensor[2, f64] = {\n  \
   k = insert(scalar_to_tensor(cast(1.1, f64)), cast(0, i32), cast(2, i64))\n  \
   mul(x, k)\n\
 }\n\
-out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
+out = scale64(cast(to_tensor([1.0, 1.0], f32), f64))\n";
 
     let build = chelis_build_c(source, "scale64");
     let kernel_c = build.path().join("scale64.c");
@@ -276,7 +276,7 @@ def h(x: tensor[2, f64]) -> f64 = {\n  \
   k = insert(scalar_to_tensor(cast(1.1, f64)), cast(0, i32), cast(2, i64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
-out = h(cast(to_tensor([1.0, 1.0]), f64))\n";
+out = h(cast(to_tensor([1.0, 1.0], f32), f64))\n";
 
     let build = chelis_build_c(source, "fwd64");
     let kernel_c = build.path().join("fwd64.c");

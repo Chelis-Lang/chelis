@@ -4748,8 +4748,8 @@ fn def_body_requires_host_runtime(body: &Expr) -> bool {
 /// tensor-returning function bodies benefit from the to_tensor-
 /// literal lowering, because the IR DAG's single-tensor-root model
 /// fits them. Tuple-returning fns (like
-/// `def eig_pair() -> (tensor[2], tensor[2]) = (to_tensor([1, 2]),
-/// to_tensor([3, 4]))`) keep the legacy host classification so the
+/// `def eig_pair() -> (tensor[2], tensor[2]) = (to_tensor([1, 2], i32),
+/// to_tensor([3, 4], i32))`) keep the legacy host classification so the
 /// generated C ABI `chelis_tuple* eig_pair(...)` is preserved.
 fn fn_body_qualifies_for_to_tensor_exemption(body: &Expr) -> bool {
     let kids = match body.carrier() {

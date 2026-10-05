@@ -354,7 +354,7 @@ type Simplex =
   | Simplex { weights: tensor[3, f32] }
 def eps() -> f32 = 0.01
 def nan_prod(a: f32) -> Option[Simplex] =
-  Some(Simplex { weights: to_tensor([0.0 / 0.0, 0.5, 0.5]) })
+  Some(Simplex { weights: to_tensor([0.0 / 0.0, 0.5, 0.5], f32) })
 ";
     let (code, records) = prove_json(source, &["--samples", "10"]);
     let ob = obligation(&records, "nan_prod").expect("nan obligation");

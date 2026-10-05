@@ -15,8 +15,8 @@ mod result_claims;
 
 use result_claims::run;
 
-const ITEMS: &str = "[to_tensor([1.0, 2.0, 3.0])]";
-const SEED: &str = "to_tensor([4.0, 5.0, 6.0])";
+const ITEMS: &str = "[to_tensor([1.0, 2.0, 3.0], f32)]";
+const SEED: &str = "to_tensor([4.0, 5.0, 6.0], f32)";
 
 /// One producer shape. `{n}` is the declared extent; every shape returns a
 /// three-element tensor, so `{n}` = 3 agrees and `{n}` = 2 traps.

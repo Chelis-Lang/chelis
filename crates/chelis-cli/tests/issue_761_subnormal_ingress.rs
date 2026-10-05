@@ -13,7 +13,7 @@ use common::write_file;
 
 const PROGRAM: &str = "module M.Main\n\
     def id(x: tensor[1, f32]) -> tensor[1, f32] = x\n\
-    out = print(id(to_tensor([1.0e-40])))\n";
+    out = print(id(to_tensor([1.0e-40], f32)))\n";
 
 fn c_toolchain_available() -> bool {
     std::process::Command::new("cc")

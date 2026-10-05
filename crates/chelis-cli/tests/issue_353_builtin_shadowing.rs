@@ -37,7 +37,7 @@ const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 
 const REPRO: &str = "module Repro\n\
                      def sum(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-                     out = sum(to_tensor([1.0, -2.0]))\n";
+                     out = sum(to_tensor([1.0, -2.0], f32))\n";
 
 fn write_tempfile(prefix: &str, src: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
@@ -120,7 +120,7 @@ fn issue_353_def_sum_rejected_at_check() {
 fn issue_353_sig_only_rejected_at_check() {
     let src = "module SigOnly\n\
                sig sum: &tensor[batch, f32] -> tensor[batch, f32]\n\
-               out = relu(to_tensor([1.0, -2.0]))\n";
+               out = relu(to_tensor([1.0, -2.0], f32))\n";
     let tmp = write_tempfile("issue353-sig-", src);
     let (code, stdout) = run_check(tmp.path());
     let errors = errors_array(&stdout);
@@ -245,7 +245,7 @@ fn issue_353_near_miss_names_check_eval_build_clean() {
         let src = format!(
             "module NearMiss\n\
              def {def_name}(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-             out = {def_name}(to_tensor([1.0, -2.0]))\n"
+             out = {def_name}(to_tensor([1.0, -2.0], f32))\n"
         );
         let tmp = write_tempfile(&format!("issue353-{def_name}-"), &src);
         let path = tmp.path().to_str().expect("path utf8");
@@ -363,7 +363,7 @@ fn issue_353_reef_package_def_sum_still_checks_clean() {
         root.join("src/app.ch"),
         "module Pkg.App\n\
          def sum(x: &tensor[2, f32]) -> tensor[2, f32] = relu(x)\n\
-         def use_it() -> tensor[2, f32] = sum(to_tensor([1.0, -2.0]))\n",
+         def use_it() -> tensor[2, f32] = sum(to_tensor([1.0, -2.0], f32))\n",
     )
     .expect("write app.ch");
 

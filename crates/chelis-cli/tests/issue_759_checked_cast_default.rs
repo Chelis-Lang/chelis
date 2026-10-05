@@ -106,7 +106,7 @@ fn assert_cast_traps(expr: &str, kind: &str, prim: &str, label: &str) {
 #[test]
 fn tensor_fractional_float_to_int_traps_domain() {
     assert_cast_traps(
-        "cast(to_tensor([3.5, -3.5]), i8)",
+        "cast(to_tensor([3.5, -3.5], f32), i8)",
         "domain",
         "i8",
         "tensor_fractional_f2i",
@@ -151,7 +151,7 @@ fn scalar_fractional_float_to_int_traps_domain() {
 }
 #[test]
 fn integral_float_to_int_casts_exactly_on_both_eval_surfaces() {
-    let tensor = eval_lane_str("cast(to_tensor([3.0, -3.0]), i8)").expect("integral tensor");
+    let tensor = eval_lane_str("cast(to_tensor([3.0, -3.0], f32), i8)").expect("integral tensor");
     assert_eq!(tensor, "tensor(shape=[2], data=[3, -3])");
     assert_eq!(
         eval_lane_str("cast(3.0, i8)").expect("integral scalar"),
@@ -163,7 +163,7 @@ fn integral_float_to_int_casts_exactly_on_both_eval_surfaces() {
 fn tensor_float_to_int_out_of_range_traps_overflow_not_saturate() {
     // Pre-rework: saturated to 127 on this surface.
     assert_cast_traps(
-        "cast(to_tensor([300.0]), i8)",
+        "cast(to_tensor([300.0], f32), i8)",
         "overflow",
         "i8",
         "tensor_f2i_overflow",
@@ -179,13 +179,13 @@ fn scalar_float_to_int_out_of_range_traps_overflow() {
 fn tensor_non_finite_to_int_traps_domain() {
     // sqrt(-1.0) is NaN; div(1.0, 0.0) is +inf (IEEE, [04-NUM-2]).
     assert_cast_traps(
-        "cast(sqrt(to_tensor([-1.0])), i32)",
+        "cast(sqrt(to_tensor([-1.0], f32)), i32)",
         "domain",
         "i32",
         "tensor_nan_to_int",
     );
     assert_cast_traps(
-        "cast(div(to_tensor([1.0]), to_tensor([0.0])), i32)",
+        "cast(div(to_tensor([1.0], f32), to_tensor([0.0], f32)), i32)",
         "domain",
         "i32",
         "tensor_inf_to_int",
@@ -198,7 +198,7 @@ fn tensor_non_finite_to_int_traps_domain() {
 
 #[test]
 fn tensor_int_narrowing_in_range_is_exact() {
-    let got = eval_lane_str("cast(to_tensor([127, -128, 0]), i8)").expect("in-range eval");
+    let got = eval_lane_str("cast(to_tensor([127, -128, 0], i32), i8)").expect("in-range eval");
     assert_eq!(got, "tensor(shape=[3], data=[127, -128, 0])");
 }
 
@@ -206,7 +206,7 @@ fn tensor_int_narrowing_in_range_is_exact() {
 fn tensor_int_narrowing_out_of_range_traps_overflow_not_wrap() {
     // Pre-rework: wrapped two's-complement to 44 on this surface.
     assert_cast_traps(
-        "cast(to_tensor([300]), i8)",
+        "cast(to_tensor([300], i32), i8)",
         "overflow",
         "i8",
         "tensor_i2i_overflow",
@@ -229,7 +229,7 @@ fn scalar_int_narrowing_out_of_range_traps_overflow() {
 
 #[test]
 fn tensor_cast_to_bool_accepts_exact_zero_one_only() {
-    let got = eval_lane_str("cast(to_tensor([1, 0]), bool)").expect("0/1 eval");
+    let got = eval_lane_str("cast(to_tensor([1, 0], i32), bool)").expect("0/1 eval");
     assert_eq!(got, "tensor(shape=[2], data=[true, false])");
 }
 
@@ -237,7 +237,7 @@ fn tensor_cast_to_bool_accepts_exact_zero_one_only() {
 fn tensor_cast_to_bool_rejects_nonzero_nonone_with_domain_trap() {
     // Pre-rework: nonzero encoded true on this surface (cast(2, bool) = true).
     assert_cast_traps(
-        "cast(to_tensor([2]), bool)",
+        "cast(to_tensor([2], i32), bool)",
         "domain",
         "bool",
         "tensor_to_bool_strict",
@@ -273,7 +273,7 @@ fn scalar_cast_to_bool_works_under_the_strict_rule() {
 fn casts_to_float_targets_finalize_and_never_trap() {
     // f16 overflow goes to inf per IEEE ([04-NUM-2]), not a trap.
     assert_eq!(
-        eval_lane_str("cast(to_tensor([1000000.0]), f16)").expect("f16 overflow eval"),
+        eval_lane_str("cast(to_tensor([1000000.0], f32), f16)").expect("f16 overflow eval"),
         "tensor(shape=[1], data=[inf])"
     );
     // i64 above 2^53 to f64 is the lossy-by-design direction ([04-NUM-6]).
@@ -580,7 +580,7 @@ fn c_tensor_float_to_int_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300.0]), i8)\n\
+    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300.0], f32), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "c_checked_cast_f2i").expect("C lane");
     assert!(
@@ -595,7 +595,7 @@ fn c_tensor_fractional_float_to_int_traps_domain() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> tensor[1, i8] = cast(to_tensor([3.5]), i8)\n\
+    let program = "def f() -> tensor[1, i8] = cast(to_tensor([3.5], f32), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) =
         c_lane_run(program, "c_checked_cast_fractional_f2i").expect("C lane");
@@ -611,7 +611,7 @@ fn c_tensor_int_narrowing_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300]), i8)\n\
+    let program = "def f() -> tensor[1, i8] = cast(to_tensor([300], i32), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "c_checked_cast_i2i").expect("C lane");
     assert!(
@@ -624,13 +624,13 @@ fn c_tensor_int_narrowing_out_of_range_traps_overflow() {
 #[test]
 fn mixed_offenders_select_the_lowest_flat_index_in_eval() {
     assert_cast_traps(
-        "cast(to_tensor([300.0, sqrt(-1.0)]), i8)",
+        "cast(to_tensor([300.0, sqrt(-1.0)], f32), i8)",
         "overflow",
         "i8",
         "eval_overflow_before_domain",
     );
     assert_cast_traps(
-        "cast(to_tensor([sqrt(-1.0), 300.0]), i8)",
+        "cast(to_tensor([sqrt(-1.0), 300.0], f32), i8)",
         "domain",
         "i8",
         "eval_domain_before_overflow",
@@ -656,7 +656,7 @@ fn c_dag_mixed_offenders_select_the_lowest_flat_index_at_multiple_thread_counts(
     ] {
         let program = format!(
             "def f(x: tensor[2, f32]) -> tensor[2, i8] = cast(x, i8)\n\
-             out = print(f(reshape(to_tensor([{values}]), [cast(2, i64)])))\n"
+             out = print(f(reshape(to_tensor([{values}], f32), [cast(2, i64)])))\n"
         );
         assert_c_trap_at_thread_counts(&program, expected, name);
     }
@@ -680,7 +680,7 @@ fn c_host_mixed_offenders_convert_instead_of_reinterpreting_and_select_lowest_in
         ),
     ] {
         let program = format!(
-            "def f() -> tensor[2, i8] = cast(to_tensor([{values}]), i8)\n\
+            "def f() -> tensor[2, i8] = cast(to_tensor([{values}], f32), i8)\n\
              out = print(f())\n"
         );
         assert_c_trap_at_thread_counts(&program, expected, name);

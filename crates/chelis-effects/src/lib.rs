@@ -2296,8 +2296,8 @@ def my_check() -> unit = test_assert(true, "ok")
             r#"
 def close() -> unit =
   test_assert_close_tensor(
-    to_tensor([1.0, 2.0]),
-    to_tensor([1.0, 2.0]),
+    to_tensor([1.0, 2.0], f32),
+    to_tensor([1.0, 2.0], f32),
     0.01,
     "close"
   )

@@ -168,9 +168,9 @@ fn binding_line<'a>(stdout: &'a str, name: &str) -> &'a str {
 /// `out = tensor(shape=[2], data=[39.0, 57.0])`, and eval agrees.
 #[test]
 fn issue_352_captured_global_named_reduce_compiles_runs_and_evals() {
-    let source = "w = to_tensor([[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]])\n\
+    let source = "w = to_tensor([[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]], f32)\n\
 def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(add(x, w), seq)\n\
-out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
 
     let build = chelis_build_c(source, "repro");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("repro.c"));
@@ -192,9 +192,9 @@ out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
 /// `sum`. Confirms the fix is about the captured name, not reduce-specific.
 #[test]
 fn issue_352_captured_global_concrete_sum_compiles_and_runs() {
-    let source = "w = to_tensor([[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]])\n\
+    let source = "w = to_tensor([[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]], f32)\n\
 def f(x: tensor[2, 3, f32]) -> tensor[2, f32] = sum(add(x, w), 1)\n\
-out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
 
     let build = chelis_build_c(source, "concrete");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("concrete.c"));
@@ -211,10 +211,10 @@ out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
 /// TWO captured bindings in one def body.
 #[test]
 fn issue_352_two_captured_globals_in_one_def() {
-    let source = "w1 = to_tensor([10.0, 20.0])\n\
-w2 = to_tensor([100.0, 200.0])\n\
+    let source = "w1 = to_tensor([10.0, 20.0], f32)\n\
+w2 = to_tensor([100.0, 200.0], f32)\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(add(x, w1), w2)\n\
-out = f(to_tensor([1.0, 2.0]))\n";
+out = f(to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "twocaps");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("twocaps.c"));
@@ -233,11 +233,11 @@ out = f(to_tensor([1.0, 2.0]))\n";
 /// the same value.
 #[test]
 fn issue_352_same_global_captured_by_two_defs_declared_once() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, w)\n\
 def g(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
-a = f(to_tensor([1.0, 2.0]))\n\
-b = g(to_tensor([1.0, 2.0]))\n";
+a = f(to_tensor([1.0, 2.0], f32))\n\
+b = g(to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "twodefs");
     let kernel_c = build.path().join("twodefs.c");
@@ -277,10 +277,10 @@ b = g(to_tensor([1.0, 2.0]))\n";
 /// references the binding; the call chain must still compile and run.
 #[test]
 fn issue_352_transitive_capture_through_def_call() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, w)\n\
 def g(x: tensor[2, f32]) -> tensor[2, f32] = neg(f(x))\n\
-out = g(to_tensor([1.0, 2.0]))\n";
+out = g(to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "transitive");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("transitive.c"));
@@ -302,7 +302,7 @@ out = g(to_tensor([1.0, 2.0]))\n";
 fn issue_352_captured_f64_global_exact_precision() {
     let source = "w64 = to_tensor([cast(0.1, f64), cast(0.2, f64)])\n\
 def f(x: tensor[2, f64]) -> tensor[2, f64] = add(x, w64)\n\
-out = f(cast(to_tensor([1.0, 1.0]), f64))\n";
+out = f(cast(to_tensor([1.0, 1.0], f32), f64))\n";
 
     let build = chelis_build_c(source, "f64cap");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("f64cap.c"));
@@ -338,10 +338,10 @@ out = f(cast(to_tensor([1.0, 1.0]), f64))\n";
 /// no eval agreement until that eval-side gap is fixed.
 #[test]
 fn issue_352_grad_over_capturing_def_compiles_and_runs() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-out = df(to_tensor([3.0, 4.0]))\n";
+out = df(to_tensor([3.0, 4.0], f32))\n";
 
     let build = chelis_build_c(source, "gradcap");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gradcap.c"));
@@ -366,10 +366,10 @@ out = df(to_tensor([3.0, 4.0]))\n";
 /// parity path). See `crates/chelis-compiler-api/src/runtime/transforms.rs`.
 #[test]
 fn issue_377_grad_over_capturing_def_evals_and_agrees_with_backend() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-out = df(to_tensor([3.0, 4.0]))\n";
+out = df(to_tensor([3.0, 4.0], f32))\n";
 
     // Eval lane now succeeds and computes the gradient.
     let eval_out = chelis_eval(source, "gradcap");
@@ -399,7 +399,7 @@ out = df(to_tensor([3.0, 4.0]))\n";
 fn issue_352_undefined_name_in_def_body_still_fails_at_check() {
     let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = \
 sum(add(x, nosuchname), seq)\n\
-out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
 
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join("undef.ch");
@@ -462,9 +462,9 @@ out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
 /// hipcc is deliberately not invoked (manual HIP gates own execution).
 #[test]
 fn issue_352_hip_host_lane_declares_captured_global() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
-out = f(to_tensor([3.0, 4.0]))\n";
+out = f(to_tensor([3.0, 4.0], f32))\n";
 
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join("hipcap.ch");
@@ -544,10 +544,10 @@ out = f(1.0)\n";
 /// repeated batch axis before the elementwise consumer.
 #[test]
 fn issue_516_vmap_over_capturing_def_runs_and_agrees() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def dot_w(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w)\n\
-out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
+out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]], f32))\n";
 
     let build = chelis_build_c(source, "vmapcap");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapcap.c"));
@@ -563,11 +563,11 @@ out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 /// weights and therefore has the same exact gradient with respect to `x`.
 #[test]
 fn issue_516_vmap_of_grad_over_capture_runs_and_agrees() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def gradf(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
 def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf)\n\
-out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
+out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]], f32))\n";
 
     let build = chelis_build_c(source, "vmapgradcap");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapgradcap.c"));
@@ -615,8 +615,8 @@ combo_out = map_jacobian(square, to_tensor([[1.0f32, 1.0f32], [2.0f32, 2.0f32], 
 #[test]
 fn issue_516_second_tensor_formal_remains_mapped() {
     let source = "def dot(x: tensor[2, f32], w: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
-xs = to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]])\n\
-ws = to_tensor([[10.0, 20.0], [1.0, 2.0], [3.0, 4.0]])\n\
+xs = to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]], f32)\n\
+ws = to_tensor([[10.0, 20.0], [1.0, 2.0], [3.0, 4.0]], f32)\n\
 values = vmap(dot)(xs, ws)\n\
 gradients = vmap(grad(dot, wrt=x))(xs, ws)\n";
     let build = chelis_build_c(source, "mappedformal");
@@ -648,8 +648,8 @@ fn issue_516_plain_mismatched_mul_remains_a_type_error() {
     let src_path = dir.path().join("plain_mismatch.ch");
     fs::write(
         &src_path,
-        "a = to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])\n\
-b = to_tensor([10.0, 20.0])\n\
+        "a = to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], f32)\n\
+b = to_tensor([10.0, 20.0], f32)\n\
 out = mul(a, b)\n",
     )
     .expect("write source");
@@ -678,9 +678,9 @@ out = mul(a, b)\n",
 /// this arm keeps the regression guard local to the #352 capture corpus.
 #[test]
 fn issue_352_captured_binding_named_main_compiles_and_runs() {
-    let source = "main = to_tensor([10.0, 20.0])\n\
+    let source = "main = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, main)\n\
-out = f(to_tensor([1.0, 2.0]))\n";
+out = f(to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "mainname");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("mainname.c"));

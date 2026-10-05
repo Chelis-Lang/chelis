@@ -214,7 +214,7 @@ export (make)
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
 def make(x: f32) -> Simplex =
-  Simplex { weights: to_tensor([1.0 / 0.0, 0.0, 0.0]) }
+  Simplex { weights: to_tensor([1.0 / 0.0, 0.0, 0.0], f32) }
 ";
 
 #[test]

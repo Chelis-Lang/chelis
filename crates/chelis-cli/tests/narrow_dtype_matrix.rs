@@ -559,7 +559,7 @@ fn c_print_of_f16_tensor_prints_f16_values() {
     }
     let (_, stdout) = build_and_run_c(
         "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f16] = add(cast(x, f16), cast(y, f16))\n\
-         out = print(f(to_tensor([2048.0, 0.5]), to_tensor([1.0, 0.25])))\n",
+         out = print(f(to_tensor([2048.0, 0.5], f32), to_tensor([1.0, 0.25], f32)))\n",
         "f16_print",
     )
     .expect("build and run");
@@ -586,7 +586,7 @@ fn c_to_list_of_f16_tensor_works() {
     }
     let (_, stdout) = build_and_run_c(
         "def f(x: tensor[2, f32]) -> tensor[2, f16] = cast(x, f16)\n\
-         out = print(to_list(f(to_tensor([2049.0, 0.75]))))\n",
+         out = print(to_list(f(to_tensor([2049.0, 0.75], f32))))\n",
         "f16_to_list",
     )
     .expect("chelis#716: to_list of an f16 tensor must not abort");
@@ -707,7 +707,7 @@ fn eval_tensor_cast_to_f16_rounds() {
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f16] = cast(x, f16)\n\
-         out = print(f(to_tensor([2049.0, 0.75])))\n",
+         out = print(f(to_tensor([2049.0, 0.75], f32)))\n",
     )
     .expect("eval should run");
     common::assert_elements_in_domain("f16", &line, "eval_f16_tensor_cast");

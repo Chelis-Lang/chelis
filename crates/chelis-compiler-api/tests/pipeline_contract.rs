@@ -307,7 +307,7 @@ fn linearity_rejection_uses_the_narrow_semantic_error() {
 
 #[test]
 fn strict_lowering_rejection_retains_the_lower_diagnostic() {
-    let source = "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5]))\n";
+    let source = "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5], f32))\n";
     let rejection = run_source(request(source, PipelineGoal::Lower(LoweringMode::Strict)))
         .expect_err("grad through floor must reject during lowering");
     let PipelineRejection::Lower(diagnostic) = rejection else {

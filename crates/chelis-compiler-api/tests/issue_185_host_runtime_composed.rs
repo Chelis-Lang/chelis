@@ -128,8 +128,8 @@ fn issue185_layer_norm_runs_and_matches_ir_eval() {
     // (`crates/chelis-types/src/infer.rs` rejects rank-2 gamma).
     let src = r#"
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0]], 0.0)
-g = to_tensor([1.0, 1.0, 1.0, 1.0])
-b = to_tensor([0.0, 0.0, 0.0, 0.0])
+g = to_tensor([1.0, 1.0, 1.0, 1.0], f32)
+b = to_tensor([0.0, 0.0, 0.0, 0.0], f32)
 out = layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let result = eval_surf(src);

@@ -41,7 +41,7 @@ def f(x: tensor[2, f32]) -> f32 = {\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-out = df(to_tensor([3.0, 4.0]))\n";
+out = df(to_tensor([3.0, 4.0], f32))\n";
 
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")

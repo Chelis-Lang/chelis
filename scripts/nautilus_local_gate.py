@@ -47,9 +47,9 @@ def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> 
 }
 
 out = jac(
-  to_tensor([1.0, 2.0]),
-  to_tensor([1.0, -2.0]),
-  to_tensor([3.0, 4.0]),
+  to_tensor([1.0, 2.0], f32),
+  to_tensor([1.0, -2.0], f32),
+  to_tensor([3.0, 4.0], f32),
 )
 """
 
@@ -66,7 +66,7 @@ def builder[n](xs: tensor[n, f32]) -> tensor[n, f32] = {
   fold(step, state0, idxs).0
 }
 
-out = builder(to_tensor([1.0, 2.0, 3.0]))
+out = builder(to_tensor([1.0, 2.0, 3.0], f32))
 """
 
 EVAL_IMPORT_SNIPPET = """

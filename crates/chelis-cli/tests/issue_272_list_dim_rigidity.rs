@@ -194,8 +194,8 @@ fn issue_272_bare_concat_differing_concrete_axes_still_type_checks() {
     let path = dir.path().join("bare_concat.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([[1.0, 2.0, 3.0]]),\n\
-                       to_tensor([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])], 0)\n",
+        "out = concat([to_tensor([[1.0, 2.0, 3.0]], f32),\n\
+                       to_tensor([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], f32)], 0)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -218,7 +218,7 @@ fn issue_272_bare_heterogeneous_list_without_annotation_still_type_checks() {
     let path = dir.path().join("bare_list.ch");
     write_file(
         &path,
-        "out = concat([to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0, 5.0])], 0)\n",
+        "out = concat([to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0, 5.0], f32)], 0)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);

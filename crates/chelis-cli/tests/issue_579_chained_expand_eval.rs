@@ -56,8 +56,8 @@ const BN1D_SOURCE: &str = "def bn1d_scale[a, n](x: &tensor[a, n, f32], g: &tenso
     \x20 gb: tensor[a, n, f32] = insert(g, 0, shape(x, cast(0, i32)))\n\
     \x20 mul(x, gb)\n\
     }\n\
-    xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-    gs = to_tensor([10.0, 20.0, 30.0])\n\
+    xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
+    gs = to_tensor([10.0, 20.0, 30.0], f32)\n\
     out = bn1d_scale(xs, gs)\n";
 
 /// School's REAL batchnorm1d extent spelling (src/nn/batchnorm.ch):
@@ -72,8 +72,8 @@ const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale[a, n](x: &tensor[a, n, f32],
     \x20 gb: tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     \x20 mul(x, gb)\n\
     }\n\
-    xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-    gs = to_tensor([10.0, 20.0, 30.0])\n\
+    xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
+    gs = to_tensor([10.0, 20.0, 30.0], f32)\n\
     out = bn1d_scale(xs, gs)\n";
 
 /// How the chained corpus spells its runtime extents.
@@ -128,9 +128,9 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
         \x20 bb = broadcast_to_achw(b, x)\n\
         \x20 add(mul(x, gb), bb)\n\
         }}\n\
-        xs = to_tensor({xs})\n\
-        gs = to_tensor([10.0, 20.0, 30.0])\n\
-        bs = to_tensor([1.0, 2.0, 3.0])\n\
+        xs = to_tensor({xs}, f32)\n\
+        gs = to_tensor([10.0, 20.0, 30.0], f32)\n\
+        bs = to_tensor([1.0, 2.0, 3.0], f32)\n\
         out = broadcast_to_achw(gs, xs)\n\
         out_affine = bn2d_affine(xs, gs, bs)\n"
     )
@@ -141,7 +141,7 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
 /// (that one is `BN1D_LET_BOUND_SOURCE`); check-rejected from v0.12.0 by the
 /// #494 source-tracking predicate until chelis#469 removed it.
 const SCALAR_PARAM_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
-    out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, i64))\n";
+    out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0], f32), cast(2, i64))\n";
 
 /// The chained rank-1 -> rank-4 scalar-parameter spelling: school's
 /// PRE-0.12-bump `broadcast_to_achw` signature (bare `i64` dim params),
@@ -156,7 +156,7 @@ const SCALAR_PARAM_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &te
     \x20 step2 = insert(step1, 2, w_dim)\n\
     \x20 insert(step2, 0, a_dim)\n\
     }\n\
-    out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, i64), cast(4, i64), cast(5, i64))\n";
+    out = broadcast_to_achw(to_tensor([1.0, 2.0], f32), cast(3, i64), cast(4, i64), cast(5, i64))\n";
 
 /// Build a nested Surf tensor literal of `shape` with sequential f32 data.
 fn nested_literal(shape: &[usize], next: &mut f64) -> String {
@@ -632,7 +632,7 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
         \x20 gb: tensor[3, 2, f32] = insert(g, 1, shape(x, cast(0, i32)))\n\
         \x20 mul(x, gb)\n\
         }\n\
-        out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";
+        out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([10.0, 20.0, 30.0], f32))\n";
     let json = check_json(source);
     let errors = json["errors"].as_array().expect("check errors array");
     assert!(
@@ -653,7 +653,7 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
 #[test]
 fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
     let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = insert(g, 3, 2i64)\n\
-        out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
+        out = bad(to_tensor([1.0, 2.0, 3.0], f32))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");
     let report = check_json(source);

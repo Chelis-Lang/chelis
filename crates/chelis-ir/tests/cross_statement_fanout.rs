@@ -206,10 +206,10 @@ fn top_level_no_module_var_rhs_aliased_fan_out_passes_linearity() {
     // later borrows of `x` pass linearity without an explicit copy.
     // Function-body fixtures below cover lowered copy counts and AD.
     let source = r#"
-x = to_tensor([1.5, 2.7, -0.3])
+x = to_tensor([1.5, 2.7, -0.3], f32)
 y = x
-a = mul(y, to_tensor([2.0, 2.0, 2.0]))
-b = mul(x, to_tensor([3.0, 3.0, 3.0]))
+a = mul(y, to_tensor([2.0, 2.0, 2.0], f32))
+b = mul(x, to_tensor([3.0, 3.0, 3.0], f32))
 "#;
     surf_to_dag(source).expect("top-level no-module var-RHS aliasing must pass linearity");
 
@@ -217,11 +217,11 @@ b = mul(x, to_tensor([3.0, 3.0, 3.0]))
     // `y = x; z = y; ...`. Each link records an alias so later
     // borrows of the source remain valid.
     let chained = r#"
-x = to_tensor([1.5, 2.7, -0.3])
+x = to_tensor([1.5, 2.7, -0.3], f32)
 y = x
 z = y
-a = mul(z, to_tensor([2.0, 2.0, 2.0]))
-b = mul(x, to_tensor([3.0, 3.0, 3.0]))
+a = mul(z, to_tensor([2.0, 2.0, 2.0], f32))
+b = mul(x, to_tensor([3.0, 3.0, 3.0], f32))
 "#;
     surf_to_dag(chained).expect("chained top-level var-RHS aliasing must pass linearity");
 }

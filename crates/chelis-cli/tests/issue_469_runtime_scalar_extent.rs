@@ -807,8 +807,8 @@ fn size_names_read_in_their_own_definition_on_both_lanes() {
             "size_grad",
             "def loss(x: tensor[2, f32], k: i64) -> f32 = tensor_to_scalar(sum(sum(insert(x, 0, k), 0), 0))\n\
              def loss4(x: tensor[2, f32]) -> f32 = loss(x, tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
-             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(loss4)(to_tensor([1.0, 2.0]))\n\
-             out = f(to_tensor([1.0, 2.0]))\n",
+             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(loss4)(to_tensor([1.0, 2.0], f32))\n\
+             out = f(to_tensor([1.0, 2.0], f32))\n",
             "out = tensor(shape=[2], data=[4.0, 4.0])",
         ),
         (
@@ -817,8 +817,8 @@ fn size_names_read_in_their_own_definition_on_both_lanes() {
                k = tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0))\n\
                tensor_to_scalar(sum(sum(insert(x, 0, k), 0), 0))\n\
              }\n\
-             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(lossk)(to_tensor([1.0, 2.0]))\n\
-             out = f(to_tensor([1.0, 2.0]))\n",
+             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(lossk)(to_tensor([1.0, 2.0], f32))\n\
+             out = f(to_tensor([1.0, 2.0], f32))\n",
             "out = tensor(shape=[2], data=[4.0, 4.0])",
         ),
     ] {

@@ -500,10 +500,10 @@ fn rank_poly_identity_builds_and_runs_at_ranks_1_through_4() {
          def r2[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n\
          def r3[a, b, c](x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
          def r4[a, b, c, d](x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n\
-         out1 = r1(to_tensor([-1.0, 2.0, -3.0, 4.0]))\n\
-         out2 = r2(to_tensor([[-1.0, 2.0], [3.0, -4.0]]))\n\
-         out3 = r3(to_tensor([[[-1.0, 2.0]], [[3.0, -4.0]]]))\n\
-         out4 = r4(to_tensor([[[[-5.0, 6.0]]]]))\n";
+         out1 = r1(to_tensor([-1.0, 2.0, -3.0, 4.0], f32))\n\
+         out2 = r2(to_tensor([[-1.0, 2.0], [3.0, -4.0]], f32))\n\
+         out3 = r3(to_tensor([[[-1.0, 2.0]], [[3.0, -4.0]]], f32))\n\
+         out4 = r4(to_tensor([[[[-5.0, 6.0]]]], f32))\n";
 
     let backend = build_compile_run(source, "rank_poly_identity");
     let backend_tensors = parse_printed_tensors(&backend);
@@ -564,10 +564,10 @@ fn multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4() {
          def r2[a, b](x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
          def r3[a, b, c](x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
          def r4[a, b, c, d](x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n\
-         out1 = r1(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))\n\
-         out2 = r2(to_tensor([[1.0, 2.0], [3.0, 4.0]]), to_tensor([[10.0, 20.0], [30.0, 40.0]]))\n\
-         out3 = r3(to_tensor([[[1.0, 2.0]], [[3.0, 4.0]]]), to_tensor([[[10.0, 20.0]], [[30.0, 40.0]]]))\n\
-         out4 = r4(to_tensor([[[[5.0, 6.0]]]]), to_tensor([[[[50.0, 60.0]]]]))\n";
+         out1 = r1(to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n\
+         out2 = r2(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32), to_tensor([[10.0, 20.0], [30.0, 40.0]], f32))\n\
+         out3 = r3(to_tensor([[[1.0, 2.0]], [[3.0, 4.0]]], f32), to_tensor([[[10.0, 20.0]], [[30.0, 40.0]]], f32))\n\
+         out4 = r4(to_tensor([[[[5.0, 6.0]]]], f32), to_tensor([[[[50.0, 60.0]]]], f32))\n";
 
     let backend = build_compile_run(source, "rank_poly_add2");
     let backend_tensors = parse_printed_tensors(&backend);
@@ -621,7 +621,7 @@ fn multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4() {
 fn rank_poly_composed_identity_builds_and_runs() {
     let source = "def my_silu[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n\
          def use2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = my_silu(x)\n\
-         out = use2d(to_tensor([[0.0, 1.0], [-1.0, 2.0]]))\n";
+         out = use2d(to_tensor([[0.0, 1.0], [-1.0, 2.0]], f32))\n";
     let backend = build_compile_run(source, "rank_poly_silu");
     let tensors = parse_printed_tensors(&backend);
     let (_, shape, data) = tensors
@@ -656,7 +656,7 @@ fn grad_over_rank_poly_callee_builds_runs_and_matches_oracle() {
     let source = "def sq[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, x)\n\
          def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, i32)))\n\
          def dloss(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)\n\
-         out = dloss(to_tensor([1.0, 2.0, 3.0]))\n";
+         out = dloss(to_tensor([1.0, 2.0, 3.0], f32))\n";
 
     let backend = build_compile_run(source, "grad_rank_poly_callee");
     let backend_tensors = parse_printed_tensors(&backend);

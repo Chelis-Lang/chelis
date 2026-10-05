@@ -89,7 +89,7 @@ fn rank_divergent_source(rhs: &str) -> String {
            e = insert(x, 0i32, 2i64)\n\
            {rhs}\n\
          }}\n\
-         out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"
+         out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32))\n"
     )
 }
 
@@ -289,7 +289,7 @@ def apply[n](floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]
   e = insert(x, 0i32, 2i64)\n\
   add(floor_div(s), e)\n\
 }\n\
-out = apply(lift, to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
+out = apply(lift, to_tensor([1.0, 2.0, 3.0, 4.0], f32))\n";
     let (status, report) = check(source);
     assert!(
         status.success(),
@@ -390,7 +390,7 @@ fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
                     b = insert(x, 0i32, 2i64)\n\
                     add(a, b)\n\
                   }\n\
-                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n";
+                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32))\n";
     let (status, report) = check(source);
     assert!(
         status.success(),
@@ -419,7 +419,7 @@ fn rebinding_to_a_derivable_rank_still_rejects_a_genuine_mismatch() {
                     b = insert(x, 0i32, 2i64)\n\
                     add(a, b)\n\
                   }\n\
-                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n";
+                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32))\n";
     let (status, report) = check(source);
     assert!(
         !status.success(),

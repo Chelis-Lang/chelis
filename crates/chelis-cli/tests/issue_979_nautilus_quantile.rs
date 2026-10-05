@@ -79,7 +79,7 @@ fn linked_nautilus_quantile_monotonicity_consumes_named_contract() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 @property quantiles_are_monotone forall(p: f32, q: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   quantile_vec(observations(), p) <= quantile_vec(observations(), q)
@@ -111,7 +111,7 @@ fn linked_nautilus_quantile_checks_and_evaluates_normally() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 median = quantile_vec(observations(), 0.5)
 "#,
     );
@@ -157,7 +157,7 @@ fn contract_does_not_turn_a_wrong_quantile_claim_green() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 @property wrong_direction forall(p: f32, q: f32)
   where 0.0 <= p, p < q, q <= 1.0:
   quantile_vec(observations(), q) < quantile_vec(observations(), p)
@@ -178,7 +178,7 @@ fn local_or_linker_shaped_spoof_cannot_receive_nautilus_contract() {
         &dir.path().join("spoof.ch"),
         r#"def pkg__nautilus__Nautilus__Stats__quantile_vec(v: &tensor[3, f32], q: f32) -> f32 = q
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 @property spoof forall(p: f32, q: f32) where 0.0 <= p, p <= q, q <= 1.0:
   pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), p)
     <= pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), q)
@@ -241,7 +241,7 @@ fn linker_symbol_with_wrong_signature_cannot_receive_nautilus_contract() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 @property wrong_signature forall(p: f32, q: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   quantile_vec(observations(), p) <= quantile_vec(observations(), q)
@@ -268,7 +268,7 @@ fn concrete_tensor_shape_cannot_receive_generic_nautilus_contract() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 @property concrete_shape_spoof forall(p: f32, q: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   quantile_vec(observations(), p) <= quantile_vec(observations(), q)
@@ -296,7 +296,7 @@ fn wrong_rank_tensor_cannot_receive_nautilus_contract() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations() -> tensor[2, 2, f32] =
-  (to_tensor([[3.0, 1.0], [2.0, 4.0]]) : tensor[2, 2, f32])
+  (to_tensor([[3.0, 1.0], [2.0, 4.0]], f32) : tensor[2, 2, f32])
 @property wrong_rank_spoof forall(p: f32, q: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   quantile_vec(observations(), p) <= quantile_vec(observations(), q)
@@ -324,9 +324,9 @@ fn quantile_contract_does_not_couple_different_datasets() {
         r#"module Risk.Proofs
 import Nautilus.Stats (quantile_vec)
 def observations_a() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0, 1.0, 2.0], f32) : tensor[3, f32])
 def observations_b() -> tensor[3, f32] =
-  (to_tensor([30.0, 10.0, 20.0]) : tensor[3, f32])
+  (to_tensor([30.0, 10.0, 20.0], f32) : tensor[3, f32])
 @property unrelated_datasets forall(p: f32, q: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   quantile_vec(observations_a(), p) <= quantile_vec(observations_b(), q)

@@ -238,7 +238,7 @@ const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at
 #[test]
 fn issue_387_integer_trunc_div_truncates_eval_matches_backend() {
     let source = "def d(x: tensor[2, i64], y: tensor[2, i64]) -> tensor[2, i64] = trunc_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
+out = d(cast(to_tensor([7, -7], i32), i64), cast(to_tensor([2, 2], i32), i64))\n";
 
     let build = chelis_build_c(source, "inttruncdiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
@@ -264,7 +264,7 @@ out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
 #[test]
 fn chelis_178_integer_floor_div_rounds_toward_neg_inf_eval_matches_backend() {
     let source = "def d(x: tensor[2, i64], y: tensor[2, i64]) -> tensor[2, i64] = floor_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
+out = d(cast(to_tensor([7, -7], i32), i64), cast(to_tensor([2, 2], i32), i64))\n";
 
     let build = chelis_build_c(source, "intfloordiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
@@ -477,7 +477,7 @@ fn issue_387_integer_div_by_zero_traps_in_backend() {
     // chelis#178: integer division is `trunc_div`; the zero-divisor guard
     // applies to it identically.
     let source = "def d(x: tensor[2, i64], y: tensor[2, i64], z: tensor[2, i64]) -> tensor[2, i64] = trunc_div(x, sub(y, z))\n\
-out = d(cast(to_tensor([7, 8]), i64), cast(to_tensor([3, 5]), i64), cast(to_tensor([1, 5]), i64))\n";
+out = d(cast(to_tensor([7, 8], i32), i64), cast(to_tensor([3, 5], i32), i64), cast(to_tensor([1, 5], i32), i64))\n";
 
     let build = chelis_build_c(source, "intdivtrap");
     let kernel_c = build.path().join("intdivtrap.c");
@@ -676,7 +676,7 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
 /// multi-element tensor is not a scalar and must fail.
 #[test]
 fn issue_381_scalar_to_tensor_on_rank1_tensor_still_rejected() {
-    let out = chelis_eval_expr("scalar_to_tensor(to_tensor([1.0, 2.0]))");
+    let out = chelis_eval_expr("scalar_to_tensor(to_tensor([1.0, 2.0], f32))");
     assert!(
         !out.status.success(),
         "scalar_to_tensor of a rank-1 tensor must be rejected; stdout={}",
@@ -701,7 +701,7 @@ fn issue_381_scalar_to_tensor_on_rank1_tensor_still_rejected() {
 #[test]
 fn issue_347_argmax_int_axis_backend_matches_eval() {
     let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmax_reduce(x, 1)\n\
-out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
+out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]], f32))\n";
 
     let build = chelis_build_c(source, "argmax");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmax.c"));
@@ -728,7 +728,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 #[test]
 fn issue_347_argmin_named_axis_backend_matches_eval() {
     let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmin_reduce(x, seq)\n\
-out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
+out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]], f32))\n";
 
     let build = chelis_build_c(source, "argmin");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmin.c"));
@@ -760,8 +760,8 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 /// is illegal C. The display label must stay the user-facing `register`.
 #[test]
 fn issue_379_c_keyword_binding_name_compiles_and_matches_eval() {
-    let source = "register = to_tensor([10.0, 20.0])\n\
-out = add(register, to_tensor([1.0, 2.0]))\n";
+    let source = "register = to_tensor([10.0, 20.0], f32)\n\
+out = add(register, to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "kw");
     let kernel_c = build.path().join("kw.c");
@@ -810,9 +810,9 @@ out = add(register, to_tensor([1.0, 2.0]))\n";
 /// analogue is the separate #378 lowering gap).
 #[test]
 fn issue_379_binding_named_main_compiles_and_matches_eval() {
-    let source = "main = to_tensor([10.0, 20.0])\n\
+    let source = "main = to_tensor([10.0, 20.0], f32)\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, main)\n\
-out = f(to_tensor([1.0, 2.0]))\n";
+out = f(to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "mainname");
     let kernel_c = build.path().join("mainname.c");
@@ -849,8 +849,8 @@ out = f(to_tensor([1.0, 2.0]))\n";
 /// identifiers. Pins that `c_ident` only rewrites the problematic cases.
 #[test]
 fn issue_379_ordinary_binding_name_is_not_mangled() {
-    let source = "w = to_tensor([10.0, 20.0])\n\
-out = add(w, to_tensor([1.0, 2.0]))\n";
+    let source = "w = to_tensor([10.0, 20.0], f32)\n\
+out = add(w, to_tensor([1.0, 2.0], f32))\n";
 
     let build = chelis_build_c(source, "ordinary");
     let c_source = fs::read_to_string(build.path().join("ordinary.c")).expect("read emitted C");
@@ -879,7 +879,7 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
 fn issue_365_max_reduce_backward_bool_mask_fill_is_dtype_correct() {
     let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(x, 0))\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(f)(x)\n\
-out = df(to_tensor([1.0, 5.0, 3.0]))\n";
+out = df(to_tensor([1.0, 5.0, 3.0], f32))\n";
 
     let build = chelis_build_c(source, "maxback");
     let kernel_c = build.path().join("maxback.c");
@@ -924,7 +924,7 @@ out = df(to_tensor([1.0, 5.0, 3.0]))\n";
 fn issue_365_softmax_backward_runs_under_debug_runtime() {
     let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(softmax(x, 0), 0))\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(f)(x)\n\
-out = df(to_tensor([1.0, 2.0, 3.0]))\n";
+out = df(to_tensor([1.0, 2.0, 3.0], f32))\n";
 
     let build = chelis_build_c(source, "softmaxback");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("softmaxback.c"));
@@ -954,7 +954,7 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 // the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_DTYPE_I32 index
 // `(int)`-truncates the FLOAT reinterpretation of the i32 bits (index `2`
 // → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
-// surface defaults integer literals to i32 (`to_tensor([2, 0, 1])` is a
+// surface defaults integer literals to i32 (`to_tensor([2, 0, 1], i32)` is a
 // CHELIS_DTYPE_I32 tensor), so this fires on ordinary index code; the pre-fix
 // corpus never reproduced it because every gather fixture cast indices to
 // i64 (`cast(_, i64)`), which took the always-correct CHELIS_DTYPE_I64 branch.
@@ -974,8 +974,8 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 #[test]
 fn issue_476_gather_int32_indices_backend_matches_eval() {
     // indices [2, 0, 1] over a 3x2 table → rows [30,31],[10,11],[20,21].
-    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
-embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]], f32)\n\
+embed = gather(table, to_tensor([2, 0, 1], i32), 0)\n";
 
     let build = chelis_build_c(source, "gatheri32");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri32.c"));
@@ -1007,8 +1007,8 @@ embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
 /// regress it.
 #[test]
 fn issue_476_gather_int64_indices_unchanged() {
-    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
-embed = gather(table, cast(to_tensor([2, 0, 1]), i64), 0)\n";
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]], f32)\n\
+embed = gather(table, cast(to_tensor([2, 0, 1], i32), i64), 0)\n";
 
     let build = chelis_build_c(source, "gatheri64");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri64.c"));
@@ -1034,8 +1034,8 @@ embed = gather(table, cast(to_tensor([2, 0, 1]), i64), 0)\n";
 #[test]
 fn issue_476_scatter_replace_int32_indices_backend_matches_eval() {
     // base 3x2 zeros; updates rows written at indices [2,0,1].
-    let source = "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
-out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]), 0, \"replace\")\n";
+    let source = "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], f32)\n\
+out = scatter(base, to_tensor([2, 0, 1], i32), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], f32), 0, \"replace\")\n";
 
     let build = chelis_build_c(source, "scatteri32");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("scatteri32.c"));
@@ -1062,9 +1062,9 @@ out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.
 /// accumulates grad 2; index 0 once → grad 1; index 1 never → grad 0.
 #[test]
 fn issue_476_gather_grad_scatter_add_int32_backend_matches_eval() {
-    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2, 0, 2]), 0), 0), 0))\n\
+    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2, 0, 2], i32), 0), 0), 0))\n\
 def df(table: tensor[3, 2, f32]) -> tensor[3, 2, f32] = grad(f)(table)\n\
-out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
+out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]], f32))\n";
 
     let build = chelis_build_c(source, "gathergradi32");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gathergradi32.c"));
@@ -1114,7 +1114,7 @@ fn issue_172_max_reduce_propagates_nan_backend_matches_eval() {
     // [2, 3] -> max 3. The output is a `tensor[2]` (both lanes label it),
     // and the non-NaN row proves the fix doesn't blanket-NaN the result.
     let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = max_reduce(div(a, b), 1)\n\
-out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]], f32), to_tensor([[0.0, 1.0], [1.0, 1.0]], f32))\n";
 
     let build = chelis_build_c(source, "maxnan");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxnan.c"));
@@ -1145,7 +1145,7 @@ out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]])
 #[test]
 fn issue_172_min_reduce_propagates_nan_backend_matches_eval() {
     let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = min_reduce(div(a, b), 1)\n\
-out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]], f32), to_tensor([[0.0, 1.0], [1.0, 1.0]], f32))\n";
 
     let build = chelis_build_c(source, "minnan");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("minnan.c"));
@@ -1173,7 +1173,7 @@ out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]])
 #[test]
 fn issue_172_max_reduce_no_nan_unchanged_backend_matches_eval() {
     let source = "def f(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)\n\
-out = f(to_tensor([[1.0, 3.0, 2.0], [6.0, 4.0, 5.0]]))\n";
+out = f(to_tensor([[1.0, 3.0, 2.0], [6.0, 4.0, 5.0]], f32))\n";
 
     let build = chelis_build_c(source, "maxok");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxok.c"));
@@ -1202,10 +1202,10 @@ fn issue_172_max_reduce_grad_forward_propagates_nan() {
     // (no internal error), and the forward of a NaN slice must be NaN — the
     // traced forward propagates the NaN exactly like the standalone forward.
     // Two roots so eval labels both with a `name = ` prefix.
-    let source = "def f(a: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(div(a, to_tensor([1.0, 0.0, 1.0])), 0))\n\
+    let source = "def f(a: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(div(a, to_tensor([1.0, 0.0, 1.0], f32)), 0))\n\
 def df(a: tensor[3, f32]) -> tensor[3, f32] = grad(f)(a)\n\
-gout = df(to_tensor([1.0, 0.0, 2.0]))\n\
-fout = f(to_tensor([1.0, 0.0, 2.0]))\n";
+gout = df(to_tensor([1.0, 0.0, 2.0], f32))\n\
+fout = f(to_tensor([1.0, 0.0, 2.0], f32))\n";
 
     let eval_out = chelis_eval_ok(source, "maxgradfwd");
     assert!(
@@ -1234,7 +1234,7 @@ fout = f(to_tensor([1.0, 0.0, 2.0]))\n";
 #[test]
 fn issue_172_tanh_matches_torch_reference() {
     let source = "def f(x: tensor[4, f32]) -> tensor[4, f32] = tanh(x)\n\
-out = f(to_tensor([0.5, -0.5, 1.0, -2.0]))\n";
+out = f(to_tensor([0.5, -0.5, 1.0, -2.0], f32))\n";
 
     let eval_out = chelis_eval_ok(source, "tanhparity");
     let val = tensor_value(&eval_out, "out");

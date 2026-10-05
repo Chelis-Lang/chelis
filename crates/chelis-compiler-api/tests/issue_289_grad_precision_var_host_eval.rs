@@ -56,7 +56,7 @@ fn reproducer_source(proj: &str) -> String {
            tensor_to_scalar(sum(lin_p(x, w), cast(0, i32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
            (grad(loss)(x, w)).{proj}\n\
-         out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n",
+         out = dloss(to_tensor([3.0, 4.0], f32), to_tensor([5.0, 6.0], f32))\n",
     )
 }
 

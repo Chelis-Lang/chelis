@@ -46,7 +46,7 @@ fn c_softmax_exposes_the_production_unsupported_identity() {
 fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
     let source = "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
                   reduce_window_max(x, [w], [s])\n\
-                  out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n";
+                  out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64)\n";
     for target in [CompileTarget::C, CompileTarget::Hip] {
         let error = compile(CompileRequest {
             source_kind: SourceKind::Surf,
