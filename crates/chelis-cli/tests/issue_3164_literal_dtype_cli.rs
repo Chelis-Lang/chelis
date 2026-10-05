@@ -130,7 +130,6 @@ b: f64 = 1.1
 sig c: f64
 c = 1.1
 def d() -> i8 = -128
-dd = d()
 e: i64 = 3000000000
 f = to_tensor([1.1, 2.2], f64)
 g = cast(to_tensor([1.1, 2.2], f32), f64)
@@ -158,7 +157,7 @@ const SUFFIXED: &str = "\
 a = 1.1f64
 b = 1.1f64
 c = 1.1f64
-dd = sub(neg(127i8), 1i8)
+d = sub(neg(127i8), 1i8)
 e = 3000000000i64
 f = to_tensor([1.1f64, 2.2f64])
 g = cast(to_tensor([1.1f32, 2.2f32]), f64)

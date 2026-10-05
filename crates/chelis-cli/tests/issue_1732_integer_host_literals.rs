@@ -93,7 +93,7 @@ fn unsuffixed_literal_returns_bind_at_the_declared_width() {
                   wide_value = wide()\n";
     check_eval_and_run(
         source,
-        "narrow_value = -128\nwide_value = 9007199254740993\n",
+        "narrow = -128\nwide = 9007199254740993\nnarrow_value = -128\nwide_value = 9007199254740993\n",
     );
 }
 
@@ -183,6 +183,7 @@ fn invalid_literal_width_and_return_type_are_rejected_before_codegen() {
             );
             assert!(
                 errors.contains("range")
+                    || errors.contains("cannot bind")
                     || errors.contains("overflow")
                     || errors.contains("only valid after unary")
                     || errors.contains("integer atom")

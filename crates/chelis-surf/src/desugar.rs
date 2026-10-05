@@ -955,8 +955,10 @@ impl GradSelectorResolver {
 // ---------------------------------------------------------------------------
 
 /// spec/04 §8.6: no binder in any scope may bind the reserved `to_tensor`,
-/// so a `to_tensor` call always names the intrinsic conversion.
-fn reject_reserved_binders(decls: &[Decl]) -> Result<(), DesugarError> {
+/// so a `to_tensor` call always names the intrinsic conversion. Desugaring
+/// runs this check; the reef linker also runs it on a package module's
+/// authored declarations, before it rewrites them to internal names.
+pub fn reject_reserved_binders(decls: &[Decl]) -> Result<(), DesugarError> {
     decls.iter().try_for_each(reserved_in_decl)
 }
 
