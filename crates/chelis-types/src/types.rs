@@ -648,6 +648,16 @@ impl Prim {
         })
     }
 
+    /// spec/04 §5.7.1 `sum_result(p, a)` for this operand `p` and an
+    /// admitted accumulator `a`: the operand dtype for `bf16` and `f16`,
+    /// otherwise the accumulator dtype.
+    pub fn sum_result_precision(self, accumulator: Prim) -> Prim {
+        match self {
+            Prim::Bf16 | Prim::F16 => self,
+            _ => accumulator,
+        }
+    }
+
     /// Resolve the spec/04-type-system.md §5.7.1 user-facing
     /// **result** precision of `reduce_sum` for this operand precision,
     /// per the "Result precision" column of the §5.7.1 table:
@@ -664,6 +674,7 @@ impl Prim {
     /// node's `output_type.precision` is the accumulator precision;
     /// lowering inserts a `Cast` for the bf16/f16 row to recover the
     /// operand-precision result.
+
     pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
         match self {
             Prim::Bf16 => Ok(Prim::Bf16),

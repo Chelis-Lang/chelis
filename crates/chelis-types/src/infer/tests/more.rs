@@ -2470,9 +2470,7 @@ fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
         }
     };
     for operand in ["i8", "i16"] {
-        let repair = format!(
-            "declare the result as i32, or narrow it explicitly with `cast(..., {operand})`"
-        );
+        let narrow = format!("narrow it explicitly with `cast(..., {operand})`");
         // The concrete mismatch against a declared result, per operation.
         for (op, source) in [
             (
@@ -2514,8 +2512,15 @@ fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
                 &[
                     &format!("`{op}` over {operand} returns i32"),
                     "spec/04 §5.7.1",
-                    &repair,
+                    "declare the result as i32",
+                    &narrow,
                 ],
+            );
+            // Only `sum` and `einsum` take an accumulator.
+            assert_eq!(
+                message.contains("pass `accumulator=i64` and declare i64"),
+                matches!(op, "sum" | "einsum"),
+                "{message}"
             );
         }
         // A downstream operation that needs the operand dtype, and a call
@@ -2536,7 +2541,9 @@ fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
                         "if the i32 value is the result of `sum`, `cumsum`, `trace` or `einsum` over {operand}"
                     ),
                     "spec/04 §5.7.1",
-                    &repair,
+                    "declare the result as i32",
+                    "for `sum` and `einsum`, pass `accumulator=i64` and declare i64",
+                    &narrow,
                 ],
             );
         }
@@ -2577,6 +2584,122 @@ fn sum_result_widening_rejections_name_the_rule_and_the_repair() {
         errors
             .iter()
             .any(|error| generic.iter().all(|phrase| error.message.contains(phrase))),
+        "{errors:?}"
+    );
+}
+
+/// chelis#2985: an explicit `accumulator=` on `matmul`, `sum` or `einsum`
+/// types the call by spec/04 §5.7.1's permitted-pairs table: `sum` and
+/// `einsum` return `sum_result(p, a)` and `matmul` its operand dtype. A pair
+/// the table omits (narrower than the default, or of the other numeric kind),
+/// any other callee, and an operand whose dtype is not concrete are rejected.
+#[test]
+fn explicit_accumulator_types_by_the_permitted_pairs_table() {
+    let pairs = [
+        (
+            "bf16",
+            &["f32", "f64"][..],
+            &["bf16", "f16", "i32", "i64"][..],
+        ),
+        ("f16", &["f32", "f64"], &["f16", "bf16", "i32"]),
+        ("f32", &["f32", "f64"], &["f16", "bf16", "i32", "i64"]),
+        ("f64", &["f64"], &["f32", "i64"]),
+        ("i8", &["i32", "i64"], &["i8", "i16", "f32", "f64"]),
+        ("i16", &["i32", "i64"], &["i8", "i16", "f32"]),
+        ("i32", &["i32", "i64"], &["i16", "f64"]),
+        ("i64", &["i64"], &["i32", "f64"]),
+    ];
+    for (operand, permitted, rejected) in pairs {
+        let reduced = matches!(operand, "bf16" | "f16");
+        for accumulator in permitted {
+            let result = if reduced { operand } else { accumulator };
+            for source in [
+                format!(
+                    "def f(x: tensor[3, {operand}]) -> tensor[{result}] = sum(x, 0i32, accumulator={accumulator})\n"
+                ),
+                format!(
+                    "def f(a: tensor[3, {operand}], b: tensor[3, {operand}]) -> tensor[{result}] = einsum(\"i,i->\", a, b, accumulator={accumulator})\n"
+                ),
+            ] {
+                let errors = surf_check_errors(&source);
+                assert!(errors.is_empty(), "{source}: {errors:?}");
+            }
+            if operand.starts_with('f') || operand == "bf16" {
+                let source = format!(
+                    "def f(a: tensor[2, 2, {operand}], b: tensor[2, 2, {operand}]) -> tensor[2, 2, {operand}] = matmul(a, b, accumulator={accumulator})\n"
+                );
+                let errors = surf_check_errors(&source);
+                assert!(errors.is_empty(), "{source}: {errors:?}");
+            }
+        }
+        for accumulator in rejected {
+            let kind = if accumulator.starts_with('i') == operand.starts_with('i') {
+                "at least as wide as its operand and its default"
+            } else {
+                "has its operand's numeric kind"
+            };
+            let source = format!(
+                "def f(x: tensor[3, {operand}]) -> tensor[{accumulator}] = sum(x, 0i32, accumulator={accumulator})\n"
+            );
+            let errors = surf_check_errors(&source);
+            assert!(
+                errors.iter().any(|error| error.message.contains(&format!(
+                    "`sum` over {operand} does not admit `accumulator={accumulator}`"
+                )) && error.message.contains(kind)
+                    && error
+                        .message
+                        .contains("omit the argument to accumulate in the default")),
+                "{source}: {errors:?}"
+            );
+        }
+    }
+    // A widened result no longer checks at the default result dtype.
+    assert!(
+        !surf_check_errors(
+            "def f(x: tensor[3, i8]) -> tensor[i32] = sum(x, 0i32, accumulator=i64)\n"
+        )
+        .is_empty()
+    );
+    // Integer matmul stays rejected with or without an accumulator.
+    assert!(!surf_check_errors(
+        "def f(a: tensor[2, 2, i32], b: tensor[2, 2, i32]) -> tensor[2, 2, i32] = matmul(a, b, accumulator=i64)\n"
+    )
+    .is_empty());
+    // Only `matmul`, `sum` and `einsum` take an accumulator.
+    for (name, source) in [
+        (
+            "cumsum",
+            "def f(x: tensor[3, i8]) -> tensor[3, i32] = cumsum(x, 0i32, accumulator=i64)\n",
+        ),
+        (
+            "trace",
+            "def f(x: tensor[2, 2, f32]) -> tensor[f32] = trace(x, 0, 1, accumulator=f64)\n",
+        ),
+        (
+            "mean",
+            "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32, accumulator=f64)\n",
+        ),
+    ] {
+        let errors = surf_check_errors(source);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains(&format!("`{name}` takes no `accumulator=` argument"))),
+            "{source}: {errors:?}"
+        );
+    }
+    let errors = surf_check_errors(
+        "def g(x: tensor[3, f32]) -> tensor[f32] = x\ndef f(x: tensor[3, f32]) -> tensor[3, f32] = g(x, accumulator=f64)\n",
+    );
+    assert!(!errors.is_empty(), "a user function takes no accumulator");
+    // The pair is decided at the call, over a concrete operand dtype.
+    let errors = surf_check_errors(
+        "def f[p: Float](x: tensor[3, p]) -> tensor[f64] = sum(x, 0i32, accumulator=f64)\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("needs an operand of concrete dtype")),
         "{errors:?}"
     );
 }

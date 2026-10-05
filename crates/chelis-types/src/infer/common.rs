@@ -1040,6 +1040,12 @@ pub(crate) fn sum_result_widening_note(
         return None;
     };
     Some(match op {
+        Some(op @ ("sum" | "einsum")) => format!(
+            "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
+             {result} and returns that {result} total; declare the result as {result} (or pass \
+             `accumulator=i64` and declare i64), or narrow it explicitly with \
+             `cast(..., {operand})`"
+        ),
         Some(op) => format!(
             "`{op}` over {operand} returns {result}, because spec/04 §5.7.1 sums {operand} in \
              {result} and returns that {result} total; declare the result as {result}, or \
@@ -1048,10 +1054,62 @@ pub(crate) fn sum_result_widening_note(
         None => format!(
             "if the {result} value is the result of `sum`, `cumsum`, `trace` or `einsum` over \
              {operand}, spec/04 §5.7.1 widened it, because those operations sum {operand} in \
-             {result} and return that {result} total; declare the result as {result}, or \
-             narrow it explicitly with `cast(..., {operand})`"
+             {result} and return that {result} total; declare the result as {result} (or, for \
+             `sum` and `einsum`, pass `accumulator=i64` and declare i64), or narrow it \
+             explicitly with `cast(..., {operand})`"
         ),
     })
+}
+
+/// spec/04 §5.7.1's permitted-pairs table for an explicit accumulator:
+/// the result dtype of `operation` (`matmul`, `sum` or `einsum`) over
+/// operand dtype `operand` accumulating in `accumulator`, or the diagnostic
+/// for a pair the table omits. `sum` and `einsum` return
+/// `sum_result(p, a)`; `matmul` returns its operand dtype.
+pub(crate) fn explicit_accumulator_result(
+    operation: &str,
+    operand: Prim,
+    accumulator: Prim,
+) -> Result<Prim, String> {
+    use Prim::*;
+    let permitted: &[Prim] = match (operation, operand) {
+        (_, Bf16 | F16 | F32) => &[F32, F64],
+        (_, F64) => &[F64],
+        ("matmul", _) => &[],
+        (_, Int8 | Int16 | Int32) => &[Int32, Int64],
+        (_, Int64) => &[Int64],
+        _ => &[],
+    };
+    if permitted.contains(&accumulator) {
+        return Ok(match (operation, operand) {
+            ("matmul", _) | (_, Bf16 | F16) => operand,
+            _ => accumulator,
+        });
+    }
+    let names = permitted
+        .iter()
+        .map(|prim| format!("`accumulator={}`", prim.name()))
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return Err(format!(
+            "`{operation}` over {} admits no accumulator (spec/04 §5.7.1)",
+            operand.name()
+        ));
+    }
+    let reason = if accumulator.is_integer() != operand.is_integer()
+        || accumulator.is_float() != operand.is_float()
+    {
+        "an accumulator has its operand's numeric kind"
+    } else {
+        "an accumulator is at least as wide as its operand and its default"
+    };
+    Err(format!(
+        "`{operation}` over {} does not admit `accumulator={}`, because {reason} \
+         (spec/04 §5.7.1); omit the argument to accumulate in the default, or write {}",
+        operand.name(),
+        accumulator.name(),
+        names.join(" or ")
+    ))
 }
 
 /// The `sum`-family operation `expr` evaluates to directly: a call to `sum`,
