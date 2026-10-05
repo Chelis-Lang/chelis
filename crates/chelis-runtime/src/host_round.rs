@@ -7,9 +7,7 @@
 //! arithmetic for every `places`; the multiple is then finalized once at the
 //! operand's own storage width.
 
-use num_bigint::BigUint;
-
-use crate::decimal_parse::{ratio_to_ieee_bits, rounded_quotient, Rounded};
+use crate::decimal_parse::{ratio_to_ieee_bits, rounded_quotient, Natural, Rounded};
 
 /// An IEEE binary float layout: exponent and stored-mantissa widths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,25 +76,29 @@ pub fn round_to_bits(bits: u64, layout: FloatLayout, places: i64) -> u64 {
     if places < -310 {
         return bits & sign_bit;
     }
-    let two = BigUint::from(2u8);
-    let ten = BigUint::from(10u8);
-    let binary_up = two.pow(exponent.max(0) as u32);
-    let binary_down = two.pow((-exponent).max(0) as u32);
-    let decimal = ten.pow(places.unsigned_abs() as u32);
-    let magnitude = BigUint::from(significand) * binary_up;
+    let power = places.unsigned_abs() as u32;
+    let mut decimal = Natural::from_u64(1);
+    decimal.mul_pow10(power);
+    let magnitude = Natural::from_u64(significand).shl(u64::from(exponent.max(0).unsigned_abs()));
+    let binary_down = Natural::from_u64(1).shl(u64::from((-exponent).max(0).unsigned_abs()));
     let (numerator, denominator) = if places >= 0 {
-        (magnitude * &decimal, binary_down)
+        let mut scaled = magnitude;
+        scaled.mul_pow10(power);
+        (scaled, binary_down)
     } else {
-        (magnitude, binary_down * &decimal)
+        let mut scaled = binary_down;
+        scaled.mul_pow10(power);
+        (magnitude, scaled)
     };
-    let coefficient = rounded_quotient(numerator, denominator);
-    if coefficient == BigUint::from(0u8) {
+    let mut coefficient = rounded_quotient(numerator, denominator);
+    if coefficient.is_zero() {
         return bits & sign_bit;
     }
     let (numerator, denominator) = if places >= 0 {
         (coefficient, decimal)
     } else {
-        (coefficient * decimal, BigUint::from(1u8))
+        coefficient.mul_pow10(power);
+        (coefficient, Natural::from_u64(1))
     };
     match ratio_to_ieee_bits(
         negative,
@@ -124,6 +126,114 @@ pub fn round_to_f32(x: f32, places: i64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decimal_parse_reference::{
+        ratio_to_ieee_bits as reference_ratio_to_ieee_bits,
+        rounded_quotient as reference_rounded_quotient, Rounded as ReferenceRounded,
+    };
+    use num_bigint::BigUint;
+
+    /// The num-bigint `round_to` this module replaced, kept as the oracle for
+    /// the differential test below (chelis#2963).
+    fn reference_round_to_bits(bits: u64, layout: FloatLayout, places: i64) -> u64 {
+        let FloatLayout {
+            exponent_bits,
+            mantissa_bits,
+        } = layout;
+        let sign_bit = 1u64 << (exponent_bits + mantissa_bits);
+        let exponent_mask = (1u64 << exponent_bits) - 1;
+        let exponent_field = (bits >> mantissa_bits) & exponent_mask;
+        let fraction = bits & ((1u64 << mantissa_bits) - 1);
+        let negative = bits & sign_bit != 0;
+        if exponent_field == exponent_mask || (exponent_field == 0 && fraction == 0) {
+            return bits;
+        }
+        let bias = layout.bias();
+        // value = significand * 2^exponent exactly.
+        let (significand, exponent) = if exponent_field == 0 {
+            (fraction, 1 - bias - mantissa_bits as i32)
+        } else {
+            (
+                fraction | (1u64 << mantissa_bits),
+                exponent_field as i32 - bias - mantissa_bits as i32,
+            )
+        };
+        // Every finite binary value is a multiple of 10^(-places) once
+        // `places >= -exponent`, so a finer quantum is the identity.
+        if places >= i64::from(-exponent.min(0)) {
+            return bits;
+        }
+        // A quantum more than twice the largest finite magnitude of any layout
+        // (below 2^1024 < 10^309) rounds every finite value to zero.
+        if places < -310 {
+            return bits & sign_bit;
+        }
+        let two = BigUint::from(2u8);
+        let ten = BigUint::from(10u8);
+        let binary_up = two.pow(exponent.max(0) as u32);
+        let binary_down = two.pow((-exponent).max(0) as u32);
+        let decimal = ten.pow(places.unsigned_abs() as u32);
+        let magnitude = BigUint::from(significand) * binary_up;
+        let (numerator, denominator) = if places >= 0 {
+            (magnitude * &decimal, binary_down)
+        } else {
+            (magnitude, binary_down * &decimal)
+        };
+        let coefficient = reference_rounded_quotient(numerator, denominator);
+        if coefficient == BigUint::from(0u8) {
+            return bits & sign_bit;
+        }
+        let (numerator, denominator) = if places >= 0 {
+            (coefficient, decimal)
+        } else {
+            (coefficient * decimal, BigUint::from(1u8))
+        };
+        match reference_ratio_to_ieee_bits(
+            negative,
+            numerator,
+            denominator,
+            exponent_bits,
+            mantissa_bits,
+            bias,
+        ) {
+            ReferenceRounded::Bits(rounded) => rounded,
+            ReferenceRounded::Overflow { .. } => {
+                (bits & sign_bit) | (exponent_mask << mantissa_bits)
+            }
+        }
+    }
+
+    /// Bit-identical agreement with the num-bigint `round_to` over random
+    /// operands at every layout, normal, subnormal and non-finite, and over
+    /// every `places` regime: identity, rounding, and all-zero.
+    #[test]
+    fn random_operands_match_the_num_bigint_round_to() {
+        let mut state = 0x2963_0005u64;
+        let mut next = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for layout in [
+            FloatLayout::F64,
+            FloatLayout::F32,
+            FloatLayout::F16,
+            FloatLayout::BF16,
+        ] {
+            let width = 1 + layout.exponent_bits + layout.mantissa_bits;
+            for _ in 0..4_000 {
+                let bits = next() >> (64 - width);
+                let places = (next() % 1_441) as i64 - 330;
+                assert_eq!(
+                    round_to_bits(bits, layout, places),
+                    reference_round_to_bits(bits, layout, places),
+                    "bits {bits} places {places} at {} exponent bits",
+                    layout.exponent_bits
+                );
+            }
+        }
+    }
 
     #[test]
     fn ties_go_to_even_on_the_exact_binary_value() {

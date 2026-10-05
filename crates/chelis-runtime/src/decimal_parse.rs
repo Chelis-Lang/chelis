@@ -4,9 +4,153 @@
 //! the decimal as an exact integer ratio and performs one round-to-nearest,
 //! ties-to-even operation at the requested storage width. It uses only integer
 //! arithmetic, so the caller's floating-point environment cannot change a
-//! result.
+//! result. The arbitrary-precision naturals are this module's own: a general
+//! big-integer crate sizes buffers and seeds root guesses through host `exp`,
+//! `log`, `log2` and `cbrt`, and the runtime archive links no host
+//! transcendental (chelis#2963).
 
-use num_bigint::BigUint;
+use std::cmp::Ordering;
+
+/// An arbitrary-precision natural number: little-endian 32-bit limbs with no
+/// high zero limb, so zero is the empty vector and equal values have equal
+/// limbs.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Natural(Vec<u32>);
+
+impl Natural {
+    pub(crate) fn from_u64(value: u64) -> Self {
+        let mut natural = Natural(vec![value as u32, (value >> 32) as u32]);
+        natural.normalize();
+        natural
+    }
+
+    fn normalize(&mut self) {
+        while self.0.last() == Some(&0) {
+            self.0.pop();
+        }
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The bit length: zero for zero, otherwise one more than the index of
+    /// the highest set bit.
+    fn bits(&self) -> u64 {
+        match self.0.last() {
+            None => 0,
+            Some(top) => 32 * self.0.len() as u64 - u64::from(top.leading_zeros()),
+        }
+    }
+
+    /// `self * factor + addend`, in place.
+    fn mul_add_small(&mut self, factor: u32, addend: u32) {
+        let mut carry = u64::from(addend);
+        for limb in &mut self.0 {
+            let product = u64::from(*limb) * u64::from(factor) + carry;
+            *limb = product as u32;
+            carry = product >> 32;
+        }
+        if carry != 0 {
+            self.0.push(carry as u32);
+        }
+        self.normalize();
+    }
+
+    /// The natural spelled by ASCII decimal digits, which the caller has
+    /// validated.
+    fn from_decimal_digits(digits: &[u8]) -> Self {
+        let mut natural = Natural(Vec::new());
+        for chunk in digits.chunks(9) {
+            let value = chunk
+                .iter()
+                .fold(0u32, |value, digit| value * 10 + u32::from(digit - b'0'));
+            natural.mul_add_small(10u32.pow(chunk.len() as u32), value);
+        }
+        natural
+    }
+
+    /// `self * 10^power`, in place.
+    pub(crate) fn mul_pow10(&mut self, mut power: u32) {
+        while power >= 9 {
+            self.mul_add_small(1_000_000_000, 0);
+            power -= 9;
+        }
+        self.mul_add_small(10u32.pow(power), 0);
+    }
+
+    pub(crate) fn shl(&self, shift: u64) -> Self {
+        if self.is_zero() {
+            return self.clone();
+        }
+        let limbs = (shift / 32) as usize;
+        let bits = (shift % 32) as u32;
+        let mut shifted = vec![0u32; limbs];
+        shifted.reserve(self.0.len() + 1);
+        if bits == 0 {
+            shifted.extend_from_slice(&self.0);
+        } else {
+            let mut carry = 0u32;
+            for limb in &self.0 {
+                shifted.push((limb << bits) | carry);
+                carry = limb >> (32 - bits);
+            }
+            shifted.push(carry);
+        }
+        let mut natural = Natural(shifted);
+        natural.normalize();
+        natural
+    }
+
+    fn add_one(mut self) -> Self {
+        self.mul_add_small(1, 1);
+        self
+    }
+
+    /// `self >> 1`, in place.
+    fn shr1(&mut self) {
+        let mut carry = 0u32;
+        for limb in self.0.iter_mut().rev() {
+            let next_carry = *limb << 31;
+            *limb = (*limb >> 1) | carry;
+            carry = next_carry;
+        }
+        self.normalize();
+    }
+
+    /// `self - other`, in place. The caller guarantees `self >= other`.
+    fn sub_assign(&mut self, other: &Natural) {
+        let mut borrow = 0u64;
+        for (index, limb) in self.0.iter_mut().enumerate() {
+            let subtrahend = u64::from(other.0.get(index).copied().unwrap_or(0)) + borrow;
+            let minuend = u64::from(*limb);
+            if minuend >= subtrahend {
+                *limb = (minuend - subtrahend) as u32;
+                borrow = 0;
+            } else {
+                *limb = ((1u64 << 32) + minuend - subtrahend) as u32;
+                borrow = 1;
+            }
+        }
+        assert_eq!(borrow, 0, "natural subtraction underflowed");
+        self.normalize();
+    }
+}
+
+impl Ord for Natural {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .len()
+            .cmp(&other.0.len())
+            .then_with(|| self.0.iter().rev().cmp(other.0.iter().rev()))
+    }
+}
+
+impl PartialOrd for Natural {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// Significant digits kept before the rest collapse into one sticky digit. A
 /// binary64 rounding midpoint, the widest case here, is `m * 2^e` with `m`
@@ -21,8 +165,8 @@ const DECIDING_DIGITS: usize = 800;
 enum DecimalValue {
     Ratio {
         negative: bool,
-        numerator: BigUint,
-        denominator: BigUint,
+        numerator: Natural,
+        denominator: Natural,
     },
     Overflow {
         negative: bool,
@@ -36,31 +180,54 @@ pub(crate) enum Rounded {
     Overflow { negative: bool },
 }
 
-pub(crate) fn rounded_quotient(numerator: BigUint, denominator: BigUint) -> BigUint {
-    let quotient = &numerator / &denominator;
-    let remainder = numerator % &denominator;
-    let twice_remainder = remainder << 1usize;
-    let quotient_is_odd = (&quotient & BigUint::from(1u8)) == BigUint::from(1u8);
-    if twice_remainder > denominator || (twice_remainder == denominator && quotient_is_odd) {
-        quotient + BigUint::from(1u8)
-    } else {
-        quotient
+/// `numerator / denominator` rounded to nearest, ties to even, by schoolbook
+/// binary long division: one quotient bit per step, from the highest.
+pub(crate) fn rounded_quotient(numerator: Natural, denominator: Natural) -> Natural {
+    assert!(
+        !denominator.is_zero(),
+        "decimal ratio with a zero denominator"
+    );
+    let mut remainder = numerator;
+    let mut quotient = Natural(Vec::new());
+    if remainder >= denominator {
+        let top = remainder.bits() - denominator.bits();
+        quotient.0 = vec![0u32; (top / 32 + 1) as usize];
+        let mut divisor = denominator.shl(top);
+        for bit in (0..=top).rev() {
+            if remainder >= divisor {
+                remainder.sub_assign(&divisor);
+                quotient.0[(bit / 32) as usize] |= 1u32 << (bit % 32);
+            }
+            divisor.shr1();
+        }
+        quotient.normalize();
+    }
+    let twice_remainder = remainder.shl(1);
+    let quotient_is_odd = quotient.0.first().is_some_and(|low| low & 1 == 1);
+    match twice_remainder.cmp(&denominator) {
+        Ordering::Greater => quotient.add_one(),
+        Ordering::Equal if quotient_is_odd => quotient.add_one(),
+        _ => quotient,
     }
 }
 
-fn to_u64(value: &BigUint) -> u64 {
-    let words = value.to_u64_digits();
-    assert!(words.len() <= 1, "rounded IEEE significand exceeds u64");
-    words.first().copied().unwrap_or(0)
+/// The value of a natural that the caller has bounded below `2^64`.
+fn to_u64(value: &Natural) -> u64 {
+    assert!(value.0.len() <= 2, "rounded IEEE significand exceeds u64");
+    value
+        .0
+        .iter()
+        .rev()
+        .fold(0u64, |acc, limb| (acc << 32) | u64::from(*limb))
 }
 
-fn floor_log2_ratio(numerator: &BigUint, denominator: &BigUint) -> i32 {
+fn floor_log2_ratio(numerator: &Natural, denominator: &Natural) -> i32 {
     let mut exponent = i32::try_from(numerator.bits()).expect("decimal numerator too large")
         - i32::try_from(denominator.bits()).expect("decimal denominator too large");
     let below_power = if exponent >= 0 {
-        numerator < &(denominator << exponent as usize)
+        numerator < &denominator.shl(exponent as u64)
     } else {
-        &(numerator << (-exponent) as usize) < denominator
+        &numerator.shl(u64::from(exponent.unsigned_abs())) < denominator
     };
     if below_power {
         exponent -= 1;
@@ -68,12 +235,13 @@ fn floor_log2_ratio(numerator: &BigUint, denominator: &BigUint) -> i32 {
     exponent
 }
 
-fn scaled_round(numerator: &BigUint, denominator: &BigUint, binary_shift: i32) -> BigUint {
-    if binary_shift >= 0 {
-        rounded_quotient(numerator << binary_shift as usize, denominator.clone())
+fn scaled_round(numerator: &Natural, denominator: &Natural, binary_shift: i32) -> u64 {
+    let shift = u64::from(binary_shift.unsigned_abs());
+    to_u64(&if binary_shift >= 0 {
+        rounded_quotient(numerator.shl(shift), denominator.clone())
     } else {
-        rounded_quotient(numerator.clone(), denominator << (-binary_shift) as usize)
-    }
+        rounded_quotient(numerator.clone(), denominator.shl(shift))
+    })
 }
 
 /// `None` only for text outside the finite decimal grammar, which [05-OP-31]
@@ -120,8 +288,8 @@ fn finite_decimal_ratio(text: &str) -> Option<DecimalValue> {
     digits.drain(..leading);
     let zero = DecimalValue::Ratio {
         negative,
-        numerator: BigUint::from(0u8),
-        denominator: BigUint::from(1u8),
+        numerator: Natural(Vec::new()),
+        denominator: Natural::from_u64(1),
     };
     if digits.is_empty() {
         return Some(zero);
@@ -146,19 +314,21 @@ fn finite_decimal_ratio(text: &str) -> Option<DecimalValue> {
     if adjusted_exponent < -400 {
         return Some(zero);
     }
-    let coefficient = BigUint::parse_bytes(digits.as_bytes(), 10)?;
+    let mut coefficient = Natural::from_decimal_digits(digits.as_bytes());
     // At most `DECIDING_DIGITS + 1` significant digits, with the leading one
     // within 400 places of the decimal point, bound the scale by 1,201.
     let power = u32::try_from(decimal_exponent.unsigned_abs())
         .expect("the significant-digit cap bounds the decimal scale");
-    let ten_to_power = BigUint::from(10u8).pow(power);
     Some(if decimal_exponent >= 0 {
+        coefficient.mul_pow10(power);
         DecimalValue::Ratio {
             negative,
-            numerator: coefficient * ten_to_power,
-            denominator: BigUint::from(1u8),
+            numerator: coefficient,
+            denominator: Natural::from_u64(1),
         }
     } else {
+        let mut ten_to_power = Natural::from_u64(1);
+        ten_to_power.mul_pow10(power);
         DecimalValue::Ratio {
             negative,
             numerator: coefficient,
@@ -213,14 +383,14 @@ pub(crate) fn round_decimal(
 /// largest finite value.
 pub(crate) fn ratio_to_ieee_bits(
     negative: bool,
-    numerator: BigUint,
-    denominator: BigUint,
+    numerator: Natural,
+    denominator: Natural,
     exponent_bits: u32,
     mantissa_bits: u32,
     bias: i32,
 ) -> Rounded {
     let sign = u64::from(negative) << (exponent_bits + mantissa_bits);
-    if numerator == BigUint::from(0u8) {
+    if numerator.is_zero() {
         return Rounded::Bits(sign);
     }
 
@@ -228,11 +398,8 @@ pub(crate) fn ratio_to_ieee_bits(
     let maximum_exponent = ((1u32 << exponent_bits) - 2) as i32 - bias;
     let mut exponent = floor_log2_ratio(&numerator, &denominator);
     if exponent >= minimum_exponent {
-        let mut significand = to_u64(&scaled_round(
-            &numerator,
-            &denominator,
-            mantissa_bits as i32 - exponent,
-        ));
+        let mut significand =
+            scaled_round(&numerator, &denominator, mantissa_bits as i32 - exponent);
         if significand == 1u64 << (mantissa_bits + 1) {
             significand >>= 1;
             exponent += 1;
@@ -245,11 +412,11 @@ pub(crate) fn ratio_to_ieee_bits(
         return Rounded::Bits(sign | (exponent_field << mantissa_bits) | fraction);
     }
 
-    let subnormal = to_u64(&scaled_round(
+    let subnormal = scaled_round(
         &numerator,
         &denominator,
         mantissa_bits as i32 - minimum_exponent,
-    ));
+    );
     Rounded::Bits(if subnormal == 1u64 << mantissa_bits {
         sign | (1u64 << mantissa_bits)
     } else {
@@ -260,6 +427,218 @@ pub(crate) fn ratio_to_ieee_bits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decimal_parse_reference as reference;
+    use num_bigint::BigUint;
+
+    /// The four storage widths as (exponent bits, mantissa bits, bias).
+    const WIDTHS: [(u32, u32, i32); 4] = [(11, 52, 1023), (8, 23, 127), (5, 10, 15), (8, 7, 127)];
+
+    /// A fixed-seed SplitMix64 stream, so every run draws the same cases.
+    struct Stream(u64);
+
+    impl Stream {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+
+        fn range(&mut self, low: i64, high: i64) -> i64 {
+            low + self.below((high - low + 1) as u64) as i64
+        }
+
+        fn digits(&mut self, count: usize) -> String {
+            (0..count)
+                .map(|_| char::from(b'0' + self.below(10) as u8))
+                .collect()
+        }
+    }
+
+    /// One conversion as comparable data: the bits, overflow with its sign,
+    /// or `None` for malformed text.
+    fn outcome(text: &str, width: (u32, u32, i32)) -> Option<Result<u64, bool>> {
+        round_decimal(text, width.0, width.1, width.2).map(|rounded| match rounded {
+            Rounded::Bits(bits) => Ok(bits),
+            Rounded::Overflow { negative } => Err(negative),
+        })
+    }
+
+    fn reference_outcome(text: &str, width: (u32, u32, i32)) -> Option<Result<u64, bool>> {
+        reference::round_decimal(text, width.0, width.1, width.2).map(|rounded| match rounded {
+            reference::Rounded::Bits(bits) => Ok(bits),
+            reference::Rounded::Overflow { negative } => Err(negative),
+        })
+    }
+
+    /// Bit-identical agreement with the num-bigint conversion at every width,
+    /// and with the standard library's correctly rounded parse at binary64
+    /// and binary32, where an overflow is that parse's signed infinity.
+    fn assert_agrees(text: &str) {
+        for width in WIDTHS {
+            assert_eq!(
+                outcome(text, width),
+                reference_outcome(text, width),
+                "`{text}` at width {width:?}"
+            );
+        }
+        if let Ok(value) = text.parse::<f64>() {
+            let expected = value.to_bits();
+            let got = match outcome(text, WIDTHS[0]) {
+                Some(Ok(bits)) => bits,
+                Some(Err(negative)) => (u64::from(negative) << 63) | 0x7ff0_0000_0000_0000,
+                None => panic!("`{text}` parses as f64 but not as a finite decimal"),
+            };
+            assert_eq!(got, expected, "`{text}` against str::parse::<f64>");
+        }
+        if let Ok(value) = text.parse::<f32>() {
+            let expected = u64::from(value.to_bits());
+            let got = match outcome(text, WIDTHS[1]) {
+                Some(Ok(bits)) => bits,
+                Some(Err(negative)) => (u64::from(negative) << 31) | 0x7f80_0000,
+                None => panic!("`{text}` parses as f32 but not as a finite decimal"),
+            };
+            assert_eq!(got, expected, "`{text}` against str::parse::<f32>");
+        }
+    }
+
+    #[test]
+    fn random_short_spellings_match_the_reference_and_the_standard_parse() {
+        let mut stream = Stream(0x2963_0001);
+        for _ in 0..20_000 {
+            let length = stream.range(1, 40) as usize;
+            let digits = stream.digits(length);
+            let point = stream.below(digits.len() as u64 + 1) as usize;
+            let sign = ["", "-", "+"][stream.below(3) as usize];
+            let mut text = format!("{sign}{}.{}", &digits[..point], &digits[point..]);
+            if stream.below(4) != 0 {
+                let exponent = stream.range(-380, 340);
+                let marker = if stream.below(2) == 0 { 'e' } else { 'E' };
+                text.push_str(&format!("{marker}{exponent}"));
+            }
+            assert_agrees(&text);
+        }
+    }
+
+    /// Every rounding boundary at every width, normal and subnormal: the
+    /// exact decimal spelling of a midpoint `m * 2^e` with `m` odd, and the
+    /// spellings just below and just above it.
+    #[test]
+    fn exact_midpoints_and_their_neighbours_match_the_reference() {
+        let mut stream = Stream(0x2963_0002);
+        for width in WIDTHS {
+            let (_, mantissa_bits, bias) = width;
+            let lowest = -(bias - 1) - mantissa_bits as i32 - 1;
+            let highest = bias - mantissa_bits as i32;
+            for _ in 0..1_500 {
+                let midpoint = (stream.next() >> (63 - mantissa_bits - 1)) | 1;
+                let exponent = stream.range(i64::from(lowest), i64::from(highest)) as i32;
+                let (coefficient, scale) = if exponent >= 0 {
+                    (BigUint::from(midpoint) << exponent as usize, 0i64)
+                } else {
+                    let power = exponent.unsigned_abs();
+                    (
+                        BigUint::from(midpoint) * BigUint::from(5u8).pow(power),
+                        i64::from(exponent),
+                    )
+                };
+                let padding = stream.range(1, 30) as u32;
+                let widened = &coefficient * BigUint::from(10u8).pow(padding);
+                let below = &widened - BigUint::from(1u8);
+                let above = &widened + BigUint::from(1u8);
+                let widened_scale = scale - i64::from(padding);
+                assert_agrees(&format!("{coefficient}e{scale}"));
+                assert_agrees(&format!("{below}e{widened_scale}"));
+                assert_agrees(&format!("{above}e{widened_scale}"));
+            }
+        }
+    }
+
+    #[test]
+    fn long_spellings_around_the_deciding_prefix_match_the_reference() {
+        let mut stream = Stream(0x2963_0003);
+        for _ in 0..600 {
+            let length = stream.range(700, 900) as usize;
+            let mut digits = stream.digits(length);
+            if stream.below(2) == 0 {
+                // A run of zeros or nines makes a midpoint-adjacent tail.
+                let run = if stream.below(2) == 0 { '0' } else { '9' };
+                let start = stream.range(1, 40) as usize;
+                digits.replace_range(
+                    start..length - 1,
+                    &run.to_string().repeat(length - 1 - start),
+                );
+            }
+            let exponent = stream.range(-1_200, 400);
+            assert_agrees(&format!("0.{digits}e{exponent}"));
+            assert_agrees(&format!("{digits}e{}", exponent - length as i64));
+        }
+    }
+
+    #[test]
+    fn extreme_exponents_and_zero_spellings_match_the_reference() {
+        for text in [
+            "0",
+            "-0",
+            "+0.000",
+            "0e999999999999999999999",
+            "-0.0e-5",
+            "4.9406564584124654e-324",
+            "2.4703282292062327e-324",
+            "2.4703282292062328e-324",
+            "2.2250738585072011e-308",
+            "2.2250738585072014e-308",
+            "1.7976931348623157e308",
+            "1.7976931348623158e308",
+            "1.401298464324817e-45",
+            "7.006492321624085e-46",
+            "3.4028235e38",
+            "3.4028236e38",
+            "6.103515625e-05",
+            "5.960464477539063e-08",
+            "65504",
+            "65520",
+            "65519.99",
+            "1e400",
+            "1e401",
+            "1e-400",
+            "1e-401",
+            "9.99e400",
+            "123456789012345678901234567890",
+            "1e-9223372036854775808",
+            "1e9223372036854775807",
+            "1e99999999999999999999",
+            ".5",
+            "5.",
+            "-.5e-3",
+        ] {
+            assert_agrees(text);
+        }
+    }
+
+    #[test]
+    fn random_malformed_spellings_match_the_reference() {
+        let alphabet = b"0123456789.eE+-x ";
+        let mut stream = Stream(0x2963_0004);
+        for _ in 0..20_000 {
+            let length = stream.below(12) as usize;
+            let text: String = (0..length)
+                .map(|_| char::from(alphabet[stream.below(alphabet.len() as u64) as usize]))
+                .collect();
+            for width in WIDTHS {
+                assert_eq!(
+                    outcome(&text, width),
+                    reference_outcome(&text, width),
+                    "`{text}`"
+                );
+            }
+        }
+    }
 
     #[test]
     fn midpoint_below_and_above_round_once_at_each_float_width() {

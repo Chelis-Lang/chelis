@@ -924,6 +924,7 @@ version = "0.18.12"
 dependencies = [
  "chelis-runtime",
  "chelis-runtime-bundle-macro",
+ "object",
  "serde_json",
  "sha2",
  "tempfile",
