@@ -1,4 +1,6 @@
 //! [04-INF-9]: checked key-builtin values retain their identity when applied.
+//! `split_keys` is applicable only by name (its static count does not travel
+//! with a value), so its aliases here are typed lambdas that call it.
 mod key_reference;
 mod ownership_support;
 
@@ -31,7 +33,7 @@ fn eval_main(source: &str) -> Result<Vec<String>, String> {
 
 #[test]
 fn typed_scalar_key_builtin_aliases_execute_in_eval_and_c() {
-    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  fork: key -> (key, key) = split_key\n  children: key -> i64 -> tensor[2, key] = split_keys\n  mix: key -> i64 -> key = fold_in\n  (left, right) = fork(seed(7i64))\n  (left, right, mix(seed(7i64), -1i64), children(seed(7i64), 2i64))\n}\n";
+    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  fork: key -> (key, key) = split_key\n  children: key -> tensor[2, key] = fn (k: key) -> split_keys(k, 2i64)\n  mix: key -> i64 -> key = fold_in\n  (left, right) = fork(seed(7i64))\n  (left, right, mix(seed(7i64), -1i64), children(seed(7i64)))\n}\n";
     let (left, right) = key_reference::split(7);
     let expected = [
         format!("key({left:016x})"),
@@ -67,7 +69,7 @@ fn typed_key_alias_rejects_wrong_input_before_lowering() {
 
 #[test]
 fn typed_tensor_key_builtin_aliases_execute_in_eval_and_c() {
-    let source = "def main() = {\n  seed: tensor[2, i64] -> tensor[2, key] = key_from_seed\n  fork: tensor[2, key] -> (tensor[2, key], tensor[2, key]) = split_key\n  children: tensor[2, key] -> i64 -> tensor[2, 3, key] = split_keys\n  mix: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n  seeds = to_tensor([1i64, -1i64])\n  (left, right) = fork(seed(seeds))\n  (left, right, mix(seed(seeds), seeds), children(seed(seeds), 3i64))\n}\n";
+    let source = "def main() = {\n  seed: tensor[2, i64] -> tensor[2, key] = key_from_seed\n  fork: tensor[2, key] -> (tensor[2, key], tensor[2, key]) = split_key\n  children: tensor[2, key] -> tensor[2, 3, key] = fn (k: tensor[2, key]) -> split_keys(k, 3i64)\n  mix: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n  seeds = to_tensor([1i64, -1i64])\n  (left, right) = fork(seed(seeds))\n  (left, right, mix(seed(seeds), seeds), children(seed(seeds)))\n}\n";
     let seeds = [1u64, u64::MAX];
     let left = seeds
         .iter()
@@ -172,7 +174,7 @@ fn typed_tensor_fold_alias_rejects_runtime_shape_mismatch() {
 
 #[test]
 fn typed_key_aliases_lower_to_their_dag_primitives() {
-    let source = "def main() = {\n  seed: tensor[2, i64] -> tensor[2, key] = key_from_seed\n  fork: tensor[2, key] -> (tensor[2, key], tensor[2, key]) = split_key\n  children: tensor[2, key] -> i64 -> tensor[2, 3, key] = split_keys\n  mix: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n  xs = to_tensor([1i64, 2i64])\n  (left, right) = fork(seed(xs))\n  (left, right, children(seed(xs), 3i64), mix(seed(xs), xs))\n}\n";
+    let source = "def main() = {\n  seed: tensor[2, i64] -> tensor[2, key] = key_from_seed\n  fork: tensor[2, key] -> (tensor[2, key], tensor[2, key]) = split_key\n  children: tensor[2, key] -> tensor[2, 3, key] = fn (k: tensor[2, key]) -> split_keys(k, 3i64)\n  mix: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n  xs = to_tensor([1i64, 2i64])\n  (left, right) = fork(seed(xs))\n  (left, right, children(seed(xs)), mix(seed(xs), xs))\n}\n";
     let outcome = run_source(PipelineRequest {
         source_kind: SourceKind::Surf,
         source,

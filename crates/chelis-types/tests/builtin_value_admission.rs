@@ -342,9 +342,27 @@ fn lexical_binding_with_a_builtin_name_is_an_ordinary_value() {
 fn carried_contract_builtins_stay_values() {
     assert_checks(
         "def main() = {\n  seed = key_from_seed\n  halves = split_key\n  folded = fold_in\n  \
-         children = split_keys\n  seeds = to_tensor([1i64, 2i64])\n  keys = seed(seeds)\n  \
+         children = fn (k: tensor[2, key]) -> split_keys(k, 2i64)\n  \
+         seeds = to_tensor([1i64, 2i64])\n  keys = seed(seeds)\n  \
          (left, right) = halves(keys)\n  \
-         (seed(7i64), seed(seeds), folded(left, seeds), children(right, 2i64))\n}\n",
+         (seed(7i64), seed(seeds), folded(left, seeds), children(right))\n}\n",
     );
     assert_checks("def g(xs: List[List[i64]]) -> List[i64] = map(len, xs)\n");
+}
+
+/// [05-OP-71]: a literal `split_keys` count is the appended extent and a
+/// static negative count is refused, rules the direct checker reads from the
+/// count expression. The transported relation sees only the count's type, so
+/// `split_keys` is applicable only by name; before chelis#3149's round 2 both
+/// aliases below checked clean.
+#[test]
+fn split_keys_alias_is_refused() {
+    assert_rejected_by_name(
+        "def g(k: key) -> tensor[5, key] = {\n  op = split_keys\n  op(k, 3i64)\n}\n",
+        "split_keys",
+    );
+    assert_rejected_by_name(
+        "def g(k: key) -> tensor[1, key] = {\n  op = split_keys\n  op(k, -1i64)\n}\n",
+        "split_keys",
+    );
 }

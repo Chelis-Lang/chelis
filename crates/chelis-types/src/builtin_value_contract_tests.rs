@@ -7,7 +7,9 @@
 //! operand dtype, the declared result (its dtype and extent), and authored
 //! generic binders, bounded and unbounded; each operand is also read again
 //! after the call and the call is repeated, so consumption and borrowing are
-//! compared, and the verdict is the type checker's and the linearity pass's
+//! compared; each scalar operand is also spelled as a literal, a negative
+//! literal and a `let`-bound literal, so a rule that reads a static operand's
+//! value is compared, and the verdict is the type checker's and the linearity pass's
 //! together. Effects are charged from one table for both routes
 //! (`builtin_call_effect`; chelis-effects locks that per builtin). Two
 //! properties follow:
@@ -276,9 +278,40 @@ fn witness_bodies(result_type: &str, param_types: &[String]) -> Vec<(String, Vec
     out
 }
 
-/// A function whose block runs `lines`, preceded by `prelude` when given.
-fn block(header: &str, prelude: Option<&str>, lines: &[String], call: &str) -> String {
-    let mut body: Vec<String> = prelude.map(str::to_string).into_iter().collect();
+/// Static spellings of a scalar operand: a literal, a negative literal, and a
+/// `let`-bound literal. A direct call may read such an operand's value (a
+/// static count, axis or bound); a value route sees only its type.
+fn static_operands(ty: &str) -> Vec<String> {
+    match ty {
+        "i32" | "i64" => vec![format!("3{ty}"), format!("-1{ty}")],
+        "f32" | "f64" => vec![format!("2.0{ty}"), format!("-1.0{ty}")],
+        "bool" => vec!["true".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// The operand spellings for one instantiation, as `(prelude lines, argument
+/// list)`: every operand a parameter, then each scalar operand in turn
+/// replaced by a literal, a negative literal, or a `let`-bound literal.
+fn argument_variants(param_types: &[String]) -> Vec<(Vec<String>, String)> {
+    let parameters: Vec<String> = (0..param_types.len()).map(|i| format!("a{i}")).collect();
+    let mut out = vec![(Vec::new(), parameters.join(", "))];
+    for (index, ty) in param_types.iter().enumerate() {
+        for literal in static_operands(ty) {
+            let mut inline = parameters.clone();
+            inline[index] = literal.clone();
+            out.push((Vec::new(), inline.join(", ")));
+            let mut bound = parameters.clone();
+            bound[index] = "s".to_string();
+            out.push((vec![format!("s = {literal}")], bound.join(", ")));
+        }
+    }
+    out
+}
+
+/// A function whose block runs `prelude` and then `lines`.
+fn block(header: &str, prelude: &[String], lines: &[String], call: &str) -> String {
+    let mut body: Vec<String> = prelude.to_vec();
     body.extend(lines.iter().map(|line| line.replace("CALL", call)));
     match body.as_slice() {
         [only] => format!("{header} = {only}\n"),
@@ -308,6 +341,8 @@ fn compare(name: &str, scheme: &Scheme, admitted: bool) -> Comparison {
     let Type::Fn(params, result) = &scheme.body else {
         return comparison;
     };
+    // Distinct assignments can render the same witness; each is checked once.
+    let mut seen = std::collections::BTreeSet::new();
     for picks in assignments(params, result) {
         let Some(param_types) = params
             .iter()
@@ -332,20 +367,41 @@ fn compare(name: &str, scheme: &Scheme, admitted: bool) -> Comparison {
             .enumerate()
             .map(|(index, ty)| format!("a{index}: {ty}"))
             .collect();
-        let arguments: Vec<String> = (0..param_types.len()).map(|i| format!("a{i}")).collect();
-        let call = arguments.join(", ");
+        let mut witnesses: Vec<(String, Vec<String>, Vec<String>, String)> = Vec::new();
         for (declared, lines) in witness_bodies(&result_type, &param_types) {
-            let header = format!("def g{binders}({}) -> {declared}", signature.join(", "));
-            let direct = block(&header, None, &lines, &format!("{name}({call})"));
-            let through_value = if admitted {
-                block(
-                    &header,
-                    Some(&format!("op = {name}")),
-                    &lines,
-                    &format!("op({call})"),
-                )
+            witnesses.push((declared, lines, Vec::new(), String::new()));
+        }
+        for (prelude, call) in argument_variants(&param_types).into_iter().skip(1) {
+            for declared in declared_results(&result_type) {
+                witnesses.push((
+                    declared,
+                    vec!["CALL".to_string()],
+                    prelude.clone(),
+                    call.clone(),
+                ));
+            }
+        }
+        let parameter_call: String = (0..param_types.len())
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (declared, lines, prelude, call) in witnesses {
+            let call = if call.is_empty() && prelude.is_empty() {
+                parameter_call.clone()
             } else {
-                block(&header, None, &lines, &format!("{ROUTE}({call})"))
+                call
+            };
+            let header = format!("def g{binders}({}) -> {declared}", signature.join(", "));
+            let direct = block(&header, &prelude, &lines, &format!("{name}({call})"));
+            if !seen.insert(direct.clone()) {
+                continue;
+            }
+            let through_value = if admitted {
+                let mut value_prelude = vec![format!("op = {name}")];
+                value_prelude.extend(prelude.iter().cloned());
+                block(&header, &value_prelude, &lines, &format!("op({call})"))
+            } else {
+                block(&header, &prelude, &lines, &format!("{ROUTE}({call})"))
             };
             let (Some(direct_ok), Some(value_ok)) =
                 (verdict(&env, &direct), verdict(&env, &through_value))

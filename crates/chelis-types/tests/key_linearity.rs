@@ -85,6 +85,8 @@ fn tensor_key_contracts_survive_checker_context_serialization() {
 
 /// #2709, [04-INF-9] and [05-OP-69]..[05-OP-72]: a builtin alias
 /// retains its closed scalar/tensor contract without a new type ascription.
+/// `split_keys` reads its static count, which a value does not carry, so it
+/// is applicable only by name (chelis#3149) and its alias is a typed lambda.
 /// These acceptance stubs precede the representation repair.
 #[test]
 fn key_builtin_aliases_retain_scalar_and_tensor_contracts() {
@@ -115,7 +117,7 @@ fn key_builtin_aliases_retain_scalar_and_tensor_contracts() {
             (
                 "children alias",
                 format!(
-                    "def good(k: {key_ty}) -> {child_ty} = {{\n  op = split_keys\n  op(k, 3i64)\n}}\n"
+                    "def good(k: {key_ty}) -> {child_ty} = {{\n  op = fn (j: {key_ty}) -> split_keys(j, 3i64)\n  op(k)\n}}\n"
                 ),
             ),
             (
@@ -281,7 +283,7 @@ fn tensor_key_alias_results_retain_operation_contracts() {
         for source in [
             "def good(s: tensor[2, i64]) -> tensor[2, key] = { op: (tensor[2, i64] -> tensor[2, key]) = key_from_seed\n result = op(s)\n result }",
             "def good(k: tensor[2, key]) -> (tensor[2, key], tensor[2, key]) = { op: (tensor[2, key] -> (tensor[2, key], tensor[2, key])) = split_key\n result = op(k)\n result }",
-            "def good(k: tensor[2, key]) -> tensor[2, *, key] = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i64)\n result }",
+            "def good(k: tensor[2, key]) -> tensor[2, 3, key] = { op: tensor[2, key] -> tensor[2, 3, key] = fn (j: tensor[2, key]) -> split_keys(j, 3i64)\n result = op(k)\n result }",
             "def good(k: tensor[2, key], n: tensor[2, i64]) -> tensor[2, key] = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
         ] {
             context_verdict(context, source)
@@ -290,11 +292,11 @@ fn tensor_key_alias_results_retain_operation_contracts() {
         for source in [
             "def bad(s: tensor[2, i64]) -> tensor[3, key] = { op: (tensor[2, i64] -> tensor[2, key]) = key_from_seed\n result = op(s)\n result }",
             "def bad(k: tensor[2, key]) -> (tensor[2, key], tensor[3, key]) = { op: (tensor[2, key] -> (tensor[2, key], tensor[2, key])) = split_key\n result = op(k)\n result }",
-            "def bad(k: tensor[2, key]) -> tensor[3, *, key] = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i64)\n result }",
+            "def bad(k: tensor[2, key]) -> tensor[3, 3, key] = { op: tensor[2, key] -> tensor[2, 3, key] = fn (j: tensor[2, key]) -> split_keys(j, 3i64)\n result = op(k)\n result }",
             "def bad(k: tensor[2, key], n: tensor[3, i64]) = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
             "def bad(k: tensor[2, key], n: tensor[2, i64]) -> tensor[3, key] = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
             "def bad(k: tensor[2, key]) = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, 1i64)\n result }",
-            "def bad(k: tensor[2, key]) = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i32)\n result }",
+            "def bad(k: tensor[2, key]) = { op: tensor[2, key] -> tensor[2, 3, key] = fn (j: tensor[2, key]) -> split_keys(j, 3i32)\n result = op(k)\n result }",
         ] {
             assert!(
                 context_verdict(context, source).is_err(),

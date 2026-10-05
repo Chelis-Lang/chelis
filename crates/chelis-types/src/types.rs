@@ -1018,6 +1018,27 @@ pub enum CollectionConstraint {
 }
 
 impl CollectionConstraint {
+    /// Whether deciding this relation at a value's application sees every
+    /// operand fact the direct call's checker reads. `concat` receives the
+    /// call's axis expression and visible list elements as evidence. The
+    /// direct `split_keys` checker reads its count expression: a literal count
+    /// is the appended extent and a static negative count is refused
+    /// ([05-OP-71]). The transported relation sees only the count's type, so
+    /// it does not carry that rule and `split_keys` is applicable only by
+    /// name ([04-INF-9]). The other relations read operand types alone.
+    pub fn transports_static_operand_rule(&self) -> bool {
+        match self {
+            Self::SplitKeys { .. } => false,
+            Self::Len { .. }
+            | Self::Index { .. }
+            | Self::Append { .. }
+            | Self::Concat { .. }
+            | Self::KeyFromSeed { .. }
+            | Self::SplitKey { .. }
+            | Self::FoldIn { .. } => true,
+        }
+    }
+
     /// The builtin this constraint belongs to, for diagnostics.
     pub fn builtin(&self) -> &'static str {
         match self {

@@ -2518,13 +2518,19 @@ pub fn builtin_call_effect(name: &str) -> Option<Effect> {
 /// operation contract travels with the value. Either the reviewed
 /// declaration says the scheme states that contract completely
 /// (`GenericAccepted`), or the scheme carries the operation's checked
-/// operand/result relation: a collection or key relation (`constraints`) or
-/// a result-origin equation (`result_origin`, as `fold` and `scan` carry).
+/// operand/result relation: a collection or key relation (`constraints`)
+/// that sees every operand fact the direct checker reads, or a result-origin
+/// equation (`result_origin`, as `fold` and `scan` carry).
 /// Every other builtin owes a rule that only its direct application runs, so
 /// it is applicable only by name until its scheme carries that rule.
 pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bool {
+    let relation_carried = !scheme.constraints.is_empty()
+        && scheme
+            .constraints
+            .iter()
+            .all(CollectionConstraint::transports_static_operand_rule);
     matches!(decl.inference, InferenceDisposition::GenericAccepted { .. })
-        || !scheme.constraints.is_empty()
+        || relation_carried
         || scheme.result_origin.is_some()
 }
 
