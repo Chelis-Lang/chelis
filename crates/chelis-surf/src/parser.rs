@@ -2094,9 +2094,30 @@ impl Parser {
     }
 
     fn check_pipe_grouping(&self, start: usize, end: usize) -> Result<(), ParseError> {
+        fn binary_symbol(kind: &TokenKind) -> Option<&'static str> {
+            Some(match kind {
+                TokenKind::Plus => "+",
+                TokenKind::Minus => "-",
+                TokenKind::Star => "*",
+                TokenKind::Slash => "/",
+                TokenKind::Percent => "%",
+                TokenKind::EqEq => "==",
+                TokenKind::BangEq => "!=",
+                TokenKind::Lt => "<",
+                TokenKind::Gt => ">",
+                TokenKind::LtEq => "<=",
+                TokenKind::GtEq => ">=",
+                TokenKind::AmpAmp => "&&",
+                TokenKind::PipePipe => "||",
+                _ => return None,
+            })
+        }
+
         let mut index = start;
         let mut pipe = None;
+        let mut first_pipe = None;
         let mut first_mixed = None;
+        let mut pipe_before_mixed = None;
         while index < end {
             let token = &self.tokens[index];
             if self.closing_delimiters[index] < end {
@@ -2107,6 +2128,7 @@ impl Parser {
             index += 1;
             match token.kind {
                 TokenKind::Pipe => {
+                    first_pipe.get_or_insert(token_index);
                     pipe = Some(token_index);
                 }
                 TokenKind::Plus
@@ -2129,70 +2151,82 @@ impl Parser {
                 | TokenKind::If
                 | TokenKind::Match
                 | TokenKind::Fn => {
-                    first_mixed.get_or_insert(token_index);
+                    if first_mixed.is_none() {
+                        first_mixed = Some(token_index);
+                        pipe_before_mixed = pipe;
+                    }
                 }
-                TokenKind::With if self.starts_record_update(token_index) => {
-                    first_mixed.get_or_insert(token_index);
+                TokenKind::With
+                    if self.starts_record_update(token_index) && first_mixed.is_none() =>
+                {
+                    first_mixed = Some(token_index);
+                    pipe_before_mixed = pipe;
                 }
                 _ => {}
             }
         }
-        if let (Some(mixed), Some(pipe)) = (first_mixed, pipe) {
-            let before_pipe = mixed < pipe;
+        if let (Some(mixed), Some(first_pipe)) = (first_mixed, first_pipe) {
+            let before_pipe = mixed < first_pipe;
+            let stage_start = pipe_before_mixed.unwrap_or(first_pipe) + 1;
+            let stage_end = (stage_start..end)
+                .find(|&index| self.tokens[index].kind == TokenKind::Pipe)
+                .unwrap_or(end);
+            let simple_left = first_pipe - start == 3;
+            let simple_stage = stage_end - stage_start == 3;
             let hint = match &self.tokens[mixed].kind {
-                TokenKind::Dot if before_pipe => {
-                    if self.tokens[mixed + 1..pipe]
-                        .iter()
-                        .any(|token| token.kind == TokenKind::LParen)
-                    {
-                        "write `(M.f(x)) |> g`"
+                TokenKind::Dot if before_pipe && simple_left => "write `(r.f) |> g`".to_string(),
+                TokenKind::Dot if before_pipe =>
+                    "parenthesize the entire left operand before `|>`, including its calls and operators".to_string(),
+                TokenKind::Dot if simple_stage => {
+                    if matches!(self.tokens.get(mixed + 1).map(|token| &token.kind), Some(TokenKind::Int(_))) {
+                        "write `x |> (f.1)`".to_string()
                     } else {
-                        "write `(r.f) |> g`"
+                        "write `x |> (M.f)`".to_string()
                     }
                 }
-                TokenKind::Dot => {
-                    if matches!(
-                        self.tokens.get(mixed + 1).map(|token| &token.kind),
-                        Some(TokenKind::Int(_))
-                    ) {
-                        "write `x |> (f.1)`"
-                    } else {
-                        "write `x |> (M.f)`"
-                    }
-                }
+                TokenKind::Dot =>
+                    "parenthesize the entire pipe stage, including every call and field or tuple access".to_string(),
                 TokenKind::If if before_pipe => {
-                    if self.tokens[pipe + 1..end]
-                        .iter()
-                        .any(|token| token.kind == TokenKind::Then)
-                    {
-                        "write `if (c |> f) then a else b`"
-                    } else if self.tokens[pipe + 1..end]
-                        .iter()
-                        .any(|token| token.kind == TokenKind::Else)
-                    {
-                        "write `if c then (x |> f) else y`"
+                    if self.tokens[first_pipe + 1..end].iter().any(|token| token.kind == TokenKind::Then) {
+                        "parenthesize the complete pipe in the condition".to_string()
+                    } else if self.tokens[first_pipe + 1..end].iter().any(|token| token.kind == TokenKind::Else) {
+                        "parenthesize the complete pipe in the `then` branch".to_string()
                     } else {
-                        "write `(if c then a else b) |> f` or `if c then a else (b |> f)`"
+                        "parenthesize the entire conditional before `|>`, or the complete pipe in its `else` branch".to_string()
                     }
                 }
-                TokenKind::Fn if before_pipe => "write `fn (v) -> (v |> f)`",
-                TokenKind::Fn => "write `x |> (fn (v) -> v + y)`",
-                TokenKind::Match => "parenthesize the pipe inside the match scrutinee or arm",
-                TokenKind::Colon if before_pipe => "write `(x: T) |> f`",
-                TokenKind::Colon => "write `x |> (f: T)`",
-                TokenKind::With if before_pipe => "write `(r with { a: x }) |> f`",
-                TokenKind::With => "write `x |> (r with { a: f })`",
-                TokenKind::Minus if mixed == start => "write `(-x) |> f`",
-                TokenKind::Bang if mixed == start => "write `(!x) |> f`",
-                TokenKind::Amp if mixed == start => "write `(&x) |> f`",
-                _ => "write `(a + b) |> f` or `a + (b |> f)`",
+                TokenKind::If => "parenthesize the entire conditional pipe stage".to_string(),
+                TokenKind::Fn if before_pipe => "parenthesize the complete pipe in the lambda body".to_string(),
+                TokenKind::Fn => "parenthesize the entire lambda pipe stage".to_string(),
+                TokenKind::Match => "parenthesize the complete pipe in the match scrutinee or arm".to_string(),
+                TokenKind::Colon if before_pipe => "parenthesize the entire ascribed left operand before `|>`".to_string(),
+                TokenKind::Colon => "parenthesize the entire ascribed pipe stage".to_string(),
+                TokenKind::With if before_pipe => "parenthesize the entire record-update left operand before `|>`".to_string(),
+                TokenKind::With => "parenthesize the entire record-update pipe stage".to_string(),
+                TokenKind::Minus | TokenKind::Bang | TokenKind::Amp if mixed == start =>
+                    "parenthesize the entire unary left operand before `|>`".to_string(),
+                kind if let Some(operator) = binary_symbol(kind) => {
+                    if before_pipe && simple_left {
+                        format!("write `(a {operator} b) |> f` or `a {operator} (b |> f)`")
+                    } else if before_pipe {
+                        "parenthesize the entire left operand before `|>`, or the complete pipe within an operator operand".to_string()
+                    } else if simple_stage {
+                        format!("write `(x |> f) {operator} y` or `x |> (f {operator} y)`")
+                    } else {
+                        "parenthesize the complete pipe before the following operator, or the entire pipe stage".to_string()
+                    }
+                }
+                _ if before_pipe => "parenthesize the entire left operand before `|>`".to_string(),
+                _ => "parenthesize the entire pipe stage".to_string(),
             };
             return Err(ParseError::Expected {
                 expected: format!(
                     "explicit grouping around pipe operands mixed with operators or open-ended forms; {hint}"
                 ),
                 found: "ungrouped pipe combination".into(),
-                offset: self.tokens[pipe].span.offset,
+                offset: self.tokens[pipe_before_mixed.unwrap_or(first_pipe)]
+                    .span
+                    .offset,
             });
         }
         Ok(())
