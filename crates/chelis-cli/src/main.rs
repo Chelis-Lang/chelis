@@ -4235,26 +4235,11 @@ fn cmd_build(
     let pruning_fired = pruned_deep_exprs.len() != selected_len;
 
     // Loose C sources preserve authored host-library definitions when the
-    // post-drop program needs the host backend. Do not let a removed eval-only
-    // definition select this path.
-    let post_drop_checked =
-        if prepared.is_none() && target == BuildTarget::C && pruning_fired && eval_drop_fired {
-            Some(
-                checked_compilation_with_effects_typed(&eval_pruned_deep_exprs).map_err(|e| {
-                    render_build_check_failure(
-                        &e,
-                        prepared.is_none().then_some((file, source.as_str())),
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
-    let preserve_host_library_surface =
-        prepared.is_none() && target == BuildTarget::C && pruning_fired && {
-            let checked = post_drop_checked.as_ref().unwrap_or(&selected_checked);
-            execution_host_requires_host_backend(checked.program(), &entry_defs)?
-        };
+    // program needs the host backend.
+    let preserve_host_library_surface = prepared.is_none()
+        && target == BuildTarget::C
+        && pruning_fired
+        && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
     let deep_exprs = if preserve_host_library_surface {
         full_deep_exprs
     } else {
