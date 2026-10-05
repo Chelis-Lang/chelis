@@ -829,10 +829,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "and",
     "or",
     "not",
-    "erf",
-    "erfc",
-    "gelu_tanh",
-    "standard_normal_cdf",
     "softmax",
     "reduce_window_max",
     "reduce_window_min",
@@ -1252,7 +1248,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "erf",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1260,7 +1258,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "erfc",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1288,7 +1288,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "gelu_tanh",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1296,7 +1298,9 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "standard_normal_cdf",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
