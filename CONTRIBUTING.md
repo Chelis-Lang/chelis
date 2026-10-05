@@ -21,7 +21,3 @@ Please report security vulnerabilities privately using GitHub's **Report a vulne
 ## Maintainer guidance
 
 Setup, checks, and development procedures are in the [maintainer guide](docs/maintainer_guide.md).
-
-### Declarative Naming
-
-The [declarative naming rules](docs/maintainer_guide.md#declarative-naming) are in the maintainer guide.
