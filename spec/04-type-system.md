@@ -539,7 +539,16 @@ scrutinee type at all.
 > guard, drop the arm, or select an arm whose guard is `false`.
 
 > **[04-PAT-3]** A constructor pattern SHALL contain exactly one sub-pattern
-> for each positional field of its resolved variant, in declaration order.
+> for each field of its resolved variant, in declaration order: the `i`th
+> sub-pattern matches the variant's `i`th declared field, whether the variant
+> declares its fields positionally or by name. For a variant with named
+> fields, the field a sub-pattern matches does not depend on the order in
+> which the record construction that produced the scrutinee wrote its fields;
+> written order governs only the evaluation order of the field expressions
+> (`spec/03-deep-syntax.md` §4.4). Every execution lane, and every derivative
+> a lane computes through the match, SHALL agree on that correspondence; a
+> lane that cannot establish the declared field order of a scrutinee SHALL
+> reject the program with a diagnostic rather than match by any other order.
 > A different count is an `ArityMismatch` type error at that pattern, naming
 > the constructor, the expected field count, and the supplied sub-pattern
 > count. This applies at every pattern depth and checker ingress, before
