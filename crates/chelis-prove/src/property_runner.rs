@@ -1209,6 +1209,18 @@ fn try_envelope_lane(
     {
         return None;
     }
+    // chelis#3236 fail-closed post-check: the residual extends the original
+    // declarations, and no abstraction variable it adds may coincide with a
+    // name the original goal already uses (it would alias that variable and
+    // hand it the envelope bounds). Decline rather than solve such a goal.
+    let original_names = NameSupply::for_property(smt_prop);
+    if !res_prop.variables.starts_with(&smt_prop.variables)
+        || res_prop.variables[smt_prop.variables.len()..]
+            .iter()
+            .any(|(name, _)| original_names.is_taken(name))
+    {
+        return None;
+    }
 
     // Solve the residual over reals. Only a genuine PROOF is accepted.
     let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines()
@@ -2179,22 +2191,119 @@ struct LoweredSurfTierBGoal {
     grad_diagnostic: Option<String>,
 }
 
+/// Everything one Tier B lowering pass contributes to the solver goal: the
+/// postcondition, the property preconditions, the assumptions the contract
+/// abstraction injects, the operands of every abstracted call, and the
+/// symbols the abstraction minted (in minting order).
+#[derive(Debug, Clone, PartialEq)]
+struct TierBGoalImage {
+    postcondition: crate::solver::SmtExpr,
+    preconditions: Vec<crate::solver::SmtExpr>,
+    contract_preconditions: Vec<crate::solver::SmtExpr>,
+    contract_operands: Vec<crate::solver::SmtExpr>,
+    minted: Vec<String>,
+}
+
+impl TierBGoalImage {
+    /// The image of a pass whose postcondition and every precondition
+    /// lowered; `None` otherwise (such a goal is never solved).
+    fn of(lowered: &LoweredSurfTierBGoal) -> Option<Self> {
+        Some(Self {
+            postcondition: lowered.postcondition.clone()?,
+            preconditions: lowered.preconditions.clone()?,
+            contract_preconditions: lowered.abstraction.preconditions(),
+            contract_operands: lowered.abstraction.recorded_operands(),
+            minted: lowered
+                .abstraction
+                .variables()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
+        })
+    }
+
+    fn exprs(&self) -> impl Iterator<Item = &crate::solver::SmtExpr> {
+        std::iter::once(&self.postcondition)
+            .chain(&self.preconditions)
+            .chain(&self.contract_preconditions)
+            .chain(&self.contract_operands)
+    }
+}
+
+/// Fail-closed check that the final pass's minted symbols captured no
+/// user-origin name (chelis#3236).
+///
+/// Lowering never reads a minted symbol by name, so the two passes must be
+/// identical up to renaming each final symbol back to its discovery
+/// placeholder. A final symbol that coincides with a user name also renames
+/// that user occurrence, which breaks the equality; a binder spelled like a
+/// final symbol is caught directly. Either way the goal is rejected rather
+/// than solved, so an incomplete reserved set can never yield a proof.
+fn check_contract_symbols_fresh(
+    params: &[Param],
+    discovery: &TierBGoalImage,
+    fresh: &TierBGoalImage,
+) -> Result<(), String> {
+    let captured = || {
+        "contract abstraction minted a solver symbol that coincides with a name the property \
+         already uses (chelis#3236); the goal is not solved"
+            .to_string()
+    };
+    if fresh.minted.len() != discovery.minted.len()
+        || params
+            .iter()
+            .any(|param| fresh.minted.contains(&param.name))
+    {
+        return Err(captured());
+    }
+    let renaming: BTreeMap<String, crate::solver::SmtExpr> = fresh
+        .minted
+        .iter()
+        .zip(&discovery.minted)
+        .map(|(fresh, placeholder)| {
+            (
+                fresh.clone(),
+                crate::solver::SmtExpr::Var(placeholder.clone()),
+            )
+        })
+        .collect();
+    let rename = |exprs: &[crate::solver::SmtExpr]| -> Vec<crate::solver::SmtExpr> {
+        exprs
+            .iter()
+            .map(|expr| substitute_smt_vars(expr, &renaming))
+            .collect()
+    };
+    let renamed = TierBGoalImage {
+        postcondition: substitute_smt_vars(&fresh.postcondition, &renaming),
+        preconditions: rename(&fresh.preconditions),
+        contract_preconditions: rename(&fresh.contract_preconditions),
+        contract_operands: rename(&fresh.contract_operands),
+        minted: discovery.minted.clone(),
+    };
+    if &renamed != discovery {
+        return Err(captured());
+    }
+    Ok(())
+}
+
 /// Lower a Surf property for Tier B with contract-abstraction symbols fresh
 /// against every other name in the goal (chelis#3236).
 ///
 /// Lowering never reads a minted symbol by name, so a discovery pass with
 /// placeholder spellings yields exactly the goal's other names: the property
-/// binders and every free or bound name in the lowered postcondition and
-/// preconditions. When that pass minted any symbol, the goal is lowered again
-/// with the `__contract_std_*` symbols made fresh against those names, so a
-/// binder or module name spelled like a contract symbol stays its own
-/// variable instead of inheriting the contract's assumptions.
+/// binders and every name in the lowered postcondition and preconditions, in
+/// the assumptions the abstraction injects, and in the operands of every
+/// abstracted call (removed from the body, but re-emitted by the
+/// monotonicity assumptions). When that pass minted any symbol, the goal is
+/// lowered again with the `__contract_std_*` symbols made fresh against all
+/// of those names, and [`check_contract_symbols_fresh`] rejects the goal if
+/// the result still captured one.
 fn lower_surf_tier_b_goal(
     decls: &[Decl],
     trusted_contract_decls: &[Decl],
     property: &Property,
     contracts: &[String],
-) -> LoweredSurfTierBGoal {
+) -> Result<LoweredSurfTierBGoal, String> {
     let discovery = lower_surf_tier_b_pass(
         decls,
         trusted_contract_decls,
@@ -2203,28 +2312,30 @@ fn lower_surf_tier_b_goal(
         ContractSymbols::Discovery,
     );
     if !discovery.abstraction.minted_symbols() {
-        return discovery;
+        return Ok(discovery);
     }
-    let (Some(postcondition), Some(preconditions)) =
-        (&discovery.postcondition, &discovery.preconditions)
-    else {
-        return discovery;
+    let Some(discovery_image) = TierBGoalImage::of(&discovery) else {
+        return Ok(discovery);
     };
     let mut names = NameSupply::new();
     for param in &property.params {
         names.reserve(&param.name);
     }
-    names.reserve_expr(postcondition);
-    for precondition in preconditions {
-        names.reserve_expr(precondition);
+    for expr in discovery_image.exprs() {
+        names.reserve_expr(expr);
     }
-    lower_surf_tier_b_pass(
+    let fresh = lower_surf_tier_b_pass(
         decls,
         trusted_contract_decls,
         property,
         contracts,
         ContractSymbols::Fresh(names),
-    )
+    );
+    let fresh_image = TierBGoalImage::of(&fresh).ok_or_else(|| {
+        "contract abstraction lowered differently on its second pass (chelis#3236)".to_string()
+    })?;
+    check_contract_symbols_fresh(&property.params, &discovery_image, &fresh_image)?;
+    Ok(fresh)
 }
 
 fn lower_surf_tier_b_pass(
@@ -2288,7 +2399,23 @@ fn try_surf_tier_b(
     seed: u64,
 ) -> Option<PropertyOutcome> {
     let contracts = expanded_contracts(property);
-    let lowered = lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts);
+    let lowered = match lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts)
+    {
+        Ok(lowered) => lowered,
+        Err(reason) => {
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+    };
     let LoweredSurfTierBGoal {
         postcondition,
         preconditions,

@@ -219,3 +219,53 @@ def observations() -> tensor[3, f32] = (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f
     assert_eq!(control["status"], "passed", "{control}\n{transcript}");
     assert_eq!(control["proof_tier"], "smt", "{control}\n{transcript}");
 }
+
+/// Red-team F1: the colliding module name occurs only as an abstracted
+/// `normal_cdf` argument. `renamed` is the same claim over an ordinary name.
+const CALL_ARGUMENT_COLLISION: &str = r#"module Probe.P0
+import Std.Contracts (normal_cdf)
+__contract_std_normal_cdf_0 = 5.0f64
+k = 5.0f64
+@property forged forall(x: f64) where x >= 1.0f64:
+  (normal_cdf(__contract_std_normal_cdf_0) <= normal_cdf(x))
+  with contract = "std.normal_cdf.range"
+  with contract = "std.normal_cdf.monotonicity"
+@property renamed forall(x: f64) where x >= 1.0f64:
+  (normal_cdf(k) <= normal_cdf(x))
+  with contract = "std.normal_cdf.range"
+  with contract = "std.normal_cdf.monotonicity"
+"#;
+
+/// The same shape at the second minted index.
+const CALL_ARGUMENT_COLLISION_INDEX_ONE: &str = r#"module Probe.P0b
+import Std.Contracts (normal_cdf)
+__contract_std_normal_cdf_1 = 5.0f64
+@property forged_one forall(x: f64) where x >= 1.0f64:
+  (normal_cdf(x) >= normal_cdf(__contract_std_normal_cdf_1))
+  with contract = "std.normal_cdf.range"
+  with contract = "std.normal_cdf.monotonicity"
+"#;
+
+#[test]
+fn normal_cdf_call_argument_collision_matches_the_renamed_control() {
+    // The claim is false (N(1.77) < N(5)); x >= 1 makes it so.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("call_argument.ch");
+    write(&path, CALL_ARGUMENT_COLLISION);
+    let index_one = dir.path().join("call_argument_index_one.ch");
+    write(&index_one, CALL_ARGUMENT_COLLISION_INDEX_ONE);
+    for tier in [AUTO, SMT_ONLY] {
+        let (records, transcript) = prove(&path, tier);
+        let forged = record(&records, "forged", &transcript);
+        let renamed = record(&records, "renamed", &transcript);
+        assert_not_proved(forged, &transcript);
+        assert_not_proved(renamed, &transcript);
+        assert_eq!(
+            forged["status"], renamed["status"],
+            "a name spelled like a contract symbol behaves like any other name\n{transcript}"
+        );
+
+        let (records, transcript) = prove(&index_one, tier);
+        assert_not_proved(record(&records, "forged_one", &transcript), &transcript);
+    }
+}

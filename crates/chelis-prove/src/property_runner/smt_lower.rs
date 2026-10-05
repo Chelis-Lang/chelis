@@ -201,6 +201,20 @@ impl ContractAbstraction {
             .collect()
     }
 
+    /// The user-origin operand of every abstracted call: each `normal_cdf`
+    /// argument and each quantile `q`. Abstraction removes the whole call
+    /// from the lowered body, yet [`Self::preconditions`] re-emits these
+    /// operands (the monotonicity implications), so their names belong to the
+    /// goal even though no lowered body or precondition shows them
+    /// (chelis#3236).
+    pub(super) fn recorded_operands(&self) -> Vec<SmtExpr> {
+        self.normal_cdf_calls
+            .iter()
+            .map(|call| call.arg.clone())
+            .chain(self.quantile_calls.iter().map(|call| call.q.clone()))
+            .collect()
+    }
+
     pub(super) fn preconditions(&self) -> Vec<SmtExpr> {
         let mut out = Vec::new();
         if self.normal_cdf_range {
