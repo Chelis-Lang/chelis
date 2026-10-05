@@ -87,8 +87,10 @@ fn survivors() {
         Some(positions) => {
             assert!(axis < rank);
             assert_eq!(positions.len(), rank - 1);
-            for (k, position) in positions.iter().enumerate() {
-                assert_eq!(*position, if k < axis { k } else { k + 1 });
+            if !positions.is_empty() {
+                let k: usize = kani::any();
+                kani::assume(k < positions.len());
+                assert_eq!(positions[k], if k < axis { k } else { k + 1 });
             }
         }
     }
@@ -109,8 +111,10 @@ fn inverse() {
         Some(result) => {
             assert!(permutation_model(axes, rank));
             assert_eq!(result.len(), rank);
-            for (i, axis) in axes.iter().enumerate() {
-                assert_eq!(result[*axis], i);
+            if !axes.is_empty() {
+                let i: usize = kani::any();
+                kani::assume(i < axes.len());
+                assert_eq!(result[axes[i]], i);
             }
         }
     }

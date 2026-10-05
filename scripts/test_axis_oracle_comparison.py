@@ -1,5 +1,7 @@
 """Lock source preservation and honest oracle scoring before the campaign."""
 from pathlib import Path
+import argparse
+import json
 import sys
 import tempfile
 import unittest
@@ -47,6 +49,18 @@ class MutationTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
+    def test_cost_and_mutant_settings_cannot_mix_different_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "bound.json"
+            path.write_text(json.dumps({"bound": 4, "unwind_by_harness": {"admission": 7}}))
+            args = argparse.Namespace(output=root)
+            self.assertEqual(comparison.frozen_settings(args)["bound"], 4)
+            self.assertEqual(comparison.frozen_settings(args)["bound"], 4)
+            path.write_text(json.dumps({"bound": 5, "unwind_by_harness": {"admission": 8}}))
+            with self.assertRaises(ValueError):
+                comparison.frozen_settings(args)
+
     def test_cached_logs_reject_missing_or_changed_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oracle.log"
@@ -72,6 +86,10 @@ class VerdictTests(unittest.TestCase):
     def test_unwind_failure_is_inconclusive(self):
         self.assertEqual(comparison.classify("kani", 1, "unwinding assertion: FAILURE", False), "unwind_failure")
         self.assertEqual(comparison.classify("kani", 1, "assertion failed VERIFICATION:- FAILED", False), "assertion_failure")
+
+    def test_reached_unsupported_construct_is_not_contract_detection(self):
+        self.assertEqual(comparison.classify("kani", 1, "Failed Checks: reached unsupported construct\nVERIFICATION:- FAILED", False), "tool_error")
+        self.assertEqual(comparison.classify("kani", 1, "warning: unsupported constructs\nFailed Checks: assertion failed\nVERIFICATION:- FAILED", False), "assertion_failure")
 
     def test_timeout_never_becomes_a_catch(self):
         self.assertEqual(comparison.classify("tests", 1, "test result: FAILED", True), "timeout")

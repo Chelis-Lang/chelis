@@ -116,6 +116,9 @@ def harness_mapping(source: str) -> dict[str, list[str]]:
 def classify(oracle: str, code: int, output: str, timeout: bool) -> str:
     if timeout or (oracle == "kani" and re.search(r"(?:CBMC|verification|solver).*timed out", output, re.I)):
         return "timeout"
+    if oracle == "kani" and (re.search(r"Failed Checks:[^\n]*unsupported", output, re.I)
+                             or re.search(r"Description:[^\n]*unsupported[^\n]*\nStatus: FAILURE", output, re.I)):
+        return "tool_error"
     if oracle == "kani" and re.search(r"unwind(?:ing)? assertion[^\n]*(?:\n[^\n]*){0,2}?FAILURE", output, re.I):
         return "unwind_failure"
     if code == 0:
@@ -234,6 +237,9 @@ def run_kani(args: argparse.Namespace, harness: str, bound: int, label: str, fal
 def calibrate(args: argparse.Namespace) -> None:
     path = args.output / "calibration.json"
     result = json.loads(path.read_text()) if path.exists() else {}
+    validate_receipts(result)
+    if not set(result) <= set(HARNESS_ROOTS):
+        raise ValueError("calibration contains unknown harnesses")
     for harness in HARNESS_ROOTS:
         if harness in result:
             continue
@@ -275,8 +281,18 @@ def calibrate(args: argparse.Namespace) -> None:
                                       "metal_movement_rank_ceiling": 8})
 
 
+def frozen_settings(args: argparse.Namespace) -> dict:
+    settings = json.loads((args.output / "bound.json").read_text())
+    identity = args.output / "campaign-settings.json"
+    if identity.exists() and json.loads(identity.read_text()) != settings:
+        raise ValueError("campaign bound or unwind settings changed")
+    save(identity, settings)
+    return settings
+
+
 def campaign(args: argparse.Namespace, source: str, inventory: list[dict]) -> None:
-    bound = json.loads((args.output / "bound.json").read_text())["bound"]
+    settings = frozen_settings(args)
+    bound = settings["bound"]
     mapping = harness_mapping(source)
     result_path = args.output / "results.json"
     rows = json.loads(result_path.read_text()) if result_path.exists() else []
@@ -287,11 +303,6 @@ def campaign(args: argparse.Namespace, source: str, inventory: list[dict]) -> No
     source_path = args.checkout / SOURCE
     if source_path.read_text() != source:
         raise ValueError("checkout source differs from frozen baseline")
-    settings = json.loads((args.output / "bound.json").read_text())
-    run_identity = args.output / "campaign-settings.json"
-    if run_identity.exists() and json.loads(run_identity.read_text()) != settings:
-        raise ValueError("campaign bound or unwind settings changed")
-    save(run_identity, settings)
     try:
         for number, mutant in enumerate(inventory, 1):
             if mutant["id"] in completed:
@@ -355,12 +366,14 @@ def costs(args: argparse.Namespace, source: str) -> None:
     path = args.output / "costs.json"
     rows = json.loads(path.read_text()) if path.exists() else {}
     validate_receipts(rows)
-    settings = json.loads((args.output / "bound.json").read_text())
+    settings = frozen_settings(args)
     bound = settings["bound"]
     for phase in ("cold", "warm"):
         for oracle in ("tests", "kani", "verus"):
             key = f"{oracle}-{phase}"
             if key in rows:
+                if any(r["status"] != "pass" for r in rows[key]):
+                    raise RuntimeError(f"cached baseline oracle failed: {key}")
                 continue
             receipts = []
             if oracle == "tests":
@@ -431,6 +444,7 @@ def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> N
     """Fresh statements, replayed tactics, then Lean checks every proof term."""
     if args.vermilion is None:
         raise ValueError("--vermilion must name the pinned, built checkout")
+    frozen_settings(args)
     home = args.vermilion.resolve()
     pin = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=home, text=True).strip()
     if pin != "696756d6b9bbaedd61d6cd743ec3165f2b639224":
