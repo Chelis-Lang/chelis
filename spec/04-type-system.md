@@ -538,6 +538,14 @@ scrutinee type at all.
 > guarded arm SHALL reject the program with a diagnostic, and SHALL NOT drop the
 > guard, drop the arm, or select an arm whose guard is `false`.
 
+> **[04-PAT-3]** A constructor pattern SHALL contain exactly one sub-pattern
+> for each positional field of its resolved variant, in declaration order.
+> A different count is an `ArityMismatch` type error at that pattern, naming
+> the constructor, the expected field count, and the supplied sub-pattern
+> count. This applies at every pattern depth and checker ingress, before
+> evaluation or lowering; a wildcard arm does not make an invalid pattern
+> admissible.
+
 ### 2.5 Opaque Types
 
 A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`

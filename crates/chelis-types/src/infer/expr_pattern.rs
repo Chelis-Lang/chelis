@@ -376,23 +376,43 @@ pub(super) fn pattern_bindings(
                     // for a pattern head (chelis#1076).
                     let (arg_types, ret) = instantiate_variant_of(adt_def, variant_info, vg);
                     let _ = unify(&ret, scrutinee_ty, subst);
+                    let supplied = kids.len() - 1;
+                    if supplied != arg_types.len() {
+                        let expected = arg_types.len();
+                        errors.push(at_check_site(
+                            pat,
+                            CheckError::with_types(
+                                CheckErrorKind::ArityMismatch,
+                                with_macro_provenance(
+                                    pat,
+                                    format!(
+                                        "constructor pattern '{ctor_name}': expected {expected} \
+                                         field(s), got {supplied} sub-pattern(s)"
+                                    ),
+                                ),
+                                format!("{expected} field(s)"),
+                                format!("{supplied} sub-pattern(s)"),
+                                vec![],
+                            ),
+                        ));
+                    }
                     for (i, sub_pat) in kids[1..].iter().enumerate() {
-                        if i < arg_types.len() {
-                            let resolved = subst.apply(&arg_types[i]);
-                            pattern_bindings(
-                                sub_pat,
-                                PatternSite::Other,
-                                &resolved,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
-                                errors,
-                                product,
-                                covered_variants,
-                                has_wildcard,
-                            );
-                        }
+                        let resolved = arg_types
+                            .get(i)
+                            .map_or_else(|| vg.fresh_type(), |arg_ty| subst.apply(arg_ty));
+                        pattern_bindings(
+                            sub_pat,
+                            PatternSite::Other,
+                            &resolved,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            product,
+                            covered_variants,
+                            has_wildcard,
+                        );
                     }
                 }
             }
