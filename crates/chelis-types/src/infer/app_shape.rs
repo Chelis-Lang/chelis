@@ -47,7 +47,7 @@ pub(super) fn infer_reduction_app(
     }
 
     let kids = node.children_slice();
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -143,7 +143,7 @@ pub(super) fn infer_expand_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -254,7 +254,7 @@ pub(super) fn infer_permute_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let axis_tys: Vec<Type> = kids[2..]
         .iter()
@@ -444,7 +444,7 @@ pub(super) fn infer_reshape_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     let mut arg_tys = vec![input_ty];
@@ -650,7 +650,7 @@ pub(super) fn infer_shrink_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let bounds_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
 
@@ -919,7 +919,7 @@ pub(super) fn infer_stride_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let stride_tys: Vec<Type> = kids[2..]
         .iter()
@@ -1125,7 +1125,7 @@ pub(super) fn infer_pad_app(
         );
     }
 
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let _func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let padding_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
     let fill_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
@@ -1382,7 +1382,7 @@ pub(super) fn infer_reduce_window_app(
             kids.len().saturating_sub(1),
         );
     }
-    let func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let func_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let window_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
     let stride_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);

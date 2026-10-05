@@ -804,7 +804,7 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
 }
 
 /// [04-LIN-9] and spec/04 section 1.1: a builtin named as a value rather
-/// than called (`map(to_int, ks)`, a builtin in a tuple or an `if` arm) is
+/// than called (`map(len, xs)`, a key builtin in a tuple or an `if` arm) is
 /// judged by the key allow-list at the parameters of the function type it
 /// is instantiated at, as a call is judged operand by operand in linearity.
 /// Every type variable of a parameter the builtin does not admit a key at
@@ -840,6 +840,50 @@ fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Sub
             );
         }
     }
+}
+
+/// [04-INF-9]: a builtin named anywhere other than as the callee of an
+/// application must carry its whole operation contract on the value
+/// (`builtins::builtin_value_contract_carried`). One that does not is
+/// applicable only by name, whatever value position it reaches: a binding,
+/// an argument, a callback, an aggregate element, or a result.
+fn reject_builtin_applicable_only_by_name(
+    name: &str,
+    scheme: &Scheme,
+    node: &DeepNode,
+) -> Option<CheckError> {
+    if !crate::builtins::builtin_env_names().contains(name) {
+        return None;
+    }
+    // Fail closed: a bound builtin with no declaration has no reviewed
+    // contract, so it is not a value.
+    if let Some(decl) = crate::builtins::builtin_decl(name)
+        && crate::builtins::builtin_value_contract_carried(decl, scheme)
+    {
+        return None;
+    }
+    let mut error = CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        with_node_provenance(
+            node,
+            format!(
+                "builtin `{name}` is applicable only by name and is not a function value: \
+                 its type scheme does not state its whole operation contract (a static \
+                 argument, an operand restriction, or a result rule that only a direct call \
+                 checks), so the contract would not travel with a value \
+                 (spec/04-type-system.md [04-INF-9])"
+            ),
+        ),
+        vec![format!(
+            "Call `{name}` directly, or pass an explicitly typed lambda that calls it \
+             (for example `fn (x: tensor[3, f32]) -> sum(x, 0i32)` in place of `sum`)"
+        )],
+    );
+    if let Some(sid) = node_span_id(node) {
+        error.span_offset = parse_span_offset(sid);
+        error.span_id = Some(sid.to_string());
+    }
+    Some(error)
 }
 
 pub(super) fn infer_var(
@@ -905,6 +949,12 @@ pub(super) fn infer_var(
             // the scheme does not quantify, so it observes nothing a sibling's
             // body has determined ([04-INF-5]); the group's completion links
             // the copies (`group_link::sibling_instance`).
+            if !called
+                && !env.is_lexically_bound(name)
+                && let Some(rejected) = reject_builtin_applicable_only_by_name(name, &scheme, node)
+            {
+                return report(errors, rejected);
+            }
             let holed = env.is_holed_group_reference(name, &scheme);
             let unsigned = !holed && product.is_unsigned_group_reference(name, &scheme);
             let sibling = unsigned || (holed && product.references_a_sibling(name));

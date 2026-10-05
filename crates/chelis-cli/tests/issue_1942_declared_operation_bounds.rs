@@ -264,6 +264,9 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                     true,
                 ),
             ] {
+                // [04-INF-9] (chelis#3149): a window reduction is applicable
+                // only by name, so every alias is refused by name.
+                let accepted = accepted && !alias;
                 fs::write(&path, &source).unwrap();
                 let checked = cli("check", &path, &dir.path().join("window-out"));
                 assert_eq!(
@@ -278,6 +281,17 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
                 if accepted {
                     assert_eq!(report["score"].as_f64(), Some(1.0), "{source}: {report}");
                     assert!(report["errors"].as_array().unwrap().is_empty());
+                } else if alias {
+                    let refusal = format!("builtin `{operation}` is applicable only by name");
+                    assert!(
+                        report["errors"].as_array().unwrap().iter().any(|error| {
+                            error["kind"] == "TypeMismatch"
+                                && error["message"]
+                                    .as_str()
+                                    .is_some_and(|message| message.contains(&refusal))
+                        }),
+                        "{source}: {report}"
+                    );
                 } else {
                     assert!(
                         report["errors"]

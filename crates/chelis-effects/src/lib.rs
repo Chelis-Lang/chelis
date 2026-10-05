@@ -411,10 +411,13 @@ fn top_level_def_bodies(exprs: &[Expr]) -> BTreeMap<String, &Expr> {
     defs
 }
 
+/// A top-level function, or an alias whose body names another value: an
+/// alias carries the latent effects of what it names, a builtin included
+/// ([04-INF-9]), and an alias of plain data names nothing latent.
 fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String> {
     bodies
         .iter()
-        .filter(|(_, body)| body.tag() == Some(DeepTag::Fn))
+        .filter(|(_, body)| matches!(body.tag(), Some(DeepTag::Fn | DeepTag::Var)))
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -483,14 +486,33 @@ fn infer_tagged_effects(
                         .contains(name)
                         .then(|| top_level_effects.get(name).cloned())
                         .flatten()
+                        // [04-INF-9]: a builtin named as a value performs
+                        // its call's effect, as a lambda calling it would.
+                        .or_else(|| {
+                            chelis_types::builtin_call_effect(name).map(|effect| {
+                                let mut effects = EffectSet::new();
+                                effects.insert(effect);
+                                effects
+                            })
+                        })
                 })
             })
             .unwrap_or_default(),
         DeepTag::App => infer_app_effects(kids, top_level_effects, top_level_callables, locals),
-        DeepTag::Fn => kids
-            .get(1)
-            .map(|body| infer_expr_effects(body, top_level_effects, top_level_callables, locals))
-            .unwrap_or_default(),
+        DeepTag::Fn => {
+            let scope = lexical_scope(tag, kids, locals);
+            kids.get(1)
+                .map(|body| {
+                    infer_expr_effects(body, top_level_effects, top_level_callables, &scope)
+                })
+                .unwrap_or_default()
+        }
+        DeepTag::Arm => infer_children_effects(
+            kids,
+            top_level_effects,
+            top_level_callables,
+            &lexical_scope(tag, kids, locals),
+        ),
         DeepTag::Let => infer_let_effects(kids, top_level_effects, top_level_callables, locals),
         DeepTag::Grad | DeepTag::Vmap => kids
             .first()
@@ -504,6 +526,37 @@ fn infer_tagged_effects(
             locals,
         ),
         _ => infer_children_effects(kids, top_level_effects, top_level_callables, locals),
+    }
+}
+
+/// `locals` extended with the names this node binds for its children: a
+/// function's parameters and a match arm's pattern variables. The names come
+/// from the type checker's own binder reading, so a lexical binder that
+/// reuses a builtin's name is the binder here exactly as it is there, and the
+/// builtin's call effect does not apply to it ([04-INF-9]).
+fn lexical_scope(
+    tag: DeepTag,
+    kids: &[Expr],
+    locals: &BTreeMap<String, EffectSet>,
+) -> BTreeMap<String, EffectSet> {
+    let names = match (tag, kids.first()) {
+        (DeepTag::Fn, Some(params)) => chelis_types::lexical_param_names(params),
+        (DeepTag::Arm, Some(pattern)) => chelis_types::lexical_pattern_names(pattern),
+        _ => Vec::new(),
+    };
+    let mut scope = locals.clone();
+    for name in names {
+        scope.insert(name, EffectSet::new());
+    }
+    scope
+}
+
+/// The names a `let` binding target binds: a plain name, or a destructuring
+/// pattern's variables.
+fn bind_target_names(target: &Expr) -> Vec<String> {
+    match symbol_name(target) {
+        Some(name) => vec![name.to_string()],
+        None => chelis_types::lexical_pattern_names(target),
     }
 }
 
@@ -521,37 +574,6 @@ fn infer_app_effects(
             top_level_callables,
             locals,
         ));
-    }
-
-    // [05-RNG-1]: a random draw is a pure function of the key it is given,
-    // so `dropout` and `uniform_like` introduce no effect.
-    let builtin_name = kids.first().and_then(var_name);
-    if matches!(
-        builtin_name,
-        Some(
-            "print"
-                | "debug"
-                | "read_file"
-                | "write_file"
-                | "read_lines"
-                | "read_bytes"
-                | "file_exists"
-                | "list_dir"
-                | "mmap_file"
-                | "process_run"
-                | "clock_wall_read"
-                | "clock_monotonic_read"
-        )
-    ) {
-        effects.insert(Effect::Io);
-    }
-    if matches!(
-        builtin_name,
-        Some(
-            "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor"
-        )
-    ) {
-        effects.insert(Effect::Test);
     }
 
     effects
@@ -578,13 +600,13 @@ fn infer_let_effects(
                 let value_effects =
                     infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
                 effects.extend(&value_effects);
-                if let Some(name) = symbol_name(&bind_kids[i]) {
-                    let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                        value_effects
-                    } else {
-                        EffectSet::new()
-                    };
-                    local_scope.insert(name.to_string(), binding_effects);
+                let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                    value_effects
+                } else {
+                    EffectSet::new()
+                };
+                for name in bind_target_names(&bind_kids[i]) {
+                    local_scope.insert(name, binding_effects.clone());
                 }
                 i += 2;
             }
@@ -680,10 +702,11 @@ fn annotate_effects(
                         &mut local_scope,
                     )
                 } else {
+                    let scope = lexical_scope(node.tag(), node.children_slice(), locals);
                     node.children_slice()
                         .iter()
                         .map(|child| {
-                            annotate_effects(child, top_level_effects, top_level_callables, locals)
+                            annotate_effects(child, top_level_effects, top_level_callables, &scope)
                         })
                         .collect()
                 };
@@ -776,13 +799,13 @@ fn annotate_let_children(
         ));
         let value_effects =
             infer_expr_effects(value, top_level_effects, top_level_callables, local_scope);
-        if let Some(name) = symbol_name(&bind_kids[index]) {
-            let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                value_effects
-            } else {
-                EffectSet::new()
-            };
-            local_scope.insert(name.to_string(), binding_effects);
+        let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+            value_effects
+        } else {
+            EffectSet::new()
+        };
+        for name in bind_target_names(&bind_kids[index]) {
+            local_scope.insert(name, binding_effects.clone());
         }
         index += 2;
     }
@@ -1122,6 +1145,7 @@ fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
     AstEffectSet::new(Metadata::default(), values, zero_span())
 }
 
+#[cfg(test)]
 fn var_name(expr: &Expr) -> Option<&str> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
@@ -1979,6 +2003,136 @@ ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
                 .is_some_and(|effects| effects.contains(&Effect::Io)),
             "expected IO effect on flat_map result, got {:?}",
             inferred.get("ys")
+        );
+    }
+
+    /// [04-INF-9] (chelis#3149): a builtin named as a value performs its
+    /// call's effect, as a lambda that calls it does, so an alias cannot shed
+    /// `IO` or `Test`. Before the fix `reader` and `caller` were pure.
+    #[test]
+    fn a_builtin_named_as_a_value_performs_its_call_effect() {
+        let program = surf_checked(
+            r#"
+reader = read_file
+def caller(path: string) -> string = reader(path)
+def local_alias(path: string) -> string = {
+  op = read_file
+  op(path)
+}
+checker = test_assert
+def via_lambda(path: string) -> string = {
+  op = fn (p: string) -> read_file(p)
+  op(path)
+}
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        for (name, effect) in [
+            ("reader", Effect::Io),
+            ("caller", Effect::Io),
+            ("local_alias", Effect::Io),
+            ("via_lambda", Effect::Io),
+            ("checker", Effect::Test),
+        ] {
+            assert!(
+                inferred
+                    .get(name)
+                    .is_some_and(|effects| effects.contains(&effect)),
+                "expected {effect:?} on `{name}`, got {:?}",
+                inferred.get(name)
+            );
+        }
+    }
+
+    /// [04-INF-9]: for every builtin admitted as a value, an alias performs
+    /// exactly the effect a call performs, read from the registry rather than
+    /// a list here. The type-level contract of the same aliases is compared
+    /// with the direct call in chelis-types (`builtin_value_contract_tests`).
+    #[test]
+    fn every_admitted_builtin_value_performs_exactly_its_call_effect() {
+        let (env, _) = chelis_types::builtin_env();
+        let mut checked = 0;
+        for name in chelis_types::builtin_env_names() {
+            let scheme = env.lookup(name).expect("bound builtin has a scheme");
+            let Some(decl) = chelis_types::builtin_decl(name) else {
+                continue;
+            };
+            if !chelis_types::builtin_value_contract_carried(decl, scheme) {
+                continue;
+            }
+            let program = surf_checked(&format!("alias = {}\n", decl.name));
+            let (inferred, _) = infer_program_effects(program.annotated_exprs());
+            let mut expected = EffectSet::new();
+            if let Some(effect) = chelis_types::builtin_call_effect(decl.name) {
+                expected.insert(effect);
+            }
+            assert_eq!(
+                inferred.get("alias").cloned().unwrap_or_default(),
+                expected,
+                "`alias = {}` must perform exactly the call's effect",
+                decl.name
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no builtin is admitted as a value");
+    }
+
+    /// [04-INF-9]: a lexical binder that reuses an effectful builtin's name
+    /// is an ordinary value, whether a parameter, a lambda parameter, a `let`
+    /// name, a destructured name or a match binder, and referencing or calling
+    /// it performs no builtin effect. The builtin itself, named outside the
+    /// binder's scope, still performs its effect. Before the fix each
+    /// shadowed function inferred `IO` or `Test`.
+    #[test]
+    fn a_lexical_binder_named_after_a_builtin_performs_no_builtin_effect() {
+        let program = surf_checked(
+            r#"
+def param(read_file: string) -> string = read_file
+def param_call(read_file: string -> string, p: string) -> string = read_file(p)
+def lambda_param(p: string) -> string = {
+  f = fn (print: string) -> print
+  f(p)
+}
+def let_name(p: string) -> string = {
+  debug = p
+  debug
+}
+def destructured(p: (string, string)) -> string = {
+  (read_file, other) = p
+  read_file
+}
+def matched(o: Option[string]) -> string = match o with {
+  | Some(test_assert) => test_assert
+  | None => ""
+}
+def outside(p: string) -> string = {
+  f = fn (read_file: string) -> read_file
+  _ = f(p)
+  read_file(p)
+}
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        for name in [
+            "param",
+            "param_call",
+            "lambda_param",
+            "let_name",
+            "destructured",
+            "matched",
+        ] {
+            assert!(
+                inferred.get(name).is_none_or(|effects| effects.is_empty()),
+                "`{name}` binds a builtin's name and performs no effect, got {:?}",
+                inferred.get(name)
+            );
+        }
+        assert!(
+            inferred
+                .get("outside")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "`read_file` outside the lambda's scope is the builtin, got {:?}",
+            inferred.get("outside")
         );
     }
 

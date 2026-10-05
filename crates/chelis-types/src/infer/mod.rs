@@ -174,7 +174,9 @@ use declaration_graph::*;
 use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
-pub(crate) use app_collection::{TensorConcatCallEvidence, decide_collection_constraint};
+pub(crate) use app_collection::{
+    CollectionCallEvidence, TensorConcatCallEvidence, decide_collection_constraint,
+};
 use declarations::*;
 use deferred_operands::*;
 use expr::*;

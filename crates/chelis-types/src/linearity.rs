@@ -3109,7 +3109,9 @@ fn callee_is_observational_higher_order(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some(DeepTag::Grad | DeepTag::Vmap))
 }
 
-fn param_names(expr: &Expr) -> Vec<String> {
+/// The names a function's `(params ...)` binds, as the checker reads them.
+/// The effect checker resolves names through this same reading.
+pub fn param_names(expr: &Expr) -> Vec<String> {
     let Some(params) = tagged_children(expr, DeepTag::Params) else {
         return Vec::new();
     };
@@ -3119,7 +3121,9 @@ fn param_names(expr: &Expr) -> Vec<String> {
         .collect()
 }
 
-fn pattern_names(expr: &Expr) -> Vec<String> {
+/// The names a pattern binds, as the checker reads them. The effect checker
+/// resolves names through this same reading.
+pub fn pattern_names(expr: &Expr) -> Vec<String> {
     let mut names = Vec::new();
     collect_pattern_names(expr, &mut names);
     names

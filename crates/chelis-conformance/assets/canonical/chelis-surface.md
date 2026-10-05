@@ -191,9 +191,7 @@ Target support for node-valued bounds is narrower than the language rule.
 | `split_keys` | `(key, i64) -> tensor[n, key]` | [05-OP-71]; consumes its key; `n` is the runtime count |
 | `fold_in` | `(key, i64) -> key` | [05-OP-72]; consumes its key |
 
-`const` and `load` are lowering-created memory nodes, while `dropout` is
-registered in the builtin type environment outside `BUILTIN_NAMES` (§4).
-Other IR nodes, including `Store`, `Copy`, `Realize`, `Cast`, `FusedElem`,
+`const` and `load` are lowering-created memory nodes. Other IR nodes, including `Store`, `Copy`, `Realize`, `Cast`, `FusedElem`,
 `OneHot`, and `BlasMatmul`, are internal representations or come from
 separate language forms. Random keys are affine values. A draw consumes its
 key without introducing `IO`; the exact mask, rate validation, and pathwise
@@ -429,9 +427,8 @@ organization. Target and AD support are described in their own sections.
 To change the array, review
 the owning spec, registration, and this exact list together.
 
-Three capabilities live *outside* the array and are intentionally absent below: `const`
-and `load` are `RiscOp` memory nodes produced during lowering, and
-`dropout` is registered in `builtin_env`. All three are documented in
+Two capabilities live *outside* the array and are intentionally absent below: `const`
+and `load` are `RiscOp` memory nodes produced during lowering. Both are documented in
 §1.6. Keywords and special forms include `cast`, `cast_trunc`,
 `cast_saturate`, `cast_wrap`, `copy`, `grad`, `vmap`, `jit`, and `realize`.
 
@@ -440,7 +437,7 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
-              uniform_like gather scatter_replace scatter_elements
+              uniform_like dropout gather scatter_replace scatter_elements
               key_from_seed split_key split_keys fold_in
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu gelu_tanh
               standard_normal_cdf
