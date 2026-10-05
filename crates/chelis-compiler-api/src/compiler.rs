@@ -922,6 +922,18 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.entry.as_deref(),
         Target::Eval,
     )?;
+    lower_result(compiled)
+}
+
+/// Lower Surf declarations the caller already holds. The declarations are the
+/// program that is checked and lowered; no source text is printed or parsed
+/// again (chelis#3172).
+pub fn lower_decls(decls: &[Decl], entry: Option<&str>) -> Result<LowerResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    lower_result(compile_decls_for_eval(decls, entry, Target::Eval)?)
+}
+
+fn lower_result(compiled: CompiledSource) -> Result<LowerResult> {
     let dag = wire_dag(&compiled.dag)
         .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
@@ -2520,7 +2532,7 @@ pub fn eval_decls_selected(
     selected_root_names: &[String],
 ) -> Result<EvalResult> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
     eval_compiled(&compiled, bindings, Some(selected_root_names))
 }
 
@@ -2627,7 +2639,7 @@ pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
 )]
 pub fn prepare_eval_decls(decls: &[Decl]) -> Result<PreparedEval> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let compiled = compile_decls_for_eval(decls, Target::Eval)?;
+    let compiled = compile_decls_for_eval(decls, None, Target::Eval)?;
     Ok(PreparedEval {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -4088,9 +4100,13 @@ fn compile_source_scoped_mode(
 /// Compile Surf declarations the caller has already parsed or assembled, for
 /// evaluation. The declarations are the program that is checked, lowered, and
 /// run; no source text is printed or parsed again (chelis#3129).
-fn compile_decls_for_eval(decls: &[Decl], target: Target) -> Result<CompiledSource> {
+fn compile_decls_for_eval(
+    decls: &[Decl],
+    entry: Option<&str>,
+    target: Target,
+) -> Result<CompiledSource> {
     bail_if_cancelled("parse")?;
-    let prepared = crate::pipeline::prepare_surf_decls(decls, None)
+    let prepared = crate::pipeline::prepare_surf_decls(decls, entry)
         .map_err(|error| {
             pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(
                 error,
