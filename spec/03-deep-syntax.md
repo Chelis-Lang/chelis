@@ -832,6 +832,19 @@ notation, while the same builtin name remains a value or pipe stage. A finite
 `Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
 explicit call. Explicit `borrow` and `copy` nodes remain explicit.
 
+A numeric literal is printed bare only where re-reading the printed program
+binds it, unsuffixed, at its `type` and gives the same Deep: outside every
+dtype-stating construct when its `type` is the `spec/04-type-system.md` §5.3
+default for its token, and inside a declaration or under a dtype argument when
+its `type` equals the dtype that construct states. A cast's literal operand of a primitive type is
+always printed with its suffix, since a bare operand would fold the cast into
+the literal. Whether a printed literal stands in a dtype-stating construct is
+decided on the printed Surf by the same rule desugaring applies. The
+`surf_literal_style` marker may add a suffix at the default but never removes
+one. A literal whose `type` is a dtype binder is printed bare inside a cast or
+dtype-stating construct that states that binder; elsewhere it has no Surf
+representation and resugaring rejects it.
+
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
 same-named call-like forms. A matching `defsig` and function-valued `def`
@@ -956,12 +969,12 @@ Type metadata is not a cast. Every cross-family pairing is a type error, not
 a conversion or a request to reinterpret the atom. There is one explicit
 source-preserving form: an integer-spelled token bound directly at a float
 dtype carries its exact Int atom together with `literal_source: integer` in
-the `lit` metadata. This covers a suffix such as `7f32` and an integer element
-in a contextually `f32` tensor literal. The marker is valid exactly once, only
-with an Int atom and a float primitive; every other use is a type error. It
-keeps the exact integer available for the one target-width rounding required
-by [04-NUM-1] and [04-NUM-14], instead of first rounding through f64. An
-unmarked Int atom under a float primitive remains contradictory. An explicit
+the `lit` metadata. This covers a suffix such as `7f32` and an integer literal
+for which a dtype-stating construct states `f32`. The marker is valid exactly
+once, only with an Int atom and a float primitive; every other use is a type
+error. It keeps the exact integer available for the one target-width rounding
+required by [04-NUM-1] and [04-NUM-14], instead of first rounding through f64.
+An unmarked Int atom under a float primitive remains contradictory. An explicit
 `cast` is the only form that converts an already-typed literal value between
 primitive families. `literal_source` is producer-asserted provenance, not a
 lexer authenticity proof: hand-written Deep MAY author the canonical marker,
@@ -972,9 +985,27 @@ any consumer may rely on it.
 `i32` (i.e. its `lit` node carries `{type: (t-prim {} i32)}`); an
 unsuffixed float literal binds at type `f32`, under
 `spec/04-type-system.md` [04-LIT-2]. See `spec/04-type-system.md` §5.3 for
-the type-system statement. The default is overridable only by an
-explicit literal suffix (§6.4.1), the contextual tensor-literal inference
-rule (`spec/02-surf-syntax.md` §P10b), or an explicit `cast`.
+the type-system statement. The default is overridable only by an explicit
+literal suffix (§6.4.1), which in Deep is the literal's `type` metadata, or,
+in Surf, by a dtype-stating construct (`spec/04-type-system.md` §5.6), which
+desugaring resolves into that `type` metadata. Deep has no dtype-stating
+constructs of its own: a Deep literal's dtype is its `type`, or the default
+when it has none, and an untyped numeric literal that is an element of a
+`to_tensor` argument is rejected.
+
+A Surf `cast` whose operand is a numeric literal, or its unary negation, that
+`spec/04-type-system.md` §5.6 binds at a primitive target desugars to that
+literal alone, `(lit {type: (t-prim {} p)} v)` with the signed value `v`, and
+no `cast` node:
+`cast(1.1, f64)` and `1.1f64` have one Deep form. A cast to a dtype binder
+keeps its node, `(cast {} (lit {type: (t-var {} p)} v) (t-var {} p))`, and every
+other cast keeps its node with the operand as written.
+
+A `to_tensor` call with a dtype argument desugars to a three-child
+application, `(app {} (var {} to_tensor) xs' (t-prim {} p))` or
+`(app {} (var {} to_tensor) xs' (t-var {} p))`, and each literal element of a
+bracket-literal `xs` carries `p` in its `type` metadata. A type node is an
+expression-position child only there.
 
 #### 6.4.1 Literal Suffixes
 
