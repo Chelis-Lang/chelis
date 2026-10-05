@@ -331,6 +331,15 @@ impl Env {
         Self::default()
     }
 
+    /// Every bound value name, in sorted order.
+    pub fn sorted_names(&self) -> Vec<&str> {
+        self.bindings
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings

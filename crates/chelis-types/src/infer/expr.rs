@@ -852,8 +852,14 @@ fn reject_builtin_applicable_only_by_name(
     scheme: &Scheme,
     node: &DeepNode,
 ) -> Option<CheckError> {
-    let decl = crate::builtins::builtin_decl(name)?;
-    if crate::builtins::builtin_value_contract_carried(decl, scheme) {
+    if !crate::builtins::builtin_env_names().contains(name) {
+        return None;
+    }
+    // Fail closed: a bound builtin with no declaration has no reviewed
+    // contract, so it is not a value.
+    if let Some(decl) = crate::builtins::builtin_decl(name)
+        && crate::builtins::builtin_value_contract_carried(decl, scheme)
+    {
         return None;
     }
     let mut error = CheckError::new(

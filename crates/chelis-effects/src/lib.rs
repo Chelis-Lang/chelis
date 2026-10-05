@@ -2052,10 +2052,11 @@ def via_lambda(path: string) -> string = {
     fn every_admitted_builtin_value_performs_exactly_its_call_effect() {
         let (env, _) = chelis_types::builtin_env();
         let mut checked = 0;
-        for decl in chelis_types::BUILTINS {
-            let scheme = env
-                .lookup(decl.name)
-                .expect("registry builtin has a scheme");
+        for name in chelis_types::builtin_env_names() {
+            let scheme = env.lookup(name).expect("bound builtin has a scheme");
+            let Some(decl) = chelis_types::builtin_decl(name) else {
+                continue;
+            };
             if !chelis_types::builtin_value_contract_carried(decl, scheme) {
                 continue;
             }

@@ -61,8 +61,8 @@ pub use builtins::{
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
     COMPARISON_OPS, CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting,
     Realizability, ShapeClass, axis_argument_layout, builtin_call_effect, builtin_decl,
-    builtin_env, builtin_value_contract_carried, case_keys, prelude_adt_defs, realizability,
-    shape_class,
+    builtin_env, builtin_env_names, builtin_value_contract_carried, case_keys, prelude_adt_defs,
+    realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,

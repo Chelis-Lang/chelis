@@ -19,7 +19,8 @@ use chelis_surf::parser::parse_str;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::types::Type;
 use chelis_types::{
-    BUILTINS, InferenceDisposition, builtin_env, builtin_value_contract_carried, check_ir_program,
+    BUILTINS, InferenceDisposition, builtin_decl, builtin_env, builtin_env_names,
+    builtin_value_contract_carried, check_ir_program,
 };
 
 const MARKER: &str = "is applicable only by name";
@@ -83,19 +84,17 @@ fn assert_checks(source: &str) {
 fn value_admission_equals_carried_contract_for_every_builtin() {
     let (env, _) = builtin_env();
     let mut mismatches = Vec::new();
-    for decl in BUILTINS {
-        let scheme = env
-            .lookup(decl.name)
-            .unwrap_or_else(|| panic!("registry builtin `{}` has no scheme", decl.name));
-        let carried = builtin_value_contract_carried(decl, scheme);
-        let source = format!("(def {{}} op (var {{}} {}))", decl.name);
+    // Every name the environment binds, so an undeclared builtin is covered
+    // (and refused: the predicate fails closed without a decl).
+    for name in builtin_env_names() {
+        let scheme = env.lookup(name).expect("bound builtin has a scheme");
+        let carried =
+            builtin_decl(name).is_some_and(|decl| builtin_value_contract_carried(decl, scheme));
+        let source = format!("(def {{}} op (var {{}} {name}))");
         let exprs = chelis_deep::parser::parse_str(&source).expect("Deep fixture must parse");
-        let refused = !by_name_rejections(&errors_of(&exprs), decl.name).is_empty();
+        let refused = !by_name_rejections(&errors_of(&exprs), name).is_empty();
         if refused == carried {
-            mismatches.push(format!(
-                "{}: carried={carried} but refused={refused}",
-                decl.name
-            ));
+            mismatches.push(format!("{name}: carried={carried} but refused={refused}"));
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");

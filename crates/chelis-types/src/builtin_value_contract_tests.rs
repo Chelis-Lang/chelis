@@ -29,7 +29,9 @@ use std::collections::BTreeMap;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
-use crate::builtins::{BUILTINS, builtin_env, builtin_value_contract_carried};
+use crate::builtins::{
+    BUILTINS, builtin_decl, builtin_env, builtin_env_names, builtin_value_contract_carried,
+};
 use crate::context::TypeEnv;
 use crate::types::{Dim, Scheme, TensorPrec, Type};
 
@@ -434,19 +436,27 @@ fn compare(name: &str, scheme: &Scheme, admitted: bool) -> Comparison {
 #[test]
 fn admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rule() {
     let (env, _) = builtin_env();
+    // Every builtin a program can name, not only the declared ones: an
+    // undeclared builtin is refused (fail closed) and must also be declared.
+    let declared: std::collections::BTreeSet<&str> = BUILTINS.iter().map(|d| d.name).collect();
+    let bound: std::collections::BTreeSet<&str> =
+        builtin_env_names().iter().map(String::as_str).collect();
+    assert_eq!(
+        bound, declared,
+        "every builtin the environment binds must have a BuiltinDecl, and every decl a binding"
+    );
     let mut failures = Vec::new();
-    for decl in BUILTINS {
-        let scheme = env
-            .lookup(decl.name)
-            .expect("registry builtin has a scheme");
-        let admitted = builtin_value_contract_carried(decl, scheme);
-        let comparison = compare(decl.name, scheme, admitted);
+    for name in &bound {
+        let scheme = env.lookup(name).expect("bound builtin has a scheme");
+        let admitted =
+            builtin_decl(name).is_some_and(|decl| builtin_value_contract_carried(decl, scheme));
+        let comparison = compare(name, scheme, admitted);
         let covered = comparison.accepted_directly > 0 && comparison.refused_directly > 0;
         let reproduces = covered && comparison.disagreements.is_empty();
         if admitted && !comparison.disagreements.is_empty() {
             failures.push(format!(
                 "`{}` is admitted as a value but its scheme disagrees with its direct call: {:?}",
-                decl.name,
+                *name,
                 &comparison.disagreements[..comparison.disagreements.len().min(2)]
             ));
         }
@@ -454,14 +464,14 @@ fn admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rul
             failures.push(format!(
                 "`{}` is admitted as a value but no witness both accepts and refuses a direct \
                  call ({} accepted, {} refused)",
-                decl.name, comparison.accepted_directly, comparison.refused_directly
+                *name, comparison.accepted_directly, comparison.refused_directly
             ));
         }
         if !admitted && reproduces {
             failures.push(format!(
                 "`{}` is refused as a value although its scheme reproduces its direct call on \
                  every witness",
-                decl.name
+                *name
             ));
         }
     }

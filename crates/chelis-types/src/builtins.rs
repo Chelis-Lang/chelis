@@ -29,6 +29,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    "dropout",
     // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
     "key_from_seed",
     "split_key",
@@ -1314,6 +1315,18 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
+    // [05-OP-37]: the keyed dropout draw. Its shape class keeps the
+    // `shape_class` default it had before it was declared here.
+    BuiltinDecl {
+        name: "dropout",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
     // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
     // the affine key rule ([04-LIN-9]) is the linearity checker's.
     BuiltinDecl {
@@ -2523,6 +2536,22 @@ pub fn builtin_call_effect(name: &str) -> Option<Effect> {
 /// equation (`result_origin`, as `fold` and `scan` carry).
 /// Every other builtin owes a rule that only its direct application runs, so
 /// it is applicable only by name until its scheme carries that rule.
+/// The names `builtin_env` binds: every builtin a program can name. The
+/// value predicate fails closed on these, so a bound builtin without a
+/// [`BuiltinDecl`] is applicable only by name rather than admitted unclassified.
+pub fn builtin_env_names() -> &'static std::collections::BTreeSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        builtin_env()
+            .0
+            .sorted_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bool {
     let relation_carried = !scheme.constraints.is_empty()
         && scheme
@@ -4211,7 +4240,7 @@ mod tests {
     /// block") and promises to list every name verbatim, so any drift in
     /// either direction is a documentation bug: a builtin missing from the
     /// doc (an op that silently fell out of the inventory) or a doc entry
-    /// that is not in the array (`const`/`load`/`dropout` live outside it by
+    /// that is not in the array (`const`/`load` live outside it by
     /// design — see the §4 preamble — and must not appear in the block).
     /// `include_str!` makes the doc a compile-time dependency of this test,
     /// so a moved or deleted file fails loudly instead of skipping.
