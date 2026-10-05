@@ -138,7 +138,9 @@ Generate Deep only when a tool needs the canonical AST. Every node includes its 
 map, calls use `app`, references use `var`, and literals carry a type.
 
 ```chelis-deep
-(defsig {} square (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+(defsig {}
+  square
+  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
 
 (def {}
   square
@@ -178,7 +180,9 @@ map, calls use `app`, references use `var`, and literals carry a type.
   (fn {}
     (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (let {}
-      (bind {} y (app {} (var {} add) (var {} x) (var {} x)))
+      (bind {}
+        y
+        (app {} (var {} add) (var {} x) (var {} x)))
       (app {} (var {} relu) (var {} y)))))
 ```
 
@@ -218,10 +222,7 @@ map, calls use `app`, references use `var`, and literals carry a type.
     (let {}
       (bind {}
         logits
-        (app {}
-          (var {} add)
-          (app {} (var {} relu) (var {} x))
-          (var {} labels))
+        (app {} (var {} add) (app {} (var {} relu) (var {} x)) (var {} labels))
         loss
         (app {}
           (var {} sum)
@@ -229,7 +230,10 @@ map, calls use `app`, references use `var`, and literals carry a type.
             (var {} mul)
             (app {}
               (var {} log)
-              (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} i32)} 0)))
+              (app {}
+                (var {} softmax)
+                (var {} logits)
+                (lit {type: (t-prim {} i32)} 0)))
             (var {} labels))
           (lit {type: (t-prim {} i32)} 0)))
       (var {} loss))))
@@ -288,11 +292,7 @@ map, calls use `app`, references use `var`, and literals carry a type.
 
 (defsig {} keep (t-fn {} (t-adt {} Weights) (t-adt {} Weights)))
 
-(def {}
-  keep
-  (fn {}
-    (params {} (w {type: (t-adt {} Weights)}))
-    (var {} w)))
+(def {} keep (fn {} (params {} (w {type: (t-adt {} Weights)})) (var {} w)))
 ```
 
 ```chelis-deep
