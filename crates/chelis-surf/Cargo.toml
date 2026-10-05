@@ -10,6 +10,10 @@ repository.workspace = true
 # Explicit, version-bounded migration; absent from ordinary Surf consumers.
 pre-020-pipe-migration = ["chelis-deep/pre-020-pipe-migration"]
 
+[[test]]
+name = "pipe_sugar_contract"
+required-features = ["pre-020-pipe-migration"]
+
 [dependencies]
 stacker.workspace = true
 chelis-unord.workspace = true
