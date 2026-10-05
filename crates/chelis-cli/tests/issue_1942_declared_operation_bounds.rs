@@ -167,6 +167,7 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
     for source in [
         "def g(x: f32) -> f32 = sin(x)\n",
         "def make() = fn (x: f32) -> sin(x)\n",
+        "primitive = sin\n",
     ] {
         let path = dir.path().join("accepted.ch");
         fs::write(&path, source).unwrap();
@@ -180,18 +181,6 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
         assert_eq!(report["score"].as_f64(), Some(1.0));
         assert!(report["errors"].as_array().unwrap().is_empty());
     }
-    // [04-INF-9] (chelis#3149): `sin` owes a direct-call rule its scheme does
-    // not carry, so naming it as a value is refused by name.
-    let path = dir.path().join("primitive.ch");
-    fs::write(&path, "primitive = sin\n").unwrap();
-    let checked = cli("check", &path, &dir.path().join("out"));
-    assert!(!checked.status.success());
-    assert!(
-        String::from_utf8_lossy(&checked.stdout)
-            .contains("builtin `sin` is applicable only by name"),
-        "{}",
-        String::from_utf8_lossy(&checked.stdout)
-    );
     let path = dir.path().join("comparison.ch");
     for (source, accepted) in [
         (

@@ -60,8 +60,8 @@ fn checked_library_round_trips_preserve_generic_function_values() {
 
 /// [04-INF-9] (chelis#3149): a builtin whose rule its scheme does not carry
 /// is applicable only by name, so a library cannot publish one as a value.
-/// That covers the window reductions and `mean`, whose shape and dtype rules
-/// run only at a direct application.
+/// That covers the window reductions and `mean`, whose shape and result
+/// rules run only at a direct application.
 #[test]
 fn checked_libraries_refuse_builtins_applicable_only_by_name() {
     let empty = build_stdlib_context(&[]).unwrap();
@@ -90,7 +90,7 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
         ("def make() = fn (x) -> sin(x)\n", false),
         ("def g(x: f32) -> f32 = sin(x)\n", true),
         ("def make() = fn (x: f32) -> sin(x)\n", true),
-        ("primitive = sin\n", false),
+        ("primitive = sin\n", true),
         (
             "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() = source()\n",
             false,
@@ -99,7 +99,7 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
             "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() -> f32 = source()\n",
             true,
         ),
-        ("def source() = sin\ndef make() = source()\n", false),
+        ("def source() = sin\ndef make() = source()\n", true),
         ("def less[p](x: p, y: p) -> bool = lt(x, y)\n", false),
         (
             "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\n",

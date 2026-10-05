@@ -26,19 +26,19 @@ fn rendered(errors: &[CheckError]) -> String {
         .join("\n")
 }
 
-/// [04-INF-9] (chelis#3149): `test_assert_close_tensor` owes a direct-call
-/// rule its scheme does not carry, so it is applicable only by name. Every
-/// alias route is refused by name, before the active-float check could see
-/// the value.
-fn assert_refused_by_name(errors: &[CheckError], route: &str) {
+fn assert_one_active_float_error(errors: &[CheckError], dtype: &str, route: &str) {
+    assert_eq!(
+        errors.len(),
+        1,
+        "{route} at {dtype} must emit exactly one diagnostic, never an empty-error fallback or a cascade; got:\n{}",
+        rendered(errors)
+    );
+    let error = &errors[0];
     assert!(
-        errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::TypeMismatch)
-                && error
-                    .message
-                    .contains("builtin `test_assert_close_tensor` is applicable only by name")
-        }),
-        "{route} must refuse `test_assert_close_tensor` as a value; got:\n{}",
+        matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+            && error.message.contains("active float dtype")
+            && error.message.contains(dtype),
+        "{route} at {dtype} must emit the active-float PrecisionMismatch; got:\n{}",
         rendered(errors)
     );
 }
@@ -83,8 +83,8 @@ def check(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtyp
 }
 
 #[test]
-fn function_value_aliases_are_refused_by_name_at_every_dtype() {
-    for dtype in FLOAT_DTYPES.iter().chain(REJECTED_DTYPES) {
+fn function_value_aliases_preserve_the_active_float_domain() {
+    for dtype in REJECTED_DTYPES {
         let fixtures = [
             (
                 "top-level alias",
@@ -160,13 +160,13 @@ def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}
         ];
 
         for (route, source) in fixtures {
-            assert_refused_by_name(&diagnostics(&source), route);
+            assert_one_active_float_error(&diagnostics(&source), dtype, route);
         }
     }
 }
 
 #[test]
-fn aliased_higher_order_calls_are_refused_by_name_at_every_float_and_rank() {
+fn aliased_higher_order_calls_accept_every_float_at_rank_zero_and_multiple_ranks() {
     for dtype in FLOAT_DTYPES {
         for tensor_type in [
             format!("tensor[{dtype}]"),
@@ -188,13 +188,18 @@ def check(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> uni
   invoke(stored_alias, actual, expected, tol)
 "#,
             );
-            assert_refused_by_name(&diagnostics(&source), &tensor_type);
+            let errors = diagnostics(&source);
+            assert!(
+                errors.is_empty(),
+                "aliased higher-order call must accept {tensor_type}; got:\n{}",
+                rendered(&errors)
+            );
         }
     }
 }
 
 #[test]
-fn aliases_are_refused_by_name_before_mixed_precision_and_rank() {
+fn aliases_still_reject_mixed_precision_and_rank() {
     for (label, source) in [
         (
             "mixed precision",
@@ -213,7 +218,16 @@ def bad(actual: &tensor[2, f32], expected: &tensor[2, 1, f32], tol: f32) -> unit
 "#,
         ),
     ] {
-        assert_refused_by_name(&diagnostics(source), label);
+        let errors = diagnostics(source);
+        assert!(
+            errors.len() == 1
+                && matches!(
+                    errors[0].kind,
+                    CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch
+                ),
+            "{label} through an alias must produce one structural mismatch; got:\n{}",
+            rendered(&errors)
+        );
     }
 }
 

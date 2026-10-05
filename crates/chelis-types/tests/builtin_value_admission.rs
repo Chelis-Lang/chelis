@@ -206,17 +206,17 @@ fn comparison_alias_declared_float_is_refused() {
 #[test]
 fn block_binding_is_refused() {
     assert_rejected_by_name(
-        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  op = exp\n  op(x)\n}\n",
-        "exp",
+        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  op = softmax\n  op(x, 0i32)\n}\n",
+        "softmax",
     );
 }
 
 #[test]
 fn user_function_argument_is_refused() {
     assert_rejected_by_name(
-        "def ap(f: tensor[3, f32] -> tensor[3, f32], x: tensor[3, f32]) -> tensor[3, f32] = f(x)\n\
-         def g(x: tensor[3, f32]) -> tensor[3, f32] = ap(exp, x)\n",
-        "exp",
+        "def ap(f: &tensor[3, f32] -> i32 -> tensor[3, f32], x: tensor[3, f32]) -> tensor[3, f32] = f(x, 0i32)\n\
+         def g(x: tensor[3, f32]) -> tensor[3, f32] = ap(softmax, x)\n",
+        "softmax",
     );
 }
 
@@ -230,43 +230,65 @@ fn map_callback_is_refused() {
 
 #[test]
 fn fold_callback_is_refused() {
-    assert_rejected_by_name("def g(xs: List[i64]) -> i64 = fold(add, 0i64, xs)\n", "add");
+    assert_rejected_by_name("def g(xs: List[i64]) -> i64 = fold(mod, 0i64, xs)\n", "mod");
 }
 
 #[test]
 fn vmap_callback_is_refused() {
     assert_rejected_by_name(
-        "def g(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = vmap(exp)(x)\n",
-        "exp",
+        "def g(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = vmap(softmax)(x)\n",
+        "softmax",
     );
 }
 
 #[test]
 fn grad_callback_is_refused() {
-    assert_rejected_by_name("def g(x: f32) -> f32 = grad(exp)(x)\n", "exp");
+    assert_rejected_by_name(
+        "def g(x: tensor[3, f32]) -> tensor[3, f32] = grad(sum)(x)\n",
+        "sum",
+    );
 }
 
 #[test]
 fn list_element_is_refused() {
     assert_rejected_by_name(
-        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  ops = [exp, log]\n  x\n}\n",
-        "exp",
+        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  ops = [sum, mean]\n  x\n}\n",
+        "sum",
     );
 }
 
 #[test]
 fn tuple_element_is_refused() {
     assert_rejected_by_name(
-        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  ops = (exp, x)\n  x\n}\n",
-        "exp",
+        "def g(x: tensor[3, f32]) -> tensor[3, f32] = {\n  ops = (sum, x)\n  x\n}\n",
+        "sum",
     );
 }
 
 #[test]
 fn returned_builtin_is_refused() {
-    assert_rejected_by_name(
-        "def pick() -> tensor[3, f32] -> tensor[3, f32] = exp\n",
-        "exp",
+    assert_rejected_by_name("def pick() = lt\n", "lt");
+}
+
+/// A builtin whose scheme states its whole contract is a value: an `exp`
+/// alias checks exactly as a direct call does, admitting a float operand and
+/// refusing an integer one with the operation's own precision diagnostic.
+#[test]
+fn complete_scheme_builtins_are_values_with_their_contract() {
+    assert_checks("op = exp\ndef g(x: tensor[3, f32]) -> tensor[3, f32] = op(x)\n");
+    let errors = errors_of(&surf_to_deep(
+        "op = exp\ndef g(x: tensor[3, i32]) -> tensor[3, i32] = op(x)\n",
+    ));
+    assert!(
+        by_name_rejections(&errors, "exp").is_empty()
+            && errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
+        "an `exp` alias at i32 is refused by its contract, not by name: {errors:#?}"
+    );
+    assert_checks(
+        "def ap(f: &tensor[3, f32] -> tensor[3, f32], x: tensor[3, f32]) -> tensor[3, f32] = f(x)\n\
+         def g(x: tensor[3, f32]) -> tensor[3, f32] = ap(exp, x)\n",
     );
 }
 

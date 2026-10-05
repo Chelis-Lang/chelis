@@ -862,9 +862,10 @@ fn reject_builtin_applicable_only_by_name(
             node,
             format!(
                 "builtin `{name}` is applicable only by name and is not a function value: \
-                 its operation rule (a static argument or a result type computed outside \
-                 its type scheme) does not travel with a value (spec/04-type-system.md \
-                 [04-INF-9])"
+                 its type scheme does not state its whole operation contract (a static \
+                 argument, an operand restriction, or a result rule that only a direct call \
+                 checks), so the contract would not travel with a value \
+                 (spec/04-type-system.md [04-INF-9])"
             ),
         ),
         vec![format!(

@@ -411,10 +411,13 @@ fn top_level_def_bodies(exprs: &[Expr]) -> BTreeMap<String, &Expr> {
     defs
 }
 
+/// A top-level function, or an alias whose body names another value: an
+/// alias carries the latent effects of what it names, a builtin included
+/// ([04-INF-9]), and an alias of plain data names nothing latent.
 fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String> {
     bodies
         .iter()
-        .filter(|(_, body)| body.tag() == Some(DeepTag::Fn))
+        .filter(|(_, body)| matches!(body.tag(), Some(DeepTag::Fn | DeepTag::Var)))
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -483,6 +486,15 @@ fn infer_tagged_effects(
                         .contains(name)
                         .then(|| top_level_effects.get(name).cloned())
                         .flatten()
+                        // [04-INF-9]: a builtin named as a value performs
+                        // its call's effect, as a lambda calling it would.
+                        .or_else(|| {
+                            chelis_types::builtin_call_effect(name).map(|effect| {
+                                let mut effects = EffectSet::new();
+                                effects.insert(effect);
+                                effects
+                            })
+                        })
                 })
             })
             .unwrap_or_default(),
@@ -523,35 +535,12 @@ fn infer_app_effects(
         ));
     }
 
-    // [05-RNG-1]: a random draw is a pure function of the key it is given,
-    // so `dropout` and `uniform_like` introduce no effect.
-    let builtin_name = kids.first().and_then(var_name);
-    if matches!(
-        builtin_name,
-        Some(
-            "print"
-                | "debug"
-                | "read_file"
-                | "write_file"
-                | "read_lines"
-                | "read_bytes"
-                | "file_exists"
-                | "list_dir"
-                | "mmap_file"
-                | "process_run"
-                | "clock_wall_read"
-                | "clock_monotonic_read"
-        )
-    ) {
-        effects.insert(Effect::Io);
-    }
-    if matches!(
-        builtin_name,
-        Some(
-            "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor"
-        )
-    ) {
-        effects.insert(Effect::Test);
+    if let Some(effect) = kids
+        .first()
+        .and_then(var_name)
+        .and_then(chelis_types::builtin_call_effect)
+    {
+        effects.insert(effect);
     }
 
     effects
@@ -1980,6 +1969,44 @@ ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
             "expected IO effect on flat_map result, got {:?}",
             inferred.get("ys")
         );
+    }
+
+    /// [04-INF-9] (chelis#3149): a builtin named as a value performs its
+    /// call's effect, as a lambda that calls it does, so an alias cannot shed
+    /// `IO` or `Test`. Before the fix `reader` and `caller` were pure.
+    #[test]
+    fn a_builtin_named_as_a_value_performs_its_call_effect() {
+        let program = surf_checked(
+            r#"
+reader = read_file
+def caller(path: string) -> string = reader(path)
+def local_alias(path: string) -> string = {
+  op = read_file
+  op(path)
+}
+checker = test_assert
+def via_lambda(path: string) -> string = {
+  op = fn (p: string) -> read_file(p)
+  op(path)
+}
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        for (name, effect) in [
+            ("reader", Effect::Io),
+            ("caller", Effect::Io),
+            ("local_alias", Effect::Io),
+            ("via_lambda", Effect::Io),
+            ("checker", Effect::Test),
+        ] {
+            assert!(
+                inferred
+                    .get(name)
+                    .is_some_and(|effects| effects.contains(&effect)),
+                "expected {effect:?} on `{name}`, got {:?}",
+                inferred.get(name)
+            );
+        }
     }
 
     #[test]

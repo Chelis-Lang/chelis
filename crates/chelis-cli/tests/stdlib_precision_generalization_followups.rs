@@ -114,18 +114,23 @@ fn expect_any_error(json: &Value, label: &str) {
     );
 }
 
-fn expect_refused_by_name(json: &Value, builtin: &str, label: &str) {
-    let refusal = format!("builtin `{builtin}` is applicable only by name");
+fn expect_one_active_float_error(json: &Value, dtype: &str, label: &str) {
     let errs = errors(json);
+    assert_eq!(
+        errs.len(),
+        1,
+        "{label}: expected exactly one diagnostic, never an empty-error fallback or cascade; got {errs:?}"
+    );
+    let error = errs[0];
+    assert_eq!(
+        error.get("kind").and_then(Value::as_str),
+        Some("PrecisionMismatch"),
+        "{label}: expected PrecisionMismatch; got {error:?}"
+    );
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
     assert!(
-        errs.iter().any(|error| {
-            error.get("kind").and_then(Value::as_str) == Some("TypeMismatch")
-                && error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .is_some_and(|message| message.contains(&refusal))
-        }),
-        "{label}: expected the by-name refusal of `{builtin}`; got {errs:?}"
+        message.contains("active float dtype") && message.contains(dtype),
+        "{label}: expected an active-float diagnostic naming {dtype}; got {message:?}"
     );
 }
 
@@ -346,14 +351,12 @@ def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {
     }
 }
 
-/// `test_assert_close_tensor` owes a direct-call rule its scheme does not
-/// carry, so it is applicable only by name ([04-INF-9], chelis#3149): an
-/// alias, a nested alias, a higher-order passage and a local alias are each
-/// refused by name at every dtype, float included, rather than reaching the
-/// active-float check through a function value.
+/// The public `chelis check` route must preserve the builtin's active-float
+/// domain when the function value is aliased or passed through a higher-order
+/// parameter. A literal callee-name check cannot satisfy this contract.
 #[test]
-fn test_assert_close_tensor_aliases_are_refused_by_name() {
-    for dtype in ["f32", "i8", "i16", "i32", "i64", "bool"] {
+fn test_assert_close_tensor_aliases_reject_every_non_float_dtype() {
+    for dtype in ["i8", "i16", "i32", "i64", "bool"] {
         for (route, declarations) in [
             (
                 "top-level alias",
@@ -389,7 +392,7 @@ fn test_assert_close_tensor_aliases_are_refused_by_name() {
             );
             write_file(&path, &source);
             let json = run_check(&path);
-            expect_refused_by_name(&json, "test_assert_close_tensor", route);
+            expect_one_active_float_error(&json, dtype, route);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -403,7 +406,7 @@ fn test_assert_close_tensor_aliases_are_refused_by_name() {
         );
         write_file(&path, &source);
         let json = run_check(&path);
-        expect_refused_by_name(&json, "test_assert_close_tensor", "local alias");
+        expect_one_active_float_error(&json, dtype, "local alias");
     }
 }
 

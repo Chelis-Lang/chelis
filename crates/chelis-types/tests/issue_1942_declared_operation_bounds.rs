@@ -80,18 +80,6 @@ fn assert_refused_by_name(source: &str, builtin: &str, errors: &[CheckError]) {
 
 fn check_alias(source: &str, builtin: &str, accepted: bool) {
     if carried(builtin) {
-        return check(source, accepted);
-    }
-    let program = desugar_program(&parse_str(source).expect("valid source"))
-        .expect("Surf fixture must desugar");
-    let Err(report) = check_typed_program(&program) else {
-        panic!("`{builtin}` named as a value must be refused by name: {source}");
-    };
-    assert_refused_by_name(source, builtin, &report.errors);
-}
-
-fn check_alias_both_ingresses(source: &str, builtin: &str, accepted: bool) {
-    if carried(builtin) {
         return check_both_ingresses(source, accepted);
     }
     assert_refused_by_name(source, builtin, &both_ingress_diagnostics(source));
@@ -373,7 +361,7 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
                          {callee}(x, [2i64], [1i64])\n"
                 );
                 if alias {
-                    check_alias_both_ingresses(&source, operation, accepted);
+                    check_alias(&source, operation, accepted);
                 } else {
                     check_both_ingresses(&source, accepted);
                 }
@@ -392,7 +380,7 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
                          {callee}(x, [2i64], [1i64])\n"
                 );
                 if alias {
-                    check_alias_both_ingresses(&source, operation, accepted);
+                    check_alias(&source, operation, accepted);
                 } else {
                     check_both_ingresses(&source, accepted);
                 }

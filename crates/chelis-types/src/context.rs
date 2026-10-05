@@ -229,6 +229,18 @@ pub(crate) struct TypeEnvInner {
 }
 
 impl TypeEnv {
+    /// This scope with one extra binding, for tests that check a program
+    /// against an exact scheme under a name no builtin route claims.
+    #[cfg(test)]
+    pub(crate) fn with_test_binding(&self, name: &str, scheme: crate::types::Scheme) -> Self {
+        let mut inner = (*self.inner).clone();
+        inner.env.bind(name.to_string(), scheme);
+        Self {
+            inner: Arc::new(inner),
+            library_proof_id: None,
+        }
+    }
+
     /// Empty outer scope — the result of building a context from `&[]`.
     /// `check_ir_with_context(&TypeEnv::empty(), exprs)` is
     /// behaviorally equivalent to [`crate::check_ir_program(exprs)`]

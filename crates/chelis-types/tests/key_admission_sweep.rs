@@ -405,19 +405,21 @@ fn every_key_primitive_admits_exactly_its_key_operand() {
 }
 
 /// A builtin named as a value is judged at the parameters of the function
-/// type it is instantiated at, as a call is: `split_key` as a callback
-/// checks, and a builtin value whose parameter admits no key is refused
-/// there, with a diagnostic that names it. Only a builtin whose whole rule
-/// travels with the value is a value at all ([04-INF-9], chelis#3149):
-/// `drop` and `to_int` are applicable only by name, so naming either as a
-/// value is refused before any key judgement.
+/// type it is instantiated at, as a call is: `drop` and `split_key` as
+/// callbacks check, and a builtin value whose parameter admits no key is
+/// refused there, with a diagnostic that names it. Only a builtin whose whole
+/// rule travels with the value is a value at all ([04-INF-9], chelis#3149):
+/// `to_int` is applicable only by name, so naming it as a value is refused
+/// before any key judgement.
 ///
-/// Evidentiary status: the `split_key` positive locks existing acceptance;
-/// the `test_assert_eq` negative is a REGRESSION TEST for the key judgement,
-/// and the by-name refusals lock chelis#3149.
+/// Evidentiary status: the positives lock existing acceptance; the
+/// `test_assert_eq` negative is a REGRESSION TEST for the key judgement, and
+/// the by-name refusals lock chelis#3149.
 #[test]
 fn a_builtin_named_as_a_value_admits_a_key_only_where_a_call_would() {
     verdict("def w(ks: List[key]) -> List[(key, key)] = map(split_key, ks)\n")
+        .unwrap_or_else(|errors| panic!("{errors:?}"));
+    verdict("def w(ks: List[key]) -> List[unit] = map(drop, ks)\n")
         .unwrap_or_else(|errors| panic!("{errors:?}"));
     let errors = verdict(
         "def w(c: bool, a: key, b: key) -> unit = \
@@ -433,10 +435,6 @@ fn a_builtin_named_as_a_value_admits_a_key_only_where_a_call_would() {
         "expected a key refusal naming `test_assert_eq`, got {errors:?}"
     );
     for (source, builtin) in [
-        (
-            "def w(ks: List[key]) -> List[unit] = map(drop, ks)\n",
-            "drop",
-        ),
         (
             "def w(ks: List[key]) -> List[i64] = map(to_int, ks)\n",
             "to_int",
