@@ -6,6 +6,10 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Raw historical receipts are never a normal Deep ingress path.
+pre-020-pipe-migration = []
+
 [dependencies]
 chelis-vocab.workspace = true
 serde.workspace = true

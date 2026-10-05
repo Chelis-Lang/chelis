@@ -310,6 +310,7 @@ fn removed_deep_forms_and_spelling_metadata_fail_closed() {
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_preserves_literal_dtype_and_old_grouping() {
     let source = "out = 0.1 |> cast(f64)\n";
@@ -334,6 +335,7 @@ fn migration_preserves_literal_dtype_and_old_grouping() {
     );
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_widths() {
     // Actual c5e4d116 receipt: a standalone negative seed retains a neg call,
@@ -363,6 +365,7 @@ fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_width
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     let source = "out = cast(-1.0, f32) |> f\n";
@@ -382,6 +385,7 @@ fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     );
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_keeps_authored_first_argument_lambdas_as_values() {
     let source = "out = x |> (fn (v) -> h(v))\n";
@@ -394,6 +398,7 @@ fn migration_keeps_authored_first_argument_lambdas_as_values() {
     assert!(print_canonical(&migrated.baseline).contains("(fn "));
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_uses_validated_metadata_without_erasing_extensions() {
     let source = "out = 0.1 |> f\n";
@@ -419,6 +424,7 @@ fn migration_uses_validated_metadata_without_erasing_extensions() {
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_preserves_metadata_owner_and_bind_value_placement() {
     let source = "out = {\n  x = 0.1 |> f\n  x\n}\n";
@@ -473,6 +479,7 @@ fn migration_preserves_metadata_owner_and_bind_value_placement() {
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_validates_compacting_stage_annotations_before_erasure() {
     for (stage, body) in [
@@ -510,6 +517,7 @@ fn migration_validates_compacting_stage_annotations_before_erasure() {
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_requires_node_maps_and_preserves_macro_source_data() {
     let source = "out = x |> f(y)\n";
@@ -553,6 +561,7 @@ fn migration_requires_node_maps_and_preserves_macro_source_data() {
     }
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_preserves_structural_binder_roles_without_admitting_program_shapes() {
     let source =
@@ -589,6 +598,7 @@ fn migration_preserves_structural_binder_roles_without_admitting_program_shapes(
     );
 }
 
+#[cfg(feature = "pre-020-pipe-migration")]
 #[test]
 fn migration_preserves_trailing_lambda_and_conditional_grouping() {
     for (source, previous) in [
@@ -676,8 +686,11 @@ fn retired_head_rejection_preserves_binders_and_macro_source_data() {
         "(def {source: (pipe {} historic)} x (lit {type: (t-prim {} i32)} 1))",
     )
     .unwrap();
-    let raw =
-        chelis_deep::parser::parse_pipe_migration_raw("(pipe {} (var {} x) (var {} f))").unwrap();
-    let error = chelis_deep::stamp_runtime_exprs(raw).unwrap_err();
-    assert!(error.to_string().contains("0.20") && error.to_string().contains("pipe"));
+    #[cfg(feature = "pre-020-pipe-migration")]
+    {
+        let raw = chelis_deep::parser::parse_pipe_migration_raw("(pipe {} (var {} x) (var {} f))")
+            .unwrap();
+        let error = chelis_deep::stamp_runtime_exprs(raw).unwrap_err();
+        assert!(error.to_string().contains("0.20") && error.to_string().contains("pipe"));
+    }
 }
