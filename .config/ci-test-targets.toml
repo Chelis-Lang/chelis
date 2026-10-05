@@ -2131,6 +2131,11 @@ prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/src/proofs.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # Exact shared scripts changed by the integer spelling migration. The PR
 # script-unit selection discovers every named test module; production oracles
 # with stronger standing jobs retain those jobs as their owners below.
