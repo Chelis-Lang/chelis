@@ -76,7 +76,10 @@ struct QuantileContractCall {
 #[derive(Debug, Clone, Default)]
 pub(super) enum ContractSymbols {
     /// Placeholder spellings for the discovery pass, whose lowered goal is
-    /// read only for the names it uses and is never solved.
+    /// read only for the names it uses and is never solved or rendered. They
+    /// contain `#`, which no Surf or Deep identifier can contain (the
+    /// identifier grammars in spec/01 and spec/03 and both lexers), so a
+    /// placeholder can never alias a user name.
     #[default]
     Discovery,
     /// The final pass: `__contract_std_*` stems made fresh against the
@@ -87,7 +90,7 @@ pub(super) enum ContractSymbols {
 impl ContractSymbols {
     fn mint(&mut self, family: &str, index: usize) -> String {
         match self {
-            Self::Discovery => format!("__contract_discovery_{family}_{index}"),
+            Self::Discovery => format!("#contract_discovery#{family}#{index}"),
             Self::Fresh(names) => names.fresh(&format!("__contract_std_{family}_{index}")),
         }
     }

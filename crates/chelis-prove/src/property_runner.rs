@@ -2245,8 +2245,8 @@ fn check_contract_symbols_fresh(
     fresh: &TierBGoalImage,
 ) -> Result<(), String> {
     let captured = || {
-        "contract abstraction minted a solver symbol that coincides with a name the property \
-         already uses (chelis#3236); the goal is not solved"
+        "the two contract-abstraction lowering passes disagreed (chelis#3236); the goal is not \
+         solved"
             .to_string()
     };
     if fresh.minted.len() != discovery.minted.len()
@@ -2332,7 +2332,9 @@ fn lower_surf_tier_b_goal(
         ContractSymbols::Fresh(names),
     );
     let fresh_image = TierBGoalImage::of(&fresh).ok_or_else(|| {
-        "contract abstraction lowered differently on its second pass (chelis#3236)".to_string()
+        "the two contract-abstraction lowering passes disagreed: the second did not lower \
+         (chelis#3236); the goal is not solved"
+            .to_string()
     })?;
     check_contract_symbols_fresh(&property.params, &discovery_image, &fresh_image)?;
     Ok(fresh)
@@ -2389,8 +2391,9 @@ fn lower_surf_tier_b_pass(
 
 /// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
 /// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
-/// `None` to fall through to Tier C (the property did not lower, or the
-/// solver timed out / errored).
+/// `None` to fall through to Tier C (the property did not lower, including
+/// when the contract-abstraction lowering passes disagree under `auto`, or
+/// the solver timed out / errored).
 fn try_surf_tier_b(
     decls: &[Decl],
     trusted_contract_decls: &[Decl],
@@ -2402,6 +2405,7 @@ fn try_surf_tier_b(
     let lowered = match lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts)
     {
         Ok(lowered) => lowered,
+        Err(_) if options.tier != "smt-only" => return None,
         Err(reason) => {
             return Some(PropertyOutcome::new(
                 property.name.clone(),

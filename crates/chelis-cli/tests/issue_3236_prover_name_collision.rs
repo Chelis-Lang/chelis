@@ -269,3 +269,36 @@ fn normal_cdf_call_argument_collision_matches_the_renamed_control() {
         assert_not_proved(record(&records, "forged_one", &transcript), &transcript);
     }
 }
+
+/// Red-team N1: a binder spelled like a discovery-pass placeholder, used
+/// under negation beside a nested contract call. `renamed_valid` is the same
+/// valid claim over an ordinary binder.
+const DISCOVERY_PLACEHOLDER_ALIAS: &str = r#"module Probe.Reg
+import Std.Contracts (normal_cdf)
+@property disc_alias_valid forall(x: f64, __contract_discovery_normal_cdf_2: f64):
+  (((normal_cdf(x) + normal_cdf(-x)) == 1.0f64) && ((normal_cdf(normal_cdf(x)) + normal_cdf(-__contract_discovery_normal_cdf_2)) <= 2.0f64))
+  with contract = "std.normal_cdf.reflection"
+@property renamed_valid forall(x: f64, u: f64):
+  (((normal_cdf(x) + normal_cdf(-x)) == 1.0f64) && ((normal_cdf(normal_cdf(x)) + normal_cdf(-u)) <= 2.0f64))
+  with contract = "std.normal_cdf.reflection"
+"#;
+
+#[test]
+fn binder_spelled_like_a_discovery_placeholder_matches_the_renamed_control() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("discovery_alias.ch");
+    write(&path, DISCOVERY_PLACEHOLDER_ALIAS);
+    for tier in [AUTO, SMT_ONLY] {
+        let (records, transcript) = prove(&path, tier);
+        let aliased = record(&records, "disc_alias_valid", &transcript);
+        let renamed = record(&records, "renamed_valid", &transcript);
+        assert_eq!(renamed["status"], "passed", "{renamed}\n{transcript}");
+        for field in ["status", "proof_tier", "composite_verdict"] {
+            assert_eq!(
+                aliased[field], renamed[field],
+                "a binder spelled like a discovery placeholder behaves like any other binder \
+                 ({field})\n{transcript}"
+            );
+        }
+    }
+}
