@@ -69,6 +69,14 @@ The workflow also exposes a `workflow_dispatch` trigger so the build path
 can be exercised on a branch without publishing. Dispatch runs upload the
 tarball as a workflow artifact and do NOT create a Release.
 
+`.github/workflows/release-e2e.yml` installs a release the way users get it
+and runs it on the hosts the install guide names: macOS 14, 15 and 26, Ubuntu
+runners, pinned distribution images from glibc 2.31 to current and musl
+Alpine, and NixOS with and without nix-ld (`scripts/release_e2e.py`,
+chelis#3250). It runs after each tag's successful `release.yml` run, because
+a release published with `GITHUB_TOKEN` starts no `release` workflow. It
+reports problems and does not gate publishing.
+
 This is a hand-rolled workflow. Chelis does not use `cargo-dist` in
 3j-pre; if multi-platform matrix support becomes a priority in a later
 phase, that decision can be revisited. No `[workspace.metadata.dist]`
@@ -148,3 +156,11 @@ For each new tag:
    vX.Y.Z`.
 5. Confirm `gh release view vX.Y.Z` shows the tarball and checksum
    attached.
+6. The Release E2E workflow runs on the published release; check its
+   summary table.
+
+Before tagging, a release author can run the same checks on a candidate:
+dispatch `release.yml` on the release branch, then run
+`gh workflow run release-e2e.yml -f candidate_run=<that run's id>`. Every host
+installs the run's unpublished artifacts and runs every step except the
+bootstrap and the GitHub install, which need a published release.
