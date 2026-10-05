@@ -51,7 +51,7 @@ fn admission() {
     kani::cover!(len != rank);
     kani::cover!(permutation_model(axes, rank));
     kani::cover!(len == rank && axes.iter().any(|a| *a >= rank));
-    kani::cover!(len >= 2 && values[0] == values[1]);
+    kani::cover!(axes.len() >= 2 && axes[0] == axes[1]);
     assert_eq!(is_permutation(axes, rank), permutation_model(axes, rank));
 }
 
