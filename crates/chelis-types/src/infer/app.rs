@@ -419,6 +419,28 @@ fn infer_app_inner(
                 arg_tys.len()
             ));
         }
+        // The operand is owned, so a borrowed one is a type error rather
+        // than an implicit consume of its owner.
+        // An operand still unresolved here is re-checked against the final
+        // substitution when the declaration closes (chelis#3180).
+        match subst.apply(&arg_tys[0]) {
+            operand @ Type::Ref(_) => {
+                let error = borrowed_drop_operand_error(&operand);
+                let error = CheckError {
+                    message: with_node_provenance(node, error.message.clone()),
+                    ..error
+                };
+                return_with_collection_cleanup!(report_at_check_site(
+                    errors,
+                    error,
+                    CheckSite::Expr(expr),
+                ));
+            }
+            Type::Var(tv) => {
+                subst.record_deferred_drop_operand(tv, TypeDiagnosticLocation::from_expr(expr));
+            }
+            _ => {}
+        }
         return_with_collection_cleanup!(Type::Unit);
     }
 
@@ -985,5 +1007,36 @@ fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], su
             continue;
         }
         subst.insert_dim(root, Dim::Wildcard);
+    }
+}
+
+/// [05-OP-67]: the operand of `drop` is owned, so a borrowed one is a type
+/// error rather than an implicit consume of its owner. Shared by the eager
+/// check in the `drop` route and the deferred one at declaration close.
+pub(super) fn borrowed_drop_operand_error(operand: &Type) -> CheckError {
+    CheckError::with_types(
+        CheckErrorKind::TypeMismatch,
+        format!(
+            "drop argument 1: expected an owned value, got borrowed `{operand}`; `drop` ends its \
+             operand's lifetime and cannot take a borrow ([05-OP-67])"
+        ),
+        "an owned value".to_string(),
+        operand.to_string(),
+        vec!["Drop the owner itself: write `drop(x)`, not `drop(&x)`".to_string()],
+    )
+}
+
+/// chelis#3180: re-check each `drop` operand that was unresolved when its call
+/// was inferred against the declaration's final substitution.
+pub(super) fn validate_deferred_drop_operands(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    for (tv, location) in subst.take_deferred_drop_operands() {
+        let operand = subst.apply(&Type::Var(tv));
+        if matches!(operand, Type::Ref(_)) {
+            let error = borrowed_drop_operand_error(&operand);
+            errors.push(match location {
+                Some(location) => location.attach(error),
+                None => error,
+            });
+        }
     }
 }
