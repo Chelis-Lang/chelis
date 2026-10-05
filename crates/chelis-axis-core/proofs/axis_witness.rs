@@ -59,8 +59,13 @@ fn check(function: &str, rank: usize, axes: &[usize], raw: i64, axis: usize) -> 
         return false;
     }
     println!(
-        "{{\"function\":{function:?},\"rank\":{rank},\"axes\":{axes:?},\"raw\":{raw},\"axis\":{axis},\"expected\":{expected:?},\"actual\":{actual:?},\"within_abi_rank\":{}}}",
-        rank <= i32::MAX as usize
+        "{{\"function\":{function:?},\"rank\":{rank},\"axes\":{axes:?},\"raw\":{raw},\"axis\":{axis},\"expected\":{expected:?},\"actual\":{actual:?},\"within_abi_rank\":{},\"within_axis_i32_domain\":{}}}",
+        rank <= i32::MAX as usize,
+        if function == "normalize_axis" {
+            i32::try_from(raw).is_ok()
+        } else {
+            axes.iter().all(|a| *a <= i32::MAX as usize) && axis <= i32::MAX as usize
+        }
     );
     true
 }
@@ -91,17 +96,17 @@ fn main() {
         ]) {
             let signed = i64::try_from(rank).unwrap_or(i64::MAX);
             for raw in [
-                i64::MIN,
-                i64::MIN + 1,
-                -signed,
-                (-signed).saturating_sub(1),
                 -2,
                 -1,
                 0,
                 1,
+                -signed,
+                (-signed).saturating_sub(1),
                 signed.saturating_sub(1),
                 signed,
                 signed.saturating_add(1),
+                i64::MIN,
+                i64::MIN + 1,
                 i64::MAX,
             ] {
                 if check(&function, rank, &[], raw, 0) {

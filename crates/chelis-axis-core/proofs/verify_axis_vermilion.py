@@ -18,6 +18,16 @@ def run(*args: str | Path, cwd: Path, env: dict[str, str] | None = None) -> None
     subprocess.run([str(arg) for arg in args], cwd=cwd, env=env, check=True)
 
 
+def build_environment(original: dict[str, str]) -> dict[str, str]:
+    env = original.copy()
+    # Upstream consumes three declared target paths, including vargo and the
+    # separately rooted SST adapter. A caller's shared Cargo target breaks them.
+    env.pop("CARGO_TARGET_DIR", None)
+    env["PATH"] = f"{Path.home() / '.elan/bin'}{os.pathsep}{env['PATH']}"
+    env["RUSTUP_NO_SELF_UPDATE"] = "1"
+    return env
+
+
 def exact_item(source: str, marker: str) -> str:
     start = source.index(marker)
     brace = source.index("{", start)
@@ -49,9 +59,7 @@ def main() -> None:
     if actual != PIN:
         raise SystemExit(f"Vermilion checkout is {actual}, expected {PIN}")
 
-    env = os.environ.copy()
-    env["PATH"] = f"{Path.home() / '.elan/bin'}{os.pathsep}{env['PATH']}"
-    env["RUSTUP_NO_SELF_UPDATE"] = "1"
+    env = build_environment(dict(os.environ))
     if not (home / "target/debug/vrml_check").is_file() or not (
         home / ".verus-checkout/source/target-verus/release/rust_verify"
     ).is_file():

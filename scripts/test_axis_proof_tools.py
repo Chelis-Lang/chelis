@@ -11,9 +11,24 @@ spec = importlib.util.spec_from_file_location("axis_verus_runner", RUNNER)
 assert spec is not None and spec.loader is not None
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
+vm_spec = importlib.util.spec_from_file_location("axis_vermilion_runner", RUNNER.with_name("verify_axis_vermilion.py"))
+assert vm_spec is not None and vm_spec.loader is not None
+vermilion = importlib.util.module_from_spec(vm_spec)
+vm_spec.loader.exec_module(vermilion)
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_upstream_build_environment_uses_its_declared_targets(self):
+        original = {"PATH": "/bin", "CARGO_TARGET_DIR": "/unrelated/shared-target", "KEEP": "value"}
+        result = vermilion.build_environment(original)
+        self.assertNotIn("CARGO_TARGET_DIR", result)
+        self.assertEqual(result["KEEP"], "value")
+        self.assertIn("CARGO_TARGET_DIR", original)
+
+    def test_upstream_environment_without_override_retains_path(self):
+        result = vermilion.build_environment({"PATH": "/bin"})
+        self.assertTrue(result["PATH"].endswith(":/bin"))
+
     def test_executable_mode_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

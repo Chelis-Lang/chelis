@@ -80,6 +80,11 @@ not the compiler input space. The result must state whether the campaign bound
 clears the ABI ceiling. Witnesses beyond that ceiling establish kernel defects,
 but do not establish production reachability. Rust caller extraction and complete
 compiler behavior remain outside the proofs.
+Axis scalars are `i32` under [05-DIM-1] and the movement signatures. The kernel's
+`i64`/`usize` interface is wider; witnesses also record whether their axis values
+fit the language domain. Normalization probes prefer small signed values before
+the full-width extremes. Being within these scalar and rank domains is necessary
+for production relevance, but does not prove a particular caller reaches the input.
 
 Cold measurements use an empty task-owned Cargo target with already installed
 tools and warm OS/download caches. Warm measurements reuse that target. Wall time

@@ -35,6 +35,7 @@ def summarize(mutant: dict, manual: dict) -> dict:
     row["reason"] = review["reason"] if review else ("concrete contract violation" if witness else classification)
     row["witness"] = json.dumps(witness, sort_keys=True) if witness else ""
     row["within_abi_rank"] = witness.get("within_abi_rank") if witness else None
+    row["within_axis_i32_domain"] = witness.get("within_axis_i32_domain") if witness else None
     row["tests"] = verdict(mutant.get("tests", []), "test_failure")
     row["test_suites"] = ";".join(f"{r['suite']}:{r['status']}" for r in mutant.get("tests", []))
     row["verus"] = mutant.get("verus_credit", "not_run")
@@ -64,6 +65,7 @@ def main() -> None:
     parser.add_argument("receipts", type=Path)
     parser.add_argument("--manual", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--extras", type=Path, help="Measured installation/setup and Vermilion baseline receipts")
     args = parser.parse_args()
     results = json.loads((args.receipts / "results.json").read_text())
     inventory = json.loads((args.receipts / "mutants.json").read_text())
@@ -100,7 +102,7 @@ def main() -> None:
     settings = json.loads((args.receipts / "bound.json").read_text())
     cost_rows = []
     for oracle in ("tests", "kani", "verus"):
-        row = {"oracle": oracle, "campaign_rank_bound": settings["bound"],
+        row = {"oracle": oracle, "kani_campaign_rank_bound": settings["bound"],
                "production_abi_rank_ceiling": settings["runtime_abi_rank_ceiling"],
                "bound_covers_abi_ceiling": settings["bound"] >= settings["runtime_abi_rank_ceiling"]}
         for phase in ("cold", "warm"):
@@ -108,6 +110,22 @@ def main() -> None:
             row[f"{phase}_seconds"] = sum(r["wall_seconds"] for r in receipts)
             row[f"{phase}_peak_rss_bytes"] = max(r["peak_group_rss_bytes"] for r in receipts)
         cost_rows.append(row)
+    if args.extras:
+        extras = json.loads(args.extras.read_text())
+        for row in cost_rows:
+            item = extras["setup"].get(row["oracle"], {})
+            for key in ("install_bytes", "setup_seconds", "setup_memory_bytes", "setup_note"):
+                row[key] = item.get(key)
+        if "vermilion" in extras:
+            vm_cost = extras["vermilion"]
+            validate_receipts(vm_cost)
+            item = extras["setup"]["vermilion"]
+            cost_rows.append({"oracle": "vermilion", "kani_campaign_rank_bound": settings["bound"],
+                              "production_abi_rank_ceiling": settings["runtime_abi_rank_ceiling"],
+                              "bound_covers_abi_ceiling": settings["bound"] >= settings["runtime_abi_rank_ceiling"],
+                              **{f"{phase}_{key}": vm_cost[phase][name] for phase in ("cold", "warm")
+                                 for key, name in (("seconds", "wall_seconds"), ("peak_rss_bytes", "peak_group_rss_bytes"))},
+                              **{key: item.get(key) for key in ("install_bytes", "setup_seconds", "setup_memory_bytes", "setup_note")}})
     write_table(args.output / "costs.csv", cost_rows)
     real = [r for r in rows if r["classification"] == "real_gap"]
     summary = {"mutants": len(rows), "viable": sum(r["classification"] not in ("unbuildable", "build_timeout") for r in rows),
