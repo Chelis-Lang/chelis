@@ -99,6 +99,9 @@ fn a_literal_cast_to_a_primitive_is_the_suffixed_literal_and_nothing_else_collap
         ("cast(3000000000, i64)", "3000000000i64"),
         ("cast(7, i8)", "7i8"),
         ("cast(7, i32)", "7i32"),
+        // A pipe normalizes to the call before literal dtype selection.
+        ("1.1 |> cast(f64)", "1.1f64"),
+        ("7 |> cast(i64)", "7i64"),
     ] {
         let collapsed = strip_spans(&deep(&format!("x = {cast}\n")));
         let literal = strip_spans(&deep(&format!("x = {suffixed}\n")));
@@ -130,6 +133,8 @@ fn a_literal_cast_to_a_primitive_is_the_suffixed_literal_and_nothing_else_collap
         ("cast(1.1f64, f64)", "type: (t-prim {} f64)} 1.1)"),
         ("cast(1, bool)", "type: (t-prim {} i32)} 1)"),
         ("cast(1.0, bool)", "type: (t-prim {} f32)} 1.0)"),
+        ("1.1f32 |> cast(f64)", "type: (t-prim {} f32)} 1.1)"),
+        ("2.5 |> cast(i32)", "type: (t-prim {} f32)} 2.5)"),
     ] {
         let text = deep(&format!("x = {cast}\n"));
         assert_contains(&text, "(cast ", cast);
@@ -241,6 +246,11 @@ fn a_dtype_argument_types_every_literal_element_and_stays_in_the_deep() {
     assert_contains(&flat, "type: (t-prim {} f64)} 2.2)", "second element");
     assert_lacks(&flat, "(t-prim {} f32)", "no default element");
     assert_lacks(&flat, "(var {} f64)", "the dtype is not a value");
+    assert_eq!(
+        strip_spans(&deep("x = [1.1, 2.2] |> to_tensor(f64)\n")),
+        strip_spans(&flat),
+        "a pipe into to_tensor(f64) is the call"
+    );
 
     let nested = deep("x = to_tensor([[1, 2], [3, -4]], i64)\n");
     for literal in ["} 1)", "} 2)", "} 3)", "} -4)"] {
@@ -356,6 +366,7 @@ fn an_unsuffixed_to_tensor_element_without_a_dtype_argument_is_rejected() {
         ("xs: tensor[2, f32] = to_tensor([1.1, 2.2])\n", "f32"),
         ("def f() -> tensor[2, f32] = to_tensor([1.5, 2.5])\n", "f32"),
         ("macro tt() = to_tensor([1.5, 2.5])\n", "f32"),
+        ("x = [1.1, 2.2] |> to_tensor\n", "f32"),
     ] {
         let error = desugar_error(source);
         assert_contains(&error, "states no dtype", source);
@@ -380,6 +391,12 @@ fn an_unsuffixed_to_tensor_element_without_a_dtype_argument_is_rejected() {
         &suffixed,
         "type: (t-prim {} f32)} 1.1)",
         "suffixed elements",
+    );
+    let piped = deep("x = [1.1f32, 2.2f32] |> to_tensor\n");
+    assert_contains(
+        &piped,
+        "type: (t-prim {} f32)} 1.1)",
+        "suffixed piped elements",
     );
     let bound = deep("xs = [1.1, 2.2]\nx = to_tensor(xs)\n");
     assert_contains(&bound, "type: (t-prim {} f32)} 1.1)", "a List bound first");

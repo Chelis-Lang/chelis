@@ -369,10 +369,13 @@ enum Site {
     TensorLiteral,
     ListElement,
     CallArgument,
+    PipeCast,
+    PipeDtypeArgument,
+    PipeNoDtypeArgument,
 }
 
 impl Site {
-    const ALL: [Site; 15] = [
+    const ALL: [Site; 18] = [
         Site::Plain,
         Site::Declared,
         Site::SigDeclared,
@@ -388,17 +391,26 @@ impl Site {
         Site::TensorLiteral,
         Site::ListElement,
         Site::CallArgument,
+        Site::PipeCast,
+        Site::PipeDtypeArgument,
+        Site::PipeNoDtypeArgument,
     ];
 
     fn uses_dtype(self) -> bool {
         !matches!(
             self,
-            Site::Plain | Site::BinderCast | Site::NoDtypeArgument | Site::ListElement
+            Site::Plain
+                | Site::BinderCast
+                | Site::NoDtypeArgument
+                | Site::ListElement
+                | Site::PipeNoDtypeArgument
         )
     }
 
-    fn render(self, literal: &str, dtype: &str) -> String {
-        match self {
+    /// The program, or `None` where the spelling is not well formed: a
+    /// negated literal cannot head an ungrouped pipe (spec/02 [02-PIPE-2]).
+    fn render(self, literal: &str, dtype: &str) -> Option<String> {
+        Some(match self {
             Site::Plain => format!("x = {literal}\n"),
             Site::Declared => format!("x: {dtype} = {literal}\n"),
             Site::SigDeclared => format!("sig x: {dtype}\nx = {literal}\n"),
@@ -418,7 +430,13 @@ impl Site {
             Site::TensorLiteral => format!("xs: tensor[2, {dtype}] = [{literal}, {literal}]\n"),
             Site::ListElement => format!("xs = [{literal}, {literal}]\n"),
             Site::CallArgument => format!("def id(v: {dtype}) -> {dtype} = v\nx = id({literal})\n"),
-        }
+            Site::PipeCast if literal.starts_with('-') => return None,
+            Site::PipeCast => format!("x = {literal} |> cast({dtype})\n"),
+            Site::PipeDtypeArgument => {
+                format!("x = [{literal}, {literal}] |> to_tensor({dtype})\n")
+            }
+            Site::PipeNoDtypeArgument => format!("x = [{literal}, {literal}] |> to_tensor\n"),
+        })
     }
 }
 
@@ -474,8 +492,8 @@ fn expected(site: Site, literal: &str, dtype: &str) -> Expected {
         | Site::DefResult
         | Site::SigDefResult
         | Site::BlockDeclared => stated(1),
-        Site::DtypeArgument | Site::TensorLiteral => stated(2),
-        Site::Cast => match (suffix, admits) {
+        Site::DtypeArgument | Site::TensorLiteral | Site::PipeDtypeArgument => stated(2),
+        Site::Cast | Site::PipeCast => match (suffix, admits) {
             (None, true) => Expected::Literals {
                 dtype: dtype.to_string(),
                 count: 1,
@@ -492,7 +510,7 @@ fn expected(site: Site, literal: &str, dtype: &str) -> Expected {
             count: 1,
             casts: 1,
         },
-        Site::NoDtypeArgument => match suffix {
+        Site::NoDtypeArgument | Site::PipeNoDtypeArgument => match suffix {
             Some(_) => own_literals(2, 0),
             None => Expected::Rejected("states no dtype"),
         },
@@ -500,7 +518,8 @@ fn expected(site: Site, literal: &str, dtype: &str) -> Expected {
 }
 
 /// Sites × literal spellings × dtypes: each literal gets the §5.6 dtype, and
-/// `chelis surf` output re-reads to the same Deep. A printer that strips a
+/// `chelis surf` output re-reads to the same Deep. A pipe site expects exactly
+/// what its normalized call does (spec/02 [02-PIPE-1]). A printer that strips a
 /// cast operand's suffix, or trusts the unsuffixed marker, fails here.
 #[test]
 fn every_site_gives_its_literal_the_stated_dtype_and_survives_resugaring() {
@@ -517,8 +536,10 @@ fn every_site_gives_its_literal_the_stated_dtype_and_survives_resugaring() {
                 if !site.uses_dtype() && dtype != DTYPES[0] {
                     continue;
                 }
+                let Some(source) = site.render(literal, dtype) else {
+                    continue;
+                };
                 cases += 1;
-                let source = site.render(literal, dtype);
                 let outcome = front_end(&source);
                 match (expected(site, literal, dtype), outcome) {
                     (Expected::Rejected(needle), Err(error)) => {

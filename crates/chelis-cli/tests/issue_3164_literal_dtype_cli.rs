@@ -150,6 +150,8 @@ w: f16 = 0.1
 y = cast(1, bool)
 def kb[p: Float](x: p) -> tensor[1, p] = to_tensor([cast(1.5, p)], p)
 kb_value = kb(1.0f64)
+pa = 1.1 |> cast(f64)
+pb = [1.1, 2.2] |> to_tensor(f64)
 ";
 
 const SUFFIXED: &str = "\
@@ -172,6 +174,8 @@ v = to_tensor([neg(1.5f64), 2f64])
 w = 0.1f16
 y = true
 kb_value = to_tensor([1.5f64])
+pa = 1.1f64
+pb = to_tensor([1.1f64, 2.2f64])
 ";
 
 #[test]
@@ -222,6 +226,7 @@ fn every_rejected_spelling_is_refused_by_check_eval_and_build() {
             "xs: tensor[2, f32] = to_tensor([1.1, 2.2])\n",
             &["states no dtype"][..],
         ),
+        ("x = [1.1, 2.2] |> to_tensor\n", &["states no dtype"][..]),
         ("x: i32 = 1.5\n", &["cannot bind at i32"][..]),
         ("x = to_tensor([1.0f64], f32)\n", &["dtype argument"][..]),
         ("xs = [1.5, 2.5]\nx = to_tensor(xs, f64)\n", &["never converts"][..]),
