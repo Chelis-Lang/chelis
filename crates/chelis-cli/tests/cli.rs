@@ -9436,7 +9436,7 @@ fn sum_family_over_a_precision_hole_is_decided_when_the_hole_binds() {
 /// executable. The f32-with-f64 rows and the i32-with-i64 rows print a total
 /// only the wider accumulator holds (16777218 and 2147483648). The named-axis
 /// form keeps the accumulator at every stage, and its default i8 total is the
-/// i32 sum_result rather than a trap.
+/// i32 sum_result rather than a trap; borrowed operands behave the same.
 #[test]
 fn explicit_accumulator_pairs_agree_in_eval_and_c() {
     let dir = tempdir().expect("tempdir");
@@ -9450,6 +9450,11 @@ fn explicit_accumulator_pairs_agree_in_eval_and_c() {
             "named_axes",
             include_str!("fixtures/explicit_accumulator/named_axes.ch"),
             include_str!("fixtures/explicit_accumulator/named_axes.expected"),
+        ),
+        (
+            "borrowed",
+            include_str!("fixtures/explicit_accumulator/borrowed.ch"),
+            include_str!("fixtures/explicit_accumulator/borrowed.expected"),
         ),
     ] {
         let path = dir.path().join(format!("{stem}.ch"));

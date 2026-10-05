@@ -34,6 +34,9 @@ fn additional_core_payloads_reject_bad_shapes_and_owners() {
         "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
         "(bind {destructure: false} x (lit {} 1))",
         "(var {destructure: true} x)",
+        "(app {accumulator: (t-prim {} float64)} (var {} sum) (lit {} 1))",
+        "(app {accumulator: (t-tensor {} (t-prim {} f64))} (var {} sum) (lit {} 1))",
+        "(var {accumulator: (t-prim {} f64)} x)",
     ] {
         assert!(parse_str(source).is_err(), "accepted {source}");
     }

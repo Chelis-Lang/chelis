@@ -1114,13 +1114,19 @@ fn accumulated_result(
     let operand = kids
         .get(if operation == "einsum" { 2 } else { 1 })
         .and_then(|operand| product.current_owner_type(operand, subst, errors));
+    // A borrowed operand is decided on its referent.
+    let operand = match operand.map(|operand| subst.apply(&operand)) {
+        Some(Type::Ref(referent)) => Some(subst.apply(&referent)),
+        operand => operand,
+    };
     let operand = match operand {
         Some(Type::Tensor(_, TensorPrec::Concrete(prim))) => prim,
         _ => {
             return Err(format!(
-                "`{operation}` with `accumulator={}` needs an operand of concrete dtype, so \
-                 that spec/04 §5.7.1's permitted-pairs table can decide the pair; declare the \
-                 operand's dtype",
+                "`{operation}` with `accumulator={}` is decided over the operand's dtype at \
+                 the call (spec/04 §5.7.1's permitted-pairs table), and this operand's dtype is \
+                 a type variable, which the checker does not decide an explicit accumulator \
+                 over; omit `accumulator=`, or pass an operand of concrete dtype",
                 accumulator.name()
             ));
         }

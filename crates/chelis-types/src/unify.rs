@@ -3962,10 +3962,18 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
-            message: format!(
-                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
-                prim.name()
-            ),
+            message: {
+                let message = format!(
+                    "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
+                    prim.name()
+                );
+                let small_integer =
+                    restriction.admits(Prim::Int8) || restriction.admits(Prim::Int16);
+                match crate::infer::sum_result_bound_note(small_integer, *prim) {
+                    Some(note) => format!("{message}; {note}"),
+                    None => message,
+                }
+            },
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,

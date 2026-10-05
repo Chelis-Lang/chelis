@@ -42,6 +42,7 @@ enum Shape {
     True,
     PositiveInteger,
     Type,
+    Dtype,
     Effects,
     Params,
     Expressions,
@@ -122,8 +123,13 @@ rules! {
     "effect" => S::Names(&["resource"]), P::Tag(T::HandleEffect), "resource on handle-effect";
     "literal_source" => S::Names(&["integer"]), P::Tag(T::Lit), "integer on lit";
     "destructure" => S::True, P::Tag(T::Bind), "true on bind";
-    "accumulator" => S::Type, P::Tag(T::App), "a type-expression node naming a dtype on app";
+    "accumulator" => S::Dtype, P::Tag(T::App), "a (t-prim {} dtype) node naming an active dtype on app";
 }
+
+/// spec/02 `PrecType`: the dtype names an `accumulator` may carry.
+const ACTIVE_DTYPES: &[&str] = &[
+    "f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64", "bool", "string", "key",
+];
 
 enum KeyClass {
     Registered(&'static Rule),
@@ -142,7 +148,7 @@ pub fn role(key: &str) -> MetadataRole {
     match classify(key) {
         KeyClass::Registered(rule) => match rule.shape {
             S::Expression | S::Wrt => MetadataRole::Expression,
-            S::Type => MetadataRole::Type,
+            S::Type | S::Dtype => MetadataRole::Type,
             S::Source => MetadataRole::Preserved,
             S::Bounds => MetadataRole::BinderMap,
             S::String
@@ -908,6 +914,12 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
         S::True => v.is_true(),
         S::PositiveInteger => v.integer().is_some_and(|n| n > 0),
         S::Type => type_shape_error(v).is_none(),
+        S::Dtype => v.node(T::TPrim).is_some_and(|n| {
+            n.children.len() == 1
+                && n.children[0]
+                    .name()
+                    .is_some_and(|name| ACTIVE_DTYPES.contains(&name))
+        }),
         S::Effects => v.node(T::Effects).is_some_and(|n| {
             n.children.iter().all(|v| {
                 v.name().is_some()

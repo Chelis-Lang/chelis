@@ -1112,6 +1112,20 @@ pub(crate) fn explicit_accumulator_result(
     ))
 }
 
+/// The spec/04 §5.7.1 note for a binder bounded to admit i8 or i16 that a
+/// body instantiated at `prim`, the i32 that `sum`, `cumsum`, `trace` and
+/// `einsum` return for those operands.
+pub(crate) fn sum_result_bound_note(admits_small_integer: bool, prim: Prim) -> Option<String> {
+    (admits_small_integer && prim == Prim::Int32).then(|| {
+        "if this i32 is the result of `sum`, `cumsum`, `trace` or `einsum` over i8 or i16, \
+         spec/04 §5.7.1 widened it, because those operations sum i8 and i16 in i32 and return \
+         that i32 total; declare that result as i32 (or, for `sum` and `einsum`, pass \
+         `accumulator=i64` and declare i64), or bound the binder to dtypes that share one \
+         sum result"
+            .to_string()
+    })
+}
+
 /// The `sum`-family operation `expr` evaluates to directly: a call to `sum`,
 /// `cumsum`, `trace` or `einsum`, or a `let` or `fn` whose tail is one.
 pub(crate) fn sum_family_tail_op(expr: &deep::Expr) -> Option<&'static str> {
