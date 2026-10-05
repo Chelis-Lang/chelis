@@ -535,7 +535,7 @@ struct CollectionContractInstance {
 enum CollectionContractState {
     Transport,
     Consumed {
-        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+        evidence: Option<crate::infer::CollectionCallEvidence>,
     },
 }
 
@@ -909,10 +909,10 @@ enum CollectionDischarge {
 
 fn discharge_collection_constraint(
     constraint: &crate::types::CollectionConstraint,
-    tensor_concat: Option<&crate::infer::TensorConcatCallEvidence>,
+    evidence: Option<&crate::infer::CollectionCallEvidence>,
     subst: &mut Subst,
 ) -> CollectionDischarge {
-    match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
+    match crate::infer::decide_collection_constraint(constraint, evidence, subst) {
         Ok(None) => CollectionDischarge::Unresolved,
         Ok(Some(decision)) => {
             let produced = decision.produced_result();
@@ -1842,6 +1842,7 @@ impl Subst {
         ids: &[CollectionContractId],
         callees: &[Type],
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+        split_keys_count: Option<i64>,
     ) {
         let callees = callees.iter().map(|ty| self.apply(ty)).collect::<Vec<_>>();
         let mut contracts = self
@@ -1856,12 +1857,16 @@ impl Subst {
             if !callees.contains(&collection_contract_callable_type(&normalized)) {
                 continue;
             }
-            let evidence = matches!(instance.constraint, CollectionConstraint::Concat { .. })
-                .then(|| tensor_concat.clone())
-                .flatten();
-            instance.state = CollectionContractState::Consumed {
-                tensor_concat: evidence,
+            let evidence = match instance.constraint {
+                CollectionConstraint::Concat { .. } => tensor_concat
+                    .clone()
+                    .map(crate::infer::CollectionCallEvidence::TensorConcat),
+                CollectionConstraint::SplitKeys { .. } => Some(
+                    crate::infer::CollectionCallEvidence::SplitKeysCount(split_keys_count),
+                ),
+                _ => None,
             };
+            instance.state = CollectionContractState::Consumed { evidence };
         }
     }
 
@@ -1888,10 +1893,10 @@ impl Subst {
                 continue;
             };
             match instance.state.clone() {
-                CollectionContractState::Consumed { tensor_concat } => {
+                CollectionContractState::Consumed { evidence } => {
                     match discharge_collection_constraint(
                         &instance.constraint,
-                        tensor_concat.as_ref(),
+                        evidence.as_ref(),
                         self,
                     ) {
                         CollectionDischarge::Unresolved => {
@@ -1923,9 +1928,8 @@ impl Subst {
                         match discharge_collection_constraint(&instance.constraint, None, self) {
                             CollectionDischarge::Unresolved => {
                                 let mut consumed = instance;
-                                consumed.state = CollectionContractState::Consumed {
-                                    tensor_concat: None,
-                                };
+                                consumed.state =
+                                    CollectionContractState::Consumed { evidence: None };
                                 self.restore_collection_contract_instance(consumed);
                             }
                             CollectionDischarge::Settled(_) => {}

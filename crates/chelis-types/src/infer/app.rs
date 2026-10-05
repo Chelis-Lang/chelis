@@ -908,6 +908,7 @@ fn infer_app_inner(
             &callee_collection_contracts,
             &alternatives,
             tensor_concat,
+            split_keys_call_count(kids, env),
         );
     }
     let related_results = product

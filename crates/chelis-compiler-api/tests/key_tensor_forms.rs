@@ -265,50 +265,29 @@ fn assert_alias_eval_c(source: &str, expected: &[String]) {
 
 fn alias_program(seeds: &str, declarations: &str) -> String {
     format!(
-        "def main() = {{\n{declarations}\n  seeds = {seeds}\n  (left, right) = halves(seed(seeds))\n  (seed(seeds), left, right, folded(seed(seeds), seeds), children(seed(seeds)))\n}}\n"
+        "def main() = {{\n{declarations}\n  seeds = {seeds}\n  (left, right) = halves(seed(seeds))\n  (seed(seeds), left, right, folded(seed(seeds), seeds), children(seed(seeds), 2i64))\n}}\n"
     )
 }
 
 /// [04-INF-9], [05-OP-69]..[05-OP-72]: usable aliases need executable
-/// parity as well as checker acceptance. `split_keys` reads its static count,
-/// which a value does not carry, so it is applicable only by name
-/// (chelis#3149) and `children` is a lambda that calls it.
+/// parity as well as checker acceptance.
 #[test]
 fn unannotated_key_builtin_aliases_execute_in_eval_and_c() {
-    for (seeds, shape, values, key_ty) in [
-        ("-1i64", vec![], vec![-1i64], "key"),
-        (
-            "scalar_to_tensor(-1i64)",
-            vec![],
-            vec![-1i64],
-            "tensor[key]",
-        ),
-        (
-            "to_tensor([1i64, -1i64])",
-            vec![2],
-            vec![1, -1],
-            "tensor[2, key]",
-        ),
+    let declarations =
+        "  seed = key_from_seed\n  halves = split_key\n  folded = fold_in\n  children = split_keys";
+    for (seeds, shape, values) in [
+        ("-1i64", vec![], vec![-1i64]),
+        ("scalar_to_tensor(-1i64)", vec![], vec![-1i64]),
+        ("to_tensor([1i64, -1i64])", vec![2], vec![1, -1]),
         (
             "to_tensor([[9007199254740993i64, -1i64], [9223372036854775807i64, -9223372036854775808i64]])",
             vec![2, 2],
             vec![9007199254740993, -1, i64::MAX, i64::MIN],
-            "tensor[2, 2, key]",
         ),
-        (
-            "to_tensor(range(0i64, 0i64))",
-            vec![0],
-            vec![],
-            "tensor[*, key]",
-        ),
+        ("to_tensor(range(0i64, 0i64))", vec![0], vec![]),
     ] {
-        // A lambda's parameter that receives a key is authored: an inferred
-        // one would be a generic type parameter, which is key-free.
-        let declarations = format!(
-            "  seed = key_from_seed\n  halves = split_key\n  folded = fold_in\n  children = fn (j: {key_ty}) -> split_keys(j, 2i64)"
-        );
         assert_alias_eval_c(
-            &alias_program(seeds, &declarations),
+            &alias_program(seeds, declarations),
             &alias_expected(&shape, &values),
         );
     }
@@ -362,7 +341,7 @@ fn concretely_typed_key_builtin_aliases_execute_in_eval_and_c() {
         ),
     ] {
         let declarations = format!(
-            "  seed: {seed_ty} -> {key_ty} = key_from_seed\n  halves: {key_ty} -> ({key_ty}, {key_ty}) = split_key\n  folded: {key_ty} -> {seed_ty} -> {key_ty} = fold_in\n  children: {key_ty} -> {children_ty} = fn (j: {key_ty}) -> split_keys(j, 2i64)"
+            "  seed: {seed_ty} -> {key_ty} = key_from_seed\n  halves: {key_ty} -> ({key_ty}, {key_ty}) = split_key\n  folded: {key_ty} -> {seed_ty} -> {key_ty} = fold_in\n  children: {key_ty} -> i64 -> {children_ty} = split_keys"
         );
         assert_alias_eval_c(
             &alias_program(seeds, &declarations),
@@ -471,7 +450,7 @@ fn unused_exported_key_callable_values_reject_before_public_c_abi() {
     for source in [
         "def exported() = split_key\ndef main() = 1i64\n",
         "def exported() = (key_from_seed, split_key)\ndef main() = 1i64\n",
-        "def exported() = ((key_from_seed, split_key), (fold_in, split_key))\ndef main() = 1i64\n",
+        "def exported() = ((key_from_seed, split_key), (fold_in, split_keys))\ndef main() = 1i64\n",
     ] {
         let error = compile(CompileRequest {
             source_kind: SourceKind::Surf,
@@ -525,7 +504,7 @@ fn shadowed_key_builtin_name_does_not_select_builtin_carrier() {
 fn key_builtin_aliases_preserve_runtime_domain_rejections() {
     for (source, trap) in [
         (
-            "def run(k: tensor[2, key], n: i64) -> (tensor[2, *, key], unit) = {\n  derive = fn (j: tensor[2, key], c: i64) -> split_keys(j, c)\n  (derive(k, n), ())\n}\ndef main() = run(key_from_seed(to_tensor([1i64, 2i64])), -1i64)\n",
+            "def run(k: tensor[2, key], n: i64) -> (tensor[2, *, key], unit) = {\n  derive = split_keys\n  (derive(k, n), ())\n}\ndef main() = run(key_from_seed(to_tensor([1i64, 2i64])), -1i64)\n",
             "numeric trap: domain in split_keys at i64",
         ),
         (
