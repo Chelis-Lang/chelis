@@ -4336,8 +4336,8 @@ path even though bare `round` under `grad` remains a structural
 > dtype of the argument's unsuffixed literal elements (spec/04 section 5.6);
 > without `T`, an unsuffixed literal element is a type error, and no default
 > dtype applies to it. With `T`, the leaf dtype SHALL equal `T`; `to_tensor`
-> never converts. A List's element type, or a written `T`, determines an
-> empty result's dtype. Inner extents that an empty outer
+> never converts. A List's element type determines an empty result's dtype;
+> a written `T` states that element type. Inner extents that an empty outer
 > List cannot establish remain explicit shape obligations; no default f32
 > or invented trailing extent is permitted. Strings and mixed leaf dtypes
 > are type errors.
