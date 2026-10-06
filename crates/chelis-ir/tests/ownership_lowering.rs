@@ -240,6 +240,81 @@ fn target_rejected_function_containers_reach_backend_after_verification() {
     }
 }
 
+/// chelis#3268: a function value a match pattern binds, from a constructor
+/// payload, a record field or an `Option`, has no C callable identity. Host
+/// lowering routes every application through it, a direct call, one an
+/// inlined higher-order callee performs, and a named list callback, to the
+/// unresolved-callable marker, so ownership verifies and the C ABI's #879
+/// rejection decides the program. Ownership never meets the binder's
+/// compiler-generated name as a callee.
+#[test]
+fn calls_through_pattern_bound_function_values_reach_backend_after_verification() {
+    let fn_box = "type FnBox =\n  | FnBox(i32 -> i32)\n  | NoBox\n\
+                  def inc(z: i32) -> i32 = add(z, 1i32)\n";
+    let sources = [
+        (
+            "constructor payload",
+            format!(
+                "{fn_box}def use_box(b: FnBox) -> i32 =\n  match b with {{\n    \
+                 | FnBox(h) => h(10i32)\n    | NoBox => 0i32\n  }}\n\
+                 a = use_box(FnBox(inc))\n"
+            ),
+        ),
+        (
+            "binder shadowing a callback formal",
+            format!(
+                "{fn_box}def use_box(f: i32 -> i32, b: FnBox) -> i32 =\n  match b with {{\n    \
+                 | FnBox(f) => f(10i32)\n    | NoBox => 0i32\n  }}\n\
+                 a = use_box(inc, FnBox(inc))\n"
+            ),
+        ),
+        (
+            "record field",
+            "type CbBox =\n  | CbBox { cb: i32 -> i32 }\n\
+             def inc(z: i32) -> i32 = add(z, 1i32)\n\
+             def run(b: CbBox) -> i32 =\n  match b with {\n    | CbBox { cb } => cb(10i32)\n  }\n\
+             a = run(CbBox { cb: inc })\n"
+                .to_string(),
+        ),
+        (
+            "option payload",
+            "def inc(z: i32) -> i32 = add(z, 1i32)\n\
+             def use_opt(o: Option[i32 -> i32]) -> i32 =\n  match o with {\n    \
+             | Some(h) => h(10i32)\n    | None => 0i32\n  }\n\
+             a = use_opt(Some(inc))\n"
+                .to_string(),
+        ),
+        (
+            "inlined higher-order callee",
+            format!(
+                "{fn_box}def apply(f: i32 -> i32, x: i32) -> i32 = f(x)\n\
+                 def use_box(b: FnBox) -> i32 =\n  match b with {{\n    \
+                 | FnBox(h) => apply(h, 10i32)\n    | NoBox => 0i32\n  }}\n\
+                 a = use_box(FnBox(inc))\n"
+            ),
+        ),
+        (
+            "named list callback",
+            format!(
+                "{fn_box}def use_box(b: FnBox) -> List[i32] =\n  match b with {{\n    \
+                 | FnBox(h) => map(h, [1i32, 2i32])\n    | NoBox => []\n  }}\n\
+                 a = use_box(FnBox(inc))\n"
+            ),
+        ),
+    ];
+    for (route, source) in sources {
+        let lowered = lower_source(&source).unwrap_or_else(|error| panic!("{route}: {error}"));
+        let rendered = verify_ownership(lowered)
+            .unwrap_or_else(|error| panic!("{route}: {error}"))
+            .render();
+        assert!(
+            rendered.contains("unresolved_call_placeholder"),
+            "{route}: the application must reach the backend as the unresolved-callable \
+             marker:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
     let roots = unit_text(&verified_fixture("issue_1222_root_alias"), "roots");

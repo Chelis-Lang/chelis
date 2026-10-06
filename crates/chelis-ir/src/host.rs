@@ -9764,7 +9764,20 @@ fn lower_host_match_arm(
         let mut renames = Vec::new();
         plan.collect_renames(&mut renames);
         let renamed = rename_bound_names(expr, &renames, &UnordSet::new());
-        lower_host_expr_with_expected_opt(&renamed, program, &scoped, tensor_helpers, expected)
+        let mut lowered = lower_host_expr_with_expected_opt(
+            &renamed,
+            program,
+            &scoped,
+            tensor_helpers,
+            expected,
+        )?;
+        let function_binders = renames
+            .into_iter()
+            .map(|(_, lowered_name)| lowered_name)
+            .filter(|lowered_name| matches!(scoped.get(lowered_name), Some(HostTypeTerm::Fn(..))))
+            .collect::<UnordSet<_>>();
+        fence_pattern_bound_callees(&mut lowered, &function_binders);
+        Ok::<_, crate::lower::LowerDiagnostic>(lowered)
     };
     let plan = plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)?;
     let test = (plan.failure_exits() + usize::from(guard.is_some()) > 1)
@@ -10218,6 +10231,177 @@ fn collect_lowered_callback_names(callback: &HostCallback, out: &mut UnordSet<St
             collect_lowered_host_names(body, out);
         }
     }
+}
+
+/// A function value bound by a match pattern was projected out of the
+/// scrutinee, so it is neither a declared function symbol nor a typed
+/// callback parameter, and the C host has no callable identity for it until
+/// chelis#879 gives function values an ABI. Each application through one of
+/// `binders`, an inlined higher-order callee's included, therefore takes the
+/// unresolved-callable marker: ownership accounts for the marker's operands,
+/// and C ABI projection rejects it as an unsupported function value under
+/// chelis#879 before emission (chelis#3268). A named callback over a binder
+/// becomes the inline callback that applies the marker to its parameters.
+fn fence_pattern_bound_callees(expr: &mut HostExpr, binders: &UnordSet<String>) {
+    if binders.is_empty() {
+        return;
+    }
+    match &mut expr.kind {
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Var(_, _)
+        | HostExprKind::Unit => {}
+        HostExprKind::Call { function, args, .. } => {
+            if binders.contains(function.as_str()) {
+                *function = HOST_UNRESOLVED_CALLABLE_MARKER.to_string();
+            }
+            for arg in args {
+                fence_pattern_bound_callees(arg, binders);
+            }
+        }
+        HostExprKind::ResultClaimScope { body, .. } => fence_pattern_bound_callees(body, binders),
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+            fence_pattern_bound_callees(value, binders)
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => fence_pattern_bound_callees(base, binders),
+        HostExprKind::List(args, _)
+        | HostExprKind::Tuple(args, _)
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::AdtConstruct { fields: args, .. }
+        | HostExprKind::TensorCall { args, .. } => {
+            for arg in args {
+                fence_pattern_bound_callees(arg, binders);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args
+                .iter_mut()
+                .chain(lists.iter_mut().map(|entry| &mut entry.value))
+            {
+                fence_pattern_bound_callees(arg, binders);
+            }
+        }
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            fence_pattern_bound_callees(cond, binders);
+            fence_pattern_bound_callees(then_expr, binders);
+            fence_pattern_bound_callees(else_expr, binders);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            fence_pattern_bound_callees(scrutinee, binders);
+            let inner = unshadowed_binders(binders, [&*bind_name]);
+            fence_pattern_bound_callees(some_expr, inner.as_ref().unwrap_or(binders));
+            fence_pattern_bound_callees(none_expr, binders);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            fence_pattern_bound_callees(scrutinee, binders);
+            for arm in arms {
+                let inner = unshadowed_binders(binders, arm.bindings.iter().map(|b| &b.name));
+                fence_pattern_bound_callees(&mut arm.expr, inner.as_ref().unwrap_or(binders));
+            }
+            if let Some(default_expr) = default_expr {
+                fence_pattern_bound_callees(default_expr, binders);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+            let mut scoped: Option<UnordSet<String>> = None;
+            for binding in bindings {
+                fence_pattern_bound_callees(&mut binding.value, scoped.as_ref().unwrap_or(binders));
+                if let Some(inner) =
+                    unshadowed_binders(scoped.as_ref().unwrap_or(binders), [&binding.name])
+                {
+                    scoped = Some(inner);
+                }
+            }
+            fence_pattern_bound_callees(body, scoped.as_ref().unwrap_or(binders));
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            fence_pattern_bound_callback(callback, binders);
+            fence_pattern_bound_callees(list, binders);
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            fence_pattern_bound_callback(callback, binders);
+            fence_pattern_bound_callees(init, binders);
+            fence_pattern_bound_callees(list, binders);
+        }
+    }
+}
+
+fn fence_pattern_bound_callback(callback: &mut HostCallback, binders: &UnordSet<String>) {
+    match &mut callback.kind {
+        HostCallbackKind::Named { function, params } => {
+            if !binders.contains(function.as_str()) {
+                return;
+            }
+            let args = params
+                .iter()
+                .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
+                .collect();
+            let arg_tys = params.iter().map(|param| param.ty.clone()).collect();
+            callback.kind = HostCallbackKind::Inline {
+                params: std::mem::take(params),
+                body: Box::new(HostExpr::new(HostExprKind::Call {
+                    function: HOST_UNRESOLVED_CALLABLE_MARKER.to_string(),
+                    args,
+                    arg_tys,
+                    ty: callback.ret_ty.clone(),
+                })),
+            };
+        }
+        HostCallbackKind::Inline { params, body } => {
+            let inner = unshadowed_binders(binders, params.iter().map(|param| &param.name));
+            fence_pattern_bound_callees(body, inner.as_ref().unwrap_or(binders));
+        }
+    }
+}
+
+/// `binders` less the names an inner binding shadows, or `None` when it
+/// shadows none of them.
+fn unshadowed_binders<'a>(
+    binders: &UnordSet<String>,
+    bound: impl IntoIterator<Item = &'a String>,
+) -> Option<UnordSet<String>> {
+    let mut inner: Option<UnordSet<String>> = None;
+    for name in bound {
+        if binders.contains(name.as_str()) {
+            inner
+                .get_or_insert_with(|| binders.clone())
+                .remove(name.as_str());
+        }
+    }
+    inner
 }
 
 fn plan_host_pattern(
@@ -27252,6 +27436,103 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             [bindings[1].name.as_str(), bindings[0].name.as_str()],
             "slots stay in declared order"
         );
+    }
+
+    /// chelis#3268: the pattern-binder callee fence is lexical. A call
+    /// through the binder takes the unresolved-callable marker, an inner
+    /// binding that reuses the binder's name stops the fence for its scope
+    /// only, and a named callback over the binder becomes the inline callback
+    /// that applies the marker to its own parameters.
+    #[test]
+    fn pattern_bound_callee_fence_is_lexical_and_rewrites_named_callbacks() {
+        let int = || HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let call = |function: &str| {
+            HostExpr::new(HostExprKind::Call {
+                function: function.into(),
+                args: vec![HostExpr::new(HostExprKind::Int(1))],
+                arg_tys: vec![int()],
+                ty: int(),
+            })
+        };
+        let callee = |expr: &HostExpr| match &expr.kind {
+            HostExprKind::Call { function, .. } => function.clone(),
+            other => panic!("expected a call, got {other:?}"),
+        };
+        let binders = UnordSet::from(["h".to_string()]);
+
+        // `let g = h(1) in let h = .. in h(1)` beside a call to an unrelated
+        // callback `f`.
+        let mut shadowed = HostExpr::new(HostExprKind::Let {
+            bindings: vec![
+                HostBinding {
+                    name: "g".into(),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: int(),
+                    value: call("h"),
+                },
+                HostBinding {
+                    name: "h".into(),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: int(),
+                    value: call("f"),
+                },
+            ],
+            body: Box::new(call("h")),
+            ty: int(),
+        });
+        fence_pattern_bound_callees(&mut shadowed, &binders);
+        let HostExprKind::Let { bindings, body, .. } = &shadowed.kind else {
+            unreachable!("the fence keeps the node kind");
+        };
+        assert_eq!(callee(&bindings[0].value), HOST_UNRESOLVED_CALLABLE_MARKER);
+        assert_eq!(callee(&bindings[1].value), "f");
+        assert_eq!(callee(body), "h", "the inner `h` is not the pattern binder");
+
+        let named = |function: &str| {
+            HostExpr::new(HostExprKind::Map {
+                callback: HostCallback {
+                    kind: HostCallbackKind::Named {
+                        function: function.into(),
+                        params: vec![HostParam {
+                            name: "x".into(),
+                            ty: int(),
+                        }],
+                    },
+                    ret_ty: int(),
+                },
+                list: Box::new(HostExpr::new(HostExprKind::List(Vec::new(), int()))),
+                ty: int(),
+            })
+        };
+        let mut through_binder = named("h");
+        fence_pattern_bound_callees(&mut through_binder, &binders);
+        let HostExprKind::Map { callback, .. } = &through_binder.kind else {
+            unreachable!("the fence keeps the node kind");
+        };
+        let HostCallbackKind::Inline { params, body } = &callback.kind else {
+            panic!("a named callback over a binder must become inline");
+        };
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "x");
+        let HostExprKind::Call { function, args, .. } = &body.kind else {
+            panic!("the inline body must apply the marker");
+        };
+        assert_eq!(function, HOST_UNRESOLVED_CALLABLE_MARKER);
+        assert!(
+            matches!(&args[..], [HostExpr { kind: HostExprKind::Var(name, _), .. }] if name == "x")
+        );
+
+        let mut through_formal = named("f");
+        fence_pattern_bound_callees(&mut through_formal, &binders);
+        let HostExprKind::Map { callback, .. } = &through_formal.kind else {
+            unreachable!("the fence keeps the node kind");
+        };
+        assert!(matches!(
+            &callback.kind,
+            HostCallbackKind::Named { function, .. } if function == "f"
+        ));
     }
 }
 
