@@ -20,6 +20,5 @@
 - [Type System Reference](type-reference.md)
 - [Backends](backends.md)
 - [C support and exclusions](c-support.md)
-- [Known core release issues](launch-known-issues.md)
 - [Runtime and Standard Library](stdlib.md)
 - [Reference Map](reference.md)

@@ -66,7 +66,7 @@ producer functions or verify the invariant.
 
 Before using a proof result, check `chelis prove --capabilities`: both
 `"obligation_engine_available"` and `"smt_available"` should be `true` for
-the SMT result shown below. The shipped release binary has SMT support. A
+the SMT result shown below. Release binaries include SMT support. A
 plain local `cargo build` omits it; its default prover can validate producer
 obligations by sampling and emits a warning that they were not SMT-verified.
 If the obligation engine is unavailable, a successful property run does not

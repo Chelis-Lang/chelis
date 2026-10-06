@@ -12,5 +12,5 @@ remove a singleton. `insert(x, axis, 1i64)` adds a singleton at a static positio
 For a fixed collection, insert singleton axes and concatenate along that axis.
 These recipes do not replace generic List stacking.
 
-The release ledger maintains the remaining issue inventory:
-[#1362](https://github.com/Chelis-Lang/chelis/issues/1362).
+For other reported limitations, use the
+[live issue tracker](https://github.com/Chelis-Lang/chelis/issues).
