@@ -19,6 +19,7 @@ class SecretScanTests(unittest.TestCase):
         self.git('init','-b','main');self.git('config','user.email','fixture@example.invalid');self.git('config','user.name','Fixture')
         (self.repo/'fixture').write_text('initial');self.git('add','fixture');self.git('commit','-m','initial')
         self.before=self.git('rev-parse','HEAD').strip()
+        self.git('update-ref','refs/remotes/origin/main',self.before)
         (self.repo/'fixture').write_text('updated');self.git('add','fixture');self.git('commit','-m','update')
         self.after=self.git('rev-parse','HEAD').strip()
 
@@ -54,15 +55,33 @@ class SecretScanTests(unittest.TestCase):
         self.assertEqual(selected,self.before+'..'+self.after)
         self.assertEqual(self.git('rev-list','--count',selected).strip(),'1')
 
-    def test_zero_before_scans_full_history(self):
-        self.assertEqual(scan.select_range('push',{'before':'0'*40,'after':self.after},self.repo),'--all')
+    def test_zero_before_scans_only_branch_since_main(self):
+        selected=scan.select_range('push',{'ref':'refs/heads/candidate','before':'0'*40,'after':self.after},self.repo)
+        self.assertEqual(selected,self.before+'..'+self.after)
+        self.assertEqual(self.git('rev-list','--count',selected).strip(),'1')
 
     def test_invalid_sha_is_rejected(self):
         for value in ['--all','not-a-sha','$(anything)']:
             with self.assertRaises(ValueError):scan.select_range('push',{'before':value,'after':self.after},self.repo)
 
-    def test_missing_before_scans_full_history(self):
-        self.assertEqual(scan.select_range('push',{'before':'a'*40,'after':self.after},self.repo),'--all')
+    def test_missing_before_scans_only_branch_since_main(self):
+        self.assertEqual(scan.select_range('push',{'ref':'refs/heads/candidate','before':'a'*40,'after':self.after},self.repo),self.before+'..'+self.after)
+
+    def test_main_force_push_scans_candidate_ancestry(self):
+        self.assertEqual(scan.select_range('push',{'ref':'refs/heads/main','before':'a'*40,'after':self.after},self.repo),self.after)
+
+    def test_unrelated_branch_scans_candidate_ancestry(self):
+        self.git('checkout','--orphan','unrelated')
+        self.git('rm','-rf','.')
+        (self.repo/'orphan').write_text('orphan candidate')
+        self.git('add','orphan');self.git('commit','-m','orphan')
+        orphan=self.git('rev-parse','HEAD').strip()
+        self.assertEqual(scan.select_range('push',{'ref':'refs/heads/unrelated','before':'0'*40,'after':orphan},self.repo),orphan)
+
+    def test_missing_default_branch_ref_rejects_fallback(self):
+        self.git('update-ref','-d','refs/remotes/origin/main')
+        with self.assertRaises(ValueError):
+            scan.select_range('push',{'ref':'refs/heads/candidate','before':'0'*40,'after':self.after},self.repo)
 
     def test_missing_after_rejects(self):
         with self.assertRaises(ValueError):scan.select_range('push',{'before':self.before,'after':'a'*40},self.repo)
