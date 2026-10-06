@@ -10,11 +10,9 @@
 //! prove` to report the variant as failed with a counterexample, which shows
 //! that the guard admits inputs and that the property can fail.
 //!
-//! `chelis prove` compiles and evaluates the linked program for every sample,
-//! guard and shrinking step (chelis#3117), so an evaluation costs about a
-//! second of CPU and refuting a property built from number text, whose
-//! counterexample the shrinker reduces one binder at a time, costs about
-//! thirty-five. The canary is what pull-request CI runs: two samples of every
+//! `chelis prove` checks and lowers the linked library once per property,
+//! then checks each sample's probe against that library, including guards and
+//! shrinking trials. The canary is what pull-request CI runs: two samples of every
 //! property and the false variants of the two properties whose refutation is
 //! cheap. The complete test runs the default hundred samples of every property
 //! and every false variant in the nightly workflow, not in pull-request CI

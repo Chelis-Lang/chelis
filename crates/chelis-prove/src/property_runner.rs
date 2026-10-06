@@ -3261,6 +3261,17 @@ fn prove_surf_property_fuzz(
         }
     };
 
+    let library = match chelis_compiler_api::build_stdlib_context(decls) {
+        Ok(library) => library,
+        Err(err) => {
+            return error(&property.name, seed, compiler_error_message(err)).with_sampling(
+                sampling_method,
+                0,
+                0,
+            );
+        }
+    };
+
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     while accepted < samples_needed && attempts < max_attempts {
@@ -3280,7 +3291,7 @@ fn prove_surf_property_fuzz(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_surf_sample(decls, property, &roots, &sample, true) {
+            match eval_surf_sample(&library, property, &roots, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -3293,11 +3304,11 @@ fn prove_surf_property_fuzz(
             }
         }
         accepted += 1;
-        match eval_surf_sample(decls, property, &roots, &sample, false) {
+        match eval_surf_sample(&library, property, &roots, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
                 let (shrunk, shrink_steps) =
-                    shrink_surf_counterexample(decls, property, &roots, sample);
+                    shrink_surf_counterexample(&library, property, &roots, sample);
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -3785,14 +3796,14 @@ impl SampleRoots {
 }
 
 fn eval_surf_sample(
-    decls: &[Decl],
+    library: &chelis_compiler_api::StdLibContext,
     property: &Property,
     roots: &SampleRoots,
     sample: &Sample,
     precondition: bool,
 ) -> Result<bool, String> {
     let root = roots.select(precondition);
-    let mut source_decls = decls.to_vec();
+    let mut source_decls = Vec::new();
     for value in &sample.values {
         if let Some((binding_name, tensor)) = &value.tensor_binding {
             source_decls.push(Decl::Sig {
@@ -3818,11 +3829,14 @@ fn eval_surf_sample(
     });
     // The assembled declarations are checked and run as they are, never
     // printed and parsed again (chelis#3129).
-    bool_property_root(chelis_compiler_api::compiler::eval_decls_selected(
-        &source_decls,
-        sample_bindings(sample),
-        &[root.to_string()],
-    ))
+    bool_property_root(
+        chelis_compiler_api::compiler::eval_decls_selected_with_library(
+            library,
+            &source_decls,
+            sample_bindings(sample),
+            &[root.to_string()],
+        ),
+    )
 }
 
 fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -> Expr {
@@ -3877,19 +3891,21 @@ fn eval_bool_with_bindings(
     ))
 }
 
+fn compiler_error_message(err: chelis_compiler_api::compiler::CompilerError) -> String {
+    err.errors
+        .iter()
+        .map(|diag| diag.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn bool_property_root(
     result: Result<
         chelis_compiler_api::schema::EvalResult,
         chelis_compiler_api::compiler::CompilerError,
     >,
 ) -> Result<bool, String> {
-    let result = result.map_err(|err| {
-        err.errors
-            .iter()
-            .map(|diag| diag.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
+    let result = result.map_err(compiler_error_message)?;
     match result.roots.as_slice() {
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
@@ -3923,13 +3939,13 @@ fn counterexample_json(sample: &Sample) -> serde_json::Value {
 const MAX_SHRINK_STEPS: usize = 64;
 
 fn shrink_surf_counterexample(
-    decls: &[Decl],
+    library: &chelis_compiler_api::StdLibContext,
     property: &Property,
     roots: &SampleRoots,
     sample: Sample,
 ) -> (Sample, usize) {
     shrink_counterexample(sample, &property.params, |candidate| {
-        sample_still_fails_surf(decls, property, roots, candidate)
+        sample_still_fails_surf(library, property, roots, candidate)
     })
 }
 
@@ -3988,19 +4004,19 @@ where
 }
 
 fn sample_still_fails_surf(
-    decls: &[Decl],
+    library: &chelis_compiler_api::StdLibContext,
     property: &Property,
     roots: &SampleRoots,
     sample: &Sample,
 ) -> bool {
     if !property.preconditions.is_empty() {
-        match eval_surf_sample(decls, property, roots, sample, true) {
+        match eval_surf_sample(library, property, roots, sample, true) {
             Ok(true) => {}
             Ok(false) | Err(_) => return false,
         }
     }
     matches!(
-        eval_surf_sample(decls, property, roots, sample, false),
+        eval_surf_sample(library, property, roots, sample, false),
         Ok(false)
     )
 }

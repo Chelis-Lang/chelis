@@ -1835,7 +1835,9 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
     let driver = out.join("driver.c");
     fs::write(&driver, &harness).unwrap();
     assert!(
-        link_static_library_driver(&out, "libnan_kernels.a", true),
+        // Matmul and the reductions use the canonical Chelis kernels. This
+        // library has no vendor BLAS calls and must link without OpenBLAS.
+        link_static_library_driver(&out, "libnan_kernels.a", false),
         "the oracle driver must link"
     );
     let run = Process::new(out.join("driver")).output().unwrap();

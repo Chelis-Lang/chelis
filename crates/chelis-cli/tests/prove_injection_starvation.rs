@@ -31,7 +31,17 @@ fn prove_json(source: &str, extra: &[&str]) -> (i32, Vec<Value>) {
     let code = output.status.code().unwrap_or(-1);
     let records = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let record: Value = serde_json::from_str(line).expect("prove emits NDJSON");
+            assert_ne!(
+                record["kind"],
+                "error",
+                "the fixture must reach property verification: {record}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            record
+        })
         .collect();
     (code, records)
 }
@@ -246,9 +256,9 @@ export (make_simplex)
 @invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
-def eps() -> f32 = 0.01
+eps = 0.01f32
 def make_simplex(a: f32, b: f32, c: f32) -> Simplex =
-  { s = abs(a) + abs(b) + abs(c) + 0.001;
+  { s = abs(a) + abs(b) + abs(c) + 0.001
     Simplex { weights: to_tensor([abs(a) / s, abs(b) / s, (abs(c) + 0.001) / s]) } }
 ";
 
@@ -276,7 +286,7 @@ export (bad_simplex)
 @invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
-def eps() -> f32 = 0.01
+eps = 0.01f32
 def bad_simplex(a: f32, b: f32, c: f32) -> Simplex = Simplex { weights: to_tensor([a, b, c]) }
 ";
     let (code, records) = prove_json(source, &["--samples", "40"]);
@@ -296,9 +306,9 @@ const SIMPLEX_OPT_TUPLE_HEAD: &str = "module Stats.Simplex
 @invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
-def eps() -> f32 = 0.01
+eps = 0.01f32
 def normed(a: f32, b: f32, c: f32) -> tensor[3, f32] =
-  { s = abs(a) + abs(b) + abs(c) + 0.001;
+  { s = abs(a) + abs(b) + abs(c) + 0.001
     to_tensor([abs(a) / s, abs(b) / s, (abs(c) + 0.001) / s]) }
 ";
 
@@ -352,7 +362,7 @@ export (nan_prod)
 @invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
-def eps() -> f32 = 0.01
+eps = 0.01f32
 def nan_prod(a: f32) -> Option[Simplex] =
   Some(Simplex { weights: to_tensor([0.0 / 0.0, 0.5, 0.5], f32) })
 ";
