@@ -146,6 +146,10 @@ through the semantic transformations that require it. The
 [operation specification](../05-risc-primitives.md) defines their domains,
 results, failures, and differentiation rules.
 
+`sub` and `min_elem` are direct RISC primitives governed by [05-OP-41] and
+[05-OP-40], respectively. They retain their own identities through lowering;
+neither is rewritten as a composition of other arithmetic operations.
+
 `grad` differentiates eligible functions and `vmap` maps functions over a named
 axis. Both require compiler cooperation. The
 [transform specification](../06-transformations.md) owns their exact behavior;
