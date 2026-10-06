@@ -133,14 +133,14 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "chelis-abi"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-vocab",
 ]
 
 [[package]]
 name = "chelis-backend-c"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-abi",
  "chelis-crmath",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-backend-hip"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-backend-c",
  "chelis-ir",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-compiler-api"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "bincode",
  "chelis-abi",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-crmath"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "cc",
  "half",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-deep"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-vocab",
  "miette",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-effects"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "chelis-types",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-image-id"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "libc",
  "object 0.37.3",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-ir"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-abi",
  "chelis-deep",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-macros"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "chelis-unord",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pipeline-core"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "chelis-effects",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pred"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "thiserror",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-reef"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "bincode",
  "chelis-deep",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-runtime"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-abi",
  "chelis-vocab",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-shell"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "bincode",
  "chelis-deep",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-surf"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-types"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-abi",
  "chelis-crmath",
@@ -366,14 +366,14 @@ dependencies = [
 
 [[package]]
 name = "chelis-unord"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chelis-validate"
-version = "0.18.13"
+version = "0.19.0"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-vocab"
-version = "0.18.13"
+version = "0.19.0"
 
 [[package]]
 name = "core-foundation"

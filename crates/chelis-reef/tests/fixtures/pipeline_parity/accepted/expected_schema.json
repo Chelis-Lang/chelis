@@ -3,7 +3,7 @@
     "name": "pipeline-parity",
     "version": "1.2.3"
   },
-  "compiler": "=0.18.13",
+  "compiler": "=0.19.0",
   "modules": [
     {
       "module": "PipelineParity.Main",

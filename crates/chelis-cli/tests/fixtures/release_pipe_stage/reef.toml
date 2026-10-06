@@ -2,6 +2,6 @@ schema = "3"
 [package]
 name = "release-pipe-stage"
 version = "0.1.0"
-compiler = "=0.18.13"
+compiler = "=0.19.0"
 module_prefix = "ReleasePipe"
 resolver = "2"
