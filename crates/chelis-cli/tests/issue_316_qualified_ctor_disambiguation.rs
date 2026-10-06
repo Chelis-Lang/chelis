@@ -292,10 +292,12 @@ fn qualified_type_annotation_distinguishes_modules() {
                 .collect()
         })
         .unwrap_or_default();
+    // Diagnostics name another module's type by its module path (chelis#3269),
+    // so the two modules' `Mode` types read apart.
     assert!(
-        messages.iter().any(|m| m.contains("type mismatch")
-            && m.contains("Sd__Mode")
-            && m.contains("Dropout__Mode")),
+        messages
+            .iter()
+            .any(|m| m == "type mismatch: Demo.Sd.Mode vs Demo.Dropout.Mode"),
         "mixing two modules' qualified Mode types must be a mismatch; got {combo}"
     );
 }
