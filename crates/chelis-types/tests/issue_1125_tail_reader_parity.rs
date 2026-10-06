@@ -193,6 +193,110 @@ fn pat_as_outer_name_traces_when_the_inner_pattern_destructures() {
 }
 
 #[test]
+fn borrowed_record_and_tuple_patterns_preserve_the_whole_scrutinee_binder() {
+    let record = ingress_messages(&format!(
+        "{FIELD_HOLDER}
+         (defsig {{}} keep_record (t-fn {{}} (t-ref {{}} (t-adt {{}} Boxed))
+           (t-adt {{}} Boxed)))
+         (def {{}} keep_record (fn {{}} (params {{}} b)
+           (match {{}} (var {{}} b)
+             (arm {{}} (pat-as {{}} whole
+               (pat-record {{}} Boxed (kv {{}} r (pat-var {{}} inner)))) ()
+               (var {{}} whole)))))"
+    ));
+    assert!(record.is_empty(), "borrowed record pattern: {record:?}");
+
+    let tuple = ingress_messages(&format!(
+        "(defsig {{}} keep_tuple
+           (t-fn {{}} (t-ref {{}} (t-tuple {{}} {T3} (t-prim {{}} i32)))
+             (t-tuple {{}} {T3} (t-prim {{}} i32))))
+         (def {{}} keep_tuple (fn {{}} (params {{}} pair)
+           (match {{}} (var {{}} pair)
+             (arm {{}} (pat-as {{}} whole
+               (pat-tuple {{}} (pat-var {{}} a) (pat-var {{}} n))) ()
+               (var {{}} whole)))))"
+    ));
+    assert!(tuple.is_empty(), "borrowed tuple pattern: {tuple:?}");
+}
+
+#[test]
+fn borrowed_scrutinee_still_rejects_wrong_pattern_shape() {
+    let foreign_ctor = ingress_messages(&format!(
+        "{HOLDER}
+         (deftype {{}} Other () (variant {{}} Wrong))
+         (defsig {{}} f (t-fn {{}} (t-ref {{}} (t-adt {{}} Holder))
+           (t-prim {{}} i32)))
+         (def {{}} f (fn {{}} (params {{}} h)
+           (match {{}} (var {{}} h)
+             (arm {{}} (pat-ctor {{}} Wrong) ()
+               (lit {{type: (t-prim {{}} i32)}} 1))
+             (arm {{}} (pat-wild {{}}) ()
+               (lit {{type: (t-prim {{}} i32)}} 0)))))"
+    ));
+    assert!(
+        foreign_ctor
+            .iter()
+            .any(|message| message.contains("Other vs Holder")),
+        "foreign constructor on borrowed Holder: {foreign_ctor:?}"
+    );
+
+    let foreign_record = ingress_messages(&format!(
+        "{FIELD_HOLDER}
+         (deftype {{}} Other () (variant {{}} Wrong (field {{}} r {T3})))
+         (defsig {{}} f (t-fn {{}} (t-ref {{}} (t-adt {{}} Boxed))
+           (t-prim {{}} i32)))
+         (def {{}} f (fn {{}} (params {{}} b)
+           (match {{}} (var {{}} b)
+             (arm {{}} (pat-record {{}} Wrong (kv {{}} r (pat-var {{}} v))) ()
+               (lit {{type: (t-prim {{}} i32)}} 1))
+             (arm {{}} (pat-wild {{}}) ()
+               (lit {{type: (t-prim {{}} i32)}} 0)))))"
+    ));
+    assert!(
+        foreign_record
+            .iter()
+            .any(|message| message.contains("Other vs Boxed")),
+        "foreign record on borrowed Boxed: {foreign_record:?}"
+    );
+
+    let non_tuple = ingress_messages(&format!(
+        "{HOLDER}
+         (defsig {{}} f (t-fn {{}} (t-ref {{}} (t-adt {{}} Holder))
+           (t-prim {{}} i32)))
+         (def {{}} f (fn {{}} (params {{}} h)
+           (match {{}} (var {{}} h)
+             (arm {{}} (pat-tuple {{}} (pat-var {{}} a) (pat-var {{}} b)) ()
+               (lit {{type: (t-prim {{}} i32)}} 1))
+             (arm {{}} (pat-wild {{}}) ()
+               (lit {{type: (t-prim {{}} i32)}} 0)))))"
+    ));
+    assert!(
+        non_tuple
+            .iter()
+            .any(|message| message.contains("Holder vs (")),
+        "tuple pattern on borrowed Holder: {non_tuple:?}"
+    );
+
+    let wrong_tuple = ingress_messages(&format!(
+        "(defsig {{}} f
+           (t-fn {{}} (t-ref {{}} (t-tuple {{}} {T3} (t-prim {{}} i32)))
+             (t-prim {{}} i32)))
+         (def {{}} f (fn {{}} (params {{}} pair)
+           (match {{}} (var {{}} pair)
+             (arm {{}} (pat-tuple {{}} (pat-var {{}} a)) ()
+               (lit {{type: (t-prim {{}} i32)}} 1))
+             (arm {{}} (pat-wild {{}}) ()
+               (lit {{type: (t-prim {{}} i32)}} 0)))))"
+    ));
+    assert!(
+        wrong_tuple
+            .iter()
+            .any(|message| message.contains("ArityMismatch")),
+        "wrong tuple arity under borrow: {wrong_tuple:?}"
+    );
+}
+
+#[test]
 fn pat_as_inner_bare_binder_denotes_the_whole_scrutinee_too() {
     // `(pat-as {} whole (pat-var {} v))` matches the inner pattern against
     // the same value, so `v` denotes the scrutinee exactly as `whole` does.
