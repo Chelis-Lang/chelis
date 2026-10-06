@@ -447,7 +447,16 @@ distinct from user-precondition generator exhaustion, which stays an
 `--invariant-min-rate <f64>` flag (default `0.01`) sets the floor for the
 rejection tier; `--invariant-min-rate 0.0` disables the starvation
 classification and preserves the legacy exhaustion-as-`Error` path.
-Generation is deterministic under a fixed seed.
+Generation is deterministic under a fixed seed. A constructor probe program
+the prover assembles that is rejected before it runs (it does not parse,
+check, or lower) is an internal failure: when generation then finds no
+sample, the record is `status:"error"` with that diagnostic, never a
+starvation verdict.
+
+Every root the prover declares in the user's program to evaluate a sample, a
+producer value, a generated value, or a constant is named fresh against every
+name that program spells, so a module that happens to define a probe's plain
+spelling keeps its definition and its verdict (chelis#3267).
 
 ### Tier B SMT proofs are over the reals (caveat)
 

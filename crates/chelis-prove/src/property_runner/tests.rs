@@ -1737,3 +1737,122 @@ fn chelis_3236_induction_symbols_avoid_a_binder_spelled_like_them() {
         .expect("the failed step must remain visible");
     assert_eq!(evidence.step.status, "disproved");
 }
+
+// chelis#3267: every root the fuzz tier declares in the user's program is
+// named fresh against it, so a module that defines a probe's plain spelling
+// gets exactly the verdict of the same module with that definition renamed.
+
+/// A valid and a false sampled property, beside a definition of `name`.
+fn probe_root_property_module(name: &str) -> String {
+    format!(
+        "module Probe.Fuzz
+{name} = true
+@property holds forall(x: f32) where x >= 0.0f32, x <= 1.0f32:
+  (x <= 2.0f32)
+@property too_strong forall(x: f32) where x >= 0.0f32, x <= 1.0f32:
+  (x <= 0.5f32)
+"
+    )
+}
+
+/// An opaque binder whose invariant band (0.5 +- 0.0005) starves rejection
+/// sampling, so the binder comes from the constructor tier, and whose
+/// constant `eps` is resolved by evaluation. `w` holds; `w_false` does not.
+fn probe_root_opaque_module(name: &str) -> String {
+    format!(
+        "module M
+export (norm, prob_value)
+@opaque
+@invariant(p) ((p.value >= (0.5 - eps)) && (p.value <= (0.5 + eps)))
+type T =
+  | T {{ value: f32 }}
+def eps() -> f32 = 0.0005
+def norm(x: f32) -> T = T {{ value: 0.5 }}
+def prob_value(p: T) -> f32 = p.value
+{name} = true
+@property w forall(p: T):
+  (prob_value(p) <= 0.5005)
+@property w_false forall(p: T):
+  (prob_value(p) <= 0.4)
+"
+    )
+}
+
+fn assert_same_verdict(defined: &PropertyOutcome, control: &PropertyOutcome) {
+    assert_eq!(defined.name, control.name);
+    assert_eq!(defined.status, control.status, "{defined:#?}\n{control:#?}");
+    assert_eq!(defined.proof_tier, control.proof_tier, "{defined:#?}");
+    assert_eq!(defined.samples, control.samples, "{defined:#?}");
+    assert_eq!(
+        defined.counterexample, control.counterexample,
+        "{defined:#?}"
+    );
+    assert_eq!(defined.reason, control.reason, "{defined:#?}");
+}
+
+fn assert_probe_root_verdicts(outcomes: &[PropertyOutcome], control: &[PropertyOutcome]) {
+    assert_eq!(outcomes.len(), control.len(), "{outcomes:#?}");
+    for (defined, control) in outcomes.iter().zip(control) {
+        assert_same_verdict(defined, control);
+    }
+    let holds = &control[0];
+    assert_eq!(holds.status, PropertyStatus::Passed, "{holds:#?}");
+    assert_eq!(holds.proof_tier, PropertyTier::Fuzz, "{holds:#?}");
+    let refuted = &outcomes[1];
+    assert_eq!(refuted.status, PropertyStatus::Failed, "{refuted:#?}");
+    assert!(refuted.counterexample.is_some(), "{refuted:#?}");
+}
+
+#[test]
+fn chelis_3267_sample_roots_avoid_a_module_definition_of_their_spelling() {
+    let control = run_surf(&probe_root_property_module("renamed_probe"), "fuzz-only");
+    for name in ["__chelis_property_probe", "__chelis_property_pre"] {
+        let outcomes = run_surf(&probe_root_property_module(name), "fuzz-only");
+        assert_probe_root_verdicts(&outcomes, &control);
+    }
+}
+
+#[test]
+fn chelis_3267_deep_sample_roots_avoid_a_module_definition_of_their_spelling() {
+    let run_deep = |surf: &str| {
+        let decls = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
+        let program = chelis_surf::desugar::desugar_program(&decls).expect("desugar fixture");
+        let opts = PropertyRunOptions {
+            tier: "fuzz-only".to_string(),
+            samples: 32,
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        };
+        let source = chelis_deep::printer::print_canonical(&program);
+        let PropertyRunResult::Ran(outcomes) =
+            run_deep_source_properties(&source, &opts).expect("run Deep properties");
+        outcomes
+    };
+    let control = run_deep(&probe_root_property_module("renamed_probe"));
+    for name in ["__chelis_property_probe", "__chelis_property_pre"] {
+        let outcomes = run_deep(&probe_root_property_module(name));
+        assert_probe_root_verdicts(&outcomes, &control);
+    }
+}
+
+#[test]
+fn chelis_3267_injection_roots_avoid_a_module_definition_of_their_spelling() {
+    for tier in ["fuzz-only", "auto"] {
+        let control = run_surf(&probe_root_opaque_module("renamed_probe"), tier);
+        assert_eq!(control[0].status, PropertyStatus::Passed, "{control:#?}");
+        assert!(control[0].injected, "{control:#?}");
+        for name in [
+            "__chelis_gen_probe",
+            "__chelis_const_probe",
+            "__chelis_prop_probe",
+        ] {
+            let outcomes = run_surf(&probe_root_opaque_module(name), tier);
+            assert_eq!(outcomes.len(), control.len(), "{outcomes:#?}");
+            for (defined, control) in outcomes.iter().zip(&control) {
+                assert_same_verdict(defined, control);
+            }
+            let refuted = &outcomes[1];
+            assert_eq!(refuted.status, PropertyStatus::Failed, "{refuted:#?}");
+            assert!(refuted.counterexample.is_some(), "{refuted:#?}");
+        }
+    }
+}

@@ -24,6 +24,7 @@ use crate::composition::{
     AssumptionDischarge, AssumptionRecord, DischargeMethod, DischargeTier, FUZZ_TOLERANCE,
     NonVacuityRecord,
 };
+use crate::smt_names::fresh_root_name;
 
 use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
@@ -226,7 +227,10 @@ pub(super) fn prove_with_injection(
                             let json = crate::opaque::generated_env_json(&generated.env);
                             bindings.push((name.clone(), generated.value_expr, json));
                         }
-                        Err(diag) => {
+                        Err(crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
+                            return outcome_error(property_name, seed, reason);
+                        }
+                        Err(crate::opaque::GenerationFailure::Starved(diag)) => {
                             if options.invariant_min_rate == 0.0 {
                                 return outcome(
                                     property_name,
@@ -541,11 +545,14 @@ fn resolve_constants(
         return env;
     }
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
+    // A fresh root, so a module that defines the plain spelling cannot turn
+    // every probe into a duplicate definition and leave the constant
+    // silently unresolved (chelis#3267).
+    let probe = fresh_root_name(&stripped, "__chelis_const_probe");
     for name in referenced {
         // Try `name()` then `name`.
         for body in [node("app", vec![var_node(&name)]), var_node(&name)] {
-            let probe = "__chelis_const_probe";
-            let program = inject_first_module(&stripped, node("def", vec![sym(probe), body]));
+            let program = inject_first_module(&stripped, node("def", vec![sym(&probe), body]));
             let source = chelis_deep::printer::print_canonical(&program);
             if let Ok(result) = chelis_compiler_api::compiler::eval_selected(
                 EvalRequest {
@@ -553,7 +560,7 @@ fn resolve_constants(
                     source,
                     bindings: Default::default(),
                 },
-                &[probe.to_string()],
+                std::slice::from_ref(&probe),
             ) {
                 let [root] = result.roots.as_slice() else {
                     continue;
@@ -769,20 +776,23 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
 /// carries its module in its linker-format name, so the probe takes the
 /// linker-format name of the type's own module (chelis#2416). Deriving the
 /// probe's name from the type's name keeps the two attributions equal by
-/// construction.
+/// construction. Either spelling is then made fresh against the program
+/// (chelis#3267); the suffix extends the linker-format terminal, so the
+/// fresh name stays in the type's module.
 fn inject_probe_into_defining_module(
     exprs: &[Expr],
     type_name: &str,
     body: Expr,
 ) -> (Vec<Expr>, String) {
     match chelis_types::linked_binding_in_module_of(type_name, "chelis_prop_probe") {
-        Some(probe) => {
+        Some(linked) => {
+            let probe = fresh_root_name(exprs, &linked);
             let mut program = exprs.to_vec();
             program.push(node("def", vec![sym(&probe), body]));
             (program, probe)
         }
         None => {
-            let probe = "__chelis_prop_probe".to_string();
+            let probe = fresh_root_name(exprs, "__chelis_prop_probe");
             let def = node("def", vec![sym(&probe), body]);
             (inject_into_module(exprs, type_name, def), probe)
         }
@@ -846,6 +856,53 @@ def eps() -> f32 = 0.0001
             (constants.get("eps").copied().unwrap_or_default() - 0.0001).abs() < 1e-8,
             "the predicate's `eps` constant resolves before sample validation: {constants:?}"
         );
+    }
+
+    #[test]
+    fn chelis_3267_constant_resolves_beside_a_definition_of_the_probe_spelling() {
+        let source = "module Stats.Simplex
+@opaque
+@invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> f32 = 0.0001
+__chelis_const_probe = true
+@property generated forall(p: Simplex):
+  true
+";
+        let constants = resolved_module_constants(source);
+
+        assert!(
+            (constants.get("eps").copied().unwrap_or_default() - 0.0001).abs() < 1e-8,
+            "a module definition of the probe's spelling must not leave `eps` unresolved: \
+             {constants:?}"
+        );
+    }
+
+    #[test]
+    fn chelis_3267_property_probe_avoids_a_definition_of_its_spelling() {
+        let body = bool_lit(true);
+        // Lexical program: the probe joins the defining module's wrapper.
+        let lexical = vec![node(
+            "module",
+            vec![
+                sym("M"),
+                node("def", vec![sym("__chelis_prop_probe"), bool_lit(false)]),
+            ],
+        )];
+        let (program, probe) = inject_probe_into_defining_module(&lexical, "", body.clone());
+        assert_eq!(probe, "__chelis_prop_probe_1");
+        assert_eq!(program.len(), 1, "the probe joins the module wrapper");
+
+        // Linked program: the probe keeps the linker-format name of the
+        // type's module, suffixed past the module's own definition.
+        let linked = vec![node(
+            "def",
+            vec![sym("pkg__m__M__chelis_prop_probe"), bool_lit(false)],
+        )];
+        let (program, probe) = inject_probe_into_defining_module(&linked, "Pkg__m__M__T", body);
+        assert_eq!(probe, "pkg__m__M__chelis_prop_probe_1");
+        assert_eq!(program.len(), 2);
     }
 
     #[test]

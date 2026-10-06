@@ -46,7 +46,7 @@ use crate::composition::{
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
-use crate::smt_names::NameSupply;
+use crate::smt_names::{NameSupply, fresh_root_name};
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3245,6 +3245,22 @@ fn prove_surf_property_fuzz(
         REJECTION_SAMPLING_METHOD
     };
 
+    // The sample roots join this program, so they are named fresh against
+    // every name it spells (chelis#3267). The evaluator desugars the same
+    // declarations, so a program that does not desugar fails here exactly as
+    // its first sample would.
+    let roots = match chelis_surf::desugar::desugar_program(decls) {
+        Ok(program) => SampleRoots::for_program(&program),
+        Err(reason) => {
+            return error(
+                &property.name,
+                seed,
+                format!("fuzz desugar failed: {reason}"),
+            )
+            .with_sampling(sampling_method, 0, 0);
+        }
+    };
+
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     while accepted < samples_needed && attempts < max_attempts {
@@ -3264,7 +3280,7 @@ fn prove_surf_property_fuzz(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_surf_sample(decls, property, &sample, true) {
+            match eval_surf_sample(decls, property, &roots, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -3277,10 +3293,11 @@ fn prove_surf_property_fuzz(
             }
         }
         accepted += 1;
-        match eval_surf_sample(decls, property, &sample, false) {
+        match eval_surf_sample(decls, property, &roots, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
-                let (shrunk, shrink_steps) = shrink_surf_counterexample(decls, property, sample);
+                let (shrunk, shrink_steps) =
+                    shrink_surf_counterexample(decls, property, &roots, sample);
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -3741,17 +3758,40 @@ fn cast_expr(expr: Expr, ty: &str) -> Expr {
     )
 }
 
+/// The two roots a property sample declares in the program it evaluates: the
+/// property probe and the precondition probe. Each is named through
+/// [`fresh_root_name`] against the whole program (chelis#3267), once per
+/// property run, so a module that defines the plain spelling keeps its
+/// definition and its verdict.
+struct SampleRoots {
+    probe: String,
+    pre: String,
+}
+
+impl SampleRoots {
+    const PROBE_STEM: &str = "__chelis_property_probe";
+    const PRE_STEM: &str = "__chelis_property_pre";
+
+    fn for_program(program: &[DeepExpr]) -> Self {
+        Self {
+            probe: fresh_root_name(program, Self::PROBE_STEM),
+            pre: fresh_root_name(program, Self::PRE_STEM),
+        }
+    }
+
+    fn select(&self, precondition: bool) -> &str {
+        if precondition { &self.pre } else { &self.probe }
+    }
+}
+
 fn eval_surf_sample(
     decls: &[Decl],
     property: &Property,
+    roots: &SampleRoots,
     sample: &Sample,
     precondition: bool,
 ) -> Result<bool, String> {
-    let root = if precondition {
-        "__chelis_property_pre"
-    } else {
-        "__chelis_property_probe"
-    };
+    let root = roots.select(precondition);
     let mut source_decls = decls.to_vec();
     for value in &sample.values {
         if let Some((binding_name, tensor)) = &value.tensor_binding {
@@ -3885,20 +3925,22 @@ const MAX_SHRINK_STEPS: usize = 64;
 fn shrink_surf_counterexample(
     decls: &[Decl],
     property: &Property,
+    roots: &SampleRoots,
     sample: Sample,
 ) -> (Sample, usize) {
     shrink_counterexample(sample, &property.params, |candidate| {
-        sample_still_fails_surf(decls, property, candidate)
+        sample_still_fails_surf(decls, property, roots, candidate)
     })
 }
 
 fn shrink_deep_counterexample(
     exprs: &[DeepExpr],
     property: &DeepProperty,
+    roots: &SampleRoots,
     sample: Sample,
 ) -> (Sample, usize) {
     shrink_counterexample(sample, &property.params, |candidate| {
-        sample_still_fails_deep(exprs, property, candidate)
+        sample_still_fails_deep(exprs, property, roots, candidate)
     })
 }
 
@@ -3945,24 +3987,40 @@ where
     (sample, steps)
 }
 
-fn sample_still_fails_surf(decls: &[Decl], property: &Property, sample: &Sample) -> bool {
+fn sample_still_fails_surf(
+    decls: &[Decl],
+    property: &Property,
+    roots: &SampleRoots,
+    sample: &Sample,
+) -> bool {
     if !property.preconditions.is_empty() {
-        match eval_surf_sample(decls, property, sample, true) {
+        match eval_surf_sample(decls, property, roots, sample, true) {
             Ok(true) => {}
             Ok(false) | Err(_) => return false,
         }
     }
-    matches!(eval_surf_sample(decls, property, sample, false), Ok(false))
+    matches!(
+        eval_surf_sample(decls, property, roots, sample, false),
+        Ok(false)
+    )
 }
 
-fn sample_still_fails_deep(exprs: &[DeepExpr], property: &DeepProperty, sample: &Sample) -> bool {
+fn sample_still_fails_deep(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    roots: &SampleRoots,
+    sample: &Sample,
+) -> bool {
     if !property.preconditions.is_empty() {
-        match eval_deep_sample(exprs, property, sample, true) {
+        match eval_deep_sample(exprs, property, roots, sample, true) {
             Ok(true) => {}
             Ok(false) | Err(_) => return false,
         }
     }
-    matches!(eval_deep_sample(exprs, property, sample, false), Ok(false))
+    matches!(
+        eval_deep_sample(exprs, property, roots, sample, false),
+        Ok(false)
+    )
 }
 
 fn shrink_candidates(value: &SampleValue, ty: &TypeExpr) -> Vec<SampleValue> {
@@ -4416,6 +4474,8 @@ fn prove_deep_property(
         REJECTION_SAMPLING_METHOD
     };
 
+    let roots = SampleRoots::for_program(exprs);
+
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     while accepted < samples_needed && attempts < max_attempts {
@@ -4435,7 +4495,7 @@ fn prove_deep_property(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_deep_sample(exprs, property, &sample, true) {
+            match eval_deep_sample(exprs, property, &roots, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -4448,10 +4508,11 @@ fn prove_deep_property(
             }
         }
         accepted += 1;
-        match eval_deep_sample(exprs, property, &sample, false) {
+        match eval_deep_sample(exprs, property, &roots, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
-                let (shrunk, shrink_steps) = shrink_deep_counterexample(exprs, property, sample);
+                let (shrunk, shrink_steps) =
+                    shrink_deep_counterexample(exprs, property, &roots, sample);
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -4775,14 +4836,11 @@ fn sample_deep_property_with_constraints(
 fn eval_deep_sample(
     exprs: &[DeepExpr],
     property: &DeepProperty,
+    roots: &SampleRoots,
     sample: &Sample,
     precondition: bool,
 ) -> Result<bool, String> {
-    let root = if precondition {
-        "__chelis_property_pre"
-    } else {
-        "__chelis_property_probe"
-    };
+    let root = roots.select(precondition);
     let mut source_exprs = exprs.to_vec();
     for value in &sample.values {
         if let Some((binding_name, _)) = &value.tensor_binding

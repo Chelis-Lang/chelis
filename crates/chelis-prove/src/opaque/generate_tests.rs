@@ -96,7 +96,7 @@ fn exact_equality_invariant_starves_with_equality_atoms_shape() {
     let inv = &collect_opaque_invariants(&exprs)[0];
     let mut rng = GenRng::new(0);
     // No producers wired here; both tiers starve.
-    let diag = generate_binder(
+    let failure = generate_binder(
         inv,
         &ConstEnv::new(),
         GenModule {
@@ -110,6 +110,9 @@ fn exact_equality_invariant_starves_with_equality_atoms_shape() {
         500,
     )
     .expect_err("exact == over a float field starves by design");
+    let GenerationFailure::Starved(diag) = failure else {
+        panic!("no probe ran, so the failure is starvation: {failure:?}");
+    };
     assert_eq!(diag.type_name, "Exact");
     assert_eq!(diag.shape, PredShape::EqualityAtoms);
     assert!(diag.recommended_route.contains("Tier B"));
@@ -282,4 +285,80 @@ fn constructor_tensor_input_sampling_preserves_declared_integer_dtype() {
 
     assert!(deep.contains("(t-prim {} i64)"), "{deep}");
     assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
+}
+
+// chelis#3267: the constructor probe is named fresh against the module, and a
+// probe program rejected before it runs is reported as such, never as
+// starvation.
+
+/// A band (0.5 +- 0.0005) that starves rejection sampling, served only by
+/// the `norm` producer, beside a definition of `name`.
+fn narrow_band_module(name: &str) -> String {
+    format!(
+        "module M
+export (norm)
+@opaque
+@invariant(p) ((p.value >= 0.4995) && (p.value <= 0.5005))
+type T =
+  | T {{ value: f32 }}
+def norm(x: f32) -> T = T {{ value: 0.5 }}
+{name} = true
+"
+    )
+}
+
+fn generate_narrow_band(
+    name: &str,
+    param_kind: GenParamKind,
+) -> Result<GeneratedBinder, GenerationFailure> {
+    let source = narrow_band_module(name);
+    let exprs = deep_of(&source);
+    let inv = &collect_opaque_invariants(&exprs)[0];
+    let producers = vec![GenProducer {
+        name: "norm".to_string(),
+        param_names: vec!["x".to_string()],
+        param_kinds: vec![param_kind],
+        option_wrapped: false,
+    }];
+    generate_binder(
+        inv,
+        &ConstEnv::new(),
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(&source),
+            runtime: &chelis_std_bundle::EMBEDDED_RUNTIME,
+        },
+        &producers,
+        &mut GenRng::new(0),
+        0.01,
+        400,
+    )
+}
+
+#[test]
+fn chelis_3267_constructor_probe_avoids_a_module_definition_of_its_spelling() {
+    let f32_kind = || GenParamKind::Scalar("f32".to_string());
+    for name in ["renamed_gen_probe", "__chelis_gen_probe"] {
+        let got = generate_narrow_band(name, f32_kind())
+            .unwrap_or_else(|failure| panic!("{name}: the producer serves the band: {failure:?}"));
+        assert_eq!(got.method, GenMethod::Constructor, "{name}");
+        let value = got.env["p.value"].as_f64_lossy();
+        assert!((0.4995..=0.5005).contains(&value), "{name}: {value}");
+    }
+}
+
+#[test]
+fn chelis_3267_rejected_constructor_probe_is_an_internal_failure_not_starvation() {
+    // `norm` takes an f32; a bool argument makes every probe program fail
+    // to check, which no sample can change.
+    let failure = generate_narrow_band("renamed_gen_probe", GenParamKind::Scalar("bool".into()))
+        .expect_err("a probe that never checks cannot serve the band");
+    let GenerationFailure::ProbeRejected(reason) = failure else {
+        panic!("a rejected probe program must not read as starvation: {failure:?}");
+    };
+    assert!(
+        reason.contains("producer `norm`") && reason.contains("opaque type `T`"),
+        "{reason}"
+    );
+    assert!(!reason.contains("starvation"), "{reason}");
 }

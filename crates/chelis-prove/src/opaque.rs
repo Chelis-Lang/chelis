@@ -1180,10 +1180,23 @@ pub struct GenModule<'a> {
     pub runtime: &'static chelis_reef::EmbeddedRuntime,
 }
 
+/// Why [`generate_binder`] produced no value.
+#[derive(Debug, Clone)]
+pub enum GenerationFailure {
+    /// Both methods ran and stayed below the acceptance-rate floor.
+    Starved(StarvationDiagnostic),
+    /// Generation starved while a constructor probe program the generator
+    /// assembled was rejected before it ran. No sample can change such a
+    /// rejection, so it is reported as an internal failure, never as
+    /// starvation (chelis#3267).
+    ProbeRejected(String),
+}
+
 /// Generate one validated binder value for `inv`. Rejection sampling runs
 /// first, followed by constructor-based generation when rejection starves.
 /// Every accepted sample satisfies the predicate. If both methods starve,
-/// the result is a [`StarvationDiagnostic`].
+/// the result is a [`GenerationFailure`]: a [`StarvationDiagnostic`], or the
+/// first rejected constructor probe when one was rejected before it ran.
 ///
 /// `floor` is the acceptance-rate floor (`--invariant-min-rate`). A value
 /// of `0.0` disables starvation classification; the caller reports a
@@ -1196,7 +1209,7 @@ pub fn generate_binder(
     rng: &mut GenRng,
     floor: f64,
     budget: usize,
-) -> Result<GeneratedBinder, StarvationDiagnostic> {
+) -> Result<GeneratedBinder, GenerationFailure> {
     // Lower the predicate once over the binder name as prefix.
     let predicate = lower_predicate_flattened_in(inv, &inv.binder, consts, module.exprs);
 
@@ -1246,11 +1259,17 @@ pub fn generate_binder(
     let ctor_budget = budget.min(200);
     let mut ctor_attempts = 0usize;
     let ctor_accepts = 0usize;
+    let mut probe_rejection: Option<String> = None;
     if !producers.is_empty() {
         for _ in 0..ctor_budget {
             ctor_attempts += 1;
-            let Some(env) = propose_via_constructor(inv, module.source, producers, rng) else {
-                continue;
+            let env = match propose_via_constructor(inv, module.source, producers, rng) {
+                Ok(Some(env)) => env,
+                Ok(None) => continue,
+                Err(reason) => {
+                    probe_rejection.get_or_insert(reason);
+                    continue;
+                }
             };
             // STILL validate (a buggy producer costs efficiency, never
             // soundness; RFC D-STARVE M2).
@@ -1265,7 +1284,14 @@ pub fn generate_binder(
         }
     }
 
-    // Both starved.
+    // Both starved. A probe program rejected before it ran is an internal
+    // failure; reporting the run as starvation would blame the module.
+    if let Some(reason) = probe_rejection {
+        return Err(GenerationFailure::ProbeRejected(format!(
+            "constructor-based generation for opaque type `{}` could not run: {reason}",
+            inv.type_name
+        )));
+    }
     let shape = classify_pred_shape(inv, consts);
     let recommended_route = match shape {
         PredShape::EqualityAtoms => {
@@ -1275,7 +1301,7 @@ pub fn generate_binder(
         }
         _ => "a richer exported producer set, or Tier B where the property lowers".to_string(),
     };
-    Err(StarvationDiagnostic {
+    Err(GenerationFailure::Starved(StarvationDiagnostic {
         type_name: inv.type_name.clone(),
         rejection_accepted: rej_accepts,
         rejection_attempted: rej_attempts,
@@ -1285,7 +1311,7 @@ pub fn generate_binder(
         floor,
         shape,
         recommended_route,
-    })
+    }))
 }
 
 /// The single shared finiteness helper (U1 review-3 unification): true if
@@ -1512,13 +1538,16 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, ScalarVa
 /// evaluate it, Option-unwrap failures, and read back the produced record's
 /// field values into the legacy f64 env. The conversion is deliberately
 /// named lossy until chelis#688 / #729 Phase 2 replaces that env. Returns
-/// `None` on producer failure (None result) or an unreadable output.
+/// `Ok(None)` on producer failure (None result, a trap while it runs) or an
+/// unreadable output, and `Err` when the probe program the generator
+/// assembled is rejected before it runs: no sample can change that, so it is
+/// an internal failure rather than a dropped sample (chelis#3267).
 fn propose_via_constructor(
     inv: &OpaqueInvariant,
     module_source: &str,
     producers: &[GenProducer],
     rng: &mut GenRng,
-) -> Option<BTreeMap<String, ScalarValue>> {
+) -> Result<Option<BTreeMap<String, ScalarValue>>, String> {
     let idx = (rng.next_u64() as usize) % producers.len();
     let producer = &producers[idx];
 
@@ -1536,7 +1565,7 @@ fn propose_via_constructor(
     let mut env = BTreeMap::new();
     for (fname, fty) in &inv.fields {
         let field_path = format!("{}.{}", inv.binder, fname);
-        if !read_produced_field(
+        let read = read_produced_field(
             module_source,
             producer,
             &arg_exprs,
@@ -1545,17 +1574,26 @@ fn propose_via_constructor(
             fty,
             &field_path,
             &mut env,
-        )? {
-            return None;
+        )
+        .map_err(|reason| {
+            format!(
+                "the constructor probe for producer `{}` was rejected before evaluation: {reason}",
+                producer.name
+            )
+        })?;
+        if read != Some(true) {
+            return Ok(None);
         }
     }
-    Some(env)
+    Ok(Some(env))
 }
 
 /// Lossily read one representation field of a producer's result into the
 /// legacy f64 `env`.
-/// Returns `Some(true)` on success, `Some(false)` when the producer
-/// returned `None` (failure to unwrap), `None` on evaluation error.
+/// Returns `Ok(Some(true))` on success, `Ok(Some(false))` when the producer
+/// returned `None` (failure to unwrap), `Ok(None)` when evaluation fails
+/// while the program runs or the result is unreadable, and `Err` when the
+/// probe program is rejected before it runs.
 #[allow(clippy::too_many_arguments)]
 fn read_produced_field(
     module_source: &str,
@@ -1566,12 +1604,16 @@ fn read_produced_field(
     fty: &FieldType,
     field_path: &str,
     env: &mut BTreeMap<String, ScalarValue>,
-) -> Option<bool> {
+) -> Result<Option<bool>, String> {
     // The probe binds `r = producer(args)` (Option-unwrapped to a fresh
     // var via match when wrapped), accesses `r.<field>`, and we read the
     // resulting tensor/scalar values. We synthesize a probe def INSIDE the
-    // defining module so field access on the opaque type is legal.
-    let probe = "__chelis_gen_probe";
+    // defining module so field access on the opaque type is legal, named
+    // fresh against the program so a module that defines the plain spelling
+    // cannot turn every proposal into a duplicate definition (chelis#3267).
+    let exprs = chelis_deep::parser::parse_and_stamp_file(module_source)
+        .map_err(|error| format!("its module does not re-parse: {error}"))?;
+    let probe = crate::smt_names::fresh_root_name(&exprs, "__chelis_gen_probe");
     let call = {
         let mut app = vec![var_node(&producer.name)];
         app.extend(arg_exprs.iter().cloned());
@@ -1587,8 +1629,7 @@ fn read_produced_field(
         // { __r = producer(args); __r.field }
         let_block("__r", call, access)
     };
-    let probe_def = node_def(probe, body);
-    let exprs = chelis_deep::parser::parse_and_stamp_file(module_source).ok()?;
+    let probe_def = node_def(&probe, body);
     let program = inject_into_module_with_source(&exprs, type_name, probe_def);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
@@ -1597,9 +1638,38 @@ fn read_produced_field(
             source,
             bindings: Default::default(),
         },
-        &[probe.to_string()],
-    )
-    .ok()?;
+        &[probe],
+    );
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if rejected_before_evaluation(&error) => {
+            return Err(error
+                .errors
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Err(_) => return Ok(None),
+    };
+    Ok(read_probe_field(&result, fty, field_path, env))
+}
+
+/// Whether an evaluation failed before the program ran: it did not parse,
+/// check, or lower. A cancellation is not a rejection of the program.
+fn rejected_before_evaluation(error: &chelis_compiler_api::compiler::CompilerError) -> bool {
+    !error.is_cancellation() && error.stage != "eval"
+}
+
+/// Read the field value of a constructor probe's single root into `env`:
+/// `Some(true)` on success, `Some(false)` on the None-sentinel, `None` when
+/// the result is unreadable.
+fn read_probe_field(
+    result: &chelis_compiler_api::schema::EvalResult,
+    fty: &FieldType,
+    field_path: &str,
+    env: &mut BTreeMap<String, ScalarValue>,
+) -> Option<bool> {
     let root = match result.roots.as_slice() {
         [r] => r,
         _ => return None,

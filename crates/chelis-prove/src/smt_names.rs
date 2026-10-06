@@ -1,4 +1,5 @@
-//! Solver-symbol hygiene (chelis#3236).
+//! Prover-name hygiene: solver symbols (chelis#3236) and injected evaluation
+//! roots (chelis#3267).
 //!
 //! Every symbol the prover itself introduces into an SMT goal -- an
 //! abstraction variable, a contract-abstraction symbol, an induction symbol,
@@ -12,6 +13,12 @@
 //! [`duplicate_variable_reason`]) instead of silently overwriting the first
 //! declaration, so a collision that slips past freshness can never become a
 //! proof.
+//!
+//! The same supply names the top-level roots the prover adds to a user's
+//! program to evaluate a property sample, a producer value, a generated
+//! opaque value, or a constant: [`fresh_root_name`] is the one place every
+//! such injection takes its name from, so a root is never spelled like a
+//! definition or import the program already has.
 
 use std::collections::BTreeSet;
 
@@ -32,6 +39,17 @@ impl NameSupply {
     /// An empty supply: no name is taken yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A supply seeded with every name atom the Deep `program` spells (see
+    /// [`Self::reserve_deep`]): each top-level definition, type, constructor,
+    /// module, import and export, and every name inside a body.
+    pub fn for_deep_program(program: &[DeepExpr]) -> Self {
+        let mut supply = Self::new();
+        for expr in program {
+            supply.reserve_deep(expr);
+        }
+        supply
     }
 
     /// A supply seeded with every name `property` uses: each declared
@@ -137,6 +155,21 @@ impl NameSupply {
     }
 }
 
+/// The name of an evaluation root the prover declares as a new top-level
+/// definition of `program` (chelis#3267): `stem` when `program` spells no
+/// such name, else the first free `stem_1`, `stem_2`, ...
+///
+/// The avoid set is every name atom of the whole assembled program: the
+/// definitions of the module the root joins, the names its imports spell,
+/// and every other module the program carries. That over-approximates the
+/// top-level names visible where the root is declared; a wider avoid set can
+/// only lengthen the root's name, never let it redefine a user name. A stem
+/// that is a linker-format binding name (`pkg__<module>__<terminal>`) stays
+/// one, since the suffix extends the terminal.
+pub fn fresh_root_name(program: &[DeepExpr], stem: &str) -> String {
+    NameSupply::for_deep_program(program).fresh(stem)
+}
+
 /// The first name `variables` declares more than once, if any.
 pub fn first_duplicate_variable(variables: &[(String, SmtSort)]) -> Option<&str> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -215,5 +248,68 @@ mod tests {
             ("x".to_string(), SmtSort::Int),
         ];
         assert_eq!(first_duplicate_variable(&repeated), Some("x"));
+    }
+
+    fn deep_program(surf: &str) -> Vec<DeepExpr> {
+        let decls = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars")
+    }
+
+    /// Every stem an injection site uses (chelis#3267).
+    const ROOT_STEMS: [&str; 6] = [
+        "__chelis_property_probe",
+        "__chelis_property_pre",
+        "__chelis_value_probe",
+        "__chelis_gen_probe",
+        "__chelis_const_probe",
+        "__chelis_prop_probe",
+    ];
+
+    #[test]
+    fn root_name_keeps_the_stem_when_the_program_does_not_spell_it() {
+        let program = deep_program("module M\ndef f(x: f32) -> f32 = x\n");
+        for stem in ROOT_STEMS {
+            assert_eq!(fresh_root_name(&program, stem), stem);
+        }
+    }
+
+    #[test]
+    fn root_name_avoids_a_module_definition_of_the_stem() {
+        for stem in ROOT_STEMS {
+            let program = deep_program(&format!("module M\n{stem} = true\n"));
+            let root = fresh_root_name(&program, stem);
+            assert_eq!(root, format!("{stem}_1"));
+            // A program that also spells the first suffix gets the next one.
+            let program = deep_program(&format!(
+                "module M\n{stem} = true\ndef {stem}_1() -> f32 = 1.0\n"
+            ));
+            assert_eq!(fresh_root_name(&program, stem), format!("{stem}_2"));
+        }
+    }
+
+    #[test]
+    fn root_name_avoids_an_imported_name() {
+        let program = deep_program(
+            "module M\nimport Std.Scalar (__chelis_gen_probe)\ndef f(x: f32) -> f32 = x\n",
+        );
+        assert_eq!(
+            fresh_root_name(&program, "__chelis_gen_probe"),
+            "__chelis_gen_probe_1"
+        );
+    }
+
+    #[test]
+    fn linked_root_name_stays_in_its_module() {
+        let program = vec![DeepExpr::Atom(
+            DeepAtom::Name("pkg__m__M__chelis_prop_probe".to_string()),
+            chelis_deep::Span::new(0, 0),
+        )];
+        let root = fresh_root_name(&program, "pkg__m__M__chelis_prop_probe");
+        assert_eq!(root, "pkg__m__M__chelis_prop_probe_1");
+        assert_eq!(
+            chelis_types::linked_binding_in_module_of("Pkg__m__M__T", "chelis_prop_probe_1"),
+            Some(root),
+            "the suffixed name is the linker-format binding of the same module"
+        );
     }
 }
