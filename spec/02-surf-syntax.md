@@ -790,9 +790,12 @@ Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
 > be rejected during macro expansion, whether or not the program calls the
 > macro, with a diagnostic that names the macro and the unused parameter.
 > Expansion therefore never discards an argument: every argument of a call that
-> macro expansion expands occurs in the expansion, where macro expansion, name
-> resolution, type checking, effect inference, and linearity checking apply to
-> it as to any other expression in that position.
+> macro expansion expands occurs in the expansion at each position where the
+> body references its parameter. Where that position is an expression, macro
+> expansion, name resolution, type checking, effect inference, and linearity
+> checking apply to the argument as to any other expression there. Where it is
+> not an expression position, such as a label in metadata, the argument is
+> subject only to the rules of that position.
 
 Macro rules:
 

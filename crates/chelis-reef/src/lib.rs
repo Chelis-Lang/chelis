@@ -11420,12 +11420,15 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             params,
             body,
             span,
-        } => Decl::MacroDef {
-            name: name.clone(),
-            params: params.clone(),
-            body: rewrite_expr(body, resolver, &mut UnordSet::new()),
-            span: *span,
-        },
+        } => {
+            let mut locals = params.iter().cloned().collect::<UnordSet<_>>();
+            Decl::MacroDef {
+                name: name.clone(),
+                params: params.clone(),
+                body: rewrite_expr(body, resolver, &mut locals),
+                span: *span,
+            }
+        }
         Decl::Dim { names, span } => Decl::Dim {
             names: names.clone(),
             span: *span,

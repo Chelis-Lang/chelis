@@ -230,6 +230,50 @@ fn macros_that_reference_every_parameter_check_clean_and_evaluate() {
     }
 }
 
+/// A macro parameter shadows an imported name of the same spelling inside
+/// the body, as it does without the import. Without that, the entry-module
+/// linker bound the body reference to the import: `apply(neg1, 5i32)` called
+/// `Std.Scalar.abs` and dropped `neg1`, and the body was then reported as
+/// never referencing its parameter.
+#[test]
+fn a_macro_parameter_shadows_an_imported_name() {
+    for (name, program, value) in [
+        (
+            "shadow_abs.ch",
+            "import Std.Scalar (abs)\n\
+             macro apply(abs, x) = abs(x)\n\
+             def neg1(x: i32) -> i32 = neg(x)\n\
+             out = apply(neg1, 5i32)\n",
+            "out = -5",
+        ),
+        (
+            "control_abs.ch",
+            "macro apply(abs, x) = abs(x)\n\
+             def neg1(x: i32) -> i32 = neg(x)\n\
+             out = apply(neg1, 5i32)\n",
+            "out = -5",
+        ),
+        (
+            "shadow_join.ch",
+            "import Std.Text (join)\n\
+             macro twice(join) = add(join, join)\n\
+             out = twice(3i32)\n",
+            "out = 6",
+        ),
+        (
+            "control_join.ch",
+            "macro twice(join) = add(join, join)\nout = twice(3i32)\n",
+            "out = 6",
+        ),
+    ] {
+        assert_eq!(
+            checked_clean_and_evaluated(name, program).trim(),
+            value,
+            "{name} must substitute the argument for the parameter, not the import"
+        );
+    }
+}
+
 #[test]
 fn a_macro_that_references_every_parameter_runs_in_compiled_c() {
     if !gcc_available() {
