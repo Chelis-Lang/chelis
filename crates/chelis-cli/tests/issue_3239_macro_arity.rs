@@ -117,16 +117,15 @@ fn checked_clean_and_evaluated(name: &str, program: &str) -> String {
     String::from_utf8(evaluated.stdout).expect("UTF-8 stdout")
 }
 
-/// Without the rule, the missing `y` read `f`'s own parameter and `out`
-/// evaluated to 9.
+/// Without the rule, the missing `y` read `f`'s own parameter.
 #[test]
 fn short_user_macro_call_is_rejected() {
     assert_file_rejected(
         "short.ch",
-        "macro second(x, y) = y\n\
-         def f(y: i32) -> i32 = second(1i32)\n\
+        "macro minus(x, y) = sub(x, y)\n\
+         def f(y: i32) -> i32 = minus(1i32)\n\
          out = f(9i32)\n",
-        "macro `second` expects 2 argument(s), but this call supplies 1",
+        "macro `minus` expects 2 argument(s), but this call supplies 1",
     );
 }
 
@@ -302,10 +301,10 @@ fn exact_arity_macro_calls_check_clean_and_evaluate() {
     for (name, program, value) in [
         (
             "user.ch",
-            "macro second(x, y) = y\n\
-             def f(y: i32) -> i32 = second(1i32, 9i32)\n\
-             out = f(5i32)\n",
-            "out = 9",
+            "macro minus(x, y) = sub(x, y)\n\
+             def f(y: i32) -> i32 = minus(9i32, y)\n\
+             out = f(1i32)\n",
+            "out = 8",
         ),
         (
             "prelude.ch",
@@ -317,7 +316,7 @@ fn exact_arity_macro_calls_check_clean_and_evaluate() {
         assert_eq!(
             checked_clean_and_evaluated(name, program).trim(),
             value,
-            "{name} must evaluate to the argument the macro selects"
+            "{name} must evaluate to the value the macro expands to"
         );
     }
 }

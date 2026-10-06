@@ -782,6 +782,21 @@ Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
 > argument. A named argument that a macro body writes on a call that does not
 > resolve to a macro belongs to that call, and expansion SHALL preserve it.
 
+> **[02-MACRO-4]** Each parameter of a macro definition SHALL occur in the
+> definition's body as a reference that substitution replaces with the call's
+> argument. A reference inside the scope of a body binder of the same name, such
+> as a `fn` parameter, a block binding, or a pattern binder, is not such an
+> occurrence. A definition with a parameter that its body never references SHALL
+> be rejected during macro expansion, whether or not the program calls the
+> macro, with a diagnostic that names the macro and the unused parameter.
+> Expansion therefore never discards an argument: every argument of a call that
+> macro expansion expands occurs in the expansion at each position where the
+> body references its parameter. Where that position is an expression, macro
+> expansion, name resolution, type checking, effect inference, and linearity
+> checking apply to the argument as to any other expression there. Where it is
+> not an expression position, such as a label in metadata, the argument is
+> subject only to the rules of that position.
+
 Macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then
