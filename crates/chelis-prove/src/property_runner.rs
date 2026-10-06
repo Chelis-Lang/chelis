@@ -3261,7 +3261,7 @@ fn prove_surf_property_fuzz(
         }
     };
 
-    let library = match chelis_compiler_api::build_stdlib_context(decls) {
+    let library = match chelis_compiler_api::build_declaration_context(decls) {
         Ok(library) => library,
         Err(err) => {
             return error(&property.name, seed, compiler_error_message(err)).with_sampling(

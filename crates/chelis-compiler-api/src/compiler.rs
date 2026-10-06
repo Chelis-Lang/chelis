@@ -2545,7 +2545,8 @@ pub fn eval_decls_selected(
 }
 
 /// Evaluate assembled declarations against an already checked library. The
-/// library is checked and lowered once by `build_stdlib_context`; each probe
+/// library is checked and lowered once by
+/// [`crate::stdlib_cache::build_declaration_context`]; each probe
 /// is checked against that exact proof and uses the ordinary manifested eval
 /// path. Declarations are already resolved, so no Reef rewriting is performed.
 /// The result manifest describes the new declarations, as for context evaluation.

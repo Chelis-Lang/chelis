@@ -3,6 +3,39 @@
 use super::*;
 
 #[test]
+fn prepared_surf_fuzz_library_preserves_source_provenance() {
+    let forged = "def pkg__demo__Hidden__identity(x: i64) -> i64 = x\n@property holds forall(x: i64): pkg__demo__Hidden__identity(x) == x\n";
+    let declarations = chelis_surf::parser::parse_str(forged).unwrap();
+    let baseline =
+        chelis_compiler_api::compiler::eval_decls_selected(&declarations, BTreeMap::new(), &[])
+            .unwrap_err();
+    assert!(
+        baseline
+            .errors
+            .iter()
+            .any(|error| error.kind().as_str() == "ReservedLinkerName")
+    );
+    let outcomes = run_surf(forged, "fuzz-only");
+    assert_eq!(outcomes[0].status, PropertyStatus::Error, "{outcomes:#?}");
+    assert_eq!(outcomes[0].accepted_samples, 0);
+
+    let authored = forged.replace("pkg__demo__Hidden__identity", "identity");
+    assert!(run_surf(&authored, "fuzz-only")[0].is_pass());
+
+    // The Reef caller's explicit provenance must survive library preparation.
+    let _linked = chelis_types::install_linked_program_guard();
+    let options = PropertyRunOptions {
+        tier: "fuzz-only".into(),
+        samples: 4,
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+    };
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_decls_properties(&declarations, &declarations, &declarations, &options).unwrap();
+    assert!(outcomes[0].is_pass(), "{outcomes:#?}");
+    assert_eq!(outcomes[0].accepted_samples, 4);
+}
+
+#[test]
 fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
     for source in [
         "@property scalar forall(x: f32) where x >= 0.0: x > 5.0\n",
@@ -15,7 +48,7 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
             .remove(0);
         let deep = chelis_surf::desugar::desugar_program(&decls).unwrap();
         let roots = SampleRoots::for_program(&deep);
-        let library = chelis_compiler_api::build_stdlib_context(&decls).unwrap();
+        let library = chelis_compiler_api::build_declaration_context(&decls).unwrap();
         let monolithic = |sample: &Sample, precondition: bool| {
             let mut whole = decls.clone();
             whole.push(Decl::LetDef {

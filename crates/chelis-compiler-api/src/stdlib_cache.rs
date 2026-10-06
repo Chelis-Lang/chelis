@@ -567,7 +567,17 @@ pub fn build_stdlib_context(
     // mangled); accept the linker name format while building the
     // context, including via direct callers and the cache-miss path.
     let _linked = chelis_types::install_linked_program_guard();
-    let prepared = crate::pipeline::prepare_surf_decls(stdlib_decls, None).map_err(|error| {
+    build_declaration_context(stdlib_decls)
+}
+
+/// Check and lower declarations as a reusable in-memory library, preserving
+/// the caller's linker provenance. Ordinary source receives ordinary admission
+/// checks; Reef callers retain the guard installed at their link boundary.
+pub fn build_declaration_context(
+    decls: &[chelis_surf::ast::Decl],
+) -> Result<StdLibContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let prepared = crate::pipeline::prepare_surf_decls(decls, None).map_err(|error| {
         crate::compiler::pipeline_rejection_to_compiler_error(
             crate::pipeline::PipelineRejection::Preparation(error),
         )
