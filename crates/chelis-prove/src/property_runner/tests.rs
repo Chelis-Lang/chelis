@@ -1586,7 +1586,7 @@ fn chelis_3236_quantile_symbols_avoid_binders_spelled_like_them() {
     let (declared, minted) = tier_b_contract_variables(
         "module M
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0f32, 1.0f32, 2.0f32]) : tensor[3, f32])
 @property forged forall(p: f32, q: f32, __contract_std_quantile_0: f32, __contract_std_quantile_1: f32)
   where 0.0 <= p, p <= q, q <= 1.0:
   ((pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), p) <= pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), q)) && (__contract_std_quantile_0 <= __contract_std_quantile_1))
@@ -1651,7 +1651,7 @@ fn chelis_3236_quantile_symbol_avoids_a_name_used_only_as_a_q_operand() {
         "module M
 __contract_std_quantile_0 = 0.5
 def observations() -> tensor[3, f32] =
-  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+  (to_tensor([3.0f32, 1.0f32, 2.0f32]) : tensor[3, f32])
 @property forged forall(q: f32)
   where 0.0 <= q, q <= 1.0:
   (pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), __contract_std_quantile_0) <= pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), q))
