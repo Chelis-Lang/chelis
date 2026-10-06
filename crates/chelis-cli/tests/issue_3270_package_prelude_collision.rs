@@ -1,12 +1,13 @@
 //! An ordinary top-level `def` or `sig` named like a loaded standard prelude
-//! macro is rejected by `check`, `eval`, and `build` alike, in a reef package
-//! module as in a standalone file, and the diagnostic names the declaration
-//! as written (spec/02-surf-syntax.md §P5b, chelis#3270).
+//! macro is rejected by `check`, `eval`, and `build` alike, in any module of a
+//! reef package graph as in a standalone file. The diagnostic names the
+//! declaration as written, and a package rejection names the module's file
+//! (spec/02-surf-syntax.md §P5b, chelis#3270).
 
 mod common;
 
 use assert_cmd::Command;
-use common::{build_and_run_app, gcc_available, make_app, write_file};
+use common::{COMPILER_VERSION, build_and_run_app, gcc_available, make_app, write_file};
 use std::path::Path;
 
 const PRELUDE_MACROS: [&str; 3] = ["residual", "linear_layer", "cross_entropy"];
@@ -30,9 +31,15 @@ fn collision(declaration: &str, name: &str) -> String {
     )
 }
 
-/// `check` reports exactly the collision with a zero score and a failing
-/// exit; `eval` and C `build` fail with it before producing any value or
-/// artifact. No command names the declaration by a linker-internal name.
+/// The package diagnostic: the collision attributed to the module's file.
+fn package_collision(file: &str, declaration: &str, name: &str) -> String {
+    format!("{file}: {}", collision(declaration, name))
+}
+
+/// `check` reports exactly the collision, starting with `diagnostic`, with a
+/// zero score and a failing exit; `eval` and C `build` fail with it before
+/// producing any value or artifact. No command names the declaration by a
+/// linker-internal name.
 fn assert_rejected_in_each_command(
     root: &Path,
     reef_home: Option<&Path>,
@@ -54,7 +61,7 @@ fn assert_rejected_in_each_command(
         checked.status.code() == Some(2)
             && report["score"].as_f64() == Some(0.0)
             && messages.len() == 1
-            && messages[0].contains(diagnostic),
+            && messages[0].starts_with(diagnostic),
         "check must report only `{diagnostic}`: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&checked.stderr)
     );
@@ -122,7 +129,7 @@ fn package_def_named_like_each_prelude_macro_is_rejected_by_every_command() {
             &app,
             Some(&reef_home),
             &app.join("src/main.ch"),
-            &collision("def", name),
+            &package_collision("main.ch", "def", name),
         );
     }
 }
@@ -139,12 +146,13 @@ fn package_sig_named_like_a_prelude_macro_is_rejected_by_every_command() {
         &app,
         Some(&reef_home),
         &app.join("src/main.ch"),
-        &collision("def", "cross_entropy"),
+        &package_collision("main.ch", "def", "cross_entropy"),
     );
 }
 
 /// The rule holds in every module of the package, not only the one a
-/// command is pointed at: an imported colliding definition is rejected too.
+/// command is pointed at: an imported colliding definition is rejected too,
+/// and the diagnostic names the imported module's file.
 #[test]
 fn imported_package_def_named_like_a_prelude_macro_is_rejected_by_every_command() {
     let (_dir, reef_home, app) = package_main(
@@ -159,10 +167,62 @@ fn imported_package_def_named_like_a_prelude_macro_is_rejected_by_every_command(
         &app,
         Some(&reef_home),
         &app.join("src/main.ch"),
-        &collision("def", "linear_layer"),
+        &package_collision("layers.ch", "def", "linear_layer"),
     );
 }
 
+/// A module of the package that the checked file does not import is linked
+/// with the package, so its colliding definition rejects the package too,
+/// attributed to that module's file.
+#[test]
+fn unimported_package_def_named_like_a_prelude_macro_is_rejected_by_every_command() {
+    let (_dir, reef_home, app) = package_main("prelude_unimported", "out = 1i32\n");
+    write_file(
+        &app.join("src/unused.ch"),
+        "module Demo.Unused\ndef residual(x: i32) -> i32 = x\n",
+    );
+    assert_rejected_in_each_command(
+        &app,
+        Some(&reef_home),
+        &app.join("src/main.ch"),
+        &package_collision("unused.ch", "def", "residual"),
+    );
+}
+
+/// A path dependency's module is a package module as well: its colliding
+/// definition rejects every command on the depending package, attributed to
+/// the dependency module's file.
+#[test]
+fn path_dependency_def_named_like_a_prelude_macro_is_rejected_by_every_command() {
+    let (dir, reef_home, app) = package_main(
+        "prelude_dependency",
+        "import Helper.Ops (cross_entropy)\nout = cross_entropy(1i32)\n",
+    );
+    let helper = dir.path().join("helper");
+    write_file(
+        &helper.join("reef.toml"),
+        &format!(
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Helper\"\n"
+        ),
+    );
+    write_file(
+        &helper.join("src/ops.ch"),
+        "module Helper.Ops\nexport (cross_entropy)\ndef cross_entropy(x: i32) -> i32 = x\n",
+    );
+    let manifest = app.join("reef.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("read app manifest");
+    text.push_str("helper = { path = \"../helper\" }\n");
+    write_file(&manifest, &text);
+    assert_rejected_in_each_command(
+        &app,
+        Some(&reef_home),
+        &app.join("src/main.ch"),
+        &package_collision("ops.ch", "def", "cross_entropy"),
+    );
+}
+
+/// The standalone file is rejected during macro expansion with the
+/// collision text alone: no file attribution is added to it.
 #[test]
 fn standalone_def_named_like_a_prelude_macro_stays_rejected_by_every_command() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -10967,7 +10967,10 @@ fn rewrite_module_decls(
         }
     }
     drain_qualified_failures(&resolver)?;
-    reject_standard_prelude_collisions(&module.decls)?;
+    // The rejection can come from any module of the package graph, so it
+    // names the module's file, as `reject_reserved_binders` does.
+    reject_standard_prelude_collisions(&module.decls)
+        .map_err(|error| format!("{}: {error}", module.file_rel.display()))?;
     Ok(out)
 }
 
@@ -14763,8 +14766,8 @@ version = "0.1.0"
     }
 
     /// chelis#3270: a package module's colliding declaration is rejected when
-    /// the package is linked, under its authored name, whether the module is
-    /// the file being checked or a module it imports.
+    /// the package is linked, under its authored name and attributed to its
+    /// module's file, whether that is the file being checked or one it imports.
     #[test]
     fn package_modules_reject_prelude_macro_names_by_authored_name() {
         for (main, other) in [
@@ -14797,14 +14800,14 @@ version = "0.1.0"
             }
             let error = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
                 .expect_err("a prelude macro name must reject the package");
-            let name = if other.is_some() {
-                "linear_layer"
+            let (file, name) = if other.is_some() {
+                ("layers.ch", "linear_layer")
             } else {
-                "residual"
+                ("main.ch", "residual")
             };
             assert!(
                 error.starts_with(&format!(
-                    "`def {name}` collides with the standard prelude macro `{name}`"
+                    "{file}: `def {name}` collides with the standard prelude macro `{name}`"
                 )) && !error.contains("pkg__"),
                 "{error}"
             );
