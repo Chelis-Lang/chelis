@@ -37,6 +37,7 @@ mod package_metadata;
 #[doc(hidden)]
 pub mod package_versioning;
 mod remote_discovery;
+mod source_names;
 
 pub use package_metadata::{
     DeclaredFileSnapshot, METADATA_FILE_MAX_BYTES, METADATA_TOTAL_MAX_BYTES, PackageDescription,
@@ -50,6 +51,7 @@ pub use remote_discovery::{
 };
 
 pub use embedded_runtime::EmbeddedRuntime;
+pub use source_names::LinkedSourceNames;
 
 pub use document_schema::{
     DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
@@ -500,6 +502,10 @@ pub struct PreparedProgram {
     /// this slice as provenance: an author cannot make a local declaration
     /// trusted by spelling a linker-shaped name.
     pub dependency_decls: Vec<Decl>,
+    /// The authored spelling of every name the linker qualified in `decls`
+    /// (chelis#3269). A diagnostic about this program renders through it
+    /// so it names declarations as the author wrote them.
+    pub source_names: LinkedSourceNames,
 }
 
 /// Linker-owned declaration graph emitted for machine consumers such as
@@ -1775,6 +1781,14 @@ impl PreparedReefGraph {
         self.stdlib_source_digest
     }
 
+    /// The authored spelling of every name this graph's linker tables
+    /// assign (chelis#3269): each module's `internal_maps` entry records the
+    /// linked name of every symbol it declares, so the table is read off
+    /// the mapping the rewrite used, never recovered from the linked string.
+    pub fn source_names(&self) -> LinkedSourceNames {
+        linked_source_names(&self.internal_maps)
+    }
+
     /// Whether this graph links a single-file program outside every reef
     /// package (chelis#2881). Such a graph has no package root: its
     /// `package_root` is empty and names no directory.
@@ -2496,6 +2510,7 @@ pub fn prepare_program_for_file(
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
         dependency_decls: graph.linked_dependency_decls.clone(),
+        source_names: graph.source_names(),
     }))
 }
 
@@ -3207,6 +3222,7 @@ pub struct IsolatedEntryModule {
 pub struct RewrittenEntryBatch {
     declarations: Vec<Decl>,
     exact_roots: BTreeMap<(usize, String), String>,
+    source_names: LinkedSourceNames,
 }
 
 impl RewrittenEntryBatch {
@@ -3218,6 +3234,12 @@ impl RewrittenEntryBatch {
         self.exact_roots
             .get(&(manifest_index, source_name.to_string()))
             .map(String::as_str)
+    }
+
+    /// The authored spelling of every name the batch's own entry modules
+    /// were linked under (chelis#3269); the graph's table covers the rest.
+    pub fn source_names(&self) -> &LinkedSourceNames {
+        &self.source_names
     }
 }
 
@@ -3255,6 +3277,7 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
     let mut seen_indices = BTreeSet::new();
     let mut declarations = Vec::new();
     let mut exact_roots = BTreeMap::new();
+    let mut source_names = LinkedSourceNames::default();
 
     for entry in entries {
         if !seen_indices.insert(entry.manifest_index) {
@@ -3379,12 +3402,16 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
             })?;
             exact_roots.insert((entry.manifest_index, source_name), exact.clone());
         }
+        for (authored, linked) in local_map.into_sorted() {
+            source_names.insert(linked, authored);
+        }
         declarations.extend(rewritten);
     }
 
     Ok(RewrittenEntryBatch {
         declarations,
         exact_roots,
+        source_names,
     })
 }
 
@@ -3406,6 +3433,7 @@ fn assemble_rewritten_entry_program(
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls,
         dependency_decls: graph.linked_dependency_decls.clone(),
+        source_names: graph.source_names(),
     }
 }
 
@@ -3415,10 +3443,9 @@ pub fn compile_rewritten_entry_batch_with_reef_graph(
     graph: &PreparedReefGraph,
     batch: &RewrittenEntryBatch,
 ) -> Result<PreparedProgram, String> {
-    Ok(assemble_rewritten_entry_program(
-        graph,
-        batch.declarations(),
-    ))
+    let mut program = assemble_rewritten_entry_program(graph, batch.declarations());
+    program.source_names.extend(&batch.source_names);
+    Ok(program)
 }
 
 /// Compile an in-memory entry decl list against a previously prepared reef
@@ -10725,6 +10752,19 @@ fn build_internal_maps(
     maps
 }
 
+/// Invert linker tables (`authored -> linked`, per module) into the
+/// `linked -> authored` table diagnostics render through (chelis#3269).
+fn linked_source_names(
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
+) -> LinkedSourceNames {
+    internal_maps
+        .to_sorted()
+        .into_iter()
+        .flat_map(|(_, module_map)| module_map.to_sorted())
+        .map(|(authored, linked)| (linked.clone(), authored.clone()))
+        .collect()
+}
+
 fn build_name_resolver(
     module: &ModuleSource,
     graph: &PackageGraph,
@@ -13559,6 +13599,61 @@ module_prefix = "OrphanSig"
     }
 
     #[test]
+    fn prepared_program_records_the_authored_spelling_of_every_linked_name() {
+        // chelis#3269: diagnostics render linked names through this table,
+        // so it must record each one the linker assigned, `__` included.
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo-app");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo-app"
+version = "0.1.0"
+compiler = "{CURRENT_COMPILER_VERSION}"
+module_prefix = "Demo"
+"#,
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Demo.Main\n\
+             type My__Shape =\n  | Circle(f32)\n\
+             def my__helper(x: i32) -> i32 = x\n\
+             out: i32 = my__helper(1i32)\n",
+        );
+        let program = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+            .expect("link the package")
+            .expect("the file is a package module");
+        let names = &program.source_names;
+        for (linked, authored) in [
+            ("pkg__demo__app__Demo__Main__out", "out"),
+            ("pkg__demo__app__Demo__Main__my__helper", "my__helper"),
+            ("Pkg__demo__app__Demo__Main__My__Shape", "My__Shape"),
+            ("Pkg__demo__app__Demo__Main__Circle", "Circle"),
+        ] {
+            assert_eq!(names.source_name(linked), Some(authored), "{linked}");
+        }
+        // Every declaration the linker named is in the table, and the table
+        // renders it back to its authored spelling.
+        for decl in &program.entry_decls {
+            let Some(linked) = entry_decl_binding_name(decl) else {
+                continue;
+            };
+            assert!(
+                names.source_name(linked).is_some(),
+                "linked name `{linked}` has no authored spelling"
+            );
+        }
+        assert_eq!(
+            names.render("def 'pkg__demo__app__Demo__Main__my__helper': got `Pkg__demo__app__Demo__Main__My__Shape`"),
+            "def 'my__helper': got `My__Shape`"
+        );
+        // A name the linker kept is not in the table.
+        assert_eq!(names.source_name("out"), None);
+    }
+
+    #[test]
     fn synthetic_entry_signatures_require_same_entry_definitions() {
         let (_dir, root) = shared_graph_fixture();
         let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
@@ -15496,6 +15591,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
+            source_names: LinkedSourceNames::default(),
         };
         let rendered = chelis_surf::format::format_program(
             &prepared.reachable_decls().expect("reachable declarations"),
@@ -15536,6 +15632,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
+            source_names: LinkedSourceNames::default(),
         };
         let invariant_rendered = chelis_surf::format::format_program(
             &invariant_program
@@ -15570,6 +15667,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
+            source_names: LinkedSourceNames::default(),
         };
         let macro_rendered = chelis_surf::format::format_program(
             &macro_program.reachable_decls().expect("macro reachability"),

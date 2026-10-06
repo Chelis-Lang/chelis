@@ -58,6 +58,15 @@ impl CheckResult {
         result.validate()?;
         Ok(result)
     }
+
+    /// [`Diagnostic::render_source_names`] for every diagnostic of the
+    /// report (chelis#3269).
+    pub fn render_source_names(&mut self, names: &chelis_reef::LinkedSourceNames) {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        for diagnostic in &mut self.errors {
+            diagnostic.render_source_names(names);
+        }
+    }
 }
 
 impl Serialize for CheckResult {

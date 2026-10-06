@@ -156,6 +156,18 @@ impl CompilerError {
             .iter()
             .any(|diagnostic| diagnostic.kind() == chelis_vocab::DiagnosticKind::Cancelled)
     }
+
+    /// This error with every diagnostic rendered through the linker's
+    /// source-name table (chelis#3269), so a diagnostic about a linked
+    /// program names declarations as their author wrote them. The
+    /// transcript is program output, not a diagnostic, and is unchanged.
+    pub fn with_source_names(mut self, names: &chelis_reef::LinkedSourceNames) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        for diagnostic in &mut self.errors {
+            diagnostic.render_source_names(names);
+        }
+        self
+    }
 }
 
 /// The error a front-end phase returns when the compile was abandoned
@@ -2708,7 +2720,19 @@ fn compile_new_decls_in_context(
 /// resolved by Reef. Keeping this boundary separate prevents an isolated
 /// multi-entry batch from being flattened back into the synthetic eval module
 /// and rewritten a second time.
+///
+/// A rejection names the context's declarations by their authored spelling
+/// (chelis#3269).
 fn compile_rewritten_decls_in_context(
+    context: &crate::context::CompiledContext,
+    rewritten: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_linked_decls_in_context(context, rewritten, target)
+        .map_err(|error| error.with_source_names(&context.reef_state.source_names()))
+}
+
+fn compile_linked_decls_in_context(
     context: &crate::context::CompiledContext,
     rewritten: &[Decl],
     target: Target,
@@ -2963,7 +2987,8 @@ pub fn prepare_rewritten_entry_batch_in_context(
     batch: &chelis_reef::RewrittenEntryBatch,
 ) -> Result<PreparedEvalInContext> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)?;
+    let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)
+        .map_err(|error| error.with_source_names(batch.source_names()))?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
