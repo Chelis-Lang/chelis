@@ -535,19 +535,20 @@ fn producer_first_param_name(exprs: &[Expr], producer: &str) -> String {
 #[test]
 fn f3_int_width_field_param_const_lowers_consistently_at_tier_b() {
     use crate::tier_b::{TierBResult, solve_property};
-    // Loop over EVERY integer width. The bound `0` is cast to the field
-    // width so the module type-checks (integer literals default to i32, so
-    // a bare `0` against an i8 field is a precision mismatch).
+    // Loop over EVERY integer width. The bound `0` carries the field width's
+    // suffix (`0i8`, `0i16`, ...) so the module type-checks: an unsuffixed
+    // integer literal is i32, and an ascription checks a literal's dtype
+    // rather than selecting it (spec/04-type-system.md §5.3).
     for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (mk_counter)
 @opaque
-@invariant(c) c.n >= ({lo} : {width})
+@invariant(c) c.n >= {lo}{width}
 type Counter =
   | Counter {{ n: {width} }}
 def mk_counter(x: {width}) -> Option[Counter] =
-  if x >= ({lo} : {width}) then Some(Counter {{ n: x }}) else None
+  if x >= {lo}{width} then Some(Counter {{ n: x }}) else None
 ",
             lo = 0,
             width = width
