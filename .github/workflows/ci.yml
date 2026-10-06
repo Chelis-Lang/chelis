@@ -1035,6 +1035,12 @@ jobs:
       - name: Run the Deep-surface obligation tier tests
         run: cargo test -p chelis-cli --features smt --test prove_deep_obligations
 
+      # chelis#3236: this CLI acceptance target is `#![cfg(feature = "smt")]`,
+      # so the change-owned lane lists no tests in it. Its owner row in
+      # .config/ci-test-targets.toml names this job, which provisions cvc5.
+      - name: Run the prover solver-symbol collision acceptance tests
+        run: cargo test -p chelis-cli --features smt --test issue_3236_prover_name_collision
+
       # Clippy's `disallowed_types` ban on raw hash collections
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is

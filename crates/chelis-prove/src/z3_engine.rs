@@ -501,6 +501,12 @@ fn lower_quantifier(
     vars: &BTreeMap<String, Z3Var>,
     sorts: &UnordMap<String, SmtSort>,
 ) -> Result<Z3Term, String> {
+    // One binder list is one scope: a repeated binder would overwrite its
+    // sibling in the extended map (chelis#3236). Binding a name the enclosing
+    // scope declares is ordinary shadowing.
+    if let Some(name) = crate::smt_names::first_duplicate_variable(bindings) {
+        return Err(crate::smt_names::duplicate_variable_reason(name));
+    }
     let mut extended_vars = vars.clone();
     let mut extended_sorts = sorts.clone();
     let mut bound_consts: Vec<Z3Var> = Vec::with_capacity(bindings.len());
@@ -591,7 +597,9 @@ pub fn solve_property_z3(property: &SmtProperty, timeout_ms: u64) -> TierBResult
     let mut vars: BTreeMap<String, Z3Var> = BTreeMap::new();
     let mut sorts: UnordMap<String, SmtSort> = UnordMap::new();
     for (name, sort) in &property.variables {
-        vars.insert(name.clone(), Z3Var::new(name, *sort));
+        if vars.insert(name.clone(), Z3Var::new(name, *sort)).is_some() {
+            return TierBResult::Error(crate::smt_names::duplicate_variable_reason(name));
+        }
         sorts.insert(name.clone(), *sort);
     }
 

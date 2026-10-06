@@ -3645,6 +3645,10 @@ class SmtCiSplitTests(unittest.TestCase):
             "cargo test -p chelis-cli --features smt --test prove_deep_obligations",
             block,
         )
+        self.assertIn(
+            "cargo test -p chelis-cli --features smt --test issue_3236_prover_name_collision",
+            block,
+        )
         forbidden = [
             "--features carcara",
             "--features z3",

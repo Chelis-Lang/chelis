@@ -225,6 +225,9 @@ jobs:
       - name: Run the Deep-surface obligation tier tests
         run: cargo test -p chelis-cli --features smt --test prove_deep_obligations
 
+      - name: Run the prover solver-symbol collision acceptance tests
+        run: cargo test -p chelis-cli --features smt --test issue_3236_prover_name_collision
+
       - name: Clippy over the cvc5 feature configuration
         run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
 

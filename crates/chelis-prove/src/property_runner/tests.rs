@@ -1483,3 +1483,257 @@ fn chelis_2957_a_property_without_a_float_contract_resolves_no_float_discharge()
         ]
     );
 }
+
+/// Trusted linked contract implementations, shaped as the linker emits them,
+/// so the contract abstraction binds calls without a Reef build.
+const TRUSTED_CONTRACT_IMPLEMENTATIONS: &str = "module Linked
+def pkg__chelis__std__Std__Contracts__normal_cdf(x: f64) -> f64 = x
+def pkg__nautilus__Nautilus__Stats__quantile_vec[n](v: &tensor[n, f32], q: f32) -> f32 = q
+";
+
+/// The solver variables the Tier B lowering of `source`'s only property
+/// declares (binders, then contract-abstraction symbols), and the names the
+/// abstraction minted.
+fn tier_b_contract_variables(source: &str) -> (Vec<String>, Vec<String>) {
+    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let trusted = flatten_module_decls(
+        &chelis_surf::parser::parse_str(TRUSTED_CONTRACT_IMPLEMENTATIONS).expect("parses"),
+    );
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    let [property] = properties.as_slice() else {
+        panic!("exactly one property: {properties:?}");
+    };
+    let lowered = lower_surf_tier_b_goal(&decls, &trusted, property, &expanded_contracts(property))
+        .expect("the fixture's contract symbols are fresh");
+    assert!(
+        lowered.postcondition.is_some() && lowered.preconditions.is_some(),
+        "the fixture lowers to Tier B"
+    );
+    let minted: Vec<String> = lowered
+        .abstraction
+        .variables()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let declared = property
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .chain(minted.iter().cloned())
+        .collect();
+    (declared, minted)
+}
+
+fn assert_declared_once(declared: &[String]) {
+    let unique: BTreeSet<&String> = declared.iter().collect();
+    assert_eq!(
+        unique.len(),
+        declared.len(),
+        "every solver variable is declared once: {declared:?}"
+    );
+}
+
+#[test]
+fn chelis_3236_normal_cdf_symbol_avoids_a_binder_spelled_like_it() {
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+@property forged forall(x: f64, __contract_std_normal_cdf_0: f64):
+  ((pkg__chelis__std__Std__Contracts__normal_cdf(x) <= 1.0) && (__contract_std_normal_cdf_0 <= 1.0))
+  with contract = \"std.normal_cdf.range\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(minted, vec!["__contract_std_normal_cdf_0_1".to_string()]);
+}
+
+#[test]
+fn chelis_3236_normal_cdf_symbol_avoids_a_module_name_spelled_like_it() {
+    // A free module-level name reaches the goal as an undeclared variable;
+    // a minted symbol of the same spelling would silently define it.
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+__contract_std_normal_cdf_0 = 5.0
+@property forged forall(x: f64):
+  ((pkg__chelis__std__Std__Contracts__normal_cdf(x) <= 1.0) && (__contract_std_normal_cdf_0 <= 1.0))
+  with contract = \"std.normal_cdf.range\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(minted, vec!["__contract_std_normal_cdf_0_1".to_string()]);
+}
+
+#[test]
+fn chelis_3236_normal_cdf_symbols_keep_their_spelling_without_a_collision() {
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+@property parity forall(x: f64):
+  ((pkg__chelis__std__Std__Contracts__normal_cdf(x) + pkg__chelis__std__Std__Contracts__normal_cdf(-x)) <= 2.0)
+  with contract = \"std.normal_cdf.range\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(
+        minted,
+        vec![
+            "__contract_std_normal_cdf_0".to_string(),
+            "__contract_std_normal_cdf_1".to_string()
+        ]
+    );
+}
+
+#[test]
+fn chelis_3236_quantile_symbols_avoid_binders_spelled_like_them() {
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+def observations() -> tensor[3, f32] =
+  (to_tensor([3.0f32, 1.0f32, 2.0f32]) : tensor[3, f32])
+@property forged forall(p: f32, q: f32, __contract_std_quantile_0: f32, __contract_std_quantile_1: f32)
+  where 0.0 <= p, p <= q, q <= 1.0:
+  ((pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), p) <= pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), q)) && (__contract_std_quantile_0 <= __contract_std_quantile_1))
+  with contract = \"std.quantile.monotonicity\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(
+        minted,
+        vec![
+            "__contract_std_quantile_0_1".to_string(),
+            "__contract_std_quantile_1_1".to_string()
+        ]
+    );
+}
+
+/// Red-team F1: a module name that occurs ONLY as an abstracted call's
+/// operand is removed from the lowered body with the call, but the
+/// monotonicity assumptions re-emit it. It must still be reserved.
+#[test]
+fn chelis_3236_normal_cdf_symbol_avoids_a_name_used_only_as_a_call_argument() {
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+__contract_std_normal_cdf_0 = 5.0
+@property forged forall(x: f64) where x >= 1.0:
+  (pkg__chelis__std__Std__Contracts__normal_cdf(__contract_std_normal_cdf_0) <= pkg__chelis__std__Std__Contracts__normal_cdf(x))
+  with contract = \"std.normal_cdf.range\"
+  with contract = \"std.normal_cdf.monotonicity\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(
+        minted,
+        vec![
+            "__contract_std_normal_cdf_0_1".to_string(),
+            "__contract_std_normal_cdf_1".to_string()
+        ]
+    );
+
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+__contract_std_normal_cdf_1 = 5.0
+@property forged_one forall(x: f64) where x >= 1.0:
+  (pkg__chelis__std__Std__Contracts__normal_cdf(x) >= pkg__chelis__std__Std__Contracts__normal_cdf(__contract_std_normal_cdf_1))
+  with contract = \"std.normal_cdf.range\"
+  with contract = \"std.normal_cdf.monotonicity\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(
+        minted,
+        vec![
+            "__contract_std_normal_cdf_0".to_string(),
+            "__contract_std_normal_cdf_1_1".to_string()
+        ]
+    );
+}
+
+#[test]
+fn chelis_3236_quantile_symbol_avoids_a_name_used_only_as_a_q_operand() {
+    let (declared, minted) = tier_b_contract_variables(
+        "module M
+__contract_std_quantile_0 = 0.5
+def observations() -> tensor[3, f32] =
+  (to_tensor([3.0f32, 1.0f32, 2.0f32]) : tensor[3, f32])
+@property forged forall(q: f32)
+  where 0.0 <= q, q <= 1.0:
+  (pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), __contract_std_quantile_0) <= pkg__nautilus__Nautilus__Stats__quantile_vec(observations(), q))
+  with contract = \"std.quantile.monotonicity\"
+",
+    );
+    assert_declared_once(&declared);
+    assert_eq!(
+        minted,
+        vec![
+            "__contract_std_quantile_0_1".to_string(),
+            "__contract_std_quantile_1".to_string()
+        ]
+    );
+}
+
+/// The image of a goal `<first> <= x` whose abstracted call carried operand
+/// `u`, with `first` minted under the given name.
+fn contract_goal_image(first: &str, minted: &str) -> TierBGoalImage {
+    use crate::solver::{CmpOp, SmtExpr};
+    TierBGoalImage {
+        postcondition: SmtExpr::Cmp(
+            CmpOp::Le,
+            Box::new(SmtExpr::Var(first.to_string())),
+            Box::new(SmtExpr::Var("x".to_string())),
+        ),
+        preconditions: vec![],
+        contract_preconditions: vec![SmtExpr::Cmp(
+            CmpOp::Le,
+            Box::new(SmtExpr::Var("u".to_string())),
+            Box::new(SmtExpr::Var("x".to_string())),
+        )],
+        contract_operands: vec![SmtExpr::Var("u".to_string())],
+        minted: vec![minted.to_string()],
+    }
+}
+
+#[test]
+fn chelis_3236_post_check_rejects_a_symbol_that_captured_a_user_name() {
+    let discovery = contract_goal_image("placeholder", "placeholder");
+    // A fresh symbol is accepted.
+    check_contract_symbols_fresh(&[], &discovery, &contract_goal_image("m", "m"))
+        .expect("a fresh symbol passes");
+    // A symbol spelled like the user operand `u` renames that operand too,
+    // so the passes no longer agree: rejected, never solved.
+    let reason = check_contract_symbols_fresh(&[], &discovery, &contract_goal_image("u", "u"))
+        .expect_err("a captured operand fails closed");
+    assert!(reason.contains("#3236"), "{reason}");
+    // A symbol spelled like a binder is rejected even if the binder is unused.
+    let decls = flatten_module_decls(
+        &chelis_surf::parser::parse_str("module M\n@property p forall(m: f64):\n  true\n")
+            .expect("parses"),
+    );
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    check_contract_symbols_fresh(
+        &properties[0].params,
+        &discovery,
+        &contract_goal_image("m", "m"),
+    )
+    .expect_err("a captured binder fails closed");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn chelis_3236_induction_symbols_avoid_a_binder_spelled_like_them() {
+    // `coupon` renamed to the induction lane's value-symbol stem: the binder
+    // stays its own variable, so the valid proof still holds and the false
+    // variant is still refuted by its step obligation.
+    let renamed = GENERAL_BOND_INDUCTION.replace("coupon", "__chelis_induction_value");
+    let outcome = &run_surf(&renamed, "induction-only")[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+
+    let false_renamed = renamed.replace(
+        "__chelis_induction_value + discount * bond_value",
+        "__chelis_induction_value - cast(1.0, f64) + discount * bond_value",
+    );
+    let outcome = &run_surf(&false_renamed, "induction-only")[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:#?}");
+    let evidence = outcome
+        .induction_evidence
+        .as_ref()
+        .expect("the failed step must remain visible");
+    assert_eq!(evidence.step.status, "disproved");
+}

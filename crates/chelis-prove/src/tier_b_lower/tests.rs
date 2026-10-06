@@ -60,6 +60,55 @@ fn flagship_guarded_option_lowers_to_smt_property() {
 }
 
 #[test]
+fn chelis_3236_input_placeholder_avoids_a_module_name_spelled_like_it() {
+    // The module spells the first positional placeholder. With no constant
+    // environment the name reaches the goal as a free variable, so the input
+    // variable must take a different spelling instead of aliasing it.
+    let exprs = deep_of(
+        "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+__arg0 = 0.0
+def probability(x: f32) -> Option[Probability] =
+  if x >= __arg0 && x <= 1.0 then Some(Probability { value: x }) else None
+",
+    );
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "probability")
+        .expect("obligation exists");
+    let pparams = vec![(
+        "__arg0".to_string(),
+        ProducerParamType::Scalar("f32".to_string()),
+    )];
+    let lowered = lower_obligation(
+        &exprs,
+        &invs[0],
+        ob,
+        &pparams,
+        &crate::opaque::ConstEnv::new(),
+    )
+    .expect("guarded-Option obligation lowers");
+    assert_eq!(
+        lowered.property.variables,
+        vec![("__arg0_1".to_string(), crate::solver::SmtSort::Real)]
+    );
+    let postcondition = format!("{:?}", lowered.property.postcondition);
+    assert!(
+        postcondition.contains("Var(\"__arg0_1\")"),
+        "{postcondition}"
+    );
+    assert!(postcondition.contains("Var(\"__arg0\")"), "{postcondition}");
+}
+
+#[test]
 fn guarded_opaque_field_rewrite_reads_a_decoded_access_node() {
     let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
         .into_iter()

@@ -29,6 +29,7 @@ use chelis_deep::ast::{Atom, Expr};
 
 use crate::obligations::{ObligationProperty, ProducedPosition};
 use crate::opaque::OpaqueInvariant;
+use crate::smt_names::NameSupply;
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use crate::tier_b::SmtProperty;
 
@@ -198,6 +199,24 @@ pub fn lower_obligation(
     // input param is left as itself (its field projections lower directly
     // to flattened vars, so it must NOT be substituted by a single var).
     let mut subst: UnordMap<String, Expr> = UnordMap::new();
+    // chelis#3236: a scalar param's solver variable is the caller's
+    // positional placeholder (`__arg<i>`) only when nothing else can spell it:
+    // every name atom of the module and of the invariants, and every
+    // flattened `<param>.<field>` variable, is taken first, so a placeholder
+    // the module itself spells is suffixed instead of aliasing that name.
+    let mut names = NameSupply::new();
+    for expr in exprs {
+        names.reserve_deep(expr);
+    }
+    names.reserve_deep(&inv.predicate);
+    for (pname, (_, pty)) in prod.params.iter().zip(producer_params.iter()) {
+        if let ProducerParamType::Opaque(input_inv) = pty {
+            names.reserve_deep(&input_inv.predicate);
+            for (fname, _) in &input_inv.fields {
+                names.reserve(&format!("{pname}.{fname}"));
+            }
+        }
+    }
 
     for (pname, (vname, pty)) in prod.params.iter().zip(producer_params.iter()) {
         match pty {
@@ -206,8 +225,9 @@ pub fn lower_obligation(
                 // param of ANY integer width is Int, matching the field sort
                 // and the constant lowering.
                 let sort = crate::opaque::prim_to_smt_sort(s);
+                let vname = names.fresh(vname);
                 variables.push((vname.clone(), sort));
-                subst.insert(pname.clone(), make_var(vname));
+                subst.insert(pname.clone(), make_var(&vname));
             }
             ProducerParamType::Opaque(input_inv) => {
                 // Cap: the flattened input representation must fit.

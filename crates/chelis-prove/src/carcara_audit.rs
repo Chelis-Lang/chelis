@@ -437,6 +437,11 @@ fn expr_has_quantifier(expr: &SmtExpr) -> bool {
 /// proof is not about).
 pub fn render_smtlib_problem(property: &SmtProperty) -> Result<String, String> {
     property_in_audit_fragment(property)?;
+    // chelis#3236: a problem declaring one name twice is not the problem any
+    // engine solved; there is nothing faithful to render.
+    if let Some(name) = crate::smt_names::first_duplicate_variable(&property.variables) {
+        return Err(crate::smt_names::duplicate_variable_reason(name));
+    }
 
     let mut out = String::new();
     out.push_str(&format!("(set-logic {})\n", smtlib_logic(property)));
@@ -551,7 +556,14 @@ fn capture_alethe_proof(
             SmtSort::Int => tm.integer_sort(),
             SmtSort::Bool => tm.boolean_sort(),
         };
-        vars.insert(name.clone(), tm.mk_const(cvc5_sort, name));
+        if vars
+            .insert(name.clone(), tm.mk_const(cvc5_sort, name))
+            .is_some()
+        {
+            return Err(CarcaraAudit::Unavailable(
+                crate::smt_names::duplicate_variable_reason(name),
+            ));
+        }
         sorts.insert(name.clone(), *sort);
     }
 

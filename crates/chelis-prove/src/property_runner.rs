@@ -33,7 +33,8 @@ use chelis_types::types::Prim;
 
 mod smt_lower;
 use smt_lower::{
-    ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith, surf_expr_to_smt,
+    ContractAbstraction, ContractSymbols, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith,
+    surf_expr_to_smt,
 };
 
 mod beacon;
@@ -45,6 +46,7 @@ use crate::composition::{
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
+use crate::smt_names::NameSupply;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1207,6 +1209,18 @@ fn try_envelope_lane(
     {
         return None;
     }
+    // chelis#3236 fail-closed post-check: the residual extends the original
+    // declarations, and no abstraction variable it adds may coincide with a
+    // name the original goal already uses (it would alias that variable and
+    // hand it the envelope bounds). Decline rather than solve such a goal.
+    let original_names = NameSupply::for_property(smt_prop);
+    if !res_prop.variables.starts_with(&smt_prop.variables)
+        || res_prop.variables[smt_prop.variables.len()..]
+            .iter()
+            .any(|(name, _)| original_names.is_taken(name))
+    {
+        return None;
+    }
 
     // Solve the residual over reals. Only a genuine PROOF is accepted.
     let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines()
@@ -1321,27 +1335,40 @@ fn try_surf_induction(
         Ok(plan) => plan,
         Err(reason) => return induction_unsupported(property, seed, reason),
     };
-    let k_name = "__chelis_induction_k";
-    let value_name = "__chelis_induction_value";
-    let base_recursive_name = "__chelis_induction_base_recursive";
-    if plan
-        .variables
-        .iter()
-        .any(|(name, _)| name == k_name || name == value_name || name == base_recursive_name)
-    {
-        return induction_unsupported(property, seed, "reserved induction symbol collision");
+    // chelis#3236: the induction symbols are fresh against every name the plan
+    // uses (binders, model parameters, and every name in the proposition,
+    // preconditions, and model body), so none can alias a user name.
+    let mut names = NameSupply::new();
+    for (name, _) in &plan.variables {
+        names.reserve(name);
     }
+    for name in &plan.model_params {
+        names.reserve(name);
+    }
+    for expr in plan.preconditions.iter().chain([
+        &plan.proposition,
+        &plan.outer_call,
+        &plan.condition,
+        &plan.base_expr,
+        &plan.step_expr,
+        &plan.recursive_call,
+    ]) {
+        names.reserve_expr(expr);
+    }
+    let k_name = names.fresh("__chelis_induction_k");
+    let value_name = names.fresh("__chelis_induction_value");
+    let base_recursive_name = names.fresh("__chelis_induction_base_recursive");
 
     use crate::solver::{ArithOp, SmtExpr};
     let zero = SmtExpr::IntLit(0);
-    let k = SmtExpr::Var(k_name.to_string());
+    let k = SmtExpr::Var(k_name.clone());
     let successor = SmtExpr::Arith(
         ArithOp::Add,
         Box::new(k.clone()),
         Box::new(SmtExpr::IntLit(1)),
     );
-    let induction_value = SmtExpr::Var(value_name.to_string());
-    let base_recursive_value = SmtExpr::Var(base_recursive_name.to_string());
+    let induction_value = SmtExpr::Var(value_name.clone());
+    let base_recursive_value = SmtExpr::Var(base_recursive_name.clone());
 
     let base_var_subst = BTreeMap::from([(plan.variable.clone(), zero.clone())]);
     let base_outer = substitute_smt_vars(&plan.outer_call, &base_var_subst);
@@ -1379,7 +1406,7 @@ fn try_surf_induction(
                 .filter(|(name, _)| name != &plan.variable)
                 .cloned()
                 .collect();
-            variables.push((base_recursive_name.to_string(), plan.model_return_sort));
+            variables.push((base_recursive_name, plan.model_return_sort));
             variables
         },
         preconditions: base_pre,
@@ -1438,13 +1465,13 @@ fn try_surf_induction(
         .iter()
         .map(|(name, sort)| {
             if name == &plan.variable {
-                (k_name.to_string(), *sort)
+                (k_name.clone(), *sort)
             } else {
                 (name.clone(), *sort)
             }
         })
         .collect();
-    step_variables.push((value_name.to_string(), plan.model_return_sort));
+    step_variables.push((value_name, plan.model_return_sort));
     let step_goal = crate::tier_b::SmtProperty {
         variables: step_variables,
         preconditions: step_pre,
@@ -2153,21 +2180,177 @@ fn normalize_successor_predecessor(expr: &crate::solver::SmtExpr) -> crate::solv
     }
 }
 
-/// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
-/// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
-/// `None` to fall through to Tier C (the property did not lower, or the
-/// solver timed out / errored).
-fn try_surf_tier_b(
+/// A Surf property lowered for Tier B: the postcondition (`None` when it did
+/// not lower), the preconditions (`None` unless every one lowered), the
+/// contract abstraction that minted symbols during lowering, and the first
+/// scalar-`grad` capability boundary met while lowering the postcondition.
+struct LoweredSurfTierBGoal {
+    postcondition: Option<crate::solver::SmtExpr>,
+    preconditions: Option<Vec<crate::solver::SmtExpr>>,
+    abstraction: ContractAbstraction,
+    grad_diagnostic: Option<String>,
+}
+
+/// Everything one Tier B lowering pass contributes to the solver goal: the
+/// postcondition, the property preconditions, the assumptions the contract
+/// abstraction injects, the operands of every abstracted call, and the
+/// symbols the abstraction minted (in minting order).
+#[derive(Debug, Clone, PartialEq)]
+struct TierBGoalImage {
+    postcondition: crate::solver::SmtExpr,
+    preconditions: Vec<crate::solver::SmtExpr>,
+    contract_preconditions: Vec<crate::solver::SmtExpr>,
+    contract_operands: Vec<crate::solver::SmtExpr>,
+    minted: Vec<String>,
+}
+
+impl TierBGoalImage {
+    /// The image of a pass whose postcondition and every precondition
+    /// lowered; `None` otherwise (such a goal is never solved).
+    fn of(lowered: &LoweredSurfTierBGoal) -> Option<Self> {
+        Some(Self {
+            postcondition: lowered.postcondition.clone()?,
+            preconditions: lowered.preconditions.clone()?,
+            contract_preconditions: lowered.abstraction.preconditions(),
+            contract_operands: lowered.abstraction.recorded_operands(),
+            minted: lowered
+                .abstraction
+                .variables()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
+        })
+    }
+
+    fn exprs(&self) -> impl Iterator<Item = &crate::solver::SmtExpr> {
+        std::iter::once(&self.postcondition)
+            .chain(&self.preconditions)
+            .chain(&self.contract_preconditions)
+            .chain(&self.contract_operands)
+    }
+}
+
+/// Fail-closed check that the final pass's minted symbols captured no
+/// user-origin name (chelis#3236).
+///
+/// Lowering never reads a minted symbol by name, so the two passes must be
+/// identical up to renaming each final symbol back to its discovery
+/// placeholder. A final symbol that coincides with a user name also renames
+/// that user occurrence, which breaks the equality; a binder spelled like a
+/// final symbol is caught directly. Either way the goal is rejected rather
+/// than solved, so an incomplete reserved set can never yield a proof.
+fn check_contract_symbols_fresh(
+    params: &[Param],
+    discovery: &TierBGoalImage,
+    fresh: &TierBGoalImage,
+) -> Result<(), String> {
+    let captured = || {
+        "the two contract-abstraction lowering passes disagreed (chelis#3236); the goal is not \
+         solved"
+            .to_string()
+    };
+    if fresh.minted.len() != discovery.minted.len()
+        || params
+            .iter()
+            .any(|param| fresh.minted.contains(&param.name))
+    {
+        return Err(captured());
+    }
+    let renaming: BTreeMap<String, crate::solver::SmtExpr> = fresh
+        .minted
+        .iter()
+        .zip(&discovery.minted)
+        .map(|(fresh, placeholder)| {
+            (
+                fresh.clone(),
+                crate::solver::SmtExpr::Var(placeholder.clone()),
+            )
+        })
+        .collect();
+    let rename = |exprs: &[crate::solver::SmtExpr]| -> Vec<crate::solver::SmtExpr> {
+        exprs
+            .iter()
+            .map(|expr| substitute_smt_vars(expr, &renaming))
+            .collect()
+    };
+    let renamed = TierBGoalImage {
+        postcondition: substitute_smt_vars(&fresh.postcondition, &renaming),
+        preconditions: rename(&fresh.preconditions),
+        contract_preconditions: rename(&fresh.contract_preconditions),
+        contract_operands: rename(&fresh.contract_operands),
+        minted: discovery.minted.clone(),
+    };
+    if &renamed != discovery {
+        return Err(captured());
+    }
+    Ok(())
+}
+
+/// Lower a Surf property for Tier B with contract-abstraction symbols fresh
+/// against every other name in the goal (chelis#3236).
+///
+/// Lowering never reads a minted symbol by name, so a discovery pass with
+/// placeholder spellings yields exactly the goal's other names: the property
+/// binders and every name in the lowered postcondition and preconditions, in
+/// the assumptions the abstraction injects, and in the operands of every
+/// abstracted call (removed from the body, but re-emitted by the
+/// monotonicity assumptions). When that pass minted any symbol, the goal is
+/// lowered again with the `__contract_std_*` symbols made fresh against all
+/// of those names, and [`check_contract_symbols_fresh`] rejects the goal if
+/// the result still captured one.
+fn lower_surf_tier_b_goal(
     decls: &[Decl],
     trusted_contract_decls: &[Decl],
     property: &Property,
-    options: &PropertyRunOptions,
-    seed: u64,
-) -> Option<PropertyOutcome> {
-    let contracts = expanded_contracts(property);
-    let contract_abstraction = RefCell::new(ContractAbstraction::for_contracts(
-        &contracts,
+    contracts: &[String],
+) -> Result<LoweredSurfTierBGoal, String> {
+    let discovery = lower_surf_tier_b_pass(
+        decls,
         trusted_contract_decls,
+        property,
+        contracts,
+        ContractSymbols::Discovery,
+    );
+    if !discovery.abstraction.minted_symbols() {
+        return Ok(discovery);
+    }
+    let Some(discovery_image) = TierBGoalImage::of(&discovery) else {
+        return Ok(discovery);
+    };
+    let mut names = NameSupply::new();
+    for param in &property.params {
+        names.reserve(&param.name);
+    }
+    for expr in discovery_image.exprs() {
+        names.reserve_expr(expr);
+    }
+    let fresh = lower_surf_tier_b_pass(
+        decls,
+        trusted_contract_decls,
+        property,
+        contracts,
+        ContractSymbols::Fresh(names),
+    );
+    let fresh_image = TierBGoalImage::of(&fresh).ok_or_else(|| {
+        "the two contract-abstraction lowering passes disagreed: the second did not lower \
+         (chelis#3236); the goal is not solved"
+            .to_string()
+    })?;
+    check_contract_symbols_fresh(&property.params, &discovery_image, &fresh_image)?;
+    Ok(fresh)
+}
+
+fn lower_surf_tier_b_pass(
+    decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    property: &Property,
+    contracts: &[String],
+    symbols: ContractSymbols,
+) -> LoweredSurfTierBGoal {
+    let contract_abstraction = RefCell::new(ContractAbstraction::for_contracts(
+        contracts,
+        trusted_contract_decls,
+        symbols,
     ));
     let grad_diagnostic = RefCell::new(None);
     let postcondition = surf_expr_to_smt(
@@ -2181,10 +2364,72 @@ fn try_surf_tier_b(
             grad_diagnostic: Some(&grad_diagnostic),
         },
     );
+    let preconditions: Option<Vec<crate::solver::SmtExpr>> = property
+        .preconditions
+        .iter()
+        .map(|e| {
+            surf_expr_to_smt(
+                e,
+                &InlineCtx {
+                    decls,
+                    depth: 0,
+                    max_depth: 3,
+                    call_stack: vec![],
+                    contracts: Some(&contract_abstraction),
+                    grad_diagnostic: None,
+                },
+            )
+        })
+        .collect();
+    LoweredSurfTierBGoal {
+        postcondition,
+        preconditions,
+        abstraction: contract_abstraction.into_inner(),
+        grad_diagnostic: grad_diagnostic.into_inner(),
+    }
+}
+
+/// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
+/// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
+/// `None` to fall through to Tier C (the property did not lower, including
+/// when the contract-abstraction lowering passes disagree under `auto`, or
+/// the solver timed out / errored).
+fn try_surf_tier_b(
+    decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    property: &Property,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> Option<PropertyOutcome> {
+    let contracts = expanded_contracts(property);
+    let lowered = match lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts)
+    {
+        Ok(lowered) => lowered,
+        Err(_) if options.tier != "smt-only" => return None,
+        Err(reason) => {
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+    };
+    let LoweredSurfTierBGoal {
+        postcondition,
+        preconditions,
+        abstraction,
+        grad_diagnostic,
+    } = lowered;
     let postcondition = match postcondition {
         Some(postcondition) => postcondition,
         None if options.tier == "smt-only" => {
-            let reason = grad_diagnostic.into_inner()?;
+            let reason = grad_diagnostic?;
             return Some(PropertyOutcome::new(
                 property.name.clone(),
                 PropertyStatus::Unsupported,
@@ -2223,27 +2468,7 @@ fn try_surf_tier_b(
     if variables.len() != property.params.len() {
         return None;
     }
-    let preconditions: Vec<crate::solver::SmtExpr> = property
-        .preconditions
-        .iter()
-        .filter_map(|e| {
-            surf_expr_to_smt(
-                e,
-                &InlineCtx {
-                    decls,
-                    depth: 0,
-                    max_depth: 3,
-                    call_stack: vec![],
-                    contracts: Some(&contract_abstraction),
-                    grad_diagnostic: None,
-                },
-            )
-        })
-        .collect();
-    if preconditions.len() != property.preconditions.len() {
-        return None;
-    }
-    let abstraction = contract_abstraction.into_inner();
+    let preconditions = preconditions?;
     if abstraction.requires_normal_cdf() && !abstraction.used_normal_cdf() {
         return Some(PropertyOutcome::new(
             property.name.clone(),

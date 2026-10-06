@@ -108,6 +108,11 @@ pub fn fuzz_smt_property(
             return TierCResult::Error(format!("cannot fuzz precondition: {reason}"));
         }
     }
+    // chelis#3236: the sample environment is keyed by name; a repeated
+    // declaration would silently share one sampled value.
+    if let Some(name) = crate::smt_names::first_duplicate_variable(&property.variables) {
+        return TierCResult::Error(crate::smt_names::duplicate_variable_reason(name));
+    }
 
     for (name, sort) in &property.variables {
         let compatible = match (sort, declared.get(name)) {
