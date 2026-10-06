@@ -350,10 +350,11 @@ fn migration_preserves_negative_seed_graphs_for_changed_and_unchanged_cast_width
                 &format!("type: (t-prim {{}} {old_dtype})"),
             );
         let migrated = chelis_surf::pipe_migration::prepare(&source, &previous).unwrap();
-        let suffix = if old_dtype == "f32" { "" } else { old_dtype };
+        // chelis#3164: the printer spells the negated seed as a suffixed
+        // negative literal; the Deep check below proves it keeps the neg call.
         assert_eq!(
             migrated.source,
-            format!("out = neg(0.1{suffix}) |> cast({dtype})\n")
+            format!("out = (-0.1{old_dtype}) |> cast({dtype})\n")
         );
         assert_eq!(
             meaning(&migrated.source),
@@ -371,9 +372,11 @@ fn migration_signed_seed_uses_the_signed_source_span_and_only_changed_dtypes() {
     let source = "out = cast(-1.0, f32) |> f\n";
     let previous = "(def {} out (pipe {} (cast {} (lit {span: \"surf:11..15\", type: (t-prim {} f32)} -1.0) (t-prim {} f32)) (var {} f)))";
     let migrated = chelis_surf::pipe_migration::prepare(source, previous).unwrap();
-    assert_eq!(migrated.source, source);
+    // chelis#3164: `cast(-1.0, f32)` is now the literal itself, so keeping the
+    // baseline's `cast` node takes the suffix the cast operand already had.
+    assert_eq!(migrated.source, "out = cast(-1.0f32, f32) |> f\n");
     assert_eq!(
-        meaning(source),
+        meaning(&migrated.source),
         print_canonical(&normalize_deep_for_surface_roundtrip(&migrated.baseline).unwrap())
     );
     assert!(
