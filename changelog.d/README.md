@@ -54,8 +54,12 @@ fails and names the operation; inspect the diff and finish or restore the
 release edit before retrying. It never stages files, commits, or tags.
 
 Commit the version bump, assembled changelog, and fragment deletions together
-in the release PR. Direct historical edits are outside the assembly convention
-and fail the PR check even with `no-changelog`.
+in the release PR. If an earlier PR merged the bump, the release PR contains
+only the assembled changelog and the fragment deletions. In both forms, the
+check rebuilds the section from the base fragments and needs an exact match.
+It also rejects a version that already has a release section. Direct historical
+edits are outside the assembly convention and fail the PR check even with
+`no-changelog`.
 
 ### Migrate a legacy Unreleased section
 

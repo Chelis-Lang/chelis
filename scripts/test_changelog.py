@@ -367,6 +367,30 @@ class ChangelogTests(unittest.TestCase):
         self.commit()
         self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
 
+    def test_release_after_separately_merged_version_bump(self):
+        self.write("changelog.d/a.fixed.md", "Fix.")
+        self.base = self.commit()
+        self.build("--write")
+        self.commit()
+        self.policy()
+        self.write("CHANGELOG.md", (self.root / "CHANGELOG.md").read_text().replace("Old fix", "Rewritten"))
+        self.commit()
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_released_version_cannot_absorb_later_fragments(self):
+        self.write("changelog.d/a.fixed.md", "Fix.")
+        self.commit()
+        self.build("--write")
+        self.write("changelog.d/b.fixed.md", "Late fix.")
+        self.base = self.commit()
+        released = (self.root / "CHANGELOG.md").read_text()
+        amended = released.replace("- Fix.\n", "- Fix.\n\n- Late fix.\n", 1)
+        self.assertNotEqual(released, amended)
+        self.write("CHANGELOG.md", amended)
+        (self.root / "changelog.d/b.fixed.md").unlink()
+        self.commit()
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
     def test_fake_release_with_leftover_fragment_fails(self):
         self.write("Cargo.toml", '[workspace.package]\nversion = "0.1.0"\n')
         self.write("changelog.d/a.fixed.md", "Fix.")
