@@ -621,12 +621,15 @@ Nix compares the fresh report against the existing output.
   use explicit `expand` or movement. A runtime `shape(t, axis)` query
   can return an `i64` extent, while an axis that selects a reduction
   or `expand` dimension resolves statically.
-- **Ownership:** owned tensor and key values have linear-use rules.
-  Read-only primitive tensor arguments auto-borrow; `len`/`index`
-  auto-borrow their List/Dict query argument. `copy()` makes an
-  explicit owned copy; `realize` and `drop` consume. Key operations
-  consume their key. The ownership pass carries borrow, move, clone,
-  and drop obligations into verified lowering.
+- **Ownership:** tensor values are owned by default. An owned tensor passed
+  to an `&tensor` parameter auto-borrows and leaves the owner live. A borrowed
+  `&tensor` passed to an owned tensor parameter is rejected unless the program
+  writes `copy(x)` to create a separate owner. Ordinary consuming fan-out of
+  an owned tensor may receive compiler-inserted copies; `drop` is terminal and
+  `realize` consumes. `len`/`index` auto-borrow their List/Dict query argument.
+  Key-carrying values are affine and cannot be copied or borrowed. The
+  ownership pass carries borrow, move, clone, and drop obligations into
+  verified lowering.
 - **Generic bounds:** a binder may declare `Float`, `Int`, or
   `Numeric` ([04-DTYPE-2]); `Numeric` excludes `bool`. Bounds survive
   aliases, imports, and higher-order uses. The exported stdlib signatures declare
