@@ -188,7 +188,7 @@ enum StaticPatternMatch {
     Unsupported(String),
 }
 
-/// Match a Deep pattern against a static ADT value `(ctor, field_names,
+/// Match a Deep pattern against a static ADT value `(ctor, layout,
 /// fields)`. The supported slice is deliberately conservative: constructor
 /// name selection with `pat-var`/`pat-wild` sub-patterns (positional or
 /// record form), whole-value `pat-var`/`pat-wild`/`pat-as`. Anything else
@@ -199,7 +199,7 @@ fn match_static_pattern(
     pattern: &Expr,
     host: Option<&HostAggregateType>,
     ctor: &str,
-    field_names: Option<&[String]>,
+    layout: &AdtLayout,
     fields: &[LoweredValue],
 ) -> StaticPatternMatch {
     let (pat_tag, pat_kids) = match pattern.carrier() {
@@ -228,7 +228,7 @@ fn match_static_pattern(
                 LoweredValue::Adt {
                     host: host.cloned(),
                     ctor: ctor.to_string(),
-                    field_names: field_names.map(<[String]>::to_vec),
+                    layout: layout.clone(),
                     fields: fields.to_vec(),
                 },
             )]),
@@ -240,14 +240,14 @@ fn match_static_pattern(
             else {
                 return StaticPatternMatch::Unsupported("a malformed `pat-as`".to_string());
             };
-            match match_static_pattern(inner, host, ctor, field_names, fields) {
+            match match_static_pattern(inner, host, ctor, layout, fields) {
                 StaticPatternMatch::Match(mut binds) => {
                     binds.push((
                         name.to_string(),
                         LoweredValue::Adt {
                             host: host.cloned(),
                             ctor: ctor.to_string(),
-                            field_names: field_names.map(<[String]>::to_vec),
+                            layout: layout.clone(),
                             fields: fields.to_vec(),
                         },
                     ));
@@ -272,6 +272,15 @@ fn match_static_pattern(
                     fields.len()
                 ));
             }
+            // [04-PAT-3]: the `i`th sub-pattern matches the `i`th DECLARED
+            // field. Slots stored in a record literal's written order cannot
+            // answer that, so reject rather than bind the wrong field.
+            if !layout.is_declared_order() {
+                return StaticPatternMatch::Unsupported(format!(
+                    "a positional `pat-ctor` against a `{ctor}` record value whose \
+                     declared field order is unknown to this lowering"
+                ));
+            }
             let mut binds = Vec::new();
             for (sub_pat, field) in sub_pats.iter().zip(fields.iter()) {
                 match bind_leaf_pattern(sub_pat, field) {
@@ -289,7 +298,7 @@ fn match_static_pattern(
             if pat_ctor != ctor {
                 return StaticPatternMatch::NoMatch;
             }
-            let Some(field_names) = field_names else {
+            let Some(field_names) = layout.field_names() else {
                 return StaticPatternMatch::Unsupported(format!(
                     "a `pat-record` against a positionally-constructed `{ctor}` value"
                 ));
@@ -985,6 +994,7 @@ fn lower_program_to_library_inner(
         program.linearity().clone(),
     );
     ctx.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
+    ctx.constructor_layouts = Arc::new(ConstructorLayouts::from_registry(program.adt_registry()));
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace;
@@ -1383,6 +1393,9 @@ fn lower_program_with_context_inner(
         program_signatures,
         new_program.linearity().clone(),
     );
+    ctx.constructor_layouts = Arc::new(ConstructorLayouts::from_registry(
+        new_program.adt_registry(),
+    ));
     let local_tensor_ascriptions = chelis_types::compose_local_tensor_ascriptions(
         &library.local_tensor_ascriptions,
         new_program.local_tensor_ascriptions(),
@@ -1512,14 +1525,10 @@ fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<S
         }
         // ADT gradient values flatten field-wise, keyed by field name when
         // the constructor is a record form (chelis#520 D2).
-        LoweredValue::Adt {
-            field_names,
-            fields,
-            ..
-        } => {
+        LoweredValue::Adt { layout, fields, .. } => {
             for (index, field) in fields.iter().enumerate() {
-                let label = field_names
-                    .as_ref()
+                let label = layout
+                    .field_names()
                     .and_then(|names| names.get(index).cloned())
                     .unwrap_or_else(|| index.to_string());
                 flatten_binding_into(&format!("{prefix}.{label}"), field, out);
@@ -1647,6 +1656,8 @@ pub struct SubexprLoweringContext {
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    /// See [`LowerCtx::constructor_layouts`].
+    constructor_layouts: Arc<ConstructorLayouts>,
     tensor_specialization: TensorCallsiteSpecialization,
     /// See [`LowerCtx::activation_record`].
     activation_record: ActivationRecord,
@@ -1675,6 +1686,17 @@ impl SubexprLoweringContext {
     pub fn claiming_parameter_binders_at_activation(&self) -> Self {
         Self {
             activation_record: ActivationRecord::Parameters,
+            ..self.clone()
+        }
+    }
+
+    /// This context with the constructor declarations of `registry`, so
+    /// record construction stores its fields in declared order and
+    /// positional patterns over records resolve (chelis#3230). A context
+    /// built from a [`CheckedProgram`] already carries its registry's.
+    pub fn with_adt_registry(&self, registry: &chelis_types::adt::AdtRegistry) -> Self {
+        Self {
+            constructor_layouts: Arc::new(ConstructorLayouts::from_registry(registry)),
             ..self.clone()
         }
     }
@@ -2070,6 +2092,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_defs,
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
+        constructor_layouts: Arc::default(),
         tensor_specialization: TensorCallsiteSpecialization::default(),
         activation_record: ActivationRecord::Nothing,
     }
@@ -2083,6 +2106,8 @@ pub(crate) fn prepare_checked_subexpr_lowering_context(
     let mut context =
         prepare_subexpr_lowering_context(program.type_env(), program_defs, program_signatures);
     context.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
+    context.constructor_layouts =
+        Arc::new(ConstructorLayouts::from_registry(program.adt_registry()));
     context
 }
 
@@ -2282,6 +2307,7 @@ pub(crate) fn try_lower_staged_host_region(
         // The staged region is this graph's only declaration.
         ctx.decl = Some(ctx.dag.declare(""));
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+        ctx.constructor_layouts = context.constructor_layouts.clone();
         ctx.activation_record = context.activation_record;
         ctx.prec_substitutions = context
             .tensor_specialization
@@ -2416,6 +2442,7 @@ fn lower_subexpr_program_inner_impl(
     // The lowered expression is this graph's only declaration.
     ctx.decl = Some(ctx.dag.declare(""));
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+    ctx.constructor_layouts = context.constructor_layouts.clone();
     ctx.activation_record = context.activation_record;
     ctx.prec_substitutions = context
         .tensor_specialization
@@ -6122,7 +6149,7 @@ fn tensor_list_value(source: NodeId) -> LoweredValue {
     LoweredValue::Adt {
         host: None,
         ctor: TENSOR_LIST_CTOR.into(),
-        field_names: None,
+        layout: AdtLayout::Positional,
         fields: vec![LoweredValue::Node(source)],
     }
 }
@@ -6158,7 +6185,7 @@ fn rebuild_runtime_list_view(
     LoweredValue::Adt {
         host: None,
         ctor: RUNTIME_LIST_VIEW_CTOR.to_string(),
-        field_names: None,
+        layout: AdtLayout::Positional,
         fields: vec![
             LoweredValue::Node(offset),
             LoweredValue::Node(len),
@@ -6240,12 +6267,12 @@ fn rebuild_recursive_list_like(
         LoweredValue::Adt {
             host,
             ctor,
-            field_names,
+            layout,
             fields,
         } => LoweredValue::Adt {
             host: host.clone(),
             ctor: ctor.clone(),
-            field_names: field_names.clone(),
+            layout: layout.clone(),
             fields: fields
                 .iter()
                 .map(|field| rebuild_recursive_list_like(field, leaves, cotangent))
@@ -6261,14 +6288,14 @@ fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
     let mut chain = LoweredValue::Adt {
         host: None,
         ctor: "Nil".to_string(),
-        field_names: None,
+        layout: AdtLayout::Positional,
         fields: Vec::new(),
     };
     for item in items.into_iter().rev() {
         chain = LoweredValue::Adt {
             host: None,
             ctor: "Cons".to_string(),
-            field_names: None,
+            layout: AdtLayout::Positional,
             fields: vec![item, chain],
         };
     }
@@ -7241,11 +7268,149 @@ enum LoweredValue {
         /// Constructor spelling and numeric leaves cannot reconstruct it.
         host: Option<HostAggregateType>,
         ctor: String,
-        /// Declared field names for record-syntax constructors, in the
-        /// order `fields` was built; `None` for positional constructors.
-        field_names: Option<Vec<String>>,
+        /// The order `fields` is stored in and the names it carries.
+        layout: AdtLayout,
         fields: Vec<LoweredValue>,
     },
+}
+
+/// The slot order of a [`LoweredValue::Adt`]'s `fields` (chelis#3230).
+///
+/// A positional pattern binds a constructor's fields by DECLARED position
+/// ([04-PAT-3]), whatever order a record literal writes them in. Only a
+/// layout that is known to be declared order can answer a positional
+/// pattern; a by-name reader (`access`, `pat-record`, named roots) reads
+/// any layout that carries names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AdtLayout {
+    /// A positional constructor application whose declaration supplied no
+    /// field names: the fields are the arguments, in declared order.
+    Positional,
+    /// Named fields stored in the constructor's declared order.
+    Declared(Vec<String>),
+    /// Named fields stored in the order a record literal wrote them,
+    /// because this lowering has no unique declaration for the
+    /// constructor. Only by-name readers may consume it.
+    Written(Vec<String>),
+}
+
+impl AdtLayout {
+    /// The field names aligned with `fields`, when the layout has names.
+    fn field_names(&self) -> Option<&[String]> {
+        match self {
+            Self::Positional => None,
+            Self::Declared(names) | Self::Written(names) => Some(names),
+        }
+    }
+
+    /// Whether `fields[i]` is the constructor's `i`th declared field.
+    fn is_declared_order(&self) -> bool {
+        match self {
+            Self::Positional | Self::Declared(_) => true,
+            Self::Written(_) => false,
+        }
+    }
+}
+
+/// Every constructor the checked program declares, by its declared name,
+/// with its owning ADT and its fields' declared names in declared order
+/// (`None` for a positional field). Built from the checker's ADT registry,
+/// the declaration source the checker types positional patterns against
+/// and host lowering orders record fields by (chelis#3230).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ConstructorLayouts {
+    constructors: BTreeMap<String, Vec<DeclaredConstructor>>,
+}
+
+#[derive(Clone, Debug)]
+struct DeclaredConstructor {
+    adt: String,
+    fields: Vec<Option<String>>,
+}
+
+impl ConstructorLayouts {
+    pub(crate) fn from_registry(registry: &chelis_types::adt::AdtRegistry) -> Self {
+        let mut constructors = BTreeMap::<String, Vec<DeclaredConstructor>>::new();
+        for definition in registry.defs.values() {
+            for variant in &definition.variants {
+                constructors
+                    .entry(variant.name.clone())
+                    .or_default()
+                    .push(DeclaredConstructor {
+                        adt: definition.name.clone(),
+                        fields: variant
+                            .fields
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect(),
+                    });
+            }
+        }
+        Self { constructors }
+    }
+
+    /// The declarations `ctor` may name: those carrying the exact
+    /// spelling, else those whose terminal segment it spells (the
+    /// resolution rule of `host::definitions_owning`). When the checker
+    /// stamped the construction with its nominal owner `adt` and some
+    /// candidate belongs to it, only those candidates remain.
+    fn candidates<'a>(&'a self, ctor: &str, adt: Option<&str>) -> Vec<&'a DeclaredConstructor> {
+        let named = match self.constructors.get(ctor) {
+            Some(exact) => exact.iter().collect::<Vec<_>>(),
+            None => self
+                .constructors
+                .iter()
+                .filter(|(name, _)| terminal_name_matches(name, ctor))
+                .flat_map(|(_, declared)| declared.iter())
+                .collect(),
+        };
+        let Some(adt) = adt else {
+            return named;
+        };
+        let owned = named
+            .iter()
+            .copied()
+            .filter(|declared| {
+                terminal_name_matches(&declared.adt, adt)
+                    || terminal_name_matches(adt, &declared.adt)
+            })
+            .collect::<Vec<_>>();
+        if owned.is_empty() { named } else { owned }
+    }
+
+    /// The one declared field order that a record literal of `ctor` (owned
+    /// by the checked nominal type `adt`, when stamped) writing exactly the
+    /// fields `written` can denote. `None` when no declaration, or more than
+    /// one distinct declared order, answers.
+    fn record_order(
+        &self,
+        ctor: &str,
+        adt: Option<&str>,
+        written: &[String],
+    ) -> Option<Vec<String>> {
+        let mut orders = self
+            .candidates(ctor, adt)
+            .into_iter()
+            .filter_map(|declared| {
+                declared
+                    .fields
+                    .iter()
+                    .cloned()
+                    .collect::<Option<Vec<String>>>()
+            })
+            .filter(|declared| {
+                declared.len() == written.len()
+                    && written.iter().all(|name| declared.contains(name))
+                    && declared.iter().all(|name| written.contains(name))
+            })
+            .collect::<Vec<_>>();
+        orders.sort();
+        orders.dedup();
+        match <[Vec<String>; 1]>::try_from(orders) {
+            Ok([only]) => Some(only),
+            Err(_) => None,
+        }
+    }
 }
 
 /// Whether a name this context binds to `bound` (`None` when unbound) names
@@ -7415,12 +7580,12 @@ impl LoweredValue {
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::trace_value).collect()),
             Self::Adt {
                 ctor,
-                field_names,
+                layout,
                 fields,
                 ..
             } => Value::Adt {
                 ctor: ctor.clone(),
-                field_names: field_names.clone(),
+                field_names: layout.field_names().map(<[String]>::to_vec),
                 fields: fields.iter().map(Self::trace_value).collect(),
             },
         }
@@ -7445,12 +7610,12 @@ impl LoweredValue {
             ),
             Self::Adt {
                 ctor,
-                field_names,
+                layout,
                 fields,
                 ..
             } => Value::Adt {
                 ctor: ctor.clone(),
-                field_names: field_names.clone(),
+                field_names: layout.field_names().map(<[String]>::to_vec),
                 fields: fields
                     .iter()
                     .map(|field| field.trace_value_from_roots(roots))
@@ -7521,7 +7686,10 @@ impl LoweredValue {
     }
 
     /// Whether `other` is this value: the same nodes and host values in the
-    /// same tuple and constructor structure.
+    /// same tuple and constructor structure. Two ADT values are the same only
+    /// when their slots carry the same names in the same order: equal slot
+    /// contents under distinct named layouts are distinct values
+    /// (chelis#3230).
     fn is_same_value(&self, other: &LoweredValue) -> bool {
         let same_items = |left: &[LoweredValue], right: &[LoweredValue]| {
             left.len() == right.len()
@@ -7538,15 +7706,17 @@ impl LoweredValue {
             (
                 Self::Adt {
                     ctor: left_ctor,
+                    layout: left_layout,
                     fields: left,
                     ..
                 },
                 Self::Adt {
                     ctor: right_ctor,
+                    layout: right_layout,
                     fields: right,
                     ..
                 },
-            ) => left_ctor == right_ctor && same_items(left, right),
+            ) => left_ctor == right_ctor && left_layout == right_layout && same_items(left, right),
             _ => false,
         }
     }
@@ -7580,12 +7750,12 @@ impl LoweredValue {
             Self::Adt {
                 host,
                 ctor,
-                field_names,
+                layout,
                 fields,
             } => Self::Adt {
                 host: host.clone(),
                 ctor: ctor.clone(),
-                field_names: field_names.clone(),
+                layout: layout.clone(),
                 fields: fields
                     .iter()
                     .map(|field| Self::from_flat(field, nodes))
@@ -7928,6 +8098,11 @@ struct LowerCtx<'program> {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
+    /// The checked program's declared constructor field orders, which
+    /// record construction stores its slots in (chelis#3230). Empty when
+    /// the lowering has no checked declarations: record literals then keep
+    /// written order and positional patterns over them reject.
+    constructor_layouts: Arc<ConstructorLayouts>,
     /// Scalar Bool under which a `grad` body's draws are entered, conjoined
     /// with every `if` arm predicate [`Self::branch_path_condition`] holds.
     /// A `grad` body is spliced back into its caller's position, so when that
@@ -8134,6 +8309,7 @@ impl<'program> LowerCtx<'program> {
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             program_signatures: program_signatures.into(),
+            constructor_layouts: Arc::default(),
             random_path_condition: None,
             if_branch_depth: 0,
             selected_arm_depth: 0,
@@ -8867,13 +9043,13 @@ impl<'program> LowerCtx<'program> {
             LoweredValue::Adt {
                 host,
                 ctor,
-                field_names,
+                layout,
                 fields,
             } => {
                 return Some(LoweredValue::Adt {
                     host: host.clone(),
                     ctor: ctor.clone(),
-                    field_names: field_names.clone(),
+                    layout: layout.clone(),
                     fields: fields
                         .iter()
                         .map(|field| self.rebase_binding(subctx, field, rebase))
@@ -9569,6 +9745,7 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        scratch.constructor_layouts = Arc::clone(&self.constructor_layouts);
         scratch.decl = Some(scratch.dag.declare(name));
         scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
         scratch.activation_record = self.activation_record;
@@ -9808,13 +9985,13 @@ impl<'program> LowerCtx<'program> {
                 )
             } else if let LoweredValue::Adt {
                 ctor,
-                field_names,
+                layout,
                 fields,
                 host,
             } = value
             {
                 let host = host.as_ref().expect("typed aggregate constructor");
-                if let Some(names) = field_names {
+                if let Some(names) = layout.field_names() {
                     let mut children = vec![Expr::Atom(Atom::Name(ctor.clone()), span)];
                     children.extend(names.iter().zip(fields).map(|(name, field)| {
                         Expr::node(
@@ -10636,14 +10813,10 @@ impl<'program> LowerCtx<'program> {
             }
             // ADT gradient values store field-wise roots, keyed by field
             // name when the constructor is a record form (chelis#520 D2).
-            LoweredValue::Adt {
-                field_names,
-                fields,
-                ..
-            } => {
+            LoweredValue::Adt { layout, fields, .. } => {
                 for (index, field) in fields.iter_mut().enumerate() {
-                    let label = field_names
-                        .as_ref()
+                    let label = layout
+                        .field_names()
                         .and_then(|names| names.get(index).cloned())
                         .unwrap_or_else(|| index.to_string());
                     self.add_named_roots(&format!("{prefix}.{label}"), field);
@@ -10741,7 +10914,7 @@ impl<'program> LowerCtx<'program> {
             DeepTag::Copy => self.lower_copy(kids),
             DeepTag::Borrow => self.lower_identity(kids),
             DeepTag::TupleGet => self.lower_tuple_get(kids),
-            DeepTag::Record => self.lower_record(kids, span),
+            DeepTag::Record => self.lower_record(meta, kids, span),
             DeepTag::Access => self.lower_access(kids, span),
             DeepTag::Match => self.lower_match(kids, span),
             DeepTag::Grad => self.lower_grad(kids, span),
@@ -11757,7 +11930,7 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Adt {
                     host: None,
                     ctor: "Nil".to_string(),
-                    field_names: None,
+                    layout: AdtLayout::Positional,
                     fields: Vec::new(),
                 };
             }
@@ -11794,7 +11967,7 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Adt {
                     host: None,
                     ctor: name.clone(),
-                    field_names: None,
+                    layout: AdtLayout::Positional,
                     fields: Vec::new(),
                 };
             }
@@ -11900,7 +12073,7 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Adt {
                     host: None,
                     ctor: "Cons".to_string(),
-                    field_names: None,
+                    layout: AdtLayout::Positional,
                     fields: vec![self.lower_expr(&kids[1]), self.lower_expr(&kids[2])],
                 };
             }
@@ -11968,7 +12141,7 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Adt {
                     host: None,
                     ctor: func_name.clone(),
-                    field_names: None,
+                    layout: AdtLayout::Positional,
                     fields,
                 };
             }
@@ -12149,12 +12322,12 @@ impl<'program> LowerCtx<'program> {
             LoweredValue::Adt {
                 host,
                 ctor,
-                field_names,
+                layout,
                 fields,
             } => LoweredValue::Adt {
                 host: host.clone(),
                 ctor,
-                field_names,
+                layout,
                 fields: fields
                     .into_iter()
                     .map(|field| self.mark_unresolved_callable_value(field))
@@ -12521,6 +12694,7 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -14142,6 +14316,7 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -14468,6 +14643,7 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -17621,12 +17797,16 @@ impl<'program> LowerCtx<'program> {
             LoweredValue::Adt {
                 host,
                 ctor,
-                field_names,
+                layout,
                 fields: first_fields,
             } if ctor != RUNTIME_LIST_VIEW_CTOR => {
+                // Slot `i` of every item must be the same field: items whose
+                // layouts differ would blend unrelated fields (chelis#3230).
                 if items.iter().any(|item| {
-                    !matches!(item, LoweredValue::Adt { ctor: item_ctor, fields, .. }
-                        if item_ctor == ctor && fields.len() == first_fields.len())
+                    !matches!(item, LoweredValue::Adt { ctor: item_ctor, layout: item_layout, fields, .. }
+                        if item_ctor == ctor
+                            && item_layout == layout
+                            && fields.len() == first_fields.len())
                 }) {
                     return None;
                 }
@@ -17644,7 +17824,7 @@ impl<'program> LowerCtx<'program> {
                 Some(LoweredValue::Adt {
                     host: host.clone(),
                     ctor: ctor.clone(),
-                    field_names: field_names.clone(),
+                    layout: layout.clone(),
                     fields: blended,
                 })
             }
@@ -22398,12 +22578,12 @@ impl<'program> LowerCtx<'program> {
             LoweredValue::Adt {
                 host,
                 ctor,
-                field_names,
+                layout,
                 fields,
             } => LoweredValue::Adt {
                 host: host.clone(),
                 ctor: ctor.clone(),
-                field_names: field_names.clone(),
+                layout: layout.clone(),
                 fields: fields
                     .iter()
                     .map(|field| self.copy_lowered_value(field))
@@ -22488,7 +22668,14 @@ impl<'program> LowerCtx<'program> {
     /// `(record {} Ctor (kv {} field value) ...)` -- static ADT/record
     /// construction (chelis#520). The constructor tag and field layout are
     /// compile-time facts; only the field values are lowered.
-    fn lower_record(&mut self, kids: &[Expr], span: Span) -> LoweredValue {
+    ///
+    /// Field expressions lower in written order, which is their evaluation
+    /// order (spec/03-deep-syntax.md §4.4), and the slots are then stored in
+    /// the constructor's declared order, which positional patterns read
+    /// ([04-PAT-3], chelis#3230). Without a unique declaration the slots keep
+    /// written order under [`AdtLayout::Written`], which only by-name readers
+    /// accept.
+    fn lower_record(&mut self, meta: &Metadata, kids: &[Expr], span: Span) -> LoweredValue {
         let Some(ctor) = kids.first().and_then(symbol_name) else {
             self.reject_static_adt(
                 span,
@@ -22496,8 +22683,8 @@ impl<'program> LowerCtx<'program> {
             );
         };
         let ctor = ctor.to_string();
-        let mut field_names: Vec<String> = Vec::new();
-        let mut fields: Vec<LoweredValue> = Vec::new();
+        let mut written_names: Vec<String> = Vec::new();
+        let mut written_fields: Vec<LoweredValue> = Vec::new();
         for kv in &kids[1..] {
             let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv) else {
                 continue;
@@ -22510,13 +22697,43 @@ impl<'program> LowerCtx<'program> {
                     format!("`record` constructor `{ctor}` has a malformed field entry"),
                 );
             };
-            field_names.push(field.to_string());
-            fields.push(self.lower_expr(value));
+            written_names.push(field.to_string());
+            written_fields.push(self.lower_expr(value));
         }
+        // The checker stamps the construction with its nominal owner, which
+        // tells apart same-named constructors of distinct types.
+        let owner = meta
+            .ty()
+            .and_then(|ty| match stamped_parts(ty.expression()) {
+                Some((DeepTag::TAdt, _, kids)) => kids.first().and_then(symbol_name),
+                _ => None,
+            });
+        let Some(declared) = self
+            .constructor_layouts
+            .record_order(&ctor, owner, &written_names)
+        else {
+            return LoweredValue::Adt {
+                host: None,
+                ctor,
+                layout: AdtLayout::Written(written_names),
+                fields: written_fields,
+            };
+        };
+        let mut slots = written_fields.into_iter().map(Some).collect::<Vec<_>>();
+        let fields = declared
+            .iter()
+            .map(|name| {
+                written_names
+                    .iter()
+                    .position(|written| written == name)
+                    .and_then(|index| slots[index].take())
+                    .expect("a declared record order names each written field exactly once")
+            })
+            .collect();
         LoweredValue::Adt {
             host: None,
             ctor,
-            field_names: Some(field_names),
+            layout: AdtLayout::Declared(declared),
             fields,
         }
     }
@@ -22532,28 +22749,30 @@ impl<'program> LowerCtx<'program> {
         let Some(field) = symbol_name(&kids[1]) else {
             self.reject_static_adt(span, "`access` field name is not a symbol".to_string());
         };
-        match target {
-            LoweredValue::Adt {
-                ctor,
-                field_names: Some(names),
-                fields,
-                ..
-            } => names
+        if let LoweredValue::Adt {
+            ctor,
+            layout,
+            fields,
+            ..
+        } = &target
+            && let Some(names) = layout.field_names()
+        {
+            return names
                 .iter()
                 .position(|name| name == field)
                 .and_then(|index| fields.get(index).cloned())
                 .unwrap_or_else(|| {
                     self.reject_static_adt(span, format!("record `{ctor}` has no field `{field}`"))
-                }),
-            _ => self.reject_static_adt(
-                span,
-                format!(
-                    "`access` on a runtime value is not supported by IR lowering; only \
-                     a compile-time-known record construction can be projected (field \
-                     `{field}`)"
-                ),
-            ),
+                });
         }
+        self.reject_static_adt(
+            span,
+            format!(
+                "`access` on a runtime value is not supported by IR lowering; only \
+                 a compile-time-known record construction can be projected (field \
+                 `{field}`)"
+            ),
+        )
     }
 
     /// `(match {} scrutinee (arm {} pattern guard body) ...)`.
@@ -22577,7 +22796,7 @@ impl<'program> LowerCtx<'program> {
         let LoweredValue::Adt {
             host,
             ctor,
-            field_names,
+            layout,
             fields,
         } = scrutinee
         else {
@@ -22599,13 +22818,7 @@ impl<'program> LowerCtx<'program> {
             else {
                 continue;
             };
-            match match_static_pattern(
-                pattern,
-                host.as_ref(),
-                &ctor,
-                field_names.as_deref(),
-                &fields,
-            ) {
+            match match_static_pattern(pattern, host.as_ref(), &ctor, &layout, &fields) {
                 StaticPatternMatch::NoMatch => continue,
                 StaticPatternMatch::Unsupported(reason) => {
                     self.reject_static_adt(
@@ -24247,6 +24460,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
+            constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,
         };
@@ -24297,13 +24511,13 @@ mod tests {
             LoweredValue::Adt {
                 host: None,
                 ctor: "Mixed".into(),
-                field_names: Some(vec!["t".into(), "n".into()]),
+                layout: AdtLayout::Declared(vec!["t".into(), "n".into()]),
                 fields: vec![LoweredValue::Node(NodeId(7)), LoweredValue::Tuple(vec![])],
             },
             LoweredValue::Adt {
                 host: None,
                 ctor: "Positional".into(),
-                field_names: None,
+                layout: AdtLayout::Positional,
                 fields: vec![LoweredValue::Node(NodeId(2))],
             },
         ]);
@@ -24612,6 +24826,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
+            constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,
         };
@@ -29673,6 +29888,158 @@ mod regression_tests {
                 .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w")),
             "bound field must lower to the field expr's Load: {dag:?}"
         );
+    }
+
+    /// The checker's ADT registry for `types`, the declaration source
+    /// record construction orders its slots by (chelis#3230).
+    fn checked_registry(types: &str) -> chelis_types::adt::AdtRegistry {
+        let declarations = chelis_surf::parser::parse_str(types).expect("Surf fixture parses");
+        chelis_types::check_typed_program(
+            &chelis_surf::desugar::desugar_program(&declarations).expect("fixture desugars"),
+        )
+        .expect("fixture checks")
+        .adt_registry()
+        .clone()
+    }
+
+    /// Lower one Deep expression against `registry`'s constructor layouts
+    /// (none when `None`) and name the free input its result is the `Load`
+    /// of, or return the lowering diagnostic.
+    fn lowered_input(
+        registry: Option<&chelis_types::adt::AdtRegistry>,
+        deep: &str,
+    ) -> Result<String, String> {
+        let exprs = chelis_deep::parser::parse_str(deep).expect("parse failed");
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+        .declared_for_test();
+        if let Some(registry) = registry {
+            ctx.constructor_layouts = Arc::new(ConstructorLayouts::from_registry(registry));
+        }
+        let value =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.lower_expr(&exprs[0])))
+                .map_err(captured_lower_message)?;
+        let node = value.as_single_node().expect("a single tensor result");
+        match &ctx.dag.get(node).expect("result node").op {
+            RiscOp::Load { name } => Ok(name.as_str().to_string()),
+            other => panic!("result is not an input load: {other:?}"),
+        }
+    }
+
+    /// `(match (record P <written fields>) (| P(<pattern>...) => <taken>))`
+    /// with each field `f` holding the free input `in_f`.
+    fn positional_match(ctor: &str, written: &[&str], pattern: &[&str], taken: &str) -> String {
+        let fields = written
+            .iter()
+            .map(|field| format!("(kv {{}} {field} (var {{}} in_{field}))"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let binders = pattern
+            .iter()
+            .map(|binder| format!("(pat-var {{}} {binder})"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "(match {{}} (record {{}} {ctor} {fields}) \
+             (arm {{}} (pat-ctor {{}} {ctor} {binders}) () (var {{}} {taken})))"
+        )
+    }
+
+    #[test]
+    fn a_positional_pattern_binds_declared_fields_whatever_the_written_order() {
+        // chelis#3230 / [04-PAT-3]: the `i`th sub-pattern is the `i`th
+        // DECLARED field. Every permutation of the written fields must bind
+        // `first` to `a`, `second` to `b`, and `third` to `c`.
+        let registry = checked_registry("type Q =\n  | Q { a: f32, b: f32, c: f32 }\n");
+        let permutations: [[&str; 3]; 6] = [
+            ["a", "b", "c"],
+            ["a", "c", "b"],
+            ["b", "a", "c"],
+            ["b", "c", "a"],
+            ["c", "a", "b"],
+            ["c", "b", "a"],
+        ];
+        for written in permutations {
+            for (binder, declared) in [("first", "a"), ("second", "b"), ("third", "c")] {
+                let deep = positional_match("Q", &written, &["first", "second", "third"], binder);
+                assert_eq!(
+                    lowered_input(Some(&registry), &deep),
+                    Ok(format!("in_{declared}")),
+                    "written order {written:?}: `{binder}` must bind declared field `{declared}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn by_name_record_patterns_and_projections_read_any_layout() {
+        // Controls: `pat-record` and `access` select by name, so they keep
+        // working with and without the declaration.
+        let registry = checked_registry("type P =\n  | P { w: f32, b: f32 }\n");
+        let by_name = "(match {} (record {} P (kv {} b (var {} in_b)) (kv {} w (var {} in_w))) \
+             (arm {} (pat-record {} P (kv {} w (pat-var {} u))) () (var {} u)))";
+        let projection =
+            "(access {} (record {} P (kv {} b (var {} in_b)) (kv {} w (var {} in_w))) w)";
+        for registry in [Some(&registry), None] {
+            assert_eq!(lowered_input(registry, by_name), Ok("in_w".to_string()));
+            assert_eq!(lowered_input(registry, projection), Ok("in_w".to_string()));
+        }
+    }
+
+    #[test]
+    fn a_positional_constructor_application_binds_in_argument_order() {
+        // Control: positional construction already lists the declared order.
+        let registry = checked_registry("type P =\n  | P { w: f32, b: f32 }\n");
+        let deep = "(match {} (app {} (var {} P) (var {} in_w) (var {} in_b)) \
+             (arm {} (pat-ctor {} P (pat-var {} x) (pat-var {} y)) () (var {} y)))";
+        assert_eq!(lowered_input(Some(&registry), deep), Ok("in_b".to_string()));
+    }
+
+    #[test]
+    fn same_named_constructors_resolve_by_their_checked_owner_or_not_at_all() {
+        // Two types declare `P` with opposite field orders. The checked owner
+        // selects one; without it no unique order exists, so none is chosen.
+        let registry = checked_registry(
+            "type Fwd =\n  | P { w: f32, b: f32 }\ntype Rev =\n  | P { b: f32, w: f32 }\n",
+        );
+        let layouts = ConstructorLayouts::from_registry(&registry);
+        let written = ["b".to_string(), "w".to_string()];
+        assert_eq!(
+            layouts.record_order("P", Some("Fwd"), &written),
+            Some(vec!["w".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            layouts.record_order("P", Some("Rev"), &written),
+            Some(vec!["b".to_string(), "w".to_string()])
+        );
+        assert_eq!(layouts.record_order("P", None, &written), None);
+        // A written field set no declaration has is not a layout either.
+        assert_eq!(
+            layouts.record_order("P", Some("Fwd"), &["w".to_string(), "w".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn adt_values_with_distinct_named_layouts_are_not_the_same_value() {
+        // chelis#3230: equal constructor and slots under different names are
+        // different values; equality must not erase the named layout.
+        let adt = |layout: AdtLayout| LoweredValue::Adt {
+            host: None,
+            ctor: "P".into(),
+            layout,
+            fields: vec![LoweredValue::Node(NodeId(1)), LoweredValue::Node(NodeId(2))],
+        };
+        let names = |names: [&str; 2]| names.map(str::to_string).to_vec();
+        let declared = adt(AdtLayout::Declared(names(["w", "b"])));
+        assert!(declared.is_same_value(&adt(AdtLayout::Declared(names(["w", "b"])))));
+        assert!(!declared.is_same_value(&adt(AdtLayout::Declared(names(["b", "w"])))));
+        assert!(!declared.is_same_value(&adt(AdtLayout::Written(names(["w", "b"])))));
+        assert!(!declared.is_same_value(&adt(AdtLayout::Positional)));
     }
 
     #[test]

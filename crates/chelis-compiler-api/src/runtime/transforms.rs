@@ -504,6 +504,7 @@ impl<'a> EvalContext<'a> {
                     program_defs.clone(),
                     self.declared_signatures.clone(),
                 )
+                .with_adt_registry(&self.adt_registry)
             }
         });
         let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context(
