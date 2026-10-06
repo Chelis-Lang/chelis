@@ -2189,14 +2189,14 @@ fn cmd_eval_inner(
             let EvalDecls {
                 decls,
                 entry_decls,
-                source_names,
+                diagnostic_names,
             } = load_eval_decls(path)?;
-            let _single_file_linked_guard = source_names
+            let _single_file_linked_guard = diagnostic_names
                 .is_some()
                 .then(chelis_types::install_linked_program_guard);
-            // chelis#3269: a linked program's diagnostics name its
+            // chelis#3269: a linked program's compile diagnostics name its
             // declarations as their author wrote them.
-            let authored = |text: String| match &source_names {
+            let authored = |text: String| match &diagnostic_names {
                 Some(names) => names.render(&text).into_owned(),
                 None => text,
             };
@@ -2214,13 +2214,15 @@ fn cmd_eval_inner(
                 manifest_root_names_from_decls(&entry_decls, checked.program(), target)?;
             // The checked compilation itself is lowered and run, so the
             // program checked is exactly the program evaluated; it is never
-            // printed back to Surf and parsed again (chelis#3129).
+            // printed back to Surf and parsed again (chelis#3129). A failure
+            // while evaluating is the program's own data and is left as it
+            // is; `with_source_names` renders only compile-stage failures.
             let outcome = chelis_compiler_api::compiler::eval_checked_selected_for_target(
                 checked,
                 &selected_roots,
                 target,
             )
-            .map_err(|error| match &source_names {
+            .map_err(|error| match &diagnostic_names {
                 Some(names) => error.with_source_names(names),
                 None => error,
             });
@@ -3175,7 +3177,7 @@ fn cmd_check_one_on_grown_stack(
     // chelis#3269: a linked program's diagnostics name its declarations as
     // their author wrote them, not by the linker's private spelling.
     if let Some(prepared) = &prepared {
-        report.render_source_names(&prepared.source_names);
+        report.render_source_names(&prepared.diagnostic_names);
     }
     report
 }
@@ -3187,7 +3189,7 @@ fn render_linked_names<'a>(
     text: &'a str,
 ) -> std::borrow::Cow<'a, str> {
     match prepared {
-        Some(prepared) => prepared.source_names.render(text),
+        Some(prepared) => prepared.diagnostic_names.render(text),
         None => std::borrow::Cow::Borrowed(text),
     }
 }
@@ -3243,7 +3245,7 @@ fn check_prepared_file(
                     eprintln!(
                         "error: {}",
                         prepared
-                            .source_names
+                            .diagnostic_names
                             .render(&compiler_error_messages(&error))
                     );
                     // One diagnostic per compiler error, for the same reason
@@ -11185,9 +11187,9 @@ struct EvalDecls {
     decls: Vec<Decl>,
     /// The evaluated file's own declarations.
     entry_decls: Vec<Decl>,
-    /// The linker's source-name table when the reef linker produced
-    /// `decls`, `None` for an unlinked file.
-    source_names: Option<chelis_reef::LinkedSourceNames>,
+    /// How diagnostics spell the linker's names when the reef linker
+    /// produced `decls`, `None` for an unlinked file.
+    diagnostic_names: Option<chelis_reef::DiagnosticNames>,
 }
 
 fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
@@ -11203,13 +11205,13 @@ fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>>
         return Ok(EvalDecls {
             decls: prepared.decls,
             entry_decls: prepared.entry_decls,
-            source_names: Some(prepared.source_names),
+            diagnostic_names: Some(prepared.diagnostic_names),
         });
     }
     Ok(EvalDecls {
         entry_decls: decls.clone(),
         decls,
-        source_names: None,
+        diagnostic_names: None,
     })
 }
 

@@ -51,7 +51,7 @@ pub use remote_discovery::{
 };
 
 pub use embedded_runtime::EmbeddedRuntime;
-pub use source_names::LinkedSourceNames;
+pub use source_names::{DiagnosticNames, LinkedSourceNames};
 
 pub use document_schema::{
     DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
@@ -502,10 +502,10 @@ pub struct PreparedProgram {
     /// this slice as provenance: an author cannot make a local declaration
     /// trusted by spelling a linker-shaped name.
     pub dependency_decls: Vec<Decl>,
-    /// The authored spelling of every name the linker qualified in `decls`
-    /// (chelis#3269). A diagnostic about this program renders through it
-    /// so it names declarations as the author wrote them.
-    pub source_names: LinkedSourceNames,
+    /// How diagnostics about this program spell the names the linker
+    /// qualified in `decls` (chelis#3269): as the author wrote them, bare in
+    /// the entry module and module-qualified elsewhere.
+    pub diagnostic_names: DiagnosticNames,
 }
 
 /// Linker-owned declaration graph emitted for machine consumers such as
@@ -1605,6 +1605,10 @@ fn collect_pattern_references(pattern: &Pattern, out: &mut BTreeSet<String>) {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntryImports {
     modules: BTreeSet<String>,
+    /// The modules the entries declare. They choose no linked module;
+    /// diagnostics name the declarations of these modules bare
+    /// (chelis#3269).
+    declared_modules: BTreeSet<String>,
 }
 
 impl EntryImports {
@@ -1612,6 +1616,11 @@ impl EntryImports {
     /// `build` of a package module.
     pub fn none() -> Self {
         Self::default()
+    }
+
+    /// The modules the entries declare with a `module` wrapper.
+    pub fn declared_modules(&self) -> &BTreeSet<String> {
+        &self.declared_modules
     }
 
     /// The modules `decls` import, looking inside a `module` wrapper.
@@ -1636,7 +1645,10 @@ impl EntryImports {
                 Decl::Import { module, .. } => {
                     self.modules.insert(module.clone());
                 }
-                Decl::Module { decls, .. } => self.add_decls(decls),
+                Decl::Module { name, decls, .. } => {
+                    self.declared_modules.insert(name.clone());
+                    self.add_decls(decls);
+                }
                 _ => {}
             }
         }
@@ -1781,12 +1793,27 @@ impl PreparedReefGraph {
         self.stdlib_source_digest
     }
 
-    /// The authored spelling of every name this graph's linker tables
-    /// assign (chelis#3269): each module's `internal_maps` entry records the
+    /// The declaration behind every name this graph's linker tables assign
+    /// (chelis#3269): each module's `internal_maps` entry records the
     /// linked name of every symbol it declares, so the table is read off
     /// the mapping the rewrite used, never recovered from the linked string.
-    pub fn source_names(&self) -> LinkedSourceNames {
+    pub fn linked_source_names(&self) -> LinkedSourceNames {
         linked_source_names(&self.internal_maps)
+    }
+
+    /// The spellings diagnostics about a program linked from this graph
+    /// name declarations by (chelis#3269), where `entry_modules` are the
+    /// root-package modules the diagnosed source declares.
+    pub fn diagnostic_names<I, M>(&self, entry_modules: I) -> DiagnosticNames
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<String>,
+    {
+        self.linked_source_names().for_entry_modules(
+            entry_modules
+                .into_iter()
+                .map(|module| (self.graph.root_package.clone(), module.into())),
+        )
     }
 
     /// Whether this graph links a single-file program outside every reef
@@ -2510,7 +2537,7 @@ pub fn prepare_program_for_file(
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
         dependency_decls: graph.linked_dependency_decls.clone(),
-        source_names: graph.source_names(),
+        diagnostic_names: graph.diagnostic_names([entry_module]),
     }))
 }
 
@@ -2591,7 +2618,13 @@ pub fn prepare_single_file_program(
     // path.
     let graph = prepare_graph_from_loaded(PathBuf::new(), graph, &roots, runtime)?;
     let entry_decls = rewrite_single_file_decls(&graph, module_name, decls)?;
-    Ok(Some(assemble_rewritten_entry_program(&graph, &entry_decls)))
+    // A single-file program's own names are not renamed by the linker.
+    let diagnostic_names = graph.diagnostic_names(std::iter::empty::<String>());
+    Ok(Some(assemble_rewritten_entry_program(
+        &graph,
+        &entry_decls,
+        diagnostic_names,
+    )))
 }
 
 /// The implicit root package of a single-file program: no manifest file,
@@ -3222,7 +3255,8 @@ pub struct IsolatedEntryModule {
 pub struct RewrittenEntryBatch {
     declarations: Vec<Decl>,
     exact_roots: BTreeMap<(usize, String), String>,
-    source_names: LinkedSourceNames,
+    linked_names: LinkedSourceNames,
+    entry_modules: BTreeSet<(String, String)>,
 }
 
 impl RewrittenEntryBatch {
@@ -3236,10 +3270,13 @@ impl RewrittenEntryBatch {
             .map(String::as_str)
     }
 
-    /// The authored spelling of every name the batch's own entry modules
-    /// were linked under (chelis#3269); the graph's table covers the rest.
-    pub fn source_names(&self) -> &LinkedSourceNames {
-        &self.source_names
+    /// The spellings diagnostics about this batch, compiled against
+    /// `graph`, name declarations by (chelis#3269): each entry module of the
+    /// batch is an entry module.
+    pub fn diagnostic_names(&self, graph: &PreparedReefGraph) -> DiagnosticNames {
+        let mut names = graph.linked_source_names();
+        names.extend(&self.linked_names);
+        names.for_entry_modules(self.entry_modules.iter().cloned())
     }
 }
 
@@ -3277,7 +3314,8 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
     let mut seen_indices = BTreeSet::new();
     let mut declarations = Vec::new();
     let mut exact_roots = BTreeMap::new();
-    let mut source_names = LinkedSourceNames::default();
+    let mut linked_names = LinkedSourceNames::default();
+    let mut entry_modules = BTreeSet::new();
 
     for entry in entries {
         if !seen_indices.insert(entry.manifest_index) {
@@ -3403,21 +3441,29 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
             exact_roots.insert((entry.manifest_index, source_name), exact.clone());
         }
         for (authored, linked) in local_map.into_sorted() {
-            source_names.insert(linked, authored);
+            linked_names.insert(
+                &linked,
+                &module.package_name,
+                &module.module_name,
+                &authored,
+            );
         }
+        entry_modules.insert((module.package_name.clone(), module.module_name.clone()));
         declarations.extend(rewritten);
     }
 
     Ok(RewrittenEntryBatch {
         declarations,
         exact_roots,
-        source_names,
+        linked_names,
+        entry_modules,
     })
 }
 
 fn assemble_rewritten_entry_program(
     graph: &PreparedReefGraph,
     rewritten_entry_decls: &[Decl],
+    diagnostic_names: DiagnosticNames,
 ) -> PreparedProgram {
     let mut decls = graph.linked_library_decls.clone();
     decls.extend(rewritten_entry_decls.iter().cloned());
@@ -3433,7 +3479,7 @@ fn assemble_rewritten_entry_program(
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls,
         dependency_decls: graph.linked_dependency_decls.clone(),
-        source_names: graph.source_names(),
+        diagnostic_names,
     }
 }
 
@@ -3443,9 +3489,11 @@ pub fn compile_rewritten_entry_batch_with_reef_graph(
     graph: &PreparedReefGraph,
     batch: &RewrittenEntryBatch,
 ) -> Result<PreparedProgram, String> {
-    let mut program = assemble_rewritten_entry_program(graph, batch.declarations());
-    program.source_names.extend(&batch.source_names);
-    Ok(program)
+    Ok(assemble_rewritten_entry_program(
+        graph,
+        batch.declarations(),
+        batch.diagnostic_names(graph),
+    ))
 }
 
 /// Compile an in-memory entry decl list against a previously prepared reef
@@ -3462,9 +3510,13 @@ pub fn compile_with_reef_graph(
 ) -> Result<PreparedProgram, String> {
     let graph = graph.covering(&EntryImports::from_decls(entry_decls), runtime)?;
     let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(&graph, entry_decls)?;
+    // The entry decls are the synthetic eval module's, which the linker does
+    // not rename, so no linked declaration is an entry's.
+    let diagnostic_names = graph.diagnostic_names(std::iter::empty::<String>());
     Ok(assemble_rewritten_entry_program(
         &graph,
         &rewritten_entry_decls,
+        diagnostic_names,
     ))
 }
 
@@ -10752,17 +10804,18 @@ fn build_internal_maps(
     maps
 }
 
-/// Invert linker tables (`authored -> linked`, per module) into the
-/// `linked -> authored` table diagnostics render through (chelis#3269).
+/// Invert linker tables (`authored -> linked`, per `(package, module)`)
+/// into the table diagnostics render through (chelis#3269).
 fn linked_source_names(
     internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
 ) -> LinkedSourceNames {
-    internal_maps
-        .to_sorted()
-        .into_iter()
-        .flat_map(|(_, module_map)| module_map.to_sorted())
-        .map(|(authored, linked)| (linked.clone(), authored.clone()))
-        .collect()
+    let mut names = LinkedSourceNames::default();
+    for ((package, module), module_map) in internal_maps.to_sorted() {
+        for (authored, linked) in module_map.to_sorted() {
+            names.insert(linked, package, module, authored);
+        }
+    }
+    names
 }
 
 fn build_name_resolver(
@@ -13622,20 +13675,35 @@ module_prefix = "Demo"
              def my__helper(x: i32) -> i32 = x\n\
              out: i32 = my__helper(1i32)\n",
         );
+        write(
+            &root.join("src/util.ch"),
+            "module Demo.Util\n\
+             type My__Shape =\n  | Square(f32)\n\
+             def my__helper(x: i32) -> i32 = x\n",
+        );
         let program = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
             .expect("link the package")
             .expect("the file is a package module");
-        let names = &program.source_names;
-        for (linked, authored) in [
+        let names = &program.diagnostic_names;
+        // The entry module's declarations are bare; another module's are
+        // qualified by its module path, so equal names stay distinct.
+        for (linked, spelled) in [
             ("pkg__demo__app__Demo__Main__out", "out"),
             ("pkg__demo__app__Demo__Main__my__helper", "my__helper"),
             ("Pkg__demo__app__Demo__Main__My__Shape", "My__Shape"),
             ("Pkg__demo__app__Demo__Main__Circle", "Circle"),
+            (
+                "pkg__demo__app__Demo__Util__my__helper",
+                "Demo.Util.my__helper",
+            ),
+            (
+                "Pkg__demo__app__Demo__Util__My__Shape",
+                "Demo.Util.My__Shape",
+            ),
         ] {
-            assert_eq!(names.source_name(linked), Some(authored), "{linked}");
+            assert_eq!(names.source_name(linked), Some(spelled), "{linked}");
         }
-        // Every declaration the linker named is in the table, and the table
-        // renders it back to its authored spelling.
+        // Every declaration the linker named is in the table.
         for decl in &program.entry_decls {
             let Some(linked) = entry_decl_binding_name(decl) else {
                 continue;
@@ -13646,8 +13714,11 @@ module_prefix = "Demo"
             );
         }
         assert_eq!(
-            names.render("def 'pkg__demo__app__Demo__Main__my__helper': got `Pkg__demo__app__Demo__Main__My__Shape`"),
-            "def 'my__helper': got `My__Shape`"
+            names.render(
+                "expected `Pkg__demo__app__Demo__Main__My__Shape`, \
+                 got `Pkg__demo__app__Demo__Util__My__Shape`"
+            ),
+            "expected `My__Shape`, got `Demo.Util.My__Shape`"
         );
         // A name the linker kept is not in the table.
         assert_eq!(names.source_name("out"), None);
@@ -15591,7 +15662,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
-            source_names: LinkedSourceNames::default(),
+            diagnostic_names: DiagnosticNames::default(),
         };
         let rendered = chelis_surf::format::format_program(
             &prepared.reachable_decls().expect("reachable declarations"),
@@ -15632,7 +15703,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
-            source_names: LinkedSourceNames::default(),
+            diagnostic_names: DiagnosticNames::default(),
         };
         let invariant_rendered = chelis_surf::format::format_program(
             &invariant_program
@@ -15667,7 +15738,7 @@ module_prefix = "RegistryLib"
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
-            source_names: LinkedSourceNames::default(),
+            diagnostic_names: DiagnosticNames::default(),
         };
         let macro_rendered = chelis_surf::format::format_program(
             &macro_program.reachable_decls().expect("macro reachability"),

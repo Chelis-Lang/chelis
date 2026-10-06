@@ -635,6 +635,33 @@ the reserved format on the user decls it admits — is the structural
 invariant that prevents a hand-authored mangled name from self-keying
 to a victim module on any surface.
 
+**Names in diagnostics.** Because the linker output is private, a
+diagnostic never shows a linker name for a declaration it can name; it
+names every linked declaration by the name its author wrote, read from
+the linker's own name assignment, never recovered by inverting the
+encoding (an authored name may itself contain `__`):
+
+- a declaration of an entry module (the module the diagnosed source
+  declares) is named bare, `out`, so a diagnostic about a package module
+  reads as it does for the same source as a standalone file;
+- a declaration of any other module is named qualified by its module
+  path, `Demo.Util.helper`, `Std.Datetime.Date`, the form an author
+  writes a qualified reference in;
+- module paths are not unique across the packages of one graph (an
+  import resolves to the importing package's own module first, and no
+  rule makes `module_prefix` unique), so declarations whose
+  module-qualified names coincide are each further qualified by package,
+  `other-lib/Demo.Util.T`;
+- the encoding is not injective (`My__Shape` in `Demo.Main` and `Shape`
+  in `Demo.Main.My` link alike); a linker name assigned to more than one
+  declaration is shown as linked, since no one authored name is it.
+
+No two distinct linker names are ever shown alike. Only the
+human-readable text of a compile-time diagnostic is so named: its kind,
+span and span identity are unchanged, and the text of an evaluation-time
+failure is the program's own data and is shown as the program produced
+it.
+
 **The rejection set.** Outside the defining module, each of the
 following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
 returns the expression's TRUE type, so a violation never cascades into

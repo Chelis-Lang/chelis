@@ -144,6 +144,9 @@ pub struct CompilerError {
 /// [`GeneralKind::Cancelled`] cannot drift apart.
 pub const EVAL_CANCELLED_KIND: &str = chelis_vocab::DiagnosticKind::Cancelled.as_str();
 
+/// `CompilerError::stage` of a failure while evaluating a checked program.
+pub(crate) const EVAL_STAGE: &str = "eval";
+
 impl CompilerError {
     /// Whether this error is a cancellation rather than a genuine failure.
     ///
@@ -157,12 +160,17 @@ impl CompilerError {
             .any(|diagnostic| diagnostic.kind() == chelis_vocab::DiagnosticKind::Cancelled)
     }
 
-    /// This error with every diagnostic rendered through the linker's
-    /// source-name table (chelis#3269), so a diagnostic about a linked
-    /// program names declarations as their author wrote them. The
-    /// transcript is program output, not a diagnostic, and is unchanged.
-    pub fn with_source_names(mut self, names: &chelis_reef::LinkedSourceNames) -> Self {
+    /// This error with every diagnostic named as its author wrote it
+    /// (chelis#3269), through the spellings of the linked program it is
+    /// about. An evaluation-stage failure is left unchanged: its text
+    /// carries program output and runtime values, which are the program's
+    /// own data, not names the linker wrote. The transcript is program
+    /// output too, and is unchanged.
+    pub fn with_source_names(mut self, names: &chelis_reef::DiagnosticNames) -> Self {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        if self.stage == EVAL_STAGE {
+            return self;
+        }
         for diagnostic in &mut self.errors {
             diagnostic.render_source_names(names);
         }
@@ -2713,26 +2721,24 @@ fn compile_new_decls_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
-    compile_rewritten_decls_in_context(context, &rewritten, target)
+    // chelis#3269: the new source is the entry, so declarations of the
+    // module it declares are named bare and every other module's qualified.
+    compile_rewritten_decls_in_context(context, &rewritten, target).map_err(|error| {
+        let declared = chelis_reef::EntryImports::from_decls(raw_new_decls);
+        error.with_source_names(
+            &context
+                .reef_state
+                .diagnostic_names(declared.declared_modules().iter().cloned()),
+        )
+    })
 }
 
 /// Compile declarations whose module identity and imports have already been
 /// resolved by Reef. Keeping this boundary separate prevents an isolated
 /// multi-entry batch from being flattened back into the synthetic eval module
-/// and rewritten a second time.
-///
-/// A rejection names the context's declarations by their authored spelling
-/// (chelis#3269).
+/// and rewritten a second time. Its caller, which knows the entry, renders a
+/// rejection's linked names (chelis#3269).
 fn compile_rewritten_decls_in_context(
-    context: &crate::context::CompiledContext,
-    rewritten: &[Decl],
-    target: Target,
-) -> Result<CompiledSource> {
-    compile_linked_decls_in_context(context, rewritten, target)
-        .map_err(|error| error.with_source_names(&context.reef_state.source_names()))
-}
-
-fn compile_linked_decls_in_context(
     context: &crate::context::CompiledContext,
     rewritten: &[Decl],
     target: Target,
@@ -2988,7 +2994,7 @@ pub fn prepare_rewritten_entry_batch_in_context(
 ) -> Result<PreparedEvalInContext> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)
-        .map_err(|error| error.with_source_names(batch.source_names()))?;
+        .map_err(|error| error.with_source_names(&batch.diagnostic_names(&context.reef_state)))?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -3044,7 +3050,7 @@ fn eval_compiled(
         .map(|(name, value)| {
             let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
                 stage_error(
-                    "eval",
+                    EVAL_STAGE,
                     format!("binding `{name}`: {message}"),
                     GeneralKind::EvalError,
                 )
@@ -3079,7 +3085,7 @@ fn eval_compiled(
     let key_rule_errors = &compiled.eval_facts().key_rule_errors;
     if !key_rule_errors.is_empty() {
         return Err(stage_error(
-            "eval",
+            EVAL_STAGE,
             format!(
                 "the lowered program breaks the key rules: {}",
                 key_rule_errors.join("; ")
@@ -3090,7 +3096,7 @@ fn eval_compiled(
     let sharing_errors = &compiled.eval_facts().sharing_errors;
     if !sharing_errors.is_empty() {
         return Err(stage_error(
-            "eval",
+            EVAL_STAGE,
             format!(
                 "the lowered program shares a node that can trap: {}",
                 sharing_errors.join("; ")
@@ -3127,7 +3133,7 @@ fn eval_compiled(
             .map(|node| node.output_type.precision)
             .ok_or_else(|| {
                 stage_error(
-                    "eval",
+                    EVAL_STAGE,
                     format!("missing node {}", node_id.0),
                     GeneralKind::EvalError,
                 )
@@ -5993,7 +5999,7 @@ fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerErro
     };
     // [04-NUM-9]: a numeric trap renders byte-identically in every lane, so
     // eval attaches no lane-only advice after the trap line.
-    stage_error("eval", message, kind)
+    stage_error(EVAL_STAGE, message, kind)
 }
 
 #[cfg(test)]

@@ -60,11 +60,15 @@ impl CheckResult {
     }
 
     /// [`Diagnostic::render_source_names`] for every diagnostic of the
-    /// report (chelis#3269).
-    pub fn render_source_names(&mut self, names: &chelis_reef::LinkedSourceNames) {
+    /// report, and the same spelling for each unresolved name, which names
+    /// the reference its `unbound variable` diagnostic reports (chelis#3269).
+    pub fn render_source_names(&mut self, names: &chelis_reef::DiagnosticNames) {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         for diagnostic in &mut self.errors {
             diagnostic.render_source_names(names);
+        }
+        for name in &mut self.unresolved_names {
+            names.render_in_place(name);
         }
     }
 }
