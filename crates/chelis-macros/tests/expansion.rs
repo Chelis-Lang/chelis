@@ -1,5 +1,8 @@
 use chelis_deep::printer::print_canonical;
-use chelis_macros::{ExpansionError, ExpansionOptions, expand_program};
+use chelis_macros::{
+    CallableDeclaration, ExpansionError, ExpansionOptions, expand_program,
+    reject_standard_prelude_collisions,
+};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
@@ -215,6 +218,67 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
             && err.to_string().contains("standard prelude macro"),
         "sig collision diagnostic must name the authored declaration; got: {err}"
     );
+}
+
+/// chelis#3270: a caller that renames declarations before expansion (the reef
+/// package linker) checks their authored names; it gets the verdict and the
+/// diagnostic expansion gives the same declarations, including the first
+/// collision in order and an annotated `def` reported as a `def`.
+#[test]
+fn authored_name_collision_check_matches_expansion() {
+    use CallableDeclaration::{Def, Sig};
+    /// Surf source, its authored declarations, and the expected diagnostic
+    /// prefix (`None` when the declarations are admitted).
+    type Case<'a> = (
+        &'a str,
+        &'a [(&'a str, CallableDeclaration)],
+        Option<&'a str>,
+    );
+    let cases: [Case; 5] = [
+        (
+            "def residual(x: f32) -> f32 = x\n",
+            &[("residual", Def)],
+            Some("`def residual`"),
+        ),
+        (
+            "sig cross_entropy: f32 -> f32\n",
+            &[("cross_entropy", Sig)],
+            Some("`sig cross_entropy`"),
+        ),
+        (
+            "sig linear_layer: f32 -> f32\nlinear_layer = fn (x: f32) -> x\n",
+            &[("linear_layer", Sig), ("linear_layer", Def)],
+            Some("`def linear_layer`"),
+        ),
+        (
+            "def keep(x: f32) -> f32 = x\nsig cross_entropy: f32 -> f32\ndef residual(x: f32) -> f32 = x\n",
+            &[("keep", Def), ("cross_entropy", Sig), ("residual", Def)],
+            Some("`sig cross_entropy`"),
+        ),
+        (
+            "def residual_step(x: f32) -> f32 = x\n",
+            &[("residual_step", Def)],
+            None,
+        ),
+    ];
+    for (source, declarations, diagnostic) in cases {
+        let deep = desugar_program(&parse_str(source).expect("surf parse should succeed"))
+            .expect("Surf fixture must desugar");
+        let expansion = expand_program(&deep, &ExpansionOptions::default())
+            .map(drop)
+            .map_err(|error| error.to_string());
+        let authored = reject_standard_prelude_collisions(declarations).map_err(|e| e.to_string());
+        assert_eq!(authored, expansion, "{source}");
+        match diagnostic {
+            Some(declaration) => assert!(
+                authored
+                    .as_ref()
+                    .is_err_and(|message| message.starts_with(declaration)),
+                "{source}: {authored:?}"
+            ),
+            None => assert_eq!(authored, Ok(()), "{source}"),
+        }
+    }
 }
 
 #[test]

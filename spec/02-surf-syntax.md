@@ -787,8 +787,11 @@ Macro rules:
 - resolution order is lexical blockers first, then user-defined top-level macros, then
   the standard macro prelude, then ordinary function call resolution
 - an ordinary top-level `def` or `sig` may not use the name of a loaded standard
-  prelude macro; the declaration is rejected during macro expansion because its calls
-  would otherwise expand as the standard macro before ordinary function resolution
+  prelude macro; the declaration is rejected no later than macro expansion because its
+  calls would otherwise expand as the standard macro before ordinary function resolution.
+  The rule applies to the name as written, in every module: a reef package module is
+  subject to it although package linking gives its declarations internal names, and
+  the diagnostic names the declaration as written
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
 - hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`
