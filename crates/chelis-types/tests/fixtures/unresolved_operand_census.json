@@ -985,13 +985,6 @@
       "disposition": "not_a_route"
     },
     {
-      "file": "expr_pattern.rs",
-      "function": "pattern_bindings",
-      "ordinal": 1,
-      "pattern": "Type::Var(_)",
-      "disposition": "not_a_route"
-    },
-    {
       "file": "expr_record.rs",
       "function": "authored_cast_source_rejection",
       "ordinal": 1,
