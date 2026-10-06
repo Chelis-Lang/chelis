@@ -21,6 +21,7 @@ pub(super) fn finish_unified_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
+    defer_result_replay: bool,
 ) -> Type {
     if let Some(rule) = func_name
         .as_deref()
@@ -2007,6 +2008,8 @@ pub(super) fn finish_unified_app(
         );
     }
 
-    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+    if !defer_result_replay {
+        product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+    }
     subst.apply(&result_ty)
 }

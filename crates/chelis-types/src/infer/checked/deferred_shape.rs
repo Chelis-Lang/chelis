@@ -322,6 +322,20 @@ impl InferenceProduct {
         });
     }
 
+    /// A nested tensor join or `to_tensor` consumes its list before the outer
+    /// constructor completes. Flush the pending equations at that boundary.
+    pub(in crate::infer) fn replay_ready_shape_checks_at_aggregate_boundary(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        adt_reg: &AdtRegistry,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let depth = std::mem::take(&mut self.aggregate_arg_depth);
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        self.aggregate_arg_depth = depth;
+    }
+
     /// Replay shape checks whose previously-free input types have now been
     /// bound by an application. The same checker functions own both the
     /// immediate and deferred paths, so their semantics cannot drift.
@@ -332,7 +346,7 @@ impl InferenceProduct {
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        if self.replaying_shape_checks {
+        if self.replaying_shape_checks || self.aggregate_arg_depth > 0 {
             return;
         }
         self.import_result_constraints(subst);
@@ -623,6 +637,7 @@ impl InferenceProduct {
                     errors,
                     self,
                     None,
+                    false,
                 );
                 self.replaying_post_app = None;
                 reconcile_replayed_result(call.func_name, result_ty, replayed, subst, errors);

@@ -271,18 +271,26 @@ impl InferenceProduct {
         let mut available: Vec<ResultConstraint> = self
             .result_type_constraints
             .iter()
-            .map(|constraint| ResultConstraint::Annotation {
-                actual: resolved(&constraint.actual, subst),
-                declared: resolved(&constraint.declared, subst),
+            .map(|constraint| {
+                #[cfg(test)]
+                super::record_result_replay_work(0);
+                ResultConstraint::Annotation {
+                    actual: resolved(&constraint.actual, subst),
+                    declared: resolved(&constraint.declared, subst),
+                }
             })
             .collect();
         available.extend(
             self.deferred_shape_checks
                 .iter()
                 .filter(|check| matches!(check.rule, DeferredShapeRule::ResultJoin { .. }))
-                .map(|check| ResultConstraint::Join {
-                    inputs: check.arg_tys.iter().map(|ty| resolved(ty, subst)).collect(),
-                    result: resolved(&check.result_ty, subst),
+                .map(|check| {
+                    #[cfg(test)]
+                    super::record_result_replay_work(0);
+                    ResultConstraint::Join {
+                        inputs: check.arg_tys.iter().map(|ty| resolved(ty, subst)).collect(),
+                        result: resolved(&check.result_ty, subst),
+                    }
                 }),
         );
         let mut visible = crate::env::free_tvars(body);
@@ -290,6 +298,8 @@ impl InferenceProduct {
         loop {
             let before = equations.len();
             available.retain(|equation| {
+                #[cfg(test)]
+                super::record_result_replay_work(0);
                 let variables: Vec<_> = equation
                     .types()
                     .into_iter()
@@ -319,6 +329,9 @@ impl InferenceProduct {
         let mut variables = crate::env::free_tvars(&resolved(actual, subst));
         variables.sort_unstable();
         variables.dedup();
+        if variables.is_empty() {
+            return false;
+        }
         // A transported operation's result is still produced at application.
         // Its signature may expose ordinary input annotations, but annotating
         // that result (especially with runtime extents) must not replace the
@@ -337,6 +350,8 @@ impl InferenceProduct {
                 return true;
             }
             for check in &self.deferred_shape_checks {
+                #[cfg(test)]
+                super::record_result_replay_work(if binding_only { 1 } else { 4 });
                 if !crate::env::free_tvars(&resolved(&check.result_ty, subst))
                     .iter()
                     .any(|variable| variables.contains(variable))
@@ -454,6 +469,7 @@ impl InferenceProduct {
         inputs: &[Type],
         published: &Type,
         subst: &mut Subst,
+        has_binding_producer: bool,
     ) -> Result<(), TypeError> {
         if inputs.iter().any(|input| {
             matches!(input, Type::Var(_))
@@ -493,12 +509,13 @@ impl InferenceProduct {
                     .iter()
                     .map(|fields| fields[index].clone())
                     .collect::<Vec<_>>();
-                self.settle_ready_join_parts(&inputs, field, subst)?;
+                self.settle_ready_join_parts(&inputs, field, subst, has_binding_producer)?;
             }
         } else if inputs.iter().any(is_closed_first_order)
-            && inputs
-                .iter()
-                .all(|input| !self.result_has_pending_producer_with(input, subst, true))
+            && (!has_binding_producer
+                || inputs
+                    .iter()
+                    .all(|input| !self.result_has_pending_producer_with(input, subst, true)))
         {
             for input in &inputs {
                 unify(&published, input, subst)?;
@@ -513,6 +530,18 @@ impl InferenceProduct {
         subst: &mut Subst,
         errors: &mut DiagnosticSink<'_>,
     ) -> bool {
+        // A join can transport a pending producer but cannot create one.
+        // A derivation with a closed result has no type variable that a join
+        // can reach. Test for open producers once instead of scanning the
+        // growing graph for every join input (chelis#2975).
+        let has_binding_producer = subst
+            .pending_collection_contracts()
+            .iter()
+            .any(|(_, _, constraint)| !crate::env::free_tvars(constraint.result()).is_empty())
+            || self.deferred_shape_checks.iter().any(|check| {
+                matches!(check.rule, DeferredShapeRule::Derivation(_))
+                    && !crate::env::free_tvars(&resolved(&check.result_ty, subst)).is_empty()
+            });
         // Keep the complete producer graph visible while deciding readiness.
         let joins: Vec<_> = self
             .deferred_shape_checks
@@ -529,6 +558,8 @@ impl InferenceProduct {
             .collect();
         let mut progressed = false;
         for (id, inputs, published, last_propagated) in joins {
+            #[cfg(test)]
+            super::record_result_replay_work(2);
             // A rule publishes its equation before knowing a result
             // constructor. Expose only structure common to every producer;
             // retain independent holes until binding evidence reaches it.
@@ -552,7 +583,9 @@ impl InferenceProduct {
                     .map(|input| resolved(input, subst))
                     .collect::<Vec<_>>(),
             );
-            if let Err(error) = self.settle_ready_join_parts(&inputs, &published, subst) {
+            if let Err(error) =
+                self.settle_ready_join_parts(&inputs, &published, subst, has_binding_producer)
+            {
                 errors.push(error.into());
             }
             progressed |= before_parts
@@ -568,8 +601,9 @@ impl InferenceProduct {
                 .any(|ty| is_closed_first_order(&resolved(ty, subst)));
             let pending = !first_order
                 && inputs.iter().any(|ty| {
-                    self.result_has_pending_producer_with(ty, subst, true)
-                        || (!self.result_inputs_closed && self.result_has_open_inputs(ty, subst))
+                    (!self.result_inputs_closed && self.result_has_open_inputs(ty, subst))
+                        || (has_binding_producer
+                            && self.result_has_pending_producer_with(ty, subst, true))
                 });
             let output = resolved(&published, subst);
             if pending && last_propagated.as_ref() == Some(&output) {
@@ -611,10 +645,12 @@ impl InferenceProduct {
         errors: &mut DiagnosticSink<'_>,
     ) {
         for constraint in std::mem::take(&mut self.result_type_constraints) {
-            if self.result_has_pending_producer(&constraint.actual, subst)
-                || (!self.result_inputs_closed
-                    && self.result_has_open_inputs(&constraint.actual, subst)
-                    && !is_closed_first_order(&resolved(&constraint.declared, subst)))
+            #[cfg(test)]
+            super::record_result_replay_work(3);
+            if (!self.result_inputs_closed
+                && self.result_has_open_inputs(&constraint.actual, subst)
+                && !is_closed_first_order(&resolved(&constraint.declared, subst)))
+                || self.result_has_pending_producer(&constraint.actual, subst)
             {
                 self.result_type_constraints.push(constraint);
             } else if let Err(error) = unify(&constraint.actual, &constraint.declared, subst) {
