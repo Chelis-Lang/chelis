@@ -277,7 +277,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
         SourceContract(
             "current canonical direct arithmetic narrative",
             "spec/design/chelis_canonical_reference.md",
-            ("`sub` and `min_elem` are direct Tier-1 RISC identities",),
+            ("`sub` and `min_elem` are direct RISC primitives",),
             ("`min_elem` is part of the specified derived built-in surface",),
         ),
         SourceContract(

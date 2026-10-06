@@ -397,6 +397,17 @@ class SourceContractMutationTests(unittest.TestCase):
         ):
             oracle.validate_source_contracts(self.repo)
 
+    def test_required_canonical_direct_arithmetic_narrative_deletion_fails(self) -> None:
+        self.mutate(
+            "spec/design/chelis_canonical_reference.md",
+            "`sub` and `min_elem` are direct RISC primitives",
+            "`sub` and `min_elem` are built-ins",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current canonical direct arithmetic narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
     def test_required_fused_extrema_narrative_deletion_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/tests/fusion_adversarial.rs",

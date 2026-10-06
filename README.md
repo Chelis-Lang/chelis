@@ -28,7 +28,7 @@ multiply before anything runs. The error from its JSON report:
 
 - **Checked before it runs.** The compiler checks shapes, precision, effects, and
   ownership. Dimensions match by name, `f32` and `f64` do not mix without a `cast`,
-  and randomness and I/O appear in a function's type.
+  I/O appears in a function's effects, and random operations take explicit keys.
 - **An agent in the loop.** `chelis check` answers in JSON with the error kind and
   source span, and the same input always gets the same answer. `chelis tide mcp`
   gives an agent check, eval, prove, and structural edits as MCP tools.
