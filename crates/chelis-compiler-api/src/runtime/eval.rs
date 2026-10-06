@@ -2915,6 +2915,16 @@ impl<'a> EvalContext<'a> {
                         args.len()
                     ));
                 }
+                #[cfg(feature = "clarabel-provider")]
+                if def_name.as_deref() == Some(super::clarabel::SOLVE) {
+                    let value = super::clarabel::invoke(&args)?;
+                    for claim in inherited_claims {
+                        self.check_declared_result_claim(claim, &value, "Clarabel.solve")?;
+                    }
+                    self.result_producer =
+                        Some(ResultProducer::Uniform("Clarabel.solve".to_owned()));
+                    return Ok(value);
+                }
                 let active_declaration = def_name.clone();
                 // chelis#1277 B2h: a def the C lane lowers as a kernel is
                 // applied through that kernel, so eval runs the DAG C emits

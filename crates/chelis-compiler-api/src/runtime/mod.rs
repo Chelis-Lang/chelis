@@ -19,6 +19,8 @@ mod eval;
 mod frame;
 pub use frame::Frame;
 use frame::ResultProducer;
+#[cfg(feature = "clarabel-provider")]
+mod clarabel;
 mod host_ops;
 mod invariant;
 mod named_axis;

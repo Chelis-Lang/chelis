@@ -62,6 +62,7 @@ tikv-jemallocator = { version = "0.7.0", features = ["unprefixed_malloc_on_suppo
 # that Tide uses, so solver availability cannot fork fuzz semantics.
 default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
+clarabel-provider = ["chelis-compiler-api/clarabel-provider"]
 # Distribution builds (release, Nix) are sealed builds (spec/08-backends.md
 # §2.1): they carry no checkout path and skip the development source-freshness
 # check. Staging receipts record the mode.
@@ -69,6 +70,11 @@ sealed-runtime = ["chelis-runtime-bundle/sealed"]
 # Test-only: instruments the runtime this `chelis` build carries and stages, so
 # its programs record the ownership ledger. The ledger test requires it.
 ownership-ledger = ["chelis-runtime/ownership-ledger"]
+
+[[test]]
+name = "clarabel_native_eval"
+path = "tests/clarabel_native_eval.rs"
+required-features = ["clarabel-provider"]
 
 [dev-dependencies]
 assert_cmd = "2"

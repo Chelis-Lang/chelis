@@ -26,3 +26,6 @@ these reasons:
 Subdirectories are complete Reef packages with their own `reef.toml` and data.
 `io_pipeline/` reads its CSV and JSON inputs with `chelis eval --file src/main.ch`
 run from the package directory.
+`clarabel_qp/` uses the optional `clarabel-provider` evaluator feature; its
+compiled C binding is not available. Run it using the commands in
+`packages/chelis-clarabel/README.md`.

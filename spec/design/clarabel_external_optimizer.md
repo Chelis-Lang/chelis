@@ -6,8 +6,9 @@ This document describes the implementation of a Chelis library call to the
 Clarabel conic optimizer. The language rules for inbound native libraries
 belong in `spec/11-ffi.md`, numeric operations in `spec/05-risc-primitives.md`,
 and property assumptions in the numbered syntax and type chapters. This
-document does not grant a proof assumption or make a native library callable
-before those contracts and their implementation exist.
+document does not grant a proof assumption. The optional evaluator feature
+calls the Rust adapter through the checked package declaration; a compiled C
+call and the ideal property contract require the binding work below.
 
 Chelis already uses Clarabel internally as an optional float proposer for
 sum-of-squares certificates. That path checks an exact rational certificate
@@ -106,6 +107,22 @@ Solver diagnostics are preserved for that extension; no such bound follows
 merely from a `Solved` status or a requested tolerance.
 
 ## Implementation sequence and acceptance
+
+The package source is `packages/chelis-clarabel/src/qp.ch`. It supplies the
+checked `Clarabel.Qp.solve` signature, cone and status ADTs, and a loud
+unavailable-provider body. With the `clarabel-provider` Cargo feature, the
+evaluator intercepts the resolved package function and calls the Rust adapter.
+The `packages/chelis-clarabel/tests/` programs exercise a solve, an
+inequality, a stopped result, and an invalid cone partition. The separate
+`examples/illustrative/clarabel_qp` package exercises a path dependency.
+The package README gives the exact commands.
+
+The evaluator feature is an integration slice. It uses a pinned Rust
+dependency but does not read a Reef native binding or verify a separate
+provider artifact. The compiled C inliner sees the fail body, so the compiled
+call needs an explicit provider-call representation before it can execute.
+The property lowering must consume that same resolved binding; the evaluator's
+name match alone grants no proof assumption.
 
 1. Implement a standalone, non-SDP Rust adapter with validated dense inputs,
    CSC conversion, cone validation, explicit statuses, and tests. This module

@@ -1,0 +1,10 @@
+schema = "3"
+[package]
+name = "chelis-clarabel"
+version = "0.1.0"
+compiler = "=0.19.1"
+module_prefix = "Clarabel"
+resolver = "2"
+description = "Optional Clarabel conic QP solver for Chelis"
+license = "MIT"
+repository = "https://github.com/Chelis-Lang/chelis"
