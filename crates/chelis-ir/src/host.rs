@@ -10720,7 +10720,12 @@ fn lower_record_host_expr(
                 format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
             )
         })?;
-    let mut supplied = UnordMap::new();
+    // Field values lower in written order, each tagged with its declared
+    // slot. spec/03-deep-syntax.md §4.4 makes written left-to-right order the
+    // evaluation order of record children in every lane, while the
+    // constructor stores its slots in declared order (chelis#3265).
+    let mut written = Vec::with_capacity(kids.len().saturating_sub(1));
+    let mut supplied = vec![false; ctor_info.fields.len()];
     for field in kids.iter().skip(1) {
         let kv_list = as_node(field).ok_or_else(|| {
             host_expr_lowering_error(record_expr, "a record field is not a `kv` node")
@@ -10736,16 +10741,17 @@ fn lower_record_host_expr(
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| host_expr_lowering_error(record_expr, "a record field has no name"))?;
-        let expected_field = ctor_info
+        let slot = ctor_info
             .fields
             .iter()
-            .find(|field| field.name.as_deref() == Some(name))
+            .position(|field| field.name.as_deref() == Some(name))
             .ok_or_else(|| {
                 host_expr_lowering_error(
                     record_expr,
                     format!("record constructor `{ctor}` has no field `{name}`"),
                 )
             })?;
+        let expected_field = &ctor_info.fields[slot];
         // The instantiated constructor field is the checker-owned expected
         // type. Thread it into nested generic calls before lowering rather
         // than forcing it afterward: `Frame[Unit].cols` must specialize
@@ -10759,41 +10765,68 @@ fn lower_record_host_expr(
             tensor_helpers,
             Some(&expected_field.ty),
         )?;
-        if supplied.insert(name.to_string(), value).is_some() {
+        if std::mem::replace(&mut supplied[slot], true) {
             return Err(host_expr_lowering_error(
                 record_expr,
                 format!("record field `{name}` is supplied more than once"),
             ));
         }
+        written.push((slot, force_host_expr_type(value, expected_field.ty.clone())));
     }
-    let fields = ctor_info
-        .fields
-        .iter()
-        .map(|field| {
-            let name = field.name.as_ref().ok_or_else(|| {
-                host_expr_lowering_error(
-                    record_expr,
-                    format!("constructor `{ctor}` contains an unnamed record field"),
-                )
-            })?;
-            let value = supplied.remove(name).ok_or_else(|| {
-                host_expr_lowering_error(
-                    record_expr,
-                    format!("record constructor `{ctor}` is missing field `{name}`"),
-                )
-            })?;
-            Ok(force_host_expr_type(value, field.ty.clone()))
+    for (field, supplied) in ctor_info.fields.iter().zip(&supplied) {
+        let name = field.name.as_ref().ok_or_else(|| {
+            host_expr_lowering_error(
+                record_expr,
+                format!("constructor `{ctor}` contains an unnamed record field"),
+            )
+        })?;
+        if !supplied {
+            return Err(host_expr_lowering_error(
+                record_expr,
+                format!("record constructor `{ctor}` is missing field `{name}`"),
+            ));
+        }
+    }
+    // Every declared field is supplied exactly once, so `written` is in
+    // declared order exactly when its slots ascend.
+    if written.is_sorted_by_key(|(slot, _)| *slot) {
+        return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+            ctor,
+            fields: written.into_iter().map(|(_, value)| value).collect(),
+            ty: ctor_info.ty,
+        }));
+    }
+    // Written order differs from declared order: bind each value to a fresh
+    // local in written order, then construct from the locals in declared
+    // order, so a trap or effect in an earlier-written field happens first.
+    let mut names = HostMatchNameSupply::new(record_expr, scope);
+    for (_, value) in &written {
+        names.avoid_lowered(value);
+    }
+    let mut fields = vec![None; ctor_info.fields.len()];
+    let bindings = written
+        .into_iter()
+        .map(|(slot, value)| {
+            let name = names.fresh("__chelis_record_field");
+            let ty = ctor_info.fields[slot].ty.clone();
+            fields[slot] = Some(HostExpr::new(HostExprKind::Var(name.clone(), ty.clone())));
+            HostBinding {
+                name,
+                display_name: None,
+                display_roots: Vec::new(),
+                ty,
+                value,
+            }
         })
-        .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()?;
-    if let Some((extra, _)) = supplied.to_sorted().into_iter().next() {
-        return Err(host_expr_lowering_error(
-            record_expr,
-            format!("record constructor `{ctor}` has no field `{extra}`"),
-        ));
-    }
-    Ok(HostExpr::new(HostExprKind::AdtConstruct {
+        .collect();
+    let construct = HostExpr::new(HostExprKind::AdtConstruct {
         ctor,
-        fields,
+        fields: fields.into_iter().flatten().collect(),
+        ty: ctor_info.ty.clone(),
+    });
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(construct),
         ty: ctor_info.ty,
     }))
 }
@@ -27078,6 +27111,102 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 panic!("{name}: conforming left the hole unresolved: {error}");
             }
         }
+    }
+
+    /// The record construction a function body reduces to: the expression
+    /// whose kind is the `S` construct, or the `let` that sequences its
+    /// field values ahead of it.
+    fn record_construction(expr: &HostExpr) -> &HostExpr {
+        match &expr.kind {
+            HostExprKind::AdtConstruct { .. } => expr,
+            HostExprKind::Let { body, .. }
+                if matches!(body.kind, HostExprKind::AdtConstruct { .. }) =>
+            {
+                expr
+            }
+            HostExprKind::ResultClaimScope { body, .. }
+            | HostExprKind::Let { body, .. }
+            | HostExprKind::RetainedInvocation { body, .. } => record_construction(body),
+            HostExprKind::FormalIngress { value, .. } => record_construction(value),
+            other => panic!("no record construction under {other:?}"),
+        }
+    }
+
+    fn operation_name(expr: &HostExpr) -> &str {
+        match &expr.kind {
+            HostExprKind::Builtin { name, .. } => name,
+            HostExprKind::Call { function, .. } => function,
+            other => panic!("expected an operation, got {other:?}"),
+        }
+    }
+
+    fn lowered_record_body(def: &str) -> HostExpr {
+        let checked = surf_check(&format!(
+            "type S =\n  | S {{ lo: f32, hi: f32 }}\n{def}\nout = mk(3.0f32)\n"
+        ));
+        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+        let host = lower_host_program(&HostLoweringSession::new(&checked), &lowered)
+            .expect("record fixture must lower");
+        host.functions
+            .into_iter()
+            .find(|function| function.name == "mk")
+            .expect("mk host function")
+            .body
+    }
+
+    #[test]
+    fn a_permuted_record_literal_evaluates_its_fields_in_written_order() {
+        // chelis#3265: `hi` is written first and declared second. Its value
+        // must be bound first, and the constructor must still receive the
+        // declared slots `lo, hi`.
+        let body = lowered_record_body(
+            "def mk(x: f32) -> S = S { hi: mul(x, 2.0f32), lo: add(x, 1.0f32) }",
+        );
+        let HostExprKind::Let {
+            bindings,
+            body: construct,
+            ..
+        } = &record_construction(&body).kind
+        else {
+            panic!("a permuted record literal must sequence its fields: {body:?}");
+        };
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| operation_name(&binding.value))
+                .collect::<Vec<_>>(),
+            ["mul", "add"],
+            "field values bind in written order"
+        );
+        let HostExprKind::AdtConstruct { fields, .. } = &construct.kind else {
+            unreachable!("record_construction returns a let over the construct");
+        };
+        let slots = fields
+            .iter()
+            .map(|field| match &field.kind {
+                HostExprKind::Var(name, _) => name.as_str(),
+                other => panic!("a sequenced slot must read its local, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            [bindings[1].name.as_str(), bindings[0].name.as_str()],
+            "slots stay in declared order"
+        );
+    }
+
+    #[test]
+    fn a_declared_order_record_literal_constructs_directly() {
+        let body = lowered_record_body(
+            "def mk(x: f32) -> S = S { lo: add(x, 1.0f32), hi: mul(x, 2.0f32) }",
+        );
+        let HostExprKind::AdtConstruct { fields, .. } = &record_construction(&body).kind else {
+            panic!("a declared-order record literal needs no sequencing: {body:?}");
+        };
+        assert_eq!(
+            fields.iter().map(operation_name).collect::<Vec<_>>(),
+            ["add", "mul"]
+        );
     }
 }
 
