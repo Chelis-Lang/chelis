@@ -276,23 +276,40 @@ fn named_argument_inside_a_macro_body_is_kept_in_compiled_c() {
     );
 }
 
-/// Inside a package the linker qualifies the macro's name before expansion,
-/// so the diagnostic names `..__Demo__Main__keep`; the rule is unchanged.
+/// Inside a package the linker qualifies the macro's name before expansion;
+/// each diagnostic still names the macro as the author wrote it (chelis#3269).
+fn assert_rejected_in_a_package_module(dir_name: &str, program: &str, diagnostic: &str) {
+    let (_dir, reef_home, app) = make_app(dir_name);
+    let source = app.join("src/main.ch");
+    write_file(&source, &format!("module Demo.Main\n{program}"));
+    assert_rejected_in_each_command(&app, Some(&reef_home), &source, diagnostic);
+}
+
 #[test]
 fn long_macro_call_in_a_package_module_is_rejected() {
-    let (_dir, reef_home, app) = make_app("issue-3239-package");
-    let source = app.join("src/main.ch");
-    write_file(
-        &source,
-        "module Demo.Main\n\
-         macro keep(x) = x\n\
-         out = keep(7i32, never_declared)\n",
+    assert_rejected_in_a_package_module(
+        "issue-3239-package",
+        "macro keep(x) = x\nout = keep(7i32, never_declared)\n",
+        "macro `keep` expects 1 argument(s), but this call supplies 2",
     );
-    assert_rejected_in_each_command(
-        &app,
-        Some(&reef_home),
-        &source,
-        "Demo__Main__keep` expects 1 argument(s), but this call supplies 2",
+}
+
+#[test]
+fn repeated_macro_parameter_in_a_package_module_is_rejected() {
+    assert_rejected_in_a_package_module(
+        "issue-3239-package-duplicate",
+        "macro dup(x, x) = x\nout = dup(1i32, 2i32)\n",
+        "macro `dup` declares parameter `x` more than once",
+    );
+}
+
+#[test]
+fn named_argument_on_a_macro_call_in_a_package_module_is_rejected() {
+    assert_rejected_in_a_package_module(
+        "issue-3239-package-named",
+        "macro keep(x) = x\nout = keep(7i32, accumulator=f64)\n",
+        "macro `keep` takes only positional arguments, but this call passes the named \
+         argument `accumulator=`",
     );
 }
 
