@@ -144,9 +144,9 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
-    // Library function returns prelude Option[i32]. New code matches
-    // against it with both arms — should accept and produce the unwrapped
-    // value parity-equal to the monolithic baseline.
+    // Library function returns prelude Option[i32]. New code matches its
+    // result (`lib_some()`, not the function value `lib_some`) with both
+    // arms — should accept, unwrap 7 and agree with the monolithic baseline.
     let library = "module Mylib.Math\nexport (lib_some)\n\n\
                    def lib_some() -> Option[i32] = Some(cast(7, i32))\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
@@ -156,7 +156,7 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     // must recognize the mangled `Some`, but must not collapse distinct
     // constructors merely because both crossed the reef boundary.
     let snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
-                   def unwrapped() -> i32 = match lib_some with {\n  | None => 0\n  | Some(x) => x\n}\n";
+                   def unwrapped() -> i32 = match lib_some() with {\n  | None => 0\n  | Some(x) => x\n}\n";
 
     let ctx = compile_reef_context(
         Path::new("/tmp/x"),
@@ -175,6 +175,24 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     })
     .expect("baseline");
     let baseline_by = collect_named_roots_json(&baseline.roots, &["unwrapped"]);
+    // Pin the value too: parity alone would also hold if both lanes dropped
+    // the root or produced the same wrong value.
+    let unwrapped_display = |roots: &[EvaluatedRoot]| {
+        roots
+            .iter()
+            .find(|root| root.name.as_deref() == Some("unwrapped"))
+            .and_then(|root| root.display.clone())
+    };
+    assert_eq!(
+        unwrapped_display(&result.roots).as_deref(),
+        Some("7"),
+        "in-context lane must unwrap the library Some(7)"
+    );
+    assert_eq!(
+        unwrapped_display(&baseline.roots).as_deref(),
+        Some("7"),
+        "monolithic lane must unwrap the library Some(7)"
+    );
     assert_eq!(by, baseline_by, "ADT match parity must match prepare_eval");
 }
 
@@ -184,8 +202,9 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
-    // Library returns prelude Option[i32]; new code matches with only
-    // Some — must reject as non-exhaustive citing the missing None.
+    // Library returns prelude Option[i32]; new code matches its result
+    // (`lib_some()`) with only Some — must reject as non-exhaustive citing
+    // the missing None.
     //
     // CONTRACT BEING TESTED: check_in_context must agree with the
     // monolithic baseline. If the baseline rejects but in_context
@@ -198,7 +217,7 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
     let (_dir, root) = build_pkg(library, main);
 
     let bad_snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
-                       def bad() -> i32 = match lib_some with {\n  | Some(x) => x\n}\n";
+                       def bad() -> i32 = match lib_some() with {\n  | Some(x) => x\n}\n";
 
     let ctx = compile_reef_context(
         Path::new("/tmp/x"),
@@ -226,17 +245,30 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
         baseline_full.as_ref().err()
     );
 
-    let baseline_rejects = baseline_full.is_err();
-    let in_context_rejects = match &in_context {
-        Ok(r) => !r.errors.is_empty(),
-        Err(_) => true,
+    // Both lanes must reject, and for non-exhaustivity naming `None`: an
+    // unrelated rejection (e.g. a scrutinee type mismatch) in both lanes
+    // would otherwise satisfy the agreement check without testing coverage.
+    let names_missing_none = |errors: &[chelis_compiler_api::schema::Diagnostic]| {
+        errors.iter().any(|error| {
+            error.kind().as_str() == "NonExhaustiveMatch" && error.message.contains("None")
+        })
     };
-    assert_eq!(
-        baseline_rejects,
-        in_context_rejects,
-        "check_in_context and monolithic prepare_eval must agree on non-exhaustive match: \
-         baseline_rejects={baseline_rejects}, in_context_rejects={in_context_rejects}, \
-         in_context={in_context:?}, baseline_err={:?}",
+    let in_context_errors = match &in_context {
+        Ok(r) => r.errors.clone(),
+        Err(e) => e.errors.clone(),
+    };
+    let baseline_errors = baseline_full
+        .as_ref()
+        .err()
+        .map(|e| e.errors.clone())
+        .unwrap_or_default();
+    assert!(
+        names_missing_none(&in_context_errors),
+        "check_in_context must reject the match as non-exhaustive citing None: {in_context:?}"
+    );
+    assert!(
+        names_missing_none(&baseline_errors),
+        "monolithic prepare_eval must reject the match as non-exhaustive citing None: {:?}",
         baseline_full.err()
     );
 }
