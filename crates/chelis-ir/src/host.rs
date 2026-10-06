@@ -10724,7 +10724,7 @@ fn lower_record_host_expr(
     // slot. spec/03-deep-syntax.md §4.4 makes written left-to-right order the
     // evaluation order of record children in every lane, while the
     // constructor stores its slots in declared order (chelis#3265).
-    let mut written = Vec::with_capacity(kids.len().saturating_sub(1));
+    let mut written = Vec::with_capacity(ctor_info.fields.len());
     let mut supplied = vec![false; ctor_info.fields.len()];
     for field in kids.iter().skip(1) {
         let kv_list = as_node(field).ok_or_else(|| {
