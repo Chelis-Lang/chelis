@@ -159,6 +159,14 @@ class WalkthroughTests(unittest.TestCase):
 
 
 class EvalProbeTests(unittest.TestCase):
+    def test_literal_ingress_states_the_probe_tensor_dtype(self) -> None:
+        # spec/04-type-system.md §5.6: a downstream parameter type does not
+        # state the dtype of unsuffixed to_tensor literal elements.
+        self.assertIn(
+            "[-1.0, 0.0, 1.0] |> to_tensor(f32) |> relu_then_softmax",
+            e2e.EVAL_PROBE,
+        )
+
     def test_only_the_softmax_of_the_relu_is_accepted(self) -> None:
         printed = (
             "result = tensor(shape=[3], data=[0.21194156, 0.21194156, 0.57611686])"

@@ -74,7 +74,7 @@ FENCE = re.compile(r"```([A-Za-z0-9_-]*)")
 EVAL_PROBE = (
     "def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32]"
     " = x |> relu |> softmax(0)\n"
-    "result = [-1.0, 0.0, 1.0] |> to_tensor |> relu_then_softmax\n"
+    "result = [-1.0, 0.0, 1.0] |> to_tensor(f32) |> relu_then_softmax\n"
 )
 # softmax(relu([-1, 0, 1])) = [1, 1, e] / (2 + e)
 EVAL_RESULT = (0.21194, 0.21194, 0.57612)
