@@ -1362,6 +1362,16 @@ job = "full-smt-prove"
 cadence = "daily 09:00 UTC and workflow_dispatch"
 reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
 tracking_issue = "chelis#434"
+# chelis#3236: every test in this CLI acceptance target is smt-gated. The
+# required per-PR SMT Feature Build runs it with cvc5 on every code PR.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "issue_3236_prover_name_collision"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "every test is smt-gated; `cargo test -p chelis-cli --features smt --test issue_3236_prover_name_collision` runs it with cvc5"
+tracking_issue = "chelis#3236"
 [[target_exclusion]]
 package = "chelis-prove"
 name = "standard_contract_discharge_table"
