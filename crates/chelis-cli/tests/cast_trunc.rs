@@ -434,6 +434,14 @@ fn host_lane_tensor_cast_trunc_converts_as_eval_does() {
     );
 }
 
+/// Preserve the frozen runtime-representation receipt's historical identity.
+/// The host lane now converts admitted values and rejects overflow, rather
+/// than rejecting every tensor cast or passing its input through unchanged.
+#[test]
+fn host_lane_tensor_cast_trunc_rejects_loudly_rather_than_passing_through() {
+    host_lane_tensor_cast_trunc_converts_as_eval_does();
+}
+
 // ===========================================================================
 // Surface round-trips
 // ===========================================================================

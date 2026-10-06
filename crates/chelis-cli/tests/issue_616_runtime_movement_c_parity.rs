@@ -535,6 +535,15 @@ fn issue_616_runtime_shrink_zero_size_axis_is_empty_in_both_lanes() {
     );
 }
 
+/// Preserve the frozen runtime-representation receipt's historical identity.
+/// Equal endpoints select an empty axis under spec/05 section 2.4.1 and the
+/// checked metadata contract; invalid overshoots still fail in both lanes.
+#[test]
+fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
+    issue_616_runtime_shrink_zero_size_axis_is_empty_in_both_lanes();
+    issue_616_runtime_shrink_overshoot_errs_in_both_lanes();
+}
+
 /// Error-path parity (soundness): a runtime shrink END that overshoots the
 /// input extent must fail LOUDLY in both lanes — the eval lane with a
 /// range-guard error, the C lane with the emitted runtime abort — never a
