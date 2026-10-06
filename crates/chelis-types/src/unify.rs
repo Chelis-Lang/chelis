@@ -3630,16 +3630,32 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
 /// - `Var(v)` unifies with `Concrete(p)` by binding `v` to `Type::Prim(p)`
 ///   in the substitution; further references through that var resolve to
 ///   the concrete prim via `Subst::apply_tensor_prec`.
-/// - Two `Var`s unify by linking them at the type-variable level
-///   (delegated to `bind_tvar`), keeping the precision slot's monomorphic
-///   structure consistent with the rest of the type system.
+/// - Two `Var`s unify through the ordinary type unifier, preserving any
+///   binding already established in an ordinary type position.
 pub fn unify_tensor_prec(
     p1: &TensorPrec,
     p2: &TensorPrec,
     subst: &mut Subst,
 ) -> Result<(), TypeError> {
-    let p1 = subst.apply_tensor_prec(p1);
-    let p2 = subst.apply_tensor_prec(p2);
+    // A precision variable is also an ordinary type variable ([04-INF-6]).
+    // Resolve its complete binding before treating it as a free precision:
+    // `apply_tensor_prec` deliberately retains a variable bound to a composite
+    // type, which would let `bind_tvar` overwrite that binding below.
+    let resolve = |prec: &TensorPrec| -> Result<TensorPrec, TypeError> {
+        match prec {
+            TensorPrec::Concrete(_) => Ok(prec.clone()),
+            TensorPrec::Var(v) => match subst.apply(&Type::Var(*v)) {
+                Type::Prim(p) => Ok(TensorPrec::Concrete(p)),
+                Type::Var(root) => Ok(TensorPrec::Var(root)),
+                other => Err(TypeError {
+                    kind: TypeErrorKind::TypeMismatch,
+                    message: format!("tensor precision must be a primitive, found {other}"),
+                }),
+            },
+        }
+    };
+    let p1 = resolve(p1)?;
+    let p2 = resolve(p2)?;
     match (&p1, &p2) {
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
         (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
@@ -3659,13 +3675,17 @@ pub fn unify_tensor_prec(
                 None => format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
             },
         }),
-        (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
-        (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),
+        (TensorPrec::Var(v), TensorPrec::Concrete(p)) => {
+            unify(&Type::Var(*v), &Type::Prim(*p), subst)
+        }
+        (TensorPrec::Concrete(p), TensorPrec::Var(v)) => {
+            unify(&Type::Prim(*p), &Type::Var(*v), subst)
+        }
         (TensorPrec::Var(v1), TensorPrec::Var(v2)) => {
             if v1 == v2 {
                 Ok(())
             } else {
-                bind_tvar(*v1, &Type::Var(*v2), subst)
+                unify(&Type::Var(*v1), &Type::Var(*v2), subst)
             }
         }
     }
@@ -3820,6 +3840,13 @@ fn discharge_operand_gates(v: TypeVar, subst: &mut Subst) {
 }
 
 fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
+    // A caller must never replace an established binding. Reconcile through
+    // the ordinary unifier so aliases and composite types retain their
+    // existing constraints even if a new binding path is added later.
+    let existing = subst.resolve_tvar(v);
+    if existing != Type::Var(v) {
+        return unify(&existing, ty, subst);
+    }
     if let Type::Var(v2) = ty
         && *v2 == v
     {
@@ -4503,7 +4530,7 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
             // include it in the occurs check so an attempt to unify
             // ?v with `tensor[..., ?v]` is caught as an infinite type.
             TensorPrec::Concrete(_) => false,
-            TensorPrec::Var(v2) => *v2 == v,
+            TensorPrec::Var(v2) => occurs_in(v, &Type::Var(*v2), subst),
         },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
         Type::KindedAdt(_, args) => args
@@ -6593,6 +6620,46 @@ mod tests {
         unify(&t_var, &t_f32, &mut s).expect("first call binds prec var to f32");
         let err = unify(&t_var, &t_bf16, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn tensor_precision_cannot_overwrite_a_composite_type_binding() {
+        let mut s = Subst::new();
+        let p = TypeVar(9001);
+        let tensor = Type::Tensor(vec![Dim::Lit(3)], tprec(Prim::F32));
+        unify(&Type::Var(p), &tensor, &mut s).unwrap();
+        let err = unify_tensor_prec(
+            &TensorPrec::Var(p),
+            &TensorPrec::Concrete(Prim::F32),
+            &mut s,
+        )
+        .expect_err("a tensor is not an f32 precision");
+        assert!(matches!(err.kind, TypeErrorKind::TypeMismatch));
+        assert_eq!(
+            s.apply(&Type::Var(p)),
+            tensor,
+            "failed unification must retain the binding"
+        );
+    }
+
+    #[test]
+    fn aliased_precision_cannot_form_a_composite_cycle() {
+        let mut s = Subst::new();
+        let p = TypeVar(9002);
+        let q = TypeVar(9003);
+        unify(
+            &Type::Var(p),
+            &Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Var(q)),
+            &mut s,
+        )
+        .unwrap();
+        let err = unify(
+            &Type::Var(q),
+            &Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Var(p)),
+            &mut s,
+        )
+        .expect_err("precision alias cycle must terminate with a diagnostic");
+        assert!(matches!(err.kind, TypeErrorKind::OccursCheck));
     }
 
     #[test]
