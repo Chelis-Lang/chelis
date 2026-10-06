@@ -190,10 +190,12 @@ fn monotonic_instant_is_opaque_outside_its_module() {
         rendered.contains("field access") && rendered.contains("opaque type `MonotonicInstant`"),
         "field access was not rejected as opaque:\n{rendered}"
     );
+    // Diagnostics name another module's type by its module path (chelis#3269),
+    // so the two distinct types read apart.
     assert!(
-        rendered.contains("TypeMismatch")
-            && rendered.contains("Std__Datetime__Instant vs")
-            && rendered.contains("Std__Datetime__Clock__MonotonicInstant"),
+        rendered.contains(
+            r#""kind":"TypeMismatch","message":"type mismatch: Std.Datetime.Instant vs Std.Datetime.Clock.MonotonicInstant""#
+        ),
         "a MonotonicInstant was accepted as an Instant:\n{rendered}"
     );
 }

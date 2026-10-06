@@ -154,7 +154,6 @@ fn an_uncalled_definition_with_an_unused_parameter_is_rejected() {
     );
 }
 
-/// Inside a package the linker qualifies the macro's name before expansion.
 #[test]
 fn an_unused_parameter_in_a_package_module_is_rejected() {
     let (_dir, reef_home, app) = make_app("issue-3266-package");
@@ -169,7 +168,7 @@ fn an_unused_parameter_in_a_package_module_is_rejected() {
         &app,
         Some(&reef_home),
         &source,
-        "Demo__Main__first` never references its parameter `b`",
+        "macro `first` never references its parameter `b`",
     );
 }
 

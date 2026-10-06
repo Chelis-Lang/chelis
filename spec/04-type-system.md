@@ -635,6 +635,41 @@ the reserved format on the user decls it admits — is the structural
 invariant that prevents a hand-authored mangled name from self-keying
 to a victim module on any surface.
 
+**Names in diagnostics.** Because the linker output is private, a
+diagnostic of `chelis check`, `eval`, `build` or `test` does not show a
+linker name that the linker assigned to one declaration. It names that
+declaration by the name its author wrote, taken from the linker's own
+name assignment rather than from the encoded string (an authored name
+may itself contain `__`):
+
+- a declaration of the diagnosed file is named bare, `out`. For a file
+  beneath a source root these are the declarations of the module the
+  file is (spec/01-nomenclature.md §6.5), so a diagnostic about a package
+  module reads as it does for the same source as a standalone file. A
+  file outside every source root is no module (spec/02-surf-syntax.md
+  §P2), and a `module` header in it makes no package module's
+  declarations its own;
+- a declaration of any other module is named qualified by its module
+  path, `Demo.Util.helper`, `Std.Datetime.Date`, the form an author
+  writes a qualified reference in;
+- module paths are not unique across the packages of one graph (an
+  import resolves to the importing package's own module first, and no
+  rule makes `module_prefix` unique), so declarations whose
+  module-qualified names coincide are each further qualified by package,
+  `other-lib/Demo.Util.T`;
+- the encoding is not injective (`My__Shape` in `Demo.Main` and `Shape`
+  in `Demo.Main.My` link alike); a linker name assigned to more than one
+  declaration is shown as linked, since no one authored name is it.
+
+No two distinct linker names are shown alike. The rule governs the
+human-readable text of a compile-time diagnostic: its kind, span and
+span identity are unchanged, and the text of an evaluation-time failure
+is the program's own data and is shown as the program produced it. A
+diagnostic whose own contract spells the names it reports keeps that
+spelling: the opaque-type violation message names its type, def,
+binding, producers and defining module as its error contract below
+states.
+
 **The rejection set.** Outside the defining module, each of the
 following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
 returns the expression's TRUE type, so a violation never cascades into

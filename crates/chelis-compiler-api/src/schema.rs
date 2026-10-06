@@ -258,6 +258,24 @@ impl Diagnostic {
         })
     }
 
+    /// Name declarations of a linked program as their author wrote them
+    /// (chelis#3269): every human-readable text field of the diagnostic --
+    /// `message`, `expected`, `got` and `suggestions` -- renders through
+    /// the linked program's spellings. `kind`, `span` and `span_id` identify
+    /// the diagnostic rather than describe it, and are left unchanged.
+    pub fn render_source_names(&mut self, names: &chelis_reef::DiagnosticNames) {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        names.render_in_place(&mut self.message);
+        for text in self
+            .expected
+            .iter_mut()
+            .chain(self.got.iter_mut())
+            .chain(self.suggestions.iter_mut())
+        {
+            names.render_in_place(text);
+        }
+    }
+
     pub(crate) fn general(
         kind: GeneralKind,
         message: impl Into<String>,

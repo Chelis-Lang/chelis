@@ -2176,7 +2176,7 @@ fn cmd_eval_inner(
                 .then(chelis_types::install_linked_program_guard);
             if let Some(package_root) = &eval_package_root {
                 let source = fs::read_to_string(path)?;
-                match prepare_eval_in_context(package_root, &source, json, target) {
+                match prepare_eval_in_context(package_root, path, &source, json, target) {
                     Ok(output) => return Ok(output),
                     Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
                 }
@@ -2189,12 +2189,21 @@ fn cmd_eval_inner(
             let EvalDecls {
                 decls,
                 entry_decls,
-                linked,
+                diagnostic_names,
             } = load_eval_decls(path)?;
-            let _single_file_linked_guard = linked.then(chelis_types::install_linked_program_guard);
-            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-            let checked =
-                checked_compilation_with_effects(&deep_exprs).map_err(boxed_string_error)?;
+            let _single_file_linked_guard = diagnostic_names
+                .is_some()
+                .then(chelis_types::install_linked_program_guard);
+            // chelis#3269: a linked program's compile diagnostics name its
+            // declarations as their author wrote them.
+            let authored = |text: String| match &diagnostic_names {
+                Some(names) => names.render(&text).into_owned(),
+                None => text,
+            };
+            let deep_exprs = expanded_desugared_program(&decls)
+                .map_err(|error| boxed_string_error(authored(error)))?;
+            let checked = checked_compilation_with_effects(&deep_exprs)
+                .map_err(|error| boxed_string_error(authored(error)))?;
             // [05-OBS-7..11]: selection consumes the same target-aware
             // manifest as evaluation and build. The former source-derived
             // list excluded pure nullary defs whenever the file also had a
@@ -2205,12 +2214,18 @@ fn cmd_eval_inner(
                 manifest_root_names_from_decls(&entry_decls, checked.program(), target)?;
             // The checked compilation itself is lowered and run, so the
             // program checked is exactly the program evaluated; it is never
-            // printed back to Surf and parsed again (chelis#3129).
+            // printed back to Surf and parsed again (chelis#3129). A failure
+            // while evaluating is the program's own data and is left as it
+            // is; `with_source_names` renders only compile-stage failures.
             let outcome = chelis_compiler_api::compiler::eval_checked_selected_for_target(
                 checked,
                 &selected_roots,
                 target,
-            );
+            )
+            .map_err(|error| match &diagnostic_names {
+                Some(names) => error.with_source_names(names),
+                None => error,
+            });
             if json {
                 prepare_eval_json(outcome)
             } else {
@@ -2278,6 +2293,7 @@ enum EvalInContextError {
 /// against unchanged sources skips the ~67s library compile entirely.
 fn prepare_eval_in_context(
     package_root: &Path,
+    file: &Path,
     source: &str,
     json: bool,
     target: chelis_types::types::Target,
@@ -2288,8 +2304,12 @@ fn prepare_eval_in_context(
     // chelis#2558: the context links only the chelis-std modules the package
     // and this source import, so the source's imports are collected first.
     // `detect_eval_package_root` routed here only because the source parsed.
-    let entries =
+    let mut entries =
         chelis_reef::EntryImports::from_surf_source(source).map_err(EvalInContextError::Compile)?;
+    // chelis#3269: diagnostics name the declarations of the package module
+    // `file` is, by its location, bare; a file outside every source root is
+    // no module, whatever its `module` header says.
+    entries.add_entry_file(file);
     // Phase K: route through `load_or_compile_for_package` so the disk
     // cache amortizes cold-compile cost across invocations. On a hit
     // (source unchanged since last run), the library compile is skipped
@@ -3158,7 +3178,34 @@ fn cmd_check_one_on_grown_stack(
     {
         return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
     }
+    let mut report = check_prepared_file(prepared.as_ref(), &source, show_inferred);
+    // chelis#3269: a linked program's diagnostics name its declarations as
+    // their author wrote them, not by the linker's private spelling.
+    if let Some(prepared) = &prepared {
+        report.render_source_names(&prepared.diagnostic_names);
+    }
+    report
+}
 
+/// The authored rendering of `text`, a diagnostic about `prepared`
+/// (chelis#3269). A program the linker did not prepare is shown as is.
+fn render_linked_names<'a>(
+    prepared: Option<&chelis_reef::PreparedProgram>,
+    text: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    match prepared {
+        Some(prepared) => prepared.diagnostic_names.render(text),
+        None => std::borrow::Cow::Borrowed(text),
+    }
+}
+
+/// The report for the program `check` prepared from a source file, with
+/// `source` its text.
+fn check_prepared_file(
+    prepared: Option<&chelis_reef::PreparedProgram>,
+    source: &str,
+    show_inferred: bool,
+) -> CheckResult {
     // RFC v5 (RT-1 F2 bypass): inside a reef package every decl checked
     // below (layered fast path AND the monolithic fallback on
     // `prepared.decls`) is reef-linker output, so accept the linker's
@@ -3200,7 +3247,12 @@ fn cmd_check_one_on_grown_stack(
                     // the failure to REACH the report, not for the terminal
                     // line to be taken away, and this message is the only
                     // human-facing account of a layered-check failure.
-                    eprintln!("error: {}", compiler_error_messages(&error));
+                    eprintln!(
+                        "error: {}",
+                        prepared
+                            .diagnostic_names
+                            .render(&compiler_error_messages(&error))
+                    );
                     // One diagnostic per compiler error, for the same reason
                     // the style gate emits one per issue: `compiler_error_messages`
                     // joins them with "; " for the terminal, and a joined
@@ -3276,7 +3328,7 @@ fn cmd_check_one_on_grown_stack(
                     // as the prepared-path parse error above, for the
                     // raw `parse_str` branch used when no reef context
                     // resolves.
-                    match chelis_surf::parser::parse_str(&source) {
+                    match chelis_surf::parser::parse_str(source) {
                         Ok(decls) => decls,
                         Err(err) => {
                             return synthetic_check_report_with_error(&err.to_string());
@@ -3302,7 +3354,7 @@ fn cmd_check_one_on_grown_stack(
                     // reported here, and it is the kind of message a person
                     // reads in a terminal rather than parses out of JSON.
                     let message = error.to_string();
-                    eprintln!("error: {message}");
+                    eprintln!("error: {}", render_linked_names(prepared, &message));
                     return match error {
                         chelis_compiler_api::pipeline::PreparationError::SurfDesugar(error) => {
                             synthetic_check_report_with_typed_error(
@@ -4161,6 +4213,27 @@ fn cmd_build(
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
         .map_err(boxed_string_error)?;
+    // chelis#3269: a linked program's diagnostics name its declarations as
+    // their author wrote them, not by the linker's private spelling.
+    build_prepared_file(file, &source, prepared.as_ref(), output, target, emit_c).map_err(|error| {
+        let text = error.to_string();
+        match render_linked_names(prepared.as_ref(), &text) {
+            std::borrow::Cow::Owned(rendered) => boxed_string_error(rendered),
+            std::borrow::Cow::Borrowed(_) => error,
+        }
+    })
+}
+
+/// Build the program `build` prepared from a source file, with `source`
+/// its text.
+fn build_prepared_file(
+    file: &std::path::Path,
+    source: &str,
+    prepared: Option<&chelis_reef::PreparedProgram>,
+    output: Option<&std::path::Path>,
+    target: BuildTarget,
+    emit_c: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // RFC v5 (RT-1 F2 bypass): a reef-prepared build checks reef-linker
     // output; accept the linker's reserved internal-name format. Raw
     // `.ch`/`.dp` builds keep the flag FALSE and reject mangled names.
@@ -4176,7 +4249,7 @@ fn cmd_build(
     // (chelis#2331).
     let (decls, entry_decls) = match &prepared {
         Some(prepared) => (prepared.decls.clone(), Some(prepared.entry_decls.clone())),
-        None => (chelis_surf::parser::parse_str(&source)?, None),
+        None => (chelis_surf::parser::parse_str(source)?, None),
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
     // and reject a zero-declaration program rather than emitting a
@@ -4228,7 +4301,7 @@ fn cmd_build(
     let selected_checked = match selected_checked {
         Some(checked) => checked,
         None => checked_compilation_with_effects_typed(&full_deep_exprs).map_err(|e| {
-            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source)))
         })?,
     };
 
@@ -4256,7 +4329,7 @@ fn cmd_build(
         selected_checked
     } else {
         checked_compilation_with_effects_typed(&deep_exprs).map_err(|e| {
-            render_build_check_failure(&e, prepared.is_none().then_some((file, source.as_str())))
+            render_build_check_failure(&e, prepared.is_none().then_some((file, source)))
         })?
     };
     let checked = checked_compilation.program();
@@ -9217,6 +9290,9 @@ fn require_test_files_in_one_package(
 fn test_entry_imports<P: AsRef<Path>>(files: &[P]) -> chelis_reef::EntryImports {
     let mut imports = chelis_reef::EntryImports::none();
     for file in files {
+        // chelis#3269: diagnostics name the declarations of the package
+        // module a test file is, by its location, bare.
+        imports.add_entry_file(file.as_ref());
         if let Ok(source) = fs::read_to_string(file.as_ref())
             && let Ok(decls) = chelis_surf::parser::parse_str(&source)
         {
@@ -10858,7 +10934,8 @@ fn prepare_eval_in_exec_context(
             #[allow(deprecated)]
             let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
-                err.errors
+                err.with_source_names(&prepared.diagnostic_names)
+                    .errors
                     .iter()
                     .map(|d| d.message.clone())
                     .collect::<Vec<_>>()
@@ -10894,7 +10971,8 @@ fn prepare_rewritten_batch_in_exec_context(
             #[allow(deprecated)]
             let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
-                err.errors
+                err.with_source_names(&prepared.diagnostic_names)
+                    .errors
                     .iter()
                     .map(|diagnostic| diagnostic.message.clone())
                     .collect::<Vec<_>>()
@@ -11067,6 +11145,7 @@ fn eval_module_init(
         Err(err) => return Some(format!("compile: {err}")),
     };
     let linked_decls = prepared.decls;
+    let diagnostic_names = prepared.diagnostic_names;
     let outcome = run_test_with_timeout(
         move || {
             // RFC v5 (RT-1 F2 bypass): `linked_decls` is the reef-linked
@@ -11090,8 +11169,11 @@ fn eval_module_init(
     match outcome {
         Err(msg) => Some(msg),
         Ok(Ok(_)) => None,
+        // chelis#3269: compile diagnostics name declarations as their author
+        // wrote them; a failure while evaluating is left as it is.
         Ok(Err(err)) => Some(
-            err.errors
+            err.with_source_names(&diagnostic_names)
+                .errors
                 .iter()
                 .map(|d| d.message.clone())
                 .collect::<Vec<_>>()
@@ -11119,8 +11201,9 @@ struct EvalDecls {
     decls: Vec<Decl>,
     /// The evaluated file's own declarations.
     entry_decls: Vec<Decl>,
-    /// Whether the reef linker produced `decls`.
-    linked: bool,
+    /// How diagnostics spell the linker's names when the reef linker
+    /// produced `decls`, `None` for an unlinked file.
+    diagnostic_names: Option<chelis_reef::DiagnosticNames>,
 }
 
 fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
@@ -11136,13 +11219,13 @@ fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>>
         return Ok(EvalDecls {
             decls: prepared.decls,
             entry_decls: prepared.entry_decls,
-            linked: true,
+            diagnostic_names: Some(prepared.diagnostic_names),
         });
     }
     Ok(EvalDecls {
         entry_decls: decls.clone(),
         decls,
-        linked: false,
+        diagnostic_names: None,
     })
 }
 

@@ -1429,6 +1429,44 @@ pub fn compile_reef_context_for_entries(
     let source_hash = ContextHash::from_digests(&digests);
     log_phase("hash_digests", &mut t);
 
+    // chelis#3269: the library is linker output, so a rejection names its
+    // declarations as their author wrote them: bare in the package module
+    // an entry file is, by its location, and module-qualified in every
+    // other module.
+    let (library, library_dag) = check_and_lower_library(&reef_state, profile, &log_phase, &mut t)
+        .map_err(|error| {
+            error.with_source_names(&reef_state.diagnostic_names(reef_state.entry_modules(entries)))
+        })?;
+
+    // Package + build identity: canonical `package_root` from the
+    // resolved reef graph plus the compiler version. Distinguishes two
+    // distinct checkouts that share name+version+source bytes and pins
+    // the compiler build into the cache key.
+    let identity = CacheIdentity::for_package_root(&reef_state.package_root);
+
+    Ok(CompiledContext {
+        source_hash,
+        identity,
+        reef_state,
+        library,
+        library_dag,
+    })
+}
+
+/// The checked library of `reef_state` and its lowered DAG: the semantic
+/// half of [`compile_reef_context_for_entries`].
+fn check_and_lower_library(
+    reef_state: &PreparedReefGraph,
+    profile: bool,
+    log_phase: &dyn Fn(&str, &mut std::time::Instant),
+    t: &mut std::time::Instant,
+) -> Result<
+    (
+        crate::pipeline::CheckedLibrary,
+        crate::pipeline::LoweredLibrary,
+    ),
+    CompilerError,
+> {
     // Phase C+0e / chelis#451: build the checked library and its lowered DAG.
     // The layered path reuses the cross-process
     // chelis-std typecheck cache so the chelis-std half of the library is
@@ -1441,7 +1479,7 @@ pub fn compile_reef_context_for_entries(
     // The full-library Surf → Deep desugar + macro expand is deferred to
     // the monolithic fallback so the layered path does NOT re-desugar
     // chelis-std (the layered helper desugars only the package's own decls).
-    let library = match build_checked_library_layered(&reef_state, &mut t) {
+    let library = match build_checked_library_layered(reef_state, t) {
         Some(Ok(library)) => library,
         Some(Err(err)) => return Err(err),
         None => {
@@ -1466,7 +1504,7 @@ pub fn compile_reef_context_for_entries(
                             crate::pipeline::PipelineRejection::Preparation(error),
                         )
                     })?;
-            log_phase("surf_desugar_macro_expand", &mut t);
+            log_phase("surf_desugar_macro_expand", t);
 
             if profile {
                 let (modules, decls) = library_structural_summary(prepared.expanded_deep());
@@ -1481,13 +1519,13 @@ pub fn compile_reef_context_for_entries(
             let analysis = crate::pipeline::analyze_prepared_library(prepared)
                 .map_err(library_rejection_to_compiler_error)
                 .map_err(|error| cancelled_or("check", error))?;
-            log_phase("build_compiled_library_context", &mut t);
+            log_phase("build_compiled_library_context", t);
             bail_if_cancelled("effects")?;
             let library = crate::pipeline::complete_library_checks(analysis)
                 .map_err(library_rejection_to_compiler_error)
                 .map_err(|error| cancelled_or("effects", error))?;
             bail_if_cancelled("linearity")?;
-            log_phase("semantic_checks", &mut t);
+            log_phase("semantic_checks", t);
             library
         }
     };
@@ -1502,21 +1540,8 @@ pub fn compile_reef_context_for_entries(
     let library_dag = crate::pipeline::lower_library(&library)
         .map_err(crate::compiler::pipeline_rejection_to_compiler_error)
         .map_err(|error| cancelled_or("lower", error))?;
-    log_phase("lower_program_to_library", &mut t);
-
-    // Package + build identity: canonical `package_root` from the
-    // resolved reef graph plus the compiler version. Distinguishes two
-    // distinct checkouts that share name+version+source bytes and pins
-    // the compiler build into the cache key.
-    let identity = CacheIdentity::for_package_root(&reef_state.package_root);
-
-    Ok(CompiledContext {
-        source_hash,
-        identity,
-        reef_state,
-        library,
-        library_dag,
-    })
+    log_phase("lower_program_to_library", t);
+    Ok((library, library_dag))
 }
 
 pub(crate) fn library_rejection_to_compiler_error(
