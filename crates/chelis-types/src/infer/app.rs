@@ -427,6 +427,9 @@ fn infer_app_inner(
                 | "argmin_reduce"
         )
     );
+    if applied_constructor_head {
+        product.aggregate_arg_depth += 1;
+    }
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -467,6 +470,15 @@ fn infer_app_inner(
             }
         })
         .collect();
+    if applied_constructor_head {
+        product.aggregate_arg_depth -= 1;
+    }
+
+    if matches!(func_name.as_deref(), Some("to_tensor")) {
+        // The leaf dtype and shape checks consume the completed list, even
+        // when this call sits inside another constructor's arguments.
+        product.replay_ready_shape_checks_at_aggregate_boundary(vg, subst, adt_reg, errors);
+    }
 
     if let Some(dtype_child) = dtype_child
         && let Some(argument) = arg_tys.first()
@@ -811,6 +823,9 @@ fn infer_app_inner(
     // `Cons(head, Nil)` where `Nil`'s tvar binds the element type)
     // keep their existing semantics.
     if matches!(func_name.as_deref(), Some("Cons")) && arg_tys.len() == 2 {
+        if matches!(subst.apply(&arg_tys[0]), Type::Tensor(..)) {
+            product.replay_ready_shape_checks_at_aggregate_boundary(vg, subst, adt_reg, errors);
+        }
         let head_resolved = subst.apply(&arg_tys[0]);
         let tail_resolved = subst.apply(&arg_tys[1]);
         if let (Type::Tensor(head_dims, head_prec), Type::Adt(list_name, list_args)) =
@@ -950,13 +965,24 @@ fn infer_app_inner(
         Ok(ret_ty) => ret_ty,
         Err(rejected) => return_with_collection_cleanup!(rejected),
     };
-    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+    // Constructor equalities belong to result origin. Nested constructors
+    // publish them without replay; the outermost constructor checks the whole
+    // aggregate once. Replaying at every inner constructor revisits the
+    // growing graph for each element (#2975).
+    let defer_result_replay = applied_constructor_head
+        && product.aggregate_arg_depth > 0
+        && !matches!(func_ty, Type::Error(_));
+    if !defer_result_replay {
+        product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+    }
     if direct_collection_builtin {
         subst.discard_collection_contracts(&callee_collection_contracts);
-    } else if matches!(
-        subst.apply(&func_ty),
-        Type::Fn(ref params, _) if params.len() == arg_tys.len()
-    ) {
+    } else if !callee_collection_contracts.is_empty()
+        && matches!(
+            subst.apply(&func_ty),
+            Type::Fn(ref params, _) if params.len() == arg_tys.len()
+        )
+    {
         let alternatives = product.callable_result_alternatives(&func_ty, subst);
         let tensor_concat = subst
             .collection_contracts_include_concat(&callee_collection_contracts, &alternatives)
@@ -968,11 +994,18 @@ fn infer_app_inner(
             split_keys_call_count(kids, env),
         );
     }
-    let related_results = product
-        .result_equations_for(&subst.apply(&ret_tv), subst)
-        .into_iter()
-        .flat_map(|equation| equation.types().into_iter().cloned().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
+    let related_results = if subst
+        .collection_contract_ids_since(collection_contract_mark)
+        .is_empty()
+    {
+        Vec::new()
+    } else {
+        product
+            .result_equations_for(&subst.apply(&ret_tv), subst)
+            .into_iter()
+            .flat_map(|equation| equation.types().into_iter().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
     if let Some(checked_result) = subst.finish_collection_contract_application(
         collection_contract_mark,
         &arg_tys,
@@ -1004,6 +1037,7 @@ fn infer_app_inner(
         errors,
         product,
         expected_result,
+        defer_result_replay,
     );
     if errors.iter_since(checkpoint).next().is_some() {
         subst.cancel_collection_contract_application(collection_contract_mark);

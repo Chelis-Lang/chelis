@@ -9,6 +9,29 @@ use crate::context::LibraryProofId;
 mod deferred_shape;
 mod result_origin;
 
+// Counts real constraint examinations for the chelis#2975 scaling oracle.
+// A typed-node count misses repeated work over one retained result graph.
+// Slots: equation collection, binding producer scan, join replay,
+// annotation replay, general producer scan.
+#[cfg(test)]
+thread_local! {
+    static RESULT_REPLAY_WORK: Cell<[usize; 5]> = const { Cell::new([0; 5]) };
+}
+
+#[cfg(test)]
+pub(super) fn record_result_replay_work(kind: usize) {
+    RESULT_REPLAY_WORK.with(|work| {
+        let mut counts = work.get();
+        counts[kind] += 1;
+        work.set(counts);
+    });
+}
+
+#[cfg(test)]
+pub(super) fn take_result_replay_work() -> [usize; 5] {
+    RESULT_REPLAY_WORK.with(|work| work.replace([0; 5]))
+}
+
 #[cfg(test)]
 use deferred_shape::reconcile_replayed_result;
 pub(super) use deferred_shape::shape_operand_awaits_binding;
@@ -43,6 +66,9 @@ pub(super) struct InferenceProduct {
     /// this function again; without the flag that recursion is unbounded.
     /// The outer pass runs to a fixpoint, so a nested call has nothing to add.
     replaying_shape_checks: bool,
+    /// Constructor arguments form one result-origin region. Replay after
+    /// the enclosing aggregate has published its equalities.
+    pub(super) aggregate_arg_depth: usize,
     /// chelis#1512: while a `PostApp` entry is being replayed, the ledger's
     /// own CLONE of the call stands in for the live Deep node, and that clone
     /// is dropped at the end of the replay iteration. A route that
