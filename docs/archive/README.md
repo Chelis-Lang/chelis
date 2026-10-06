@@ -11,7 +11,6 @@ the project as it was when written, not current behavior. The numbered chapters 
 - Historical plans: [July execution](chelis_plan_execution.md) and [completed maintenance schedule](maintenance_schedule.md); current sequence is in [`chelis_project_plan.md`](../../spec/design/chelis_project_plan.md).
 - [Phase 1e benchmark capture](perf/phase1e/RESULTS.md) — point-in-time comparison.
 - [Retired mascot](mascot/README.md): replaced by the line art in [`docs/assets/brand/`](../assets/brand/).
-- [Core release issue snapshot](launch_known_issues_2026_10_04.md) — a dated issue inventory; use the [live issue tracker](https://github.com/Chelis-Lang/chelis/issues) for current limitations.
 - [Deep 0.20 pipe migration](pipe_migration_0_20.md) — version-specific source conversion notes.
 
 Other archives: [`investigations/`](investigations/README.md) (resolved bug diagnoses and review notes), `perf/` (dated performance reports), `rca/` (incident analysis),
