@@ -71,3 +71,55 @@ condition = "AND"
 regexTarget = "match"
 paths = ["^scripts/test_openspec_controller\\.py$"]
 regexes = ["^APP_TOKEN_SHA\\ =\\ \"bcd2ba49218906704ab6c1aa796996da409d3eb1\"$"]
+
+# These original frozen-manifest fields are SHA-256 digests of public Git blobs,
+# independently recomputed against the campaign baseline; not credentials.
+# Preserve the raw receipts and scan every other field, value and archive member.
+[[allowlists]]
+description = "Reviewed axis campaign source hashes; exact archived JSON path and match (PR #2851)"
+condition = "AND"
+regexTarget = "match"
+paths = ["^docs/investigations/axis_oracle_comparison_results/receipts\\.tar\\.gz!raw/manifest\\.json$", "^docs/investigations/axis_oracle_comparison_results/receipts\\.tar\\.gz!raw/calibration-provenance\\.json$"]
+regexes = [
+  "^two_claims_one_local_guard_key\\.rs\":\\ \"e81bfc5da482f9f4db0573eb0ae635b80bf1f92bd93ed9967efdb4483108693c\"$",
+  "^hip_runtime_api\\.h\":\\ \"d19fb211fc0f995030e8a1d6590d7ba1b8143bbe605e1174a7dee286c39d47df\"$",
+  "^hip_runtime_api\\.h\":\\ \"e494002cda533833d526fc3298e264bb38bdde5eac24a6c21752a87a6aeabc83\"$",
+  "^dict_key_domain\\.rs\":\\ \"10cc1c61a7ea56c98daf452bbfdea3568f66cb3dd97782ef7b7cd9b79029f2a6\"$",
+  "^issue_2318_key_form\\.rs\":\\ \"8ed80c3e98fbc0046ec065fa4af5ba460c95b6af89f28ff1bfffc5d5386c9fa8\"$",
+  "^issue_2463_key_dead_draw_traps\\.rs\":\\ \"9cdf64679c7a60a5b8d37a16645320bdb5809084889d961e2198199d3e173339\"$",
+  "^compiled_context_authenticated_handoff\\.rs\":\\ \"485e5053eddb3ca50fec93d6563ce6958f487543f8a4b50d2c71c1b722d971c5\"$",
+  "^dropout_fixed_stream_api\\.rs\":\\ \"f23994d085d93682c174aa74af18bd2173d7f82c3924184f0cf19902d505201c\"$",
+  "^library\\-v11\\-key\\-input\\.bin\":\\ \"3de3d58aea89df066dd49212d2631ae943b3d4ae4c768672fa0e44f8137bd960\"$",
+  "^stdlib\\-v15\\-key\\-input\\.bin\":\\ \"87d4c0e2913392d125ab453791aa2d03d2e90c9708bb89de26ae7657a51ff50e\"$",
+  "^issue_1291_count_device_helpers_api\\.rs\":\\ \"e7cc777b65815f08ccc07a8b80a700ccced2647db976d0b7e7948632f0fdda5b\"$",
+  "^issue_1650_empty_tensor_api\\.rs\":\\ \"480c943b0f14dd9d86093dd019f079b7c0e45067f30dcefe570f21ea91d2868a\"$",
+  "^issue_1741_scalar_gradient_api\\.rs\":\\ \"39e30f929522346803e0aa2ca9e8aafb1fb423462dffd176599e2f2b216d7bfa\"$",
+  "^issue_1922_helper_summary_diagnostic_api\\.rs\":\\ \"3d16ac43f8bdd59c830dc714733df8362f88a78f0e77191ac2b00dac2fc7053e\"$",
+  "^key_admission_lanes\\.rs\":\\ \"8a0de9d379ef8d6dba0b85b349cf580af8bf93c214b1afc1ee27d54fd06bf810\"$",
+  "^key_affinity_lanes\\.rs\":\\ \"4ba9412f95e3494a084706c01c145ec29e535922b470849f5ff9a6b37a894597\"$",
+  "^key_execution_values\\.rs\":\\ \"2d9fc1441fbee7640a70a3d13c1d21a2ecc71694b1918cd2f0d42bb3c10532d2\"$",
+  "^key_extent_lanes\\.rs\":\\ \"8abb3d23bf6693bc33427bb2e2293dfbf5bedf25f16a328db307097137f9a9af\"$",
+  "^key_operand_random_c\\.rs\":\\ \"fae63f3dd8f7dc529d264078716329831bf6982171e50fb3e40f62660b083bf1\"$",
+  "^key_operations_c\\.rs\":\\ \"b0baea88200a2e7028f0bb3c4623e9e512a1fac0ccded5002c1df66991b50b05\"$",
+  "^key_root_lanes\\.rs\":\\ \"b1976b917b0f0b6f13b63ee6dca2de422b2e6b27e0d1565a5eb549446a95e91b\"$",
+  "^key_surface_lanes\\.rs\":\\ \"6849c0c817808184a06f76c653f2ab7dd2cd0c0162050168749ad6aef3adf3b7\"$",
+  "^key_tensor_forms\\.rs\":\\ \"8e70cba81f99477fcedfa64117af4afc66413d3068c1d86f1ac21c1f97ec9ff6\"$",
+  "^stdlib_cache_key_runtime_identity\\.rs\":\\ \"7024269d24cf278f107f783b39046769906f769959555eaf3d9ab6b6d4103594\"$",
+  "^capacity_key\\.rs\":\\ \"b3f01672cfd3b02ee96bbb649619ad656baa258009f01b6663868328dd40792a\"$",
+  "^issue_1771_literal_result_tokens\\.rs\":\\ \"32493bf55363ea638202adaae1c712bdd3fe51bc0f8189feb20f898a1adbf85b\"$",
+  "^key_operations_ir\\.rs\":\\ \"ae8e1d3033fba3701d73498d74e5ed25d73e2c7641702df81e94a29386e86f0d\"$",
+  "^hip_runtime_api\\.h\":\\ \"5bdfe672321dce4f511a4d88bbfc0f1595f982bfcf7cfe61d603c70b2c79ccf8\"$",
+  "^metadata_plan_api\\.rs\":\\ \"5bdedc34235ab5978c720ba9f092d9815c97f6580e8c5403347c3f947ef831d6\"$",
+  "^token\\.rs\":\\ \"3754a03df329f0010ac42a468e209e6752d7abd8fbbb1435b0f2f8b2386de1ad\"$",
+  "^api\\.rs\":\\ \"8c2fcfd6e18ad743e4c8d4c201a2ac8aee7ead01a1ca2283ca5df10ecc4f4ba0\"$",
+  "^post_app_ledger_key\\.rs\":\\ \"c914b57ea1c8152cb0f6d4bc51cf3920be28a26391cf13b615ae8b8c7a0fd01e\"$",
+  "^key_admission\\.rs\":\\ \"bb6e3a9846d7462b376f4f6470af86487531a7aa695507cdf2efe087ce04ad91\"$",
+  "^infer_public_api_surface\\.rs\":\\ \"ad34e98cceb8bef3bbf059465b448e8665d8d2f4bdef132da384c8cb03d24fb3\"$",
+  "^issue_755_field_access_totality\\.rs\":\\ \"0711fbdb0d18294ab1496bbce7c17ae8d0cfde6af448c21a8443e076a35605dc\"$",
+  "^key_admission_sweep\\.rs\":\\ \"9726e6a17b9bffc5f941f994429162d99565f894fbf7034f899c403f7e30c36b\"$",
+  "^key_builtin_cases\\.rs\":\\ \"5c5f3ab9650276f86489bcd1ef4083264b38784547d33c5b4f523427e34113fb\"$",
+  "^key_linearity\\.rs\":\\ \"67a9d291a7d904eed47ed2f3dd3ec39d134dd89095ae5d180f12dc00bc1ded8b\"$",
+  "^random_key_reference\\.rs\":\\ \"55b724cafc81a067c1b7873705773af75a8203b8c3880e287e27023535dce0fd\"$",
+  "^typed_metadata_api\\.rs\":\\ \"2c3b5a58e73c2cfd1b4755f760dc19f82e32e951127337f3870beedfb105b7e4\"$",
+  "^api_surface\\.rs\":\\ \"8281eb4d537fd20ea0303adebaae6243796304733ccd77190b8a50bb309655a8\"$",
+]
