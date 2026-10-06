@@ -391,8 +391,10 @@ def needs_fragment(path: str) -> bool:
 
 def is_release(before: dict[str, File], after: dict[str, File]) -> bool:
     try:
+        # The version bump can come from an earlier PR. assemble() rejects a
+        # version that already has a release section.
         current = workspace_version(after)
-        if current == workspace_version(before) or fragments(after):
+        if fragments(after):
             return False
         first = sections(required(after, "CHANGELOG.md"))[0]
         if first.version != current:
