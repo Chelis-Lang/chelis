@@ -81,6 +81,43 @@ fn stdio_tool_failures_remain_json_rpc_responses() {
 }
 
 #[test]
+fn stdio_tool_notifications_do_not_execute() {
+    let dir = tempfile::tempdir().expect("notification witness directory");
+    let witness = dir.path().join("dispatch.txt");
+    std::fs::write(&witness, "untouched").expect("seed dispatch witness");
+    let notification = json!({"jsonrpc":"2.0","method":"tools/call","params":{
+        "name":"chelis_eval","arguments":{"source_kind":"surf",
+        "source":format!("written = write_file({witness:?}, \"dispatched\")\n")}}});
+    let ping = json!({"jsonrpc":"2.0","id":"after-notification","method":"ping"});
+
+    let output = run(&lines(&[notification.clone(), ping]));
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{:?}", output);
+    assert_eq!(
+        std::fs::read_to_string(&witness).unwrap(),
+        "untouched",
+        "a notification must not execute its tool, even if its reply is discarded"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"jsonrpc":"2.0","id":"after-notification","result":{}})
+    );
+
+    // The same tool arguments must actually write when sent as a request;
+    // an invalid or refused tool call cannot prove notification non-dispatch.
+    let mut request = notification;
+    request["id"] = json!("dispatch-control");
+    let output = run(&lines(&[request]));
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{:?}", output);
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["id"], "dispatch-control");
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(reply["result"]["structuredContent"]["ok"], true);
+    assert_eq!(std::fs::read_to_string(&witness).unwrap(), "dispatched");
+}
+
+#[test]
 fn stdio_rejects_lsp_headers_invalid_json_and_unterminated_messages() {
     for input in ["Content-Length: 2\r\n\r\n{}", "not JSON\n", "{\n}\n", "{}"] {
         let output = run(input);
