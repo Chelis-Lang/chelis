@@ -103,3 +103,31 @@ fn valid_patterns_preserve_field_and_tuple_element_types() {
         );
     }
 }
+
+#[test]
+fn empty_tuple_pattern_matches_unit_at_both_checker_ingresses() {
+    for source in [
+        "def f(u: unit) -> i32 = match u with { | () => 1 }\n",
+        "type T = | A(unit) | B\n\
+         def f(t: T) -> i32 = match t with { | A(()) => 1 | B => 0 }\n",
+    ] {
+        let errors = diagnostics(source);
+        assert!(
+            errors.is_empty(),
+            "unit pattern must check: {source}: {errors:?}"
+        );
+    }
+
+    for source in [
+        "def f(n: i32) -> i32 = match n with { | () => 1 | _ => 0 }\n",
+        "def f(t: (i32, i32)) -> i32 = match t with { | () => 1 | _ => 0 }\n",
+    ] {
+        let errors = diagnostics(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch)),
+            "unit pattern must reject non-unit scrutinee: {source}: {errors:?}"
+        );
+    }
+}

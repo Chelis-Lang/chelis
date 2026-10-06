@@ -5,6 +5,15 @@
 
 use super::*;
 
+/// A shape pattern inspects the value behind a borrow, while `pat-var` and
+/// `pat-as` still bind the original scrutinee and keep its borrow provenance.
+fn pattern_shape_type(mut ty: &Type) -> &Type {
+    while let Type::Ref(inner) = ty {
+        ty = inner;
+    }
+    ty
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_match(
     node: &DeepNode,
@@ -337,10 +346,11 @@ pub(super) fn pattern_bindings(
                     // a foreign module's tag. Resolve through the structural
                     // constructor map and its exact registry owner instead.
                     let resolved_scrutinee = subst.apply(scrutinee_ty);
+                    let pattern_ty = pattern_shape_type(&resolved_scrutinee);
                     let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
                         ctor_name,
                         CallShape::Positional,
-                        &resolved_scrutinee,
+                        pattern_ty,
                         env,
                         adt_reg,
                     ) else {
@@ -375,7 +385,7 @@ pub(super) fn pattern_bindings(
                     // spelling is a value binding, not constructor authority
                     // for a pattern head (chelis#1076).
                     let (arg_types, ret) = instantiate_variant_of(adt_def, variant_info, vg);
-                    if let Err(error) = unify(&ret, scrutinee_ty, subst) {
+                    if let Err(error) = unify(&ret, pattern_ty, subst) {
                         errors.push(at_check_site(pat, error.into()));
                     }
                     let supplied = kids.len() - 1;
@@ -495,10 +505,11 @@ pub(super) fn pattern_bindings(
                     // unresolvable case a `_` wildcard arm could otherwise
                     // silently accept.
                     let resolved_scrutinee = subst.apply(scrutinee_ty);
+                    let pattern_ty = pattern_shape_type(&resolved_scrutinee);
                     let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
                         ctor_name,
                         CallShape::Record,
-                        &resolved_scrutinee,
+                        pattern_ty,
                         env,
                         adt_reg,
                     ) else {
@@ -550,7 +561,7 @@ pub(super) fn pattern_bindings(
                     // downstream linearity/borrow checks. (closes #181)
                     let (instantiated_arg_types, instantiated_ret) =
                         instantiate_variant_of(adt_def, variant_info, vg);
-                    if let Err(error) = unify(&instantiated_ret, scrutinee_ty, subst) {
+                    if let Err(error) = unify(&instantiated_ret, pattern_ty, subst) {
                         errors.push(at_check_site(pat, error.into()));
                     }
 
@@ -686,8 +697,15 @@ pub(super) fn pattern_bindings(
                 // Unification handles all three cases: a flexible scrutinee
                 // gains the tuple shape, an exact tuple pins the element
                 // types, and a mismatched kind or arity reports an error.
+                // The empty tuple pattern denotes unit, whose internal type
+                // is `Type::Unit` rather than `Type::Tuple([])`.
                 let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
-                if let Err(error) = unify(&resolved, &Type::Tuple(elems.clone()), subst) {
+                let pattern_ty = if elems.is_empty() {
+                    Type::Unit
+                } else {
+                    Type::Tuple(elems.clone())
+                };
+                if let Err(error) = unify(pattern_shape_type(&resolved), &pattern_ty, subst) {
                     errors.push(at_check_site(pat, error.into()));
                 }
                 for (i, sub_pat) in kids.iter().enumerate() {
