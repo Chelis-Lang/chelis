@@ -252,13 +252,14 @@ pub fn link_args(
 }
 
 /// Resolve `compiler`'s identity and check that, given `compile_flags` and
-/// `link_flags`, it compiles against the carried runtime archive's C library
-/// ([`check_c_library`]) and with the profile's floating-point semantics. A wrapper
-/// script is opaque on the command line, so the check observes the compiler
-/// itself. After the C library, it reads what the compiler predefines under those flags:
+/// `link_flags`, it compiles with the profile's floating-point semantics and
+/// against the carried runtime archive's C library. A wrapper script is opaque on
+/// the command line, so the check observes the compiler itself. First it reads what
+/// the compiler predefines under those flags:
 /// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
 /// dropped optimisation level (`__OPTIMIZE__` missing although the profile
-/// passes `-O2`). No macro reveals contraction, reassociation, or a NaN or
+/// passes `-O2`). Then it refuses a compiler for another C library
+/// ([`check_c_library`]). No macro reveals contraction, reassociation, or a NaN or
 /// infinity assumption, so it then compiles and runs the canary
 /// ([`canary_source`]) with the same flags, linked by [`link_args`], and compares the bits it prints with
 /// the profile's obligation table (`chelis_crmath::profile`): every kernel row of
@@ -321,7 +322,6 @@ fn check_compiler(
     {
         return Ok(CompilerIdentity { path, version });
     }
-    check_c_library(&path, compile_flags)?;
 
     let macros = tool_command(&path)
         .args(compile_flags)
@@ -364,6 +364,7 @@ fn check_compiler(
             violations.join("; ")
         ));
     }
+    check_c_library(&path, compile_flags)?;
     run_canary(&path, compile_flags, link_flags)?;
     ACCEPTED
         .lock()
@@ -403,7 +404,8 @@ const CARRIED_C_LIBRARY: Option<CLibrary> = if cfg!(all(target_os = "linux", tar
 /// Refuse a compiler that compiles against another C library than the carried
 /// runtime archive's (spec/08-backends.md section 7). Every native build links
 /// that archive, and the link would fail on symbols only its own C library
-/// defines, so the check runs before anything compiles.
+/// defines, so the check runs before anything compiles. It runs after the profile's
+/// macro check, which reports a compiler that rejects a profile flag as such.
 fn check_c_library(path: &Path, compile_flags: &[String]) -> Result<(), String> {
     let Some(carried) = CARRIED_C_LIBRARY else {
         return Ok(());
@@ -444,7 +446,7 @@ fn compiles_against_glibc(path: &Path, compile_flags: &[String]) -> Result<bool,
     if !output.status.success() {
         return Err(format!(
             "native compiler `{}` cannot preprocess `#include <stdint.h>`, so its C library \
-             headers are missing: {}",
+             cannot be read: {}",
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -1287,6 +1289,37 @@ mod tests {
                 "{result:?}"
             ),
         }
+    }
+
+    /// A compiler that rejects a profile flag is refused as rejecting the pinned
+    /// profile, on every platform, not as one whose C library cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_reports_a_rejected_profile_flag_as_the_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let real = resolve_executable(&compiler).expect("a C compiler on PATH");
+        let path = dir.path().join("strict-cc");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = -fno-fast-math ]; then\n    \
+                 echo 'strict-cc: error: unsupported option -fno-fast-math' >&2\n    exit 1\n  fi\n\
+                 done\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = verify_compiler(path.to_str().unwrap(), &flags, &links);
+        assert!(
+            matches!(&result, Err(CompilerCheckError::Refused(reason))
+                if reason.contains("rejected the pinned profile") && reason.contains("-fno-fast-math")),
+            "{result:?}"
+        );
     }
 
     /// A profile that compiles with OpenMP also links with it, so an

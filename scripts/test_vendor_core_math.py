@@ -206,6 +206,11 @@ class RoundevenTests(unittest.TestCase):
             ("another definition", "static double\nroundeven_finite (double x)\n{\n  return x;\n}\n", "not the inline helper"),
             ("a second definition", vcm.ROUNDEVEN_FINITE + "static double\nroundeven_finite (double x)\n{\n}\n",
              "not the inline helper"),
+            ("a definition spelled without spaces", "static double roundeven_finite(double x){ return __builtin_rint (x); }\n",
+             "not the inline helper"),
+            ("a definition with another parameter", "static double\np__roundeven_finite (const double v)\n{\n  return v;\n}\n",
+             "not the inline helper"),
+            ("a macro", "#define roundeven_finite(x) (x)\n", "as a macro"),
         ]:
             with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, reason):
                 vcm.require_inline_roundeven(text, "t")

@@ -28,8 +28,8 @@ every lane compiles:
    6). Values are unchanged: every dropped arm computes the same bits as the
    arm that stays;
 5. every kernel that rounds a reduced argument to an integer calls one
-   `roundeven_finite` helper, `ROUNDEVEN_FINITE`, which needs no compiler builtin
-   and no C library function: `inline_roundeven` replaces upstream's definitions
+   `roundeven_finite` helper, `ROUNDEVEN_FINITE`, which calls no C library
+   function: `inline_roundeven` replaces upstream's definitions
    (the `__builtin_roundeven` macro and its fallback), and `route_sin_roundeven`
    gives binary64 `sin`, which calls the builtin directly, the helper and routes
    the call through it.
@@ -340,7 +340,7 @@ def contract_clean(text: str, origin: str) -> str:
 # call to the C library's `roundeven`, which musl and glibc before 2.25 lack, and
 # `chelis build` compiles every kernel into its compiler canary, so one such call
 # stops every native build there. `inline_roundeven` and `route_sin_roundeven` give
-# all six `ROUNDEVEN_FINITE` instead, which calls nothing.
+# all six `ROUNDEVEN_FINITE` instead, which calls no C library function.
 #
 # It is exact. Chelis pins round-to-nearest-even at every entry point (design
 # section 6) and the amalgamation's guard keeps FLT_EVAL_METHOD at 0, so for
@@ -350,7 +350,7 @@ def contract_clean(text: str, origin: str) -> str:
 # already an integer, and `copysign` keeps the sign of zero, as `roundeven` does.
 ROUNDEVEN_FINITE = """\
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 roundeven_finite (double x)
 {
@@ -366,7 +366,10 @@ _ROUNDEVEN_HELPER = re.compile(
     r"^/\* __builtin_roundeven was introduced in gcc 10:\n.*?^#endif\n", re.MULTILINE | re.DOTALL
 )
 _ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
-_ROUNDEVEN_DEFINITION = re.compile(r"^(\w*)roundeven_finite \(double x\)$", re.MULTILINE)
+# A `roundeven_finite` definition under any kernel prefix, however its signature is
+# spaced and whatever its parameter list.
+_ROUNDEVEN_DEFINITION = re.compile(r"(?<!\w)(\w*)roundeven_finite\s*\([^)]*\)\s*\{")
+_ROUNDEVEN_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+\w*roundeven_finite\b", re.MULTILINE)
 # Integer rounding a kernel must not reach except through `ROUNDEVEN_FINITE`: the
 # builtin and the C library function it lowers to.
 _ROUNDEVEN_CALLS = {"__builtin_roundeven", "__builtin_roundevenf", "__builtin_roundevenl",
@@ -398,6 +401,9 @@ def require_inline_roundeven(text: str, origin: str) -> None:
     found = sorted(_code_tokens(text) & _ROUNDEVEN_CALLS)
     if found:
         raise VendorError(f"{origin}: `{found[0]}` rounds to an integer outside the inline roundeven_finite")
+    macro = _ROUNDEVEN_MACRO.search(text)
+    if macro:
+        raise VendorError(f"{origin}: `{macro.group().strip()}` defines roundeven_finite as a macro, not the inline helper")
     definitions: dict[str, int] = {}
     for m in _ROUNDEVEN_DEFINITION.finditer(text):
         definitions[m.group(1)] = definitions.get(m.group(1), 0) + 1

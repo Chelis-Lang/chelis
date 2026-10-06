@@ -95,7 +95,7 @@ Read from the upstream sources:
   Upstream's helper is that builtin on GCC 10 and Clang 17, inline assembly or a
   `round`-based fallback elsewhere. On baseline x86-64 the builtin lowers to a call to
   the C library's `roundeven`, which musl and glibc before 2.25 do not provide, so
-  §3.3 replaces all six with one helper that calls nothing.
+  §3.3 replaces all six with one helper that calls no C library function.
 - **FMA.** The kernels call `__builtin_fma`. Where the target has no hardware FMA in its
   baseline (x86-64 without `-mfma`, which the strict profile forbids adding from the
   host CPU), the compiler emits a call to the C library's `fma`, which C17 7.12.13.1
@@ -156,8 +156,9 @@ not the oracle of §8.
      the addition rounds `|x|` to an integer with ties to even (2^52 is even), the
      subtraction is exact, and `copysign` keeps the sign of zero: the value of
      `roundeven(x)` for every finite `x`. The canary refuses a compiler that folds
-     `(a + b) - a` (the obligation table below). The helper calls no compiler builtin
-     and no C library function, so a kernel links on every C library. The script
+     `(a + b) - a` (the obligation table below). The helper calls no C library
+     function; its builtins, `__builtin_fabs` and `__builtin_copysign`, compile to
+     instructions, so a kernel links on every C library. The script
      fails if any `roundeven` builtin or call survives, or if a `roundeven_finite` is
      not this helper.
   The amalgamation begins with guards: `#error` when `__FAST_MATH__`,
@@ -301,12 +302,15 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   without the claim that something added flags: the canary carries every kernel, so a
   builtin or C library function a kernel calls unconditionally would make every native
   build fail where it is missing. The kernels therefore round to an integer through
-  §3.3's helper, which needs neither.
+  §3.3's helper, which calls no C library function and only builtins every
+  supported GCC and Clang provides.
 - A selected compiler whose C library is not the one the carried runtime archive was
   built for fails the build before anything compiles (spec/08 §7). The archive comes
   from the compiler's own build, so its C library is that build's Rust target
-  environment (`gnu` or `musl`); `verify_compiler` reads the compiler's from its
-  `<stdint.h>`, which defines `__GLIBC__` exactly under glibc.
+  environment (`gnu` or `musl`). After the profile's macro check, `verify_compiler`
+  reads the compiler's C library from its `<stdint.h>`, which defines `__GLIBC__`
+  under glibc and not under musl; C libraries that also define it for compatibility,
+  such as uClibc-ng, read as glibc.
 
 **The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
 holds a closed list of the profile's obligations, each tied to the text it enforces:

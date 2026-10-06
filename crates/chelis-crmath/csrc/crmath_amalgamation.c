@@ -319,7 +319,7 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_sinf__roundeven_finite (double x)
 {
@@ -506,7 +506,7 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_cosf__roundeven_finite (double x)
 {
@@ -687,7 +687,7 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_tanf__roundeven_finite (double x)
 {
@@ -1342,7 +1342,7 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_exp__roundeven_finite (double x)
 {
@@ -3331,7 +3331,7 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_sin__roundeven_finite (double x)
 {
@@ -9989,7 +9989,7 @@ SOFTWARE.
 /****************** code copied from cosf.c **********************************/
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; no compiler builtin or C library call */
+   mode Chelis pins at every entry; it calls no C library function */
 static double
 chelis_cr_erfc__roundeven_finite (double x)
 {
