@@ -90,8 +90,11 @@ For effects in function types, continue to [Effects](effects.md).
 Comparisons, `max_elem` / `min_elem`, and unary activations (`sigmoid`, `tanh`,
 `silu`, `gelu`, `gelu_tanh`) borrow their tensor inputs. Both operands of a comparison or
 extremum remain available for a later call, including when `<` or `>` is used.
-A prior consuming call such as `realize(x)` still makes a later read of `x` an
-error. Comparisons require matching dimensions and dtypes; borrowing does not
+An explicit `drop(x)` makes any later use of that owner an error. A call with
+an owned parameter consumes its argument. If an owned tensor feeds two
+ordinary consuming calls, the compiler inserts a copy for the first use;
+passing a borrowed tensor to an owned parameter requires an explicit `copy`.
+Comparisons require matching dimensions and dtypes; borrowing does not
 permit implicit broadcasting or promotion.
 
 A local `to_tensor` binding or parameter that would capture the conversion
