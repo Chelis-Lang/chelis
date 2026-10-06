@@ -489,3 +489,118 @@ fn an_evaluation_failure_keeps_the_program_text() {
         "the program's own text is kept:\n{stderr}"
     );
 }
+
+/// Red-team R2-1 (A): a package file outside every source root is no
+/// module, whatever its `module` header says (spec/02 §P2). An error in the
+/// package module that header names is not the file's own, so `eval` names
+/// it qualified, as `check` does.
+#[test]
+fn an_off_root_module_header_does_not_make_a_module_the_entry() {
+    let (_dir, reef_home, app) =
+        package_with_main("module Demo.Main\nexport (out)\nout: i32 = true\n");
+    write_file(
+        &app.join("scratch.ch"),
+        "module Demo.Main\nout: i32 = 1i32\n",
+    );
+    let message = "def 'Demo.Main.out' body doesn't match declared signature: \
+                   expected `i32`, got `bool`";
+    let check = chelis(&app, &reef_home, &["check", "scratch.ch"]);
+    let errors = check_errors(&check);
+    assert_eq!(errors[0]["message"], message, "{errors:?}");
+    let eval = chelis(&app, &reef_home, &["eval", "--file", "scratch.ch"]);
+    let stderr = text(&eval.stderr);
+    assert!(
+        stderr.contains(&format!("error: {message}")),
+        "eval agrees with check:\n{stderr}"
+    );
+}
+
+/// Red-team R2-1 (B) and R2-2: in the in-context entry compile of an
+/// off-root file, the file's own `T` is bare and the package module's `T`
+/// is qualified, in `eval` as in `check`.
+#[test]
+fn the_eval_entry_compile_tells_the_file_s_type_from_the_module_s() {
+    let (_dir, reef_home, app) =
+        package_with_main("module Demo.Main\nexport (T, MkM)\ntype T =\n  | MkM(i32)\n");
+    write_file(
+        &app.join("src/util.ch"),
+        "module Demo.Util\nimport Demo.Main (T, MkM)\nexport (make)\n\
+         def make(x: i32) -> T = MkM(x)\n",
+    );
+    write_file(
+        &app.join("scratch.ch"),
+        "module Demo.Main\nimport Demo.Util (make)\ntype T =\n  | MkS(i32)\n\
+         out: T = make(1i32)\n",
+    );
+    let message = "def 'out' body doesn't match declared signature: \
+                   expected `T`, got `Demo.Main.T`";
+    let check = chelis(&app, &reef_home, &["check", "scratch.ch"]);
+    assert_eq!(check_errors(&check)[0]["message"], message);
+    let eval = chelis(&app, &reef_home, &["eval", "--file", "scratch.ch"]);
+    let stderr = text(&eval.stderr);
+    assert!(
+        stderr.contains(&format!("error: {message}")),
+        "eval agrees with check:\n{stderr}"
+    );
+    assert_no_linker_spelling("eval stderr", &stderr);
+}
+
+/// Red-team R2-1 (C): a test file's `module` header does not make the
+/// package module it names the test's own, so an error there reads
+/// qualified in `chelis test`, as in `check`.
+#[test]
+fn a_test_file_module_header_does_not_make_a_module_the_entry() {
+    let (_dir, reef_home, app) =
+        package_with_main("module Demo.Main\ndef helper(x: i32) -> bool = x\n");
+    write_file(
+        &app.join("tests/main_test.ch"),
+        "module Demo.Main\n\
+         def helper(x: i32) -> i32 = x\n\
+         def test_h() -> unit = test_assert(helper(1i32) == 1i32, \"h\")\n",
+    );
+    let message = "def 'Demo.Main.helper' body doesn't match declared signature: \
+                   expected `(i32) -> bool`, got `(i32) -> i32`";
+    let check = chelis(&app, &reef_home, &["check", "tests/main_test.ch"]);
+    assert_eq!(check_errors(&check)[0]["message"], message);
+    let test = chelis(&app, &reef_home, &["test", "tests/"]);
+    let output = format!("{}{}", text(&test.stdout), text(&test.stderr));
+    assert!(!test.status.success(), "{output}");
+    assert!(
+        output.contains(message),
+        "test agrees with check:\n{output}"
+    );
+    assert!(!output.contains("def 'helper'"), "{output}");
+}
+
+/// Red-team R2-2: the suite batch links each test file into its own module.
+/// An error in a batched file names its own declaration bare and another
+/// module's type qualified.
+#[test]
+fn a_batched_test_file_error_names_declarations_as_written() {
+    let (_dir, reef_home, app) = package_with_main("module Demo.Main\nanswer = 1i32\n");
+    write_file(
+        &app.join("src/util.ch"),
+        "module Demo.Util\nexport (make)\ntype T =\n  | MkU(i32)\n\
+         def make(x: i32) -> T = MkU(x)\n",
+    );
+    write_file(
+        &app.join("tests/a_test.ch"),
+        "module Demo.Tests.A\nimport Demo.Util (make)\n\
+         def bad(x: i32) -> i32 = make(x)\n\
+         def test_a() -> unit = test_assert(true, \"a\")\n",
+    );
+    write_file(
+        &app.join("tests/b_test.ch"),
+        "module Demo.Tests.B\ndef test_b() -> unit = test_assert(true, \"b\")\n",
+    );
+    let test = chelis(&app, &reef_home, &["test", "tests/"]);
+    let stderr = text(&test.stderr);
+    assert!(
+        stderr.contains(
+            "error: def 'bad' body doesn't match declared signature: \
+             expected `(i32) -> i32`, got `(i32) -> Demo.Util.T`"
+        ),
+        "the batch worker names declarations as written:\n{stderr}"
+    );
+    assert_no_linker_spelling("test stderr", &stderr);
+}

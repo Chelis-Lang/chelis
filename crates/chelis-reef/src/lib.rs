@@ -1605,10 +1605,8 @@ fn collect_pattern_references(pattern: &Pattern, out: &mut BTreeSet<String>) {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntryImports {
     modules: BTreeSet<String>,
-    /// The modules the entries declare. They choose no linked module;
-    /// diagnostics name the declarations of these modules bare
-    /// (chelis#3269).
-    declared_modules: BTreeSet<String>,
+    /// The source files of the entries, when the caller has them.
+    entry_files: BTreeSet<PathBuf>,
 }
 
 impl EntryImports {
@@ -1618,9 +1616,13 @@ impl EntryImports {
         Self::default()
     }
 
-    /// The modules the entries declare with a `module` wrapper.
-    pub fn declared_modules(&self) -> &BTreeSet<String> {
-        &self.declared_modules
+    /// Record that `file` is the source of an entry. A diagnostic about the
+    /// program names the declarations of the package module `file` is,
+    /// by its location, bare (chelis#3269); a file outside every source
+    /// root is no module, whatever `module` header it carries
+    /// (spec/02-surf-syntax.md §P2).
+    pub fn add_entry_file(&mut self, file: &Path) {
+        self.entry_files.insert(file.to_path_buf());
     }
 
     /// The modules `decls` import, looking inside a `module` wrapper.
@@ -1645,10 +1647,7 @@ impl EntryImports {
                 Decl::Import { module, .. } => {
                     self.modules.insert(module.clone());
                 }
-                Decl::Module { name, decls, .. } => {
-                    self.declared_modules.insert(name.clone());
-                    self.add_decls(decls);
-                }
+                Decl::Module { decls, .. } => self.add_decls(decls),
                 _ => {}
             }
         }
@@ -1803,7 +1802,7 @@ impl PreparedReefGraph {
 
     /// The spellings diagnostics about a program linked from this graph
     /// name declarations by (chelis#3269), where `entry_modules` are the
-    /// root-package modules the diagnosed source declares.
+    /// root-package modules the diagnosed files are, by their location.
     pub fn diagnostic_names<I, M>(&self, entry_modules: I) -> DiagnosticNames
     where
         I: IntoIterator<Item = M>,
@@ -1814,6 +1813,25 @@ impl PreparedReefGraph {
                 .into_iter()
                 .map(|module| (self.graph.root_package.clone(), module.into())),
         )
+    }
+
+    /// The root-package modules the entry files of `entries` are, by their
+    /// location under a source root (chelis#3269). A file outside every
+    /// source root is no module, and its `module` header names none
+    /// (spec/02-surf-syntax.md §P2).
+    pub fn entry_modules(&self, entries: &EntryImports) -> BTreeSet<String> {
+        let Some(root_package) = self.graph.packages.get(&self.graph.root_package) else {
+            return BTreeSet::new();
+        };
+        entries
+            .entry_files
+            .iter()
+            .filter_map(|file| {
+                module_name_for_input(&self.package_root, file, root_package)
+                    .ok()
+                    .flatten()
+            })
+            .collect()
     }
 
     /// Whether this graph links a single-file program outside every reef

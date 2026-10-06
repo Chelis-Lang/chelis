@@ -2721,14 +2721,15 @@ fn compile_new_decls_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
-    // chelis#3269: the new source is the entry, so declarations of the
-    // module it declares are named bare and every other module's qualified.
+    // chelis#3269: the new source's own declarations are the synthetic eval
+    // module's, which keeps their authored names, so they render bare
+    // without an entry module; every linked declaration is another module's
+    // and is qualified. A `module` header in the source names no module.
     compile_rewritten_decls_in_context(context, &rewritten, target).map_err(|error| {
-        let declared = chelis_reef::EntryImports::from_decls(raw_new_decls);
         error.with_source_names(
             &context
                 .reef_state
-                .diagnostic_names(declared.declared_modules().iter().cloned()),
+                .diagnostic_names(std::iter::empty::<String>()),
         )
     })
 }

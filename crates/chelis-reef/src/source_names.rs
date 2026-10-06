@@ -12,9 +12,9 @@
 //! shown whole (chelis#2919). [`DiagnosticNames`] spells each recorded
 //! name for one program (spec/04-type-system.md §2.5):
 //!
-//! - a declaration of an entry module, the module the diagnosed source
-//!   declares, is spelled by its bare name, as the same source reads as a
-//!   standalone file;
+//! - a declaration of an entry module, the package module a diagnosed file
+//!   is by its location, is spelled by its bare name, as the same source
+//!   reads as a standalone file;
 //! - any other declaration is spelled qualified by its module path,
 //!   `Demo.Util.helper`, the form an author writes a qualified reference in;
 //! - when that still spells two linked names alike, which happens only for

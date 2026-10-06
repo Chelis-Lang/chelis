@@ -2176,7 +2176,7 @@ fn cmd_eval_inner(
                 .then(chelis_types::install_linked_program_guard);
             if let Some(package_root) = &eval_package_root {
                 let source = fs::read_to_string(path)?;
-                match prepare_eval_in_context(package_root, &source, json, target) {
+                match prepare_eval_in_context(package_root, path, &source, json, target) {
                     Ok(output) => return Ok(output),
                     Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
                 }
@@ -2293,6 +2293,7 @@ enum EvalInContextError {
 /// against unchanged sources skips the ~67s library compile entirely.
 fn prepare_eval_in_context(
     package_root: &Path,
+    file: &Path,
     source: &str,
     json: bool,
     target: chelis_types::types::Target,
@@ -2303,8 +2304,12 @@ fn prepare_eval_in_context(
     // chelis#2558: the context links only the chelis-std modules the package
     // and this source import, so the source's imports are collected first.
     // `detect_eval_package_root` routed here only because the source parsed.
-    let entries =
+    let mut entries =
         chelis_reef::EntryImports::from_surf_source(source).map_err(EvalInContextError::Compile)?;
+    // chelis#3269: diagnostics name the declarations of the package module
+    // `file` is, by its location, bare; a file outside every source root is
+    // no module, whatever its `module` header says.
+    entries.add_entry_file(file);
     // Phase K: route through `load_or_compile_for_package` so the disk
     // cache amortizes cold-compile cost across invocations. On a hit
     // (source unchanged since last run), the library compile is skipped
@@ -9285,6 +9290,9 @@ fn require_test_files_in_one_package(
 fn test_entry_imports<P: AsRef<Path>>(files: &[P]) -> chelis_reef::EntryImports {
     let mut imports = chelis_reef::EntryImports::none();
     for file in files {
+        // chelis#3269: diagnostics name the declarations of the package
+        // module a test file is, by its location, bare.
+        imports.add_entry_file(file.as_ref());
         if let Ok(source) = fs::read_to_string(file.as_ref())
             && let Ok(decls) = chelis_surf::parser::parse_str(&source)
         {
@@ -10926,7 +10934,8 @@ fn prepare_eval_in_exec_context(
             #[allow(deprecated)]
             let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
-                err.errors
+                err.with_source_names(&prepared.diagnostic_names)
+                    .errors
                     .iter()
                     .map(|d| d.message.clone())
                     .collect::<Vec<_>>()
@@ -10962,7 +10971,8 @@ fn prepare_rewritten_batch_in_exec_context(
             #[allow(deprecated)]
             let prepared_eval = chelis_compiler_api::compiler::prepare_eval_decls(&prepared.decls);
             prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
-                err.errors
+                err.with_source_names(&prepared.diagnostic_names)
+                    .errors
                     .iter()
                     .map(|diagnostic| diagnostic.message.clone())
                     .collect::<Vec<_>>()
@@ -11135,6 +11145,7 @@ fn eval_module_init(
         Err(err) => return Some(format!("compile: {err}")),
     };
     let linked_decls = prepared.decls;
+    let diagnostic_names = prepared.diagnostic_names;
     let outcome = run_test_with_timeout(
         move || {
             // RFC v5 (RT-1 F2 bypass): `linked_decls` is the reef-linked
@@ -11158,8 +11169,11 @@ fn eval_module_init(
     match outcome {
         Err(msg) => Some(msg),
         Ok(Ok(_)) => None,
+        // chelis#3269: compile diagnostics name declarations as their author
+        // wrote them; a failure while evaluating is left as it is.
         Ok(Err(err)) => Some(
-            err.errors
+            err.with_source_names(&diagnostic_names)
+                .errors
                 .iter()
                 .map(|d| d.message.clone())
                 .collect::<Vec<_>>()

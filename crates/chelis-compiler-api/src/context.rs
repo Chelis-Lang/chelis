@@ -1430,14 +1430,12 @@ pub fn compile_reef_context_for_entries(
     log_phase("hash_digests", &mut t);
 
     // chelis#3269: the library is linker output, so a rejection names its
-    // declarations as their author wrote them: bare in a module the entries
-    // declare, the module the caller is about to run, and module-qualified
-    // in every other module.
+    // declarations as their author wrote them: bare in the package module
+    // an entry file is, by its location, and module-qualified in every
+    // other module.
     let (library, library_dag) = check_and_lower_library(&reef_state, profile, &log_phase, &mut t)
         .map_err(|error| {
-            error.with_source_names(
-                &reef_state.diagnostic_names(entries.declared_modules().iter().cloned()),
-            )
+            error.with_source_names(&reef_state.diagnostic_names(reef_state.entry_modules(entries)))
         })?;
 
     // Package + build identity: canonical `package_root` from the
