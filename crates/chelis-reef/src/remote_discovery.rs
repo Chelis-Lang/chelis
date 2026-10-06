@@ -1207,7 +1207,7 @@ struct DiscoverySession {
     candidates: BTreeMap<PackageName, Vec<CandidateMaterial>>,
     path_stack: Vec<PackageName>,
     pending_local: BTreeSet<PackageName>,
-    loaded_local: BTreeSet<PackageName>,
+    loaded_local: BTreeMap<PackageName, Vec<PackageRequirement>>,
     queried_remote: BTreeSet<PackageName>,
     refresh_dependencies: BTreeSet<PackageName>,
     exclusions: BTreeMap<PackageName, Vec<String>>,
@@ -1296,7 +1296,7 @@ impl DiscoverySession {
             candidates: BTreeMap::new(),
             path_stack: Vec::new(),
             pending_local: BTreeSet::new(),
-            loaded_local: BTreeSet::new(),
+            loaded_local: BTreeMap::new(),
             queried_remote: BTreeSet::new(),
             refresh_dependencies: BTreeSet::new(),
             exclusions: BTreeMap::new(),
@@ -1483,10 +1483,14 @@ impl DiscoverySession {
         while let Some(package) = self
             .pending_local
             .iter()
-            .find(|package| !self.loaded_local.contains(*package))
+            .find(|package| {
+                self.loaded_local.get(*package) != Some(&self.known_requirements(package))
+            })
             .cloned()
         {
-            self.loaded_local.insert(package.clone());
+            let requirements = self.known_requirements(&package);
+            self.loaded_local
+                .insert(package.clone(), requirements.clone());
             if package.as_str() == crate::CHELIS_STD_PACKAGE_NAME {
                 let runtime_package = self.runtime.package().map_err(|message| {
                     DiscoveryError::CandidateManifest {
@@ -1541,6 +1545,12 @@ impl DiscoverySession {
                 .cloned()
                 .unwrap_or_default();
             for entry in entries {
+                let version = PackageVersion::from_str(&entry.version).map_err(|error| {
+                    DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message: format!("invalid registry candidate version: {error}"),
+                    }
+                })?;
                 if let Some(locked) = self.locked.get(&package)
                     && locked.version == entry.version
                     && matches!(&locked.source, LockSource::LocalRegistry { .. })
@@ -1557,6 +1567,41 @@ impl DiscoverySession {
                         message,
                     })?;
                 }
+                // A root requirement applies in every solution. Requirements
+                // from other candidates are alternatives until those
+                // candidates are selected, so they only widen discovery when
+                // the root does not exclude the version.
+                if self.mode == DiscoveryMode::Resolve
+                    && self
+                        .root_requests
+                        .iter()
+                        .filter(|request| request.package == package)
+                        .any(|request| !request.requirement.matches(&version))
+                {
+                    continue;
+                }
+                let matching = requirements
+                    .iter()
+                    .filter(|requirement| requirement.matches(&version))
+                    .map(PackageRequirement::as_str)
+                    .collect::<Vec<_>>();
+                if self.mode == DiscoveryMode::Resolve && matching.is_empty() {
+                    continue;
+                }
+                if self.candidates.get(&package).into_iter().flatten().any(
+                    |candidate| matches!(candidate, CandidateMaterial::Local { entry: loaded, .. } if loaded.version == entry.version),
+                ) {
+                    continue;
+                }
+                let context = if matching.is_empty() {
+                    format!("local registry candidate {}", entry.version)
+                } else {
+                    format!(
+                        "local registry candidate {} matching {}",
+                        entry.version,
+                        matching.join(", ")
+                    )
+                };
                 let installed = match crate::load_registry_package(package.as_str(), &entry.version)
                 {
                     Ok(installed) => installed,
@@ -1565,7 +1610,7 @@ impl DiscoverySession {
                     Err(crate::LoadRegistryError::Other(message)) => {
                         return Err(DiscoveryError::CandidateManifest {
                             package: package.to_string(),
-                            message: format!("load local registry candidate: {message}"),
+                            message: format!("load {context}: {message}"),
                         });
                     }
                 };
@@ -1573,7 +1618,7 @@ impl DiscoverySession {
                     crate::read_manifest(&installed.root.join("reef.toml")).map_err(|message| {
                         DiscoveryError::CandidateManifest {
                             package: package.to_string(),
-                            message,
+                            message: format!("read {context}: {message}"),
                         }
                     })?;
                 if parsed.typed.package.name != package {

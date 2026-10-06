@@ -9,6 +9,7 @@ use chelis_reef::{
     UpgradeMode, build_package_with_options, canonicalize_local_registry_index, init_package,
     package_schema, publish_package, upgrade_documents,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -675,6 +676,84 @@ fn write_manifest(root: &std::path::Path, name: &str, dependencies: &str) {
         "module Fixture.Main\ndef value() -> i32 = 1\n",
     )
     .unwrap();
+}
+
+#[test]
+fn exact_registry_pin_ignores_unreadable_excluded_version() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let directory = tempdir().unwrap();
+    let registry = directory.path().join("registry");
+    let previous = std::env::var_os("CHELIS_REEF_HOME");
+    unsafe { std::env::set_var("CHELIS_REEF_HOME", &registry) };
+
+    for (version, root_name) in [("0.1.0", "old"), ("0.2.0", "selected")] {
+        let package = directory.path().join(root_name);
+        write_manifest(&package, "dependency", "");
+        let manifest = std::fs::read_to_string(package.join("reef.toml")).unwrap();
+        std::fs::write(
+            package.join("reef.toml"),
+            manifest.replace("version = \"0.1.0\"", &format!("version = \"{version}\"")),
+        )
+        .unwrap();
+        publish_package(&package, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
+    }
+
+    let old_shell = registry.join("packages/dependency/0.1.0/dependency-0.1.0.chb");
+    let mut bytes = std::fs::read(&old_shell).unwrap();
+    bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+    std::fs::write(&old_shell, &bytes).unwrap();
+    let index_path = registry.join("index.json");
+    let mut index: LocalRegistryIndex =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    index
+        .packages
+        .get_mut("dependency")
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry.version == "0.1.0")
+        .unwrap()
+        .shell_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    std::fs::write(&index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+
+    let root = directory.path().join("root");
+    write_manifest(&root, "root", "");
+    let manifest = std::fs::read_to_string(root.join("reef.toml")).unwrap();
+    let resolver_two = manifest
+        .replace("schema = \"1\"", "schema = \"2\"")
+        .replace(
+            "module_prefix = \"Fixture\"",
+            "module_prefix = \"Fixture\"\nresolver = \"2\"",
+        );
+    std::fs::write(
+        root.join("reef.toml"),
+        format!("{resolver_two}\n[dependencies]\ndependency = \"=0.2.0\"\n"),
+    )
+    .unwrap();
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("excluded unsupported shell cannot break an exact pin");
+
+    std::fs::write(
+        root.join("reef.toml"),
+        format!("{resolver_two}\n[dependencies]\ndependency = \"=0.1.0\"\n"),
+    )
+    .unwrap();
+    let error = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap_err();
+    assert!(error.contains("=0.1.0"), "{error}");
+    assert!(error.contains("shell format version 2"), "{error}");
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("CHELIS_REEF_HOME", value) },
+        None => unsafe { std::env::remove_var("CHELIS_REEF_HOME") },
+    }
 }
 
 #[test]
