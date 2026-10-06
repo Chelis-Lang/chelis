@@ -915,6 +915,14 @@ enum ReefSrcCommand {
 /// thread has by default.
 const MUSL_MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+/// Every allocation under musl, Rust's through this global allocator and the C
+/// and C++ libraries' (cvc5, GMP) through the `malloc` it defines: musl's own
+/// allocator made checking, testing and proving 1.4 to 1.6 times slower than in
+/// the glibc builds.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() {
     // The checker and the parser bound their recursion by the stack left on the
     // current thread (`stacker::remaining_stack`). For the main thread musl

@@ -235,7 +235,11 @@ bindgen loads libclang at run time and proc macros are shared objects; the final
 `chelis` links with `+crt-static`, so it is a static-pie executable with no
 program interpreter and no shared libraries, and the runtime archive it carries
 is a musl archive. Alpine needs `py3-pip` for cvc5's CMake and `bison` for the
-`yacc` GMP's build runs. Each release job:
+`yacc` GMP's build runs. musl's own malloc made that `chelis` check, test and
+prove 1.4 to 1.6 times slower than the glibc builds, so under musl it allocates
+through jemalloc (`tikv-jemallocator` with an unprefixed `malloc`, which also
+serves cvc5 and GMP), and the job requires that malloc to answer `MALLOC_CONF`.
+Each release job:
 
 - installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
   uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot

@@ -50,6 +50,12 @@ sha2 = "0.10"
 tempfile = "3"
 walkdir = "2"
 
+# musl's own malloc made the musl build check, test and prove 1.4 to 1.6 times
+# slower than the glibc builds (chelis#3280). jemalloc replaces it there for
+# Rust and, through the unprefixed `malloc` it defines, for cvc5 and GMP.
+[target.'cfg(target_env = "musl")'.dependencies]
+tikv-jemallocator = { version = "0.7.0", features = ["unprefixed_malloc_on_supported_platforms"] }
+
 [features]
 # The shared property/obligation runner is part of every normal CLI build.
 # `smt` only adds cvc5; a default build still runs the identical Tier-C engine

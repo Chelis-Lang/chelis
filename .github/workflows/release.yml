@@ -489,6 +489,13 @@ jobs:
             exit 1
           fi
 
+      # musl's own malloc made this build 1.4 to 1.6 times slower than the
+      # glibc builds, so chelis allocates through jemalloc here, and jemalloc's
+      # unprefixed malloc serves cvc5 and GMP too (chelis#3280). Only that
+      # malloc reads MALLOC_CONF, so a build without it prints no statistics.
+      - name: Require jemalloc as the allocator
+        run: docker exec --env MALLOC_CONF=stats_print:true musl sh -c './target/release/chelis --version 2>&1 | grep -F "Begin jemalloc statistics"'
+
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
       - name: Verify cvc5 discharge path (smt feature live)
