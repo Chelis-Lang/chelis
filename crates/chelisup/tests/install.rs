@@ -11,7 +11,20 @@ use std::process::Command;
 /// The release build `install` downloads for `version` on this host.
 fn build(version: &str) -> String {
     let slug = chelisup::install::detect_slug().expect("host platform must be supported in CI");
-    chelisup::install::release_build(version, slug).unwrap()
+    chelisup::install::release_build(version, slug, chelisup::install::host_is_musl()).unwrap()
+}
+
+/// The Linux builds `install` accepts for `version` on this host, in preference
+/// order, joined as its missing-asset error lists them.
+#[cfg(target_os = "linux")]
+fn linux_assets(version: &str) -> String {
+    let musl = chelisup::install::host_is_musl();
+    chelisup::install::release_builds(version, "linux-x86_64", musl)
+        .unwrap()
+        .iter()
+        .map(|build| chelisup::install::asset_name(version, build))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 fn stdout(out: &std::process::Output) -> String {
@@ -550,11 +563,12 @@ fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
 
     let refused = install(home.path(), release.path(), "0.7.24");
     assert!(!refused.status.success());
+    let missing = format!(
+        "release asset {} not found under CHELISUP_RELEASE_BASE",
+        linux_assets("0.7.24")
+    );
     assert!(
-        stderr(&refused).contains(
-            "release asset chelis-v0.7.24-linux-x86_64-static.tar.gz or \
-             chelis-v0.7.24-linux-x86_64-glibc2.31.tar.gz not found under CHELISUP_RELEASE_BASE"
-        ),
+        stderr(&refused).contains(&missing),
         "stderr: {}",
         stderr(&refused)
     );
@@ -573,8 +587,10 @@ fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_prefers_the_static_build_and_falls_back_to_glibc_2_31() {
-    // A release that publishes a static build installs it. One that does not,
-    // such as 0.18.12, installs its glibc-2.31 build as before.
+    // A release that publishes a static build installs it on a glibc host,
+    // even beside a musl build, and a musl host installs the musl build. One
+    // that publishes neither, such as 0.18.12, installs its glibc-2.31 build
+    // as before.
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
     let earlier = ReleaseRuntime::matching("0.18.12");
@@ -593,13 +609,22 @@ fn linux_prefers_the_static_build_and_falls_back_to_glibc_2_31() {
     );
 
     let later = ReleaseRuntime::matching("0.18.13");
-    for build in ["linux-x86_64-glibc2.31", "linux-x86_64-static"] {
+    for build in [
+        "linux-x86_64-glibc2.31",
+        "linux-x86_64-static",
+        "linux-x86_64-musl",
+    ] {
         build_release_tarball(release.path(), "0.18.13", build, &later);
     }
     let preferred = install(home.path(), release.path(), "0.18.13");
     assert!(preferred.status.success(), "stderr: {}", stderr(&preferred));
+    let host_build = if chelisup::install::host_is_musl() {
+        "linux-x86_64-musl"
+    } else {
+        "linux-x86_64-static"
+    };
     assert!(
-        stdout(&preferred).contains("installed chelis 0.18.13 (linux-x86_64-static) into"),
+        stdout(&preferred).contains(&format!("installed chelis 0.18.13 ({host_build}) into")),
         "stdout: {}",
         stdout(&preferred)
     );

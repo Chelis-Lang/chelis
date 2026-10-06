@@ -45,14 +45,17 @@ Release is driven by `.github/workflows/release.yml`:
 - **Trigger:** pushing a tag matching `v*` to `origin/main`.
 - **Platforms:** `ubuntu-latest` for `linux-x86_64` and for the static
   `linux-x86_64-static`, a `debian:11` container on `ubuntu-latest` for
-  `linux-x86_64-glibc2.31`, and `macos-latest` for `darwin-arm64`.
+  `linux-x86_64-glibc2.31`, a pinned `alpine:3.24` container run through
+  `docker run` on `ubuntu-latest` for `linux-x86_64-musl`, and `macos-latest`
+  for `darwin-arm64`.
 - **Build:** `cargo build --release -p chelis-cli`.
 - **Packaging:** each release stages the stripped `chelis` binary, `libchelis_runtime.a`,
   `chelis_runtime.h`, `chelis_blas.h`, `README.md`, and `LICENSE` into a platform tarball.
 - **Artifacts:** releases attach
   `chelis-<version>-linux-x86_64.tar.gz`,
   `chelis-<version>-linux-x86_64-static.tar.gz`,
-  `chelis-<version>-linux-x86_64-glibc2.31.tar.gz`, and
+  `chelis-<version>-linux-x86_64-glibc2.31.tar.gz`,
+  `chelis-<version>-linux-x86_64-musl.tar.gz`, and
   `chelis-<version>-darwin-arm64.tar.gz`, each with a sibling `.sha256` file.
 - **glibc floor (#330):** the default `linux-x86_64` build inherits a hard
   `GLIBC_2.39` verneed requirement from the `ubuntu-latest` toolchain and
@@ -61,7 +64,9 @@ Release is driven by `.github/workflows/release.yml`:
   glibc, runs the release fixture test inside that container, and asserts the
   packaged binary requests no glibc symbol version above 2.31. On Linux
   `chelisup install` downloads the static build when a release publishes it and
-  this variant otherwise (chelis#2686).
+  this variant otherwise (chelis#2686); on a musl host it first takes the musl
+  build, a static executable whose carried runtime archive is musl's
+  (chelis#3280).
 - **Publish:** build jobs upload artifacts and a final `softprops/action-gh-release@v2`
   step attaches them to the tag.
 

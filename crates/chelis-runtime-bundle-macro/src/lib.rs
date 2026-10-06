@@ -8,8 +8,8 @@
 //! the `.rlib` through `--extern`. Cargo starts a dependent of a crate with a
 //! `staticlib` type only after that invocation has finished, so the archive
 //! exists when the macro expands. The macro reads the arguments of the rustc
-//! process expanding it; a compilation whose arguments do not locate the
-//! archive fails instead of carrying another one.
+//! process expanding it ([`locate::process_args`]); a compilation whose
+//! arguments do not locate the archive fails instead of carrying another one.
 //!
 //! The expansion embeds bytes only, never a path. Compilation caches such as
 //! kache key the invoking crate on the content of its `--extern` artifacts, not
@@ -60,7 +60,8 @@ fn expand(input: TokenStream, found: impl FnOnce(&Path) -> Result<String, String
         let args = std::env::args_os()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        locate::expand_argfiles(args, |path| std::fs::read_to_string(path))
+        locate::process_args(args, || std::fs::read("/proc/self/cmdline"))
+            .and_then(|args| locate::expand_argfiles(args, |path| std::fs::read_to_string(path)))
             .and_then(|args| locate::locate(&args, extern_name, Path::is_file))
             .and_then(|located| match located {
                 Located::Archive(archive) => found(&archive),

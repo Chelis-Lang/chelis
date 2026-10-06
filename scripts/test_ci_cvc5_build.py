@@ -185,12 +185,12 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         smt_builds = [
             line.strip()
             for line in self.text.splitlines()
-            if "cargo build" in line and "--features smt" in line
+            if re.search(r"cargo (build|rustc)\b", line) and "--features smt" in line
         ]
         self.assertEqual(
             len(smt_builds),
-            4,
-            "release.yml should build chelis-cli --features smt in all four jobs",
+            5,
+            "release.yml should build chelis-cli --features smt in all five jobs",
         )
         for line in smt_builds:
             self.assertIn(
@@ -217,6 +217,7 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
             "build-linux-x86_64:",
             "build-linux-x86_64-glibc231:",
             "build-linux-x86_64-static:",
+            "build-linux-x86_64-musl:",
             "build-darwin-arm64:",
         ):
             with self.subTest(job=job):

@@ -15,8 +15,11 @@ x86-64.
 On Linux, `chelisup` and the toolchain it installs are static executables that
 need no system libraries, so they start on any x86-64 distribution, including
 NixOS without nix-ld. They resolve host names through `/etc/hosts` and the name
-servers in `/etc/resolv.conf` only, not through NSS plugins. For
-source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
+servers in `/etc/resolv.conf` only, not through NSS plugins. Linux releases
+come in glibc builds and a musl build, which differ in the C library of the
+runtime that native builds link. `chelisup install` picks the musl build when
+`/bin/sh` is loaded by musl's dynamic loader, as on Alpine, and the static glibc
+build otherwise. For source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
 
 Run these commands in a terminal outside a Chelis project:
 
@@ -134,10 +137,14 @@ On macOS install Apple's Command Line Tools with `xcode-select --install`.
 On Debian/Ubuntu install `build-essential`, and on Fedora install `gcc gcc-c++`.
 BLAS-backed CPU operations additionally need OpenBLAS on Linux; macOS uses
 Accelerate. Definitions-only builds also require `ar` from the native toolchain.
-On Linux the release toolchains carry a glibc runtime, so native builds need a
-glibc C compiler. On a musl-based system such as Alpine, `chelis eval`, `check`,
-`test`, and `prove` work, and `chelis build` refuses the musl compiler
-([#3280](https://github.com/Chelis-Lang/chelis/issues/3280)).
+On Alpine install `gcc musl-dev`, and `openblas-dev` for OpenBLAS; BLAS-backed
+operations are untested on musl. The glibc builds carry a glibc runtime and the
+musl build a musl runtime, so `chelis build` needs a C compiler for the same C
+library and refuses one for the other before compiling anything
+([#3280](https://github.com/Chelis-Lang/chelis/issues/3280)). For a release
+without a musl build, `chelisup` installs the static glibc build on a musl
+system; there `chelis eval`, `check`, `test`, and `prove` work, and
+`chelis build` refuses the musl compiler.
 HIP requires ROCm's `hipcc` and its libraries; Metal requires the macOS SDK and
 `clang++`. A compatible GPU is required when executing GPU work. See
 [Backends](backends.md) for compiler overrides and prerelease target limitations.

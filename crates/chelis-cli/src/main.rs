@@ -911,7 +911,36 @@ enum ReefSrcCommand {
     },
 }
 
+/// The stack of the thread the CLI runs on under musl: the 8 MiB a Linux main
+/// thread has by default.
+const MUSL_MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() {
+    // The checker and the parser bound their recursion by the stack left on the
+    // current thread (`stacker::remaining_stack`). For the main thread musl
+    // reports only the part of the stack already mapped, so they would find
+    // almost none left and refuse every program. Under musl the CLI therefore
+    // runs on a thread whose stack size is set, as a glibc or macOS main thread
+    // reports its own.
+    if cfg!(target_env = "musl") {
+        let thread = std::thread::Builder::new()
+            .name("main".to_owned())
+            .stack_size(MUSL_MAIN_STACK_BYTES)
+            .spawn(cli_main)
+            .unwrap_or_else(|error| {
+                eprintln!("error: cannot start the chelis thread: {error}");
+                std::process::exit(1)
+            });
+        // A panic was reported by the hook; exit as a panicking main does.
+        if thread.join().is_err() {
+            std::process::exit(101);
+        }
+        return;
+    }
+    cli_main();
+}
+
+fn cli_main() {
     // Before any host or user lookup: the static Linux build must not load
     // the host's NSS plugins.
     chelisup::nss::use_builtin_services();

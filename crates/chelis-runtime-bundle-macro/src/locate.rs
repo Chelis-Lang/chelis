@@ -75,6 +75,38 @@ pub(crate) fn locate(
     Ok(Located::Archive(archive))
 }
 
+/// This process's arguments, given the ones the standard library reports
+/// (`std_args`). A proc macro is a shared object loaded into rustc, and the
+/// standard library inside it learns the process's arguments from the C
+/// library: glibc passes them to a shared object's initializers, musl does not,
+/// so under a musl-hosted rustc `std_args` is empty. Linux records every
+/// process's arguments in `/proc/self/cmdline`, which `read_cmdline` reads, and
+/// they are taken from there then.
+pub(crate) fn process_args(
+    std_args: Vec<String>,
+    read_cmdline: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> Result<Vec<String>, String> {
+    if !std_args.is_empty() || !cfg!(target_os = "linux") {
+        return Ok(std_args);
+    }
+    let cmdline = read_cmdline().map_err(|error| {
+        format!("cannot read the rustc arguments from /proc/self/cmdline: {error}")
+    })?;
+    Ok(cmdline_args(&cmdline))
+}
+
+/// The arguments in a Linux `/proc/<pid>/cmdline`, each followed by a NUL byte.
+fn cmdline_args(cmdline: &[u8]) -> Vec<String> {
+    let cmdline = cmdline.strip_suffix(&[0]).unwrap_or(cmdline);
+    if cmdline.is_empty() {
+        return Vec::new();
+    }
+    cmdline
+        .split(|&byte| byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect()
+}
+
 /// This process's arguments as rustc reads them: an `@path` argument after the
 /// program is replaced by the lines of `path`. Cargo passes rustc its arguments
 /// through such a file when the command line is too long; classifying the
@@ -293,5 +325,14 @@ mod tests {
         assert!(missing.unwrap_err().contains("/t/missing"));
         let shell = expand_argfiles(args(&["rustc", "@shell:/t/args"]), |_| Ok(String::new()));
         assert!(shell.unwrap_err().contains("shell-quoted"));
+    }
+
+    #[test]
+    fn cmdline_arguments_are_split_at_each_terminating_nul() {
+        assert_eq!(
+            cmdline_args(b"rustc\0--crate-name\0chelis_runtime_bundle\0\0"),
+            args(&["rustc", "--crate-name", "chelis_runtime_bundle", ""])
+        );
+        assert_eq!(cmdline_args(b""), Vec::<String>::new());
     }
 }

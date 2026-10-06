@@ -2,10 +2,14 @@
 
 The release workflow's `installed-artifact-canary` matrix downloads the staged
 Linux x86-64 and macOS arm64 artifacts from the same workflow run, before
-publication. On Linux that is the static build, the one `chelisup` installs
-there. It uses the staged installer, not a Cargo binary or an existing
-user installation. `publish-release` requires this matrix in addition to all
-four build jobs; workflow dispatch still does not publish anything.
+publication. On Linux that is the static build, the one `chelisup` installs on
+glibc systems, and the musl build, the one it installs on musl systems; the musl
+leg (slug `linux-x86_64-musl`) runs the script inside the pinned `alpine:3.24`
+image through `docker run`, with Alpine's `python3 gcc musl-dev`, and installs
+the musl toolchain with the static build's installer. It uses the staged
+installer, not a Cargo binary or an existing user installation.
+`publish-release` requires this matrix in addition to all five build jobs;
+workflow dispatch still does not publish anything.
 
 The script verifies archive and installer checksum sidecars (including their
 filenames), rejects ambiguous/link/escaping archive members, inventories every

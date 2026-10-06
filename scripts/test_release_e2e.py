@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -11,6 +12,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -254,6 +256,47 @@ class LinkageTests(unittest.TestCase):
                     e2e.StepFailed, f"chelis loads {re.escape(library)}"
                 ):
                     e2e.macho_verdict("chelis", loaded)
+
+
+class HostLibcTests(unittest.TestCase):
+    @staticmethod
+    def proof(glibc: str | None, root: Path) -> e2e.Proof:
+        args = argparse.Namespace(
+            evidence=root, version="0.7.24", archive_label="v0.7.24",
+            tag="v0.7.24", assets=root,
+        )
+        with mock.patch.object(e2e.platform, "system", return_value="Linux"), \
+                mock.patch.object(e2e.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(e2e, "glibc_version", return_value=glibc):
+            return e2e.Proof(args)
+
+    def test_a_musl_host_prefers_the_musl_build_and_a_glibc_host_the_static(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            musl = self.proof(None, Path(directory))
+            glibc = self.proof("2.39", Path(directory))
+        self.assertEqual(musl.builds[0], "linux-x86_64-musl")
+        self.assertIn("linux-x86_64-static", musl.builds[1:])
+        self.assertEqual(glibc.builds[0], "linux-x86_64-static")
+        self.assertNotIn("linux-x86_64-musl", glibc.builds)
+
+    def test_native_steps_run_only_where_the_runtime_archive_matches_the_host(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proof = self.proof(None, Path(directory))
+        proof.build = "linux-x86_64-musl"
+        proof.require_matching_libc()
+        proof.build = "linux-x86_64-static"
+        with self.assertRaisesRegex(e2e.StepSkipped, "glibc library"):
+            proof.require_matching_libc()
+
+    def test_the_musl_build_must_be_static(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proof = self.proof(None, root)
+            proof.build = "linux-x86_64-musl"
+            write_elf(root / "dynamic", interpreter="/lib/ld-musl-x86_64.so.1",
+                      needed=["libc.musl-x86_64.so.1"], runpath=[])
+            with self.assertRaisesRegex(e2e.StepFailed, "chelis is not static"):
+                proof.elf_linkage("chelis", root / "dynamic")
 
 
 if __name__ == "__main__":
