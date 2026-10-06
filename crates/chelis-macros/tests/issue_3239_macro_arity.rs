@@ -168,9 +168,9 @@ fn expanded_forms(program: &[Expr]) -> Vec<String> {
 fn short_call_is_rejected_instead_of_capturing_a_caller_binding() {
     assert_arity_mismatch(
         expand(&desugar(
-            "macro second(x, y) = y\ndef f(y: i32) -> i32 = second(1i32)\n",
+            "macro minus(x, y) = sub(x, y)\ndef f(y: i32) -> i32 = minus(1i32)\n",
         )),
-        "second",
+        "minus",
         2,
         1,
     );
@@ -230,29 +230,30 @@ fn a_user_override_of_a_prelude_macro_has_the_override_arity() {
 
 #[test]
 fn internal_deep_defmacro_calls_have_the_same_rule() {
-    let definitions = "(defmacro {} second (params {} x y) (var {} y))\n";
+    let definitions =
+        "(defmacro {} minus (params {} x y) (app {} (var {} sub) (var {} x) (var {} y)))\n";
     assert_arity_mismatch(
         expand(&deep(&format!(
-            "{definitions}(def {{}} out (app {{}} (var {{}} second) (lit {{}} 1)))"
+            "{definitions}(def {{}} out (app {{}} (var {{}} minus) (lit {{}} 1)))"
         ))),
-        "second",
+        "minus",
         2,
         1,
     );
     assert_arity_mismatch(
         expand(&deep(&format!(
-            "{definitions}(def {{}} out (app {{}} (var {{}} second) (lit {{}} 1) \
+            "{definitions}(def {{}} out (app {{}} (var {{}} minus) (lit {{}} 1) \
              (lit {{}} 2) (var {{}} never_declared)))"
         ))),
-        "second",
+        "minus",
         2,
         3,
     );
     assert_eq!(
         expanded_forms(&deep(&format!(
-            "{definitions}(def {{}} out (app {{}} (var {{}} second) (lit {{}} 1) (lit {{}} 2)))"
+            "{definitions}(def {{}} out (app {{}} (var {{}} minus) (lit {{}} 1) (lit {{}} 2)))"
         ))),
-        ["(def {} out (lit {} 2))"]
+        ["(def {} out (app {} (var {} sub) (lit {} 1) (lit {} 2)))"]
     );
 }
 
@@ -262,7 +263,7 @@ fn internal_deep_defmacro_calls_have_the_same_rule() {
 fn calls_produced_by_an_expansion_have_the_same_rule() {
     assert_arity_mismatch(
         expand(&desugar(
-            "macro inner(x, y) = y\nmacro outer(a) = inner(a)\ndef f(y: i32) -> i32 = outer(1i32)\n",
+            "macro inner(x, y) = sub(x, y)\nmacro outer(a) = inner(a)\ndef f(y: i32) -> i32 = outer(1i32)\n",
         )),
         "inner",
         2,
@@ -317,9 +318,9 @@ fn a_repeated_parameter_name_is_rejected_at_the_definition() {
 fn exact_arity_calls_substitute_every_argument() {
     assert_eq!(
         expanded_forms(&desugar(
-            "macro second(x, y) = y\nout = second(1i32, 9i32)\n"
+            "macro minus(x, y) = sub(x, y)\nout = minus(9i32, 1i32)\n"
         )),
-        ["(def {} out (lit {} 9))"]
+        ["(def {} out (app {} (var {} sub) (lit {} 9) (lit {} 1)))"]
     );
     assert_eq!(
         expanded_forms(&desugar("macro seven() = 7i32\nout = seven()\n")),
@@ -327,9 +328,9 @@ fn exact_arity_calls_substitute_every_argument() {
     );
     assert_eq!(
         expanded_forms(&desugar(
-            "macro inner(x, y) = y\nmacro outer(a) = inner(a, a)\nout = outer(3i32)\n"
+            "macro inner(x, y) = sub(x, y)\nmacro outer(a) = inner(a, a)\nout = outer(3i32)\n"
         )),
-        ["(def {} out (lit {} 3))"]
+        ["(def {} out (app {} (var {} sub) (lit {} 3) (lit {} 3)))"]
     );
     let prelude = expanded_forms(&desugar(
         "def g(x: f32) -> f32 = x\ndef f(x: f32) -> f32 = residual(x, g)\n",

@@ -62,6 +62,11 @@ pub enum ExpansionError {
     DuplicateParameter { name: String, parameter: String },
 
     #[error(
+        "macro `{name}` never references its parameter `{parameter}`; every macro parameter must occur in the macro body, so that no argument is discarded unchecked (spec/02-surf-syntax.md [02-MACRO-4])"
+    )]
+    UnusedParameter { name: String, parameter: String },
+
+    #[error(
         "macro `{name}` expects {expected} argument(s), but this call supplies {found}; a macro call supplies exactly one positional argument per parameter (spec/02-surf-syntax.md [02-MACRO-2])"
     )]
     ArityMismatch {
@@ -96,8 +101,10 @@ struct MacroDef {
 
 impl MacroDef {
     /// Admit a definition, authored or prelude, only when its parameter names
-    /// are distinct ([02-MACRO-1]): a repeated name would let its later
-    /// binding silently replace the earlier argument.
+    /// are distinct ([02-MACRO-1]), since a repeated name would let its later
+    /// binding silently replace the earlier argument, and when its body
+    /// references every parameter ([02-MACRO-4]), since substitution would
+    /// otherwise discard that parameter's argument before any check sees it.
     fn admitted(self) -> Result<Self, ExpansionError> {
         let repeated = {
             let mut seen = UnordSet::new();
@@ -106,13 +113,44 @@ impl MacroDef {
                 .find(|param| !seen.insert(param.as_str()))
                 .cloned()
         };
-        match repeated {
-            Some(parameter) => Err(ExpansionError::DuplicateParameter {
+        if let Some(parameter) = repeated {
+            return Err(ExpansionError::DuplicateParameter {
+                name: self.name,
+                parameter,
+            });
+        }
+        match self.unused_parameter().cloned() {
+            Some(parameter) => Err(ExpansionError::UnusedParameter {
                 name: self.name,
                 parameter,
             }),
             None => Ok(self),
         }
+    }
+
+    /// The first parameter whose argument substitution would place nowhere in
+    /// the expansion. The body is substituted exactly as a call substitutes it,
+    /// with a fresh placeholder per parameter, so a reference that a body
+    /// binder shadows is not a use.
+    fn unused_parameter(&self) -> Option<&String> {
+        let placeholders = self
+            .params
+            .iter()
+            .zip(fresh_placeholders(&self.body, 0))
+            .collect::<Vec<_>>();
+        let substitutions = placeholders
+            .iter()
+            .map(|(param, placeholder)| ((*param).clone(), var(placeholder)))
+            .collect::<UnordMap<_, _>>();
+        let mut placed = UnordSet::new();
+        collect_symbols(
+            &substitute_expr(&self.body, &substitutions, &UnordSet::new()),
+            &mut placed,
+        );
+        placeholders
+            .into_iter()
+            .find(|(_, placeholder)| !placed.contains(placeholder))
+            .map(|(param, _)| param)
     }
 
     /// Pair each parameter with the call's positional argument at its
@@ -350,21 +388,21 @@ impl Expander {
         }
 
         let mut user_macros = UnordMap::new();
+        let mut forms = Vec::with_capacity(exprs.len());
         for expr in exprs {
-            if let Some(def) = extract_macro_def(expr)? {
-                user_macros.insert(def.name.clone(), def);
+            match extract_macro_def(expr)? {
+                Some(def) => {
+                    user_macros.insert(def.name.clone(), def);
+                }
+                None => forms.push(expr),
             }
         }
         macros.merge(user_macros);
 
-        let mut out = Vec::new();
-        for expr in exprs {
-            if extract_macro_def(expr)?.is_some() {
-                continue;
-            }
-            out.push(self.expand_expr(expr, &macros, &Scope::default())?);
-        }
-        Ok(out)
+        forms
+            .into_iter()
+            .map(|expr| self.expand_expr(expr, &macros, &Scope::default()))
+            .collect()
     }
 
     /// Reject an ordinary declaration whose calls would be consumed by the
@@ -682,17 +720,21 @@ fn macro_arg_placeholders<'a>(
     arguments: impl Iterator<Item = (&'a String, &'a Expr)>,
     expansion_id: usize,
 ) -> (UnordMap<String, Expr>, UnordMap<String, Expr>) {
-    let mut used_symbols = UnordSet::new();
-    collect_symbols(body, &mut used_symbols);
-
     let mut placeholder_params = UnordMap::new();
     let mut placeholder_args = UnordMap::new();
-    for (idx, (param, arg)) in arguments.enumerate() {
-        let placeholder = fresh_placeholder(idx, expansion_id, &mut used_symbols);
+    for ((param, arg), placeholder) in arguments.zip(fresh_placeholders(body, expansion_id)) {
         placeholder_params.insert(param.clone(), var(&placeholder));
         placeholder_args.insert(placeholder, arg.clone());
     }
     (placeholder_params, placeholder_args)
+}
+
+/// One placeholder name per parameter position, distinct from every symbol in
+/// the body and from each other.
+fn fresh_placeholders(body: &Expr, expansion_id: usize) -> impl Iterator<Item = String> {
+    let mut used_symbols = UnordSet::new();
+    collect_symbols(body, &mut used_symbols);
+    (0..).map(move |idx| fresh_placeholder(idx, expansion_id, &mut used_symbols))
 }
 
 fn fresh_placeholder(

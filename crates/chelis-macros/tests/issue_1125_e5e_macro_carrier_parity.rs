@@ -52,16 +52,26 @@ fn macro_call(name_value: &str, argument: Expr) -> Expr {
     )
 }
 
+/// A zero-parameter macro, so its invalid body is admitted under
+/// [02-MACRO-4] and the rejection comes from successor reconstruction.
 fn direct_invalid_body_result_error(body: Expr) -> ExpansionError {
-    let nested_call = macro_call(
-        "invalid_body",
-        decoded(DeepTag::Lit, vec![Expr::Atom(Atom::Int(0), sp())]),
+    let definition = raw_form(
+        "defmacro",
+        vec![
+            name("invalid_body"),
+            decoded(DeepTag::Params, Vec::new()),
+            body,
+        ],
+    );
+    let nested_call = decoded(
+        DeepTag::App,
+        vec![decoded(DeepTag::Var, vec![name("invalid_body")])],
     );
     let successor_parent = decoded(
         DeepTag::App,
         vec![decoded(DeepTag::Var, vec![name("sink")]), nested_call],
     );
-    let program = vec![macro_definition("invalid_body", body), successor_parent];
+    let program = vec![definition, successor_parent];
 
     expand_program(&program, &options())
         .expect_err("an invalid macro body result must reject at successor reconstruction")
@@ -242,7 +252,7 @@ fn macro_free_odd_bind_keeps_its_unpaired_child() {
 
 #[test]
 fn macro_body_odd_bind_survives_substitution_and_hygiene() {
-    let body = decoded(
+    let malformed_let = decoded(
         DeepTag::Let,
         vec![
             decoded(
@@ -256,16 +266,29 @@ fn macro_body_odd_bind_survives_substitution_and_hygiene() {
             decoded(DeepTag::Var, vec![name("x")]),
         ],
     );
+    // Substitution does not enter the malformed let, so the body references
+    // the parameter outside it as well ([02-MACRO-4]).
+    let body = decoded(
+        DeepTag::App,
+        vec![
+            decoded(DeepTag::Var, vec![name("pair")]),
+            malformed_let,
+            decoded(DeepTag::Var, vec![name("value")]),
+        ],
+    );
     let program = vec![
         macro_definition("odd_bind", body),
         macro_call("odd_bind", decoded(DeepTag::Var, vec![name("argument")])),
     ];
 
     let expanded = expand_program(&program, &options()).expect("macro expansion succeeds");
-    let [expanded_let] = expanded.exprs() else {
+    let [expanded_app] = expanded.exprs() else {
         panic!("expected one expanded macro body");
     };
-    let ExprCarrier::DecodedNode(DeepTag::Let, _, let_children) = expanded_let.carrier() else {
+    let ExprCarrier::DecodedNode(DeepTag::App, _, app_children) = expanded_app.carrier() else {
+        panic!("expected the body call to remain a call");
+    };
+    let ExprCarrier::DecodedNode(DeepTag::Let, _, let_children) = app_children[1].carrier() else {
         panic!("expected the malformed let to remain a let");
     };
     let ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_children) = let_children[0].carrier()
