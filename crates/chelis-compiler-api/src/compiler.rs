@@ -2544,6 +2544,31 @@ pub fn eval_decls_selected(
     eval_compiled(&compiled, bindings, Some(selected_root_names))
 }
 
+/// Evaluate assembled declarations against an already checked library. The
+/// library is checked and lowered once by
+/// [`crate::stdlib_cache::build_declaration_context`]; each probe
+/// is checked against that exact proof and uses the ordinary manifested eval
+/// path. Declarations are already resolved, so no Reef rewriting is performed.
+/// The result manifest describes the new declarations, as for context evaluation.
+pub fn eval_decls_selected_with_library(
+    library: &crate::stdlib_cache::StdLibContext,
+    decls: &[Decl],
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: &[String],
+) -> Result<EvalResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let lowered = library.library_dag().ok_or_else(|| {
+        stage_error(
+            "lower",
+            "the prepared library has no lowering product",
+            GeneralKind::LowerError,
+        )
+    })?;
+    let compiled =
+        compile_decls_against_library(library.checked_library(), lowered, decls, Target::Eval)?;
+    eval_compiled(&compiled, bindings, Some(selected_root_names))
+}
+
 /// Compile the source once, then evaluate it once per entry in `test_roots`,
 /// returning a parallel Vec of per-root `(name, Result<EvalResult>)` pairs.
 ///
@@ -2745,10 +2770,24 @@ fn compile_rewritten_decls_in_context(
     target: Target,
 ) -> Result<CompiledSource> {
     let _linked = chelis_types::install_linked_program_guard();
+    compile_decls_against_library(
+        context.checked_library(),
+        &context.library_dag,
+        rewritten,
+        target,
+    )
+}
+
+fn compile_decls_against_library(
+    library: &crate::pipeline::CheckedLibrary,
+    library_dag: &crate::pipeline::LoweredLibrary,
+    rewritten: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
     bail_if_cancelled("desugar")?;
     let prepared = crate::pipeline::prepare_surf_decls_with_context(
         rewritten,
-        context.checked_library().program().exprs(),
+        library.program().exprs(),
         None,
     )
     .map_err(|error| {
@@ -2758,12 +2797,9 @@ fn compile_rewritten_decls_in_context(
 
     // Type-check the new code once against the library context, then run the
     // shared effect and linearity transitions.
-    let analysis =
-        crate::pipeline::analyze_prepared_with_library(prepared, context.checked_library())
-            .map_err(|report| {
-                crate::compiler::check_errors_to_compiler_error("check", &report.errors)
-            })
-            .map_err(|error| cancelled_or("check", error))?;
+    let analysis = crate::pipeline::analyze_prepared_with_library(prepared, library)
+        .map_err(|report| crate::compiler::check_errors_to_compiler_error("check", &report.errors))
+        .map_err(|error| cancelled_or("check", error))?;
     bail_if_cancelled("effects")?;
     let checked = crate::pipeline::complete_context_checks(analysis)
         .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))
@@ -2772,7 +2808,7 @@ fn compile_rewritten_decls_in_context(
     bail_if_cancelled("lower")?;
     let lowered = crate::pipeline::lower_checked_with_context(
         checked,
-        &context.library_dag,
+        library_dag,
         crate::pipeline::LoweringMode::AllowHostOnly,
     )
     .map_err(pipeline_rejection_to_compiler_error)
@@ -2788,7 +2824,7 @@ fn compile_rewritten_decls_in_context(
     // nullary definition that is effectful only through the library is not
     // auto-applied as a value root.
     let mut manifest = chelis_effects::realizability::compute_root_manifest_in_context(
-        Some(context.library_checked()),
+        Some(library.program()),
         &new_checked,
         &realizability,
     );
@@ -2804,8 +2840,8 @@ fn compile_rewritten_decls_in_context(
     // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
-        checked: context.library_checked().clone(),
-        lowered_names: crate::runtime::library_lowered_names(context.library_checked()),
+        checked: library.program().clone(),
+        lowered_names: crate::runtime::library_lowered_names(library.program()),
     };
 
     Ok(CompiledSource {

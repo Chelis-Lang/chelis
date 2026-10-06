@@ -176,24 +176,42 @@ fn audit_stays_clean_after_sync_restamps_pinned_links() {
 }
 
 /// Shared skills carry the same link rewrite, applied by one function on both
-/// the sync and the audit side. The chelis-std skill is authored at
-/// `packages/chelis-std/SKILL.md` and links to the surface guide (materialized,
-/// so it stays relative) and to the shell contract (not materialized, so it is
-/// pinned). Sync writes the pinned body, audit accepts it, and the raw
-/// authored body in its place is drift.
+/// the sync and the audit side. The chelis-std skill's absolute documentation
+/// URLs survive unchanged. A fixture exercises relative links from that same
+/// package location, independently of which links its prose currently carries.
+/// Audit accepts the materialized skill and rejects a changed destination.
 #[test]
 fn shared_skill_links_are_pinned_by_sync_and_expected_by_audit() {
     let (_tmp, root) = shell();
     let path = root.join("agent-skills/chelis-std/SKILL.md");
     let skill = std::fs::read_to_string(&path).unwrap();
     let links = destinations(&skill);
+    let raw = chelis_conformance::skills::skill_body("chelis-std").unwrap();
+    assert_eq!(skill, raw, "absolute URLs must survive materialization");
     assert!(
-        links.contains(&pinned("spec/design/shell_repo_contract.md")),
+        links.contains(&"https://chelis.ch/docs/chelis/reef/".to_string()),
         "{links:?}"
     );
+    let fixture = format!(
+        "{raw}\n[contract](../../spec/design/shell_repo_contract.md)\n[surface](../../docs/CHELIS_SURFACE.md)\n"
+    );
+    let rewritten = chelis_conformance::links::pin_links(
+        &fixture,
+        &chelis_conformance::skills::source_path("chelis-std"),
+        "agent-skills/chelis-std/SKILL.md",
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
+    );
+    let rewritten_links = destinations(&rewritten);
     assert!(
-        links.iter().any(|l| l == "../../docs/CHELIS_SURFACE.md"),
-        "{links:?}"
+        rewritten_links.contains(&pinned("spec/design/shell_repo_contract.md")),
+        "{rewritten_links:?}"
+    );
+    assert!(
+        rewritten_links
+            .iter()
+            .any(|l| l == "../../docs/CHELIS_SURFACE.md"),
+        "{rewritten_links:?}"
     );
 
     scaffold::materialize_skills(&root, VER).expect("sync skills");
@@ -210,9 +228,15 @@ fn shared_skill_links_are_pinned_by_sync_and_expected_by_audit() {
     let row = vendored(&root);
     assert_eq!(row.verdict, audit::Verdict::Pass, "{}", row.diagnostic);
 
-    let raw = chelis_conformance::skills::skill_body("chelis-std").unwrap();
-    assert_ne!(raw, skill, "the authored body must carry a link to rewrite");
-    std::fs::write(&path, raw).unwrap();
+    let changed = skill.replace(
+        "https://chelis.ch/docs/chelis/reef/",
+        "https://example.invalid/reef/",
+    );
+    assert_ne!(
+        changed, skill,
+        "the negative control must change a destination"
+    );
+    std::fs::write(&path, changed).unwrap();
     let row = vendored(&root);
     assert_eq!(row.verdict, audit::Verdict::Fail);
     assert!(

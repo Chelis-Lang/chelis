@@ -400,6 +400,10 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   states its sampled domain and names the deterministic tests that check the callables at
   the extremes outside it. `crates/chelis-cli/tests/std_decimal_properties.rs` runs them and
   a deliberately false variant of each, which must fail.
+  The Surf fuzz runner checks and lowers the linked library once per property and
+  checks each sample, guard, and shrinking probe against that retained proof. The
+  complete nightly case keeps the default hundred accepted samples per law and
+  every false variant; the pull-request canary uses two samples per law.
 
 ## 15. Delivery and consumers
 

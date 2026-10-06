@@ -74,8 +74,9 @@ pub use library_cache::{
 /// yet a stable public commitment (V1 has no production decode caller).
 pub use runtime::RuntimeValue;
 pub use stdlib_cache::{
-    StdLibContext, build_stdlib_context, cache_disabled, load_or_build_stdlib_context,
-    stdlib_cache_key, stdlib_cache_key_input_bytes, typecheck_cache_dir,
+    StdLibContext, build_declaration_context, build_stdlib_context, cache_disabled,
+    load_or_build_stdlib_context, stdlib_cache_key, stdlib_cache_key_input_bytes,
+    typecheck_cache_dir,
 };
 
 /// Pinned compiler version for fixture `reef.toml` files in tests and for

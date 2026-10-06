@@ -612,6 +612,21 @@ fn unary_elementwise_emits_dtype_switch_at_i64() {
 
 // ---- L1675 unary func --------------------------------------------------
 
+/// Retain the Phase 1 oracle's required identity. The stronger chelis#2734
+/// contract rejects this integer transcendental before emission, so there is
+/// no generated binary32 conversion or aborting runtime arm to execute.
+#[test]
+fn unary_func_int32_arm_aborts_without_binary32_conversion() {
+    let program = make_unary_program("exp", Prim::Int32);
+    let error = emit_host_program(&program, "unfunc_i32")
+        .expect_err("integer exp must be rejected before generating a float conversion");
+    let message = error.to_string();
+    assert!(
+        message.contains("`exp` over a") && message.contains("has no arm for this dtype"),
+        "{message}"
+    );
+}
+
 #[test]
 fn unary_func_elementwise_emits_typed_pointer_access() {
     let program = make_unary_program("exp", Prim::F32);

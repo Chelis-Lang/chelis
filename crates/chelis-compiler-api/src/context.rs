@@ -275,6 +275,7 @@ impl CompiledContext {
         &self.library
     }
 
+    #[cfg(test)]
     pub(crate) fn library_checked(&self) -> &CheckedProgram {
         self.library.program()
     }

@@ -3,6 +3,97 @@
 use super::*;
 
 #[test]
+fn prepared_surf_fuzz_library_preserves_source_provenance() {
+    let forged = "def pkg__demo__Hidden__identity(x: i64) -> i64 = x\n@property holds forall(x: i64): pkg__demo__Hidden__identity(x) == x\n";
+    let declarations = chelis_surf::parser::parse_str(forged).unwrap();
+    let baseline =
+        chelis_compiler_api::compiler::eval_decls_selected(&declarations, BTreeMap::new(), &[])
+            .unwrap_err();
+    assert!(
+        baseline
+            .errors
+            .iter()
+            .any(|error| error.kind().as_str() == "ReservedLinkerName")
+    );
+    let outcomes = run_surf(forged, "fuzz-only");
+    assert_eq!(outcomes[0].status, PropertyStatus::Error, "{outcomes:#?}");
+    assert_eq!(outcomes[0].accepted_samples, 0);
+
+    let authored = forged.replace("pkg__demo__Hidden__identity", "identity");
+    assert!(run_surf(&authored, "fuzz-only")[0].is_pass());
+
+    // The Reef caller's explicit provenance must survive library preparation.
+    let _linked = chelis_types::install_linked_program_guard();
+    let options = PropertyRunOptions {
+        tier: "fuzz-only".into(),
+        samples: 4,
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+    };
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_decls_properties(&declarations, &declarations, &declarations, &options).unwrap();
+    assert!(outcomes[0].is_pass(), "{outcomes:#?}");
+    assert_eq!(outcomes[0].accepted_samples, 4);
+}
+
+#[test]
+fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
+    for source in [
+        "@property scalar forall(x: f32) where x >= 0.0: x > 5.0\n",
+        "@property integer forall(x: i64): x > 5i64\n",
+        "@property text forall(x: string): x == \"s0\"\n",
+    ] {
+        let decls = chelis_surf::parser::parse_str(source).unwrap();
+        let property = collect_surf_properties(&decls, &decls, None)
+            .unwrap()
+            .remove(0);
+        let deep = chelis_surf::desugar::desugar_program(&decls).unwrap();
+        let roots = SampleRoots::for_program(&deep);
+        let library = chelis_compiler_api::build_declaration_context(&decls).unwrap();
+        let monolithic = |sample: &Sample, precondition: bool| {
+            let mut whole = decls.clone();
+            whole.push(Decl::LetDef {
+                name: roots.select(precondition).to_string(),
+                ty: None,
+                value: sample_block_expr(&property, sample, precondition),
+                span: deep_span(),
+            });
+            bool_property_root(chelis_compiler_api::compiler::eval_decls_selected(
+                &whole,
+                sample_bindings(sample),
+                &[roots.select(precondition).to_string()],
+            ))
+        };
+        let mut rng = Lcg::new(0);
+        for _ in 0..8 {
+            let sample = sample_property(&property, &mut rng).unwrap();
+            for precondition in [true, false] {
+                assert_eq!(
+                    eval_surf_sample(&library, &property, &roots, &sample, precondition),
+                    Ok(monolithic(&sample, precondition).expect("baseline sample executes")),
+                    "{source}"
+                );
+            }
+            let still_fails = |sample: &Sample| {
+                (property.preconditions.is_empty() || matches!(monolithic(sample, true), Ok(true)))
+                    && matches!(monolithic(sample, false), Ok(false))
+            };
+            if still_fails(&sample) {
+                let (expected, expected_steps) =
+                    shrink_counterexample(sample.clone(), &property.params, still_fails);
+                let (actual, actual_steps) =
+                    shrink_surf_counterexample(&library, &property, &roots, sample);
+                assert_eq!(
+                    counterexample_json(&actual),
+                    counterexample_json(&expected),
+                    "{source}"
+                );
+                assert_eq!(actual_steps, expected_steps, "{source}");
+            }
+        }
+    }
+}
+
+#[test]
 fn deep_param_rejects_unknown_form_but_reads_a_structural_param() {
     let span = deep_span();
     let structural = DeepExpr::BareList(
