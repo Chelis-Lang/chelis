@@ -111,7 +111,10 @@ Xcode's `clang`, finds the system headers, and each command `--emit-c` prints
 runs its tool through `env SDKROOT=…`. The C compiler is a declared input:
 the build prints `Compiler: <path> (<version>)`, and refuses a compiler, for
 example a wrapper script, that predefines `__FAST_MATH__`, a nonzero
-`__FINITE_MATH_ONLY__`, or no `__OPTIMIZE__` under the profile.
+`__FINITE_MATH_ONLY__`, or no `__OPTIMIZE__` under the profile. It also refuses,
+before compiling anything, a C compiler for another C library than the runtime
+`chelis` carries: the Linux releases carry a glibc runtime, so on a musl system
+such as Alpine `chelis build` names that mismatch instead of failing at link time.
 
 Transcendentals (`exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, `erfc`) are
 correctly rounded, so every lane returns the same bits for them. Generated C

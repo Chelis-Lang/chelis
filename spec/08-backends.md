@@ -462,7 +462,10 @@ as `-march=native`), and SHALL run each native tool with an environment cleared
 to a fixed allowlist, so that an ambient variable (for example `CFLAGS`,
 `CCC_OVERRIDE_OPTIONS`, or `NIX_CFLAGS_COMPILE`) cannot change generated code. A
 selected native compiler that does not honor this profile, including a wrapper
-that injects flags, SHALL fail the build rather than produce an artifact.
+that injects flags, SHALL fail the build rather than produce an artifact. A
+selected C compiler that compiles against another C library than the one the
+carried runtime archive (§2.1) was built for SHALL fail the build before anything
+compiles, with a diagnostic that names the archive's C library.
 Emitted code computes every transcendental with the compiler-owned correctly
 rounded kernels of [05-OP-46], never with the host math library, a vendor vector
 library, or a compiler built-in. Executable
