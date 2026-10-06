@@ -246,6 +246,86 @@ fn every_mixed_operator_requires_grouping() {
 }
 
 #[test]
+fn pipe_grouping_diagnostics_match_the_rejected_form() {
+    for (rejected, hint, grouped) in [
+        ("r.f |> g", "`(r.f) |> g`", "(r.f) |> g"),
+        (
+            "M.f(x) |> g",
+            "parenthesize the entire left operand",
+            "(M.f(x)) |> g",
+        ),
+        ("x |> M.f", "`x |> (M.f)`", "x |> (M.f)"),
+        ("x |> M.f |> g", "`x |> (M.f)`", "x |> (M.f) |> g"),
+        (
+            "x |> M.f(y)",
+            "parenthesize the entire pipe stage",
+            "x |> (M.f(y))",
+        ),
+        (
+            "x |> f(g).field",
+            "parenthesize the entire pipe stage",
+            "x |> (f(g).field)",
+        ),
+        ("x |> f.1", "`x |> (f.1)`", "x |> (f.1)"),
+        (
+            "x |> f(g).1",
+            "parenthesize the entire pipe stage",
+            "x |> (f(g).1)",
+        ),
+        ("x |> f.1 |> g", "`x |> (f.1)`", "x |> (f.1) |> g"),
+        (
+            "r.f + x |> g",
+            "parenthesize the entire left operand",
+            "(r.f + x) |> g",
+        ),
+        (
+            "x |> M.f(y).field",
+            "parenthesize the entire pipe stage",
+            "x |> (M.f(y).field)",
+        ),
+        (
+            "x |> f(g).field(h)",
+            "parenthesize the entire pipe stage",
+            "x |> (f(g).field(h))",
+        ),
+        (
+            "if c then x |> f else y",
+            "parenthesize the complete pipe in the `then` branch",
+            "if c then (x |> f) else y",
+        ),
+        (
+            "if c then a else b |> f",
+            "parenthesize the entire conditional",
+            "(if c then a else b) |> f",
+        ),
+        (
+            "x |> if c then f else g",
+            "parenthesize the entire conditional pipe stage",
+            "x |> (if c then f else g)",
+        ),
+        (
+            "fn (v) -> v |> f",
+            "parenthesize the complete pipe in the lambda body",
+            "fn (v) -> (v |> f)",
+        ),
+        (
+            "x |> fn (v) -> v + y",
+            "parenthesize the entire lambda pipe stage",
+            "x |> (fn (v) -> v + y)",
+        ),
+        ("a + b |> f", "`(a + b) |> f`", "(a + b) |> f"),
+        ("x |> f + y", "`(x |> f) + y`", "(x |> f) + y"),
+        ("x |> f * y", "`(x |> f) * y`", "(x |> f) * y"),
+    ] {
+        let error = parse_str(&format!("out = {rejected}\n"))
+            .expect_err("ungrouped expression must fail")
+            .to_string();
+        assert!(error.contains(hint), "{rejected}: {error}");
+        parse_str(&format!("out = {grouped}\n")).expect("suggested grouping must parse");
+    }
+}
+
+#[test]
 fn accumulator_pipe_stages_preserve_the_explicit_width_and_call_arity() {
     for expression in [
         "x |> sum(0i32, accumulator=f64)",
