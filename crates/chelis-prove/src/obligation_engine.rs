@@ -28,6 +28,7 @@ use crate::composition::{
 use crate::discharge::QualifierSet;
 use crate::obligations::{ObligationMeta, ObligationProperty, ProducedPosition};
 use crate::opaque::{ConstEnv, OpaqueInvariant};
+use crate::smt_names::fresh_root_name;
 use crate::tier_b::TierBResult;
 use crate::tier_b_lower::ProducerParamType;
 
@@ -875,7 +876,18 @@ fn run_tier_c(
                                 name: name.clone(),
                             });
                         }
-                        Err(diag) => {
+                        Err(crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
+                            return outcome(
+                                ob,
+                                ObligationStatus::Error,
+                                ObligationTier::Fuzz,
+                                n,
+                                seed,
+                                None,
+                                Some(reason),
+                            );
+                        }
+                        Err(crate::opaque::GenerationFailure::Starved(diag)) => {
                             // Generator starvation for the input binder.
                             if options.invariant_min_rate == 0.0 {
                                 // Floor disabled: legacy exhaustion => Error.
@@ -1605,9 +1617,11 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     if let Some(v) = literal_const_value(&exprs, name) {
         return Some(v);
     }
+    // A fresh root, so a module that defines the plain spelling cannot turn
+    // the probe into a duplicate definition (chelis#3267).
+    let probe = fresh_root_name(&exprs, "__chelis_const_probe");
     for probe_body in [deep_node("app", vec![deep_var(name)]), deep_var(name)] {
-        let probe = "__chelis_const_probe";
-        let probe_def = node_def(probe, probe_body);
+        let probe_def = node_def(&probe, probe_body);
         let program = inject_const_probe(&exprs, probe_def);
         let deep_probe = chelis_deep::printer::print_canonical(&program);
         let Ok(result) = chelis_compiler_api::compiler::eval_selected(
@@ -1616,7 +1630,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
                 source: deep_probe,
                 bindings: Default::default(),
             },
-            &[probe.to_string()],
+            std::slice::from_ref(&probe),
         ) else {
             continue;
         };
@@ -1852,9 +1866,8 @@ fn eval_producer_value(
     inv: &OpaqueInvariant,
     call: Expr,
 ) -> Result<ExecutionValue, String> {
-    let probe = "__chelis_value_probe";
-    let probe_def = node_def(probe, call);
-    let program = inject_into_module_stripped(module_source, &inv.type_name, vec![probe_def])?;
+    let (program, probe) =
+        inject_probe_stripped(module_source, &inv.type_name, "__chelis_value_probe", call)?;
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
@@ -1862,7 +1875,7 @@ fn eval_producer_value(
             source,
             bindings: Default::default(),
         },
-        &[probe.to_string()],
+        &[probe],
     )
     .map_err(|e| {
         e.errors
@@ -2090,17 +2103,22 @@ fn node_def(name: &str, body: Expr) -> Expr {
     deep_node("def", vec![deep_sym(name), body])
 }
 
-/// Insert defs into the defining module with the invariant metadata
-/// stripped (so the shape-sensitive predicate does not block IR lowering).
-fn inject_into_module_stripped(
+/// Declare `body` as a probe `def` in the defining module, with the
+/// invariant metadata stripped (so the shape-sensitive predicate does not
+/// block IR lowering). The probe is named fresh against the program
+/// (chelis#3267); returns the program and the probe's name.
+fn inject_probe_stripped(
     module_source: &str,
     type_name: &str,
-    defs: Vec<Expr>,
-) -> Result<Vec<Expr>, String> {
+    stem: &str,
+    body: Expr,
+) -> Result<(Vec<Expr>, String), String> {
     let exprs = chelis_deep::parse_and_stamp_file(module_source)
         .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
-    Ok(inject_into_defining_module(&stripped, type_name, defs))
+    let probe = fresh_root_name(&stripped, stem);
+    let program = inject_into_defining_module(&stripped, type_name, vec![node_def(&probe, body)]);
+    Ok((program, probe))
 }
 
 /// Drop the `invariant`/`invariant_amenability` deftype metadata keys,
@@ -2357,6 +2375,30 @@ def bound() -> i64 = 9007199254740993i64
         assert!(
             !constants.contains_key("bound"),
             "a rounded integer must not enter the producer constant environment: {constants:?}"
+        );
+    }
+
+    #[test]
+    fn chelis_3267_guard_constant_resolves_beside_a_definition_of_the_probe_spelling() {
+        // `hi` is not a plain literal, so it resolves by evaluating a probe
+        // root rather than through the literal fast path.
+        let source = "module Stats.Guard
+@opaque
+@invariant(p) p.value <= hi()
+type Bounded =
+  | Bounded { value: f32 }
+def hi() -> f32 = 0.5 + 0.25
+__chelis_const_probe = true
+";
+        let declarations = chelis_surf::parser::parse_str(source).expect("parse module");
+        let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+        let invariants = crate::opaque::collect_opaque_invariants(&exprs);
+        let constants = resolve_module_constants(&exprs, &invariants);
+        assert_eq!(
+            constants.get("hi").copied(),
+            Some(0.75),
+            "a module definition of the probe's spelling must not leave `hi` unresolved: \
+             {constants:?}"
         );
     }
 

@@ -464,3 +464,52 @@ fn defining_module_injection_appends_to_the_module_node() {
     };
     assert_eq!(module.children_slice().last(), Some(&marker));
 }
+
+// --- chelis#3267: the producer value probe is named fresh ---
+
+/// A sound (`make`) and an unsound (`wrap`) producer beside a definition of
+/// `name`.
+fn value_probe_module(name: &str) -> String {
+    format!(
+        "module M.Prob
+export (make, wrap)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability {{ value: f32 }}
+def make(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= 1.0 then Some(Probability {{ value: x }}) else None
+def wrap(x: f32) -> Option[Probability] = Some(Probability {{ value: x }})
+{name} = true
+"
+    )
+}
+
+#[test]
+fn chelis_3267_value_probe_avoids_a_module_definition_of_its_spelling() {
+    let control = run(&value_probe_module("renamed_value_probe"), "fuzz-only");
+    let outcomes = run(&value_probe_module("__chelis_value_probe"), "fuzz-only");
+    assert_eq!(outcomes.len(), 2, "{outcomes:#?}");
+    assert_eq!(outcomes.len(), control.len(), "{outcomes:#?}");
+    for (defined, control) in outcomes.iter().zip(&control) {
+        assert_eq!(defined.name, control.name);
+        assert_eq!(defined.status, control.status, "{defined:#?}\n{control:#?}");
+        assert_eq!(defined.samples, control.samples, "{defined:#?}");
+        assert_eq!(
+            defined.counterexample, control.counterexample,
+            "{defined:#?}"
+        );
+        assert_eq!(defined.reason, control.reason, "{defined:#?}");
+    }
+    let make = outcomes
+        .iter()
+        .find(|outcome| outcome.name.ends_with(":make"))
+        .expect("the sound producer has an obligation");
+    assert_eq!(make.status, ObligationStatus::Passed, "{make:#?}");
+    let wrap = outcomes
+        .iter()
+        .find(|outcome| outcome.name.ends_with(":wrap"))
+        .expect("the unsound producer has an obligation");
+    assert_eq!(wrap.status, ObligationStatus::Failed, "{wrap:#?}");
+    assert!(wrap.counterexample.is_some(), "{wrap:#?}");
+}

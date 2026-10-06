@@ -2547,11 +2547,8 @@ fn eval_deep_sample(
     sample: &Sample,
     precondition: bool,
 ) -> Result<bool, String> {
-    let root = if precondition {
-        "__chelis_property_pre"
-    } else {
-        "__chelis_property_probe"
-    };
+    let root = sample_root_name(exprs, precondition);
+    let root = root.as_str();
     let mut source_exprs = exprs.to_vec();
     for value in &sample.values {
         if let Some((binding_name, _)) = &value.tensor_binding
@@ -2574,6 +2571,29 @@ fn eval_deep_sample(
     ));
     let source = chelis_deep::printer::print_canonical(&source_exprs);
     eval_bool_with_bindings(SourceKind::Deep, source, root, sample_bindings(sample))
+}
+
+/// The root a Deep property sample declares in the program it evaluates.
+/// Under `chelis-prove` it is named through the shared runner's helper,
+/// fresh against every name the program spells, so a module that defines
+/// the plain spelling keeps its definition and its verdict (chelis#3267).
+/// The no-`chelis-prove` build has no access to that helper and keeps the
+/// plain spelling.
+fn sample_root_name(exprs: &[DeepExpr], precondition: bool) -> String {
+    let stem = if precondition {
+        "__chelis_property_pre"
+    } else {
+        "__chelis_property_probe"
+    };
+    #[cfg(feature = "chelis-prove")]
+    {
+        chelis_prove::smt_names::fresh_root_name(exprs, stem)
+    }
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        let _ = exprs;
+        stem.to_string()
+    }
 }
 
 fn deep_sample_block_expr(

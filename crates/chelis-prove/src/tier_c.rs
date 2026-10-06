@@ -32,8 +32,12 @@ pub enum TierCResult {
 /// tier delegates to it.
 pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u64) -> TierCResult {
     // For the dispatcher integration, we call eval_selected on a probe root
-    // that wraps the property. This mirrors what chelis prove does internally.
-    let probe_name = format!("__chelis_prove_probe_{property_name}");
+    // that wraps the property. This mirrors what chelis prove does internally,
+    // including naming the root fresh against the program (chelis#3267).
+    let probe_name = match probe_root_name(property_source, property_name) {
+        Ok(name) => name,
+        Err(reason) => return TierCResult::Error(reason),
+    };
     let source_with_probe = format!("{property_source}\n{probe_name} = {property_name}()\n",);
 
     let result = compiler::eval_selected(
@@ -71,6 +75,18 @@ pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u
             TierCResult::Error(msg)
         }
     }
+}
+
+/// The root that wraps `property_name`, named fresh against every name the
+/// Surf `property_source` spells. A source that does not parse or desugar
+/// cannot be evaluated either, so its error is the result.
+fn probe_root_name(property_source: &str, property_name: &str) -> Result<String, String> {
+    let decls = chelis_surf::parser::parse_str(property_source).map_err(|e| e.to_string())?;
+    let program = chelis_surf::desugar::desugar_program(&decls).map_err(|e| e.to_string())?;
+    Ok(crate::smt_names::fresh_root_name(
+        &program,
+        &format!("__chelis_prove_probe_{property_name}"),
+    ))
 }
 
 // --- SmtProperty-based fuzzer (used by --tier auto) ---
@@ -381,5 +397,20 @@ mod tests {
             TierCResult::Error(msg) => assert!(msg.contains("no declared dtype"), "{msg}"),
             other => panic!("expected an error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chelis_3267_dispatcher_probe_avoids_a_module_definition_of_its_spelling() {
+        let module = |body: &str| {
+            format!("module M\n__chelis_prove_probe_holds = false\ndef holds() -> bool = {body}\n")
+        };
+        assert_eq!(
+            super::fuzz(&module("true"), "holds", 4, 0),
+            TierCResult::AllPassed(4)
+        );
+        assert!(matches!(
+            super::fuzz(&module("false"), "holds", 4, 0),
+            TierCResult::Failed(_)
+        ));
     }
 }
