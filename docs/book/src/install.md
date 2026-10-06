@@ -7,10 +7,11 @@ Packages](reef.md) covers package creation and dependencies.
 
 ## Install a release toolchain
 
-You need an authenticated [GitHub CLI](https://cli.github.com). `chelisup`
-downloads release assets through the authenticated GitHub REST API, so it needs a
-GitHub token even though the releases are public: it reads `GITHUB_TOKEN`, or
-`gh auth token` when that is unset. Prebuilt release assets are available for macOS arm64 and Linux x86-64.
+The published 0.19.0 installer uses an authenticated GitHub download. Sign in
+with the [GitHub CLI](https://cli.github.com) for the commands below. The
+source-built installer can also download public releases without a token;
+private releases require `GITHUB_TOKEN` or a working `gh auth token` with read
+access. Prebuilt release assets are available for macOS arm64 and Linux x86-64.
 On Linux, `chelisup` and the toolchain it installs are static executables that
 need no system libraries, so they start on any x86-64 distribution, including
 NixOS without nix-ld. They resolve host names through `/etc/hosts` and the name
@@ -28,8 +29,7 @@ chelisup install "${release_tag#v}"
 chelis --version
 ```
 
-If you are already signed in with `gh`, you can skip `gh auth login`. The
-bootstrap script installs **only `chelisup`**. The separate `chelisup install`
+The bootstrap script installs **only `chelisup`**. The separate `chelisup install`
 command downloads the toolchain and installs the `chelis` version-selecting
 shim. The script prints the PATH line for your install location; the line above
 uses the default `~/.chelis/bin`. `chelisup install` takes a bare `X.Y.Z`, while

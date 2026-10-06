@@ -1087,8 +1087,8 @@ fn phaseA_item7_empty_input_and_empty_default_errors_nothing_to_install() {
 fn phaseA_item7_auth_failure_aborts_before_first_install() {
     let _g = file_lock();
     // Three shells in a chain, but no GITHUB_TOKEN (and no `gh` on
-    // PATH inside the helper). The first manifest fetch fails with
-    // AuthMissing; the bootstrap must NOT try the install loop.
+    // PATH inside the helper). The private server rejects the first
+    // anonymous manifest fetch; bootstrap must not try the install loop.
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
@@ -1100,12 +1100,17 @@ fn phaseA_item7_auth_failure_aborts_before_first_install() {
         SyntheticShell::new("chelis-lang", "auth-b", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path("/repos/chelis-lang/auth-a/releases/tags/v0.2.0"))
+            .respond_with(ResponseTemplate::new(401)),
+    ]);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
     let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), None, &registry)
-        .expect_err("no token must fail");
+        .expect_err("private release must reject an anonymous request");
     match err {
         chelis_reef::BootstrapError::Fetch(chelis_reef::GitHubFetchError::AuthMissing {
             ..
@@ -1116,6 +1121,65 @@ fn phaseA_item7_auth_failure_aborts_before_first_install() {
     assert!(
         !registry.join("index.json").exists(),
         "auth failure must not touch the registry"
+    );
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].headers.contains_key("authorization"));
+}
+
+#[test]
+fn phaseA_item7_public_bootstrap_without_token() {
+    let _g = file_lock();
+    let shell = SyntheticShell::new("chelis-lang", "public-shell", "v0.2.0", "0.2.0", vec![]);
+    let archive_id = archive_asset_id(0);
+    let shell_id = shell_asset_id(0);
+    let metadata = serde_json::json!({
+        "assets": [
+            {"id": archive_id, "name": shell.archive_name()},
+            {"id": shell_id, "name": shell.shell_name()},
+        ]
+    })
+    .to_string();
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/repos/chelis-lang/public-shell/releases/tags/v0.2.0",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(metadata)),
+        Mock::given(method("GET"))
+            .and(wm_path(format!(
+                "/repos/chelis-lang/public-shell/releases/assets/{archive_id}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell.archive_bytes())),
+        Mock::given(method("GET"))
+            .and(wm_path(format!(
+                "/repos/chelis-lang/public-shell/releases/assets/{shell_id}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell.shell_bytes())),
+    ]);
+    let dir = tempdir().expect("tempdir");
+    let registry = dir.path().join("reef-home");
+    let spec = shell.spec_string();
+    lib_install_bootstrap(&[&spec], &harness.uri(), None, &registry)
+        .expect("public bootstrap must install without gh or GITHUB_TOKEN");
+    assert!(
+        registry
+            .join("packages/public-shell/0.2.0/public-shell-0.2.0.chb")
+            .is_file()
+    );
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization"))
     );
 }
 

@@ -306,16 +306,12 @@ preference order: the static `chelis-v<ver>-linux-x86_64-static.tar.gz`, then,
 for every release from 0.7.24 on, `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
 (chelis#2686); the `linux-x86_64` tarball needs the glibc of the runner that built
 it, and a glibc older than 2.31 runs neither dynamic build.
-**Private-repo caveat:** until chelis releases are public the public release URL
-does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
-an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of
-the `curl | sh` line fetches the published script asset through `gh` and pipes it
-to `sh` —
-`gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh`
-— and the script then uses `gh release download` again for the `chelisup-<slug>`
-binary (the fallback the current School install script already uses). From a
-checkout, `sh crates/chelisup/bootstrap/chelisup.sh` runs the same script
-directly.
+The public bootstrap URL serves `chelisup.sh` without a token. The script uses
+an authenticated `gh` when available, or `curl` for public releases. The
+`chelisup install` GitHub REST path likewise sends a token when available and
+fetches public assets anonymously otherwise. Private releases require
+`GITHUB_TOKEN` or a working `gh auth token`. From a checkout,
+`sh crates/chelisup/bootstrap/chelisup.sh` runs the same script directly.
 
 ### 5.6 Relationship to binary distribution (chelis#468)
 

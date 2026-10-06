@@ -252,6 +252,61 @@ fn binary_install_from_lockfile_places_and_verifies() {
 }
 
 #[test]
+fn public_binary_lockfile_installs_without_token() {
+    let Some(platform) = chelis_reef::host_platform_slug() else {
+        return;
+    };
+    let asset = asset_name(platform);
+    let bytes = build_tar_zst(ARTIFACT_NAME, MARKER);
+    let sha = sha256_bytes(&bytes);
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(metadata_json(&asset))),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes)),
+    ]);
+    let dir = tempdir().expect("tempdir");
+    let package_root = dir.path().join("consumer");
+    let chelis_home = dir.path().join("chelis-home");
+    let reef_home = dir.path().join("reef-home");
+    write_binary_lockfile(&package_root, platform, &asset, &sha);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_HOME", &chelis_home)
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env_remove("GITHUB_TOKEN")
+        .env("PATH", "")
+        .args([
+            "reef",
+            "install",
+            "--from-lockfile",
+            "--package-root",
+            package_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read(chelis_home.join("bin").join(ARTIFACT_NAME)).unwrap(),
+        MARKER
+    );
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization"))
+    );
+}
+
+#[test]
 fn binary_install_sha_mismatch_aborts_fail_closed() {
     let platform = match chelis_reef::host_platform_slug() {
         Some(p) => p,

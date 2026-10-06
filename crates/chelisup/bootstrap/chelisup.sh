@@ -15,7 +15,7 @@
 #   chelisup-<slug>   with slug in { darwin-arm64, darwin-x86_64, linux-x86_64 }
 # attached to each GitHub release (no version in the name, no tarball).
 #
-# With `gh` on PATH the download uses `gh release download`; without it,
+# With authenticated `gh` the download uses `gh release download`; otherwise,
 # the public release URL is fetched with curl.
 set -eu
 
@@ -44,7 +44,7 @@ tmp="$target.download"
 mkdir -p "$bin_dir"
 
 # 3. Download the prebuilt for this host into a temp file.
-if command -v gh >/dev/null 2>&1; then
+if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
   printf 'chelisup bootstrap: downloading %s via gh (latest release of %s)\n' "$asset" "$repo"
   gh release download --repo "$repo" --pattern "$asset" --output "$tmp" --clobber
 else

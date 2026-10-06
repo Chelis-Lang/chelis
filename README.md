@@ -44,10 +44,9 @@ multiply before anything runs. The error from its JSON report:
 ## Install a release toolchain
 
 Chelis releases include `chelisup`, which installs toolchains and selects the
-version used by each project. `chelisup` downloads release assets through the
-authenticated GitHub REST API, so it needs a GitHub token even though the
-releases are public; an authenticated [GitHub CLI](https://cli.github.com)
-provides one.
+version used by each project. The published 0.19.0 installer uses an authenticated
+GitHub download, so the commands below sign in with [`gh`](https://cli.github.com).
+The source-built installer also supports anonymous downloads of public releases.
 
 ```sh
 gh auth login
