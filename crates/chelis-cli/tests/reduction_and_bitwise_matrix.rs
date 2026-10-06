@@ -932,7 +932,7 @@ fn f32_reductions_agree_across_lanes() {
         let program = format!(
             "module M.Main\n\
              def f(x: tensor[4, f32]) -> tensor[{ret}] = {op}(x, 0)\n\
-             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n"
+             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5], f32)))\n"
         );
         let eval_got = eval_first_line(&program).expect("eval");
         common::assert_elements_in_domain(ret, &eval_got, op);
@@ -992,7 +992,7 @@ fn bool_dtype_is_clean_in_both_lanes() {
             "1",
         ),
         (
-            "module M.Main\ndef f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, bool] = cmplt(x, y)\nout = print(f(to_tensor([1.0, 3.0]), to_tensor([2.0, 2.0])))\n",
+            "module M.Main\ndef f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, bool] = cmplt(x, y)\nout = print(f(to_tensor([1.0, 3.0], f32), to_tensor([2.0, 2.0], f32)))\n",
             "tensor(shape=[2], data=[true, false])",
         ),
     ];

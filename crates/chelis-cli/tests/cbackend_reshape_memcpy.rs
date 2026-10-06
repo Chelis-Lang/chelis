@@ -183,7 +183,7 @@ static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
 #[test]
 fn checked_host_reshape_executes_zero_and_overflow_domains_under_ubsan() {
     let build = chelis_build_c(
-        "module CheckedReshape\nresult = reshape(to_tensor([1.0, 2.0]), [2i64])\n",
+        "module CheckedReshape\nresult = reshape(to_tensor([1.0, 2.0], f32), [2i64])\n",
         "checked_reshape",
     );
     let kernel = build.path().join("checked_reshape.c");
@@ -303,7 +303,7 @@ int main(int argc, char **argv) {{
 fn cbackend_reshape_tensor_f64() {
     let build = chelis_build_c(
         "module Demo\n\
-         src = cast(to_tensor([1.5, 2.5, 3.5, 4.5]), f64)\n\
+         src = cast(to_tensor([1.5, 2.5, 3.5, 4.5], f32), f64)\n\
          result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
@@ -413,7 +413,7 @@ int main(void) {{
 fn cbackend_reshape_tensor_f32_control() {
     let build = chelis_build_c(
         "module Demo\n\
-         src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
+         src = to_tensor([1.5, 2.5, 3.5, 4.5], f32)\n\
          result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
@@ -476,7 +476,7 @@ int main(void) {{
 fn cbackend_reshape_zero_element_tensor_keeps_an_extent_above_int32() {
     let build = chelis_build_c(
         "module Demo\n\
-         src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
+         src = to_tensor([1.5, 2.5, 3.5, 4.5], f32)\n\
          result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );

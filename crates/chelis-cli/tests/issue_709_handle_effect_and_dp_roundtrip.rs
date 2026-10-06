@@ -460,7 +460,7 @@ fn rt721_host_bodied_nullary_still_roundtrips() {
 /// or resolve it; here it must fail with a type mismatch and produce no value.
 #[test]
 fn rt721_toplevel_value_binding_is_not_callable() {
-    let dp = deep_of("g = to_tensor([1.0])\nout = print(g())\n");
+    let dp = deep_of("g = to_tensor([1.0], f32)\nout = print(g())\n");
     let err = eval_with_ext(&dp, ".dp")
         .expect_err("applying a non-fn top-level value binding must be rejected");
     assert!(

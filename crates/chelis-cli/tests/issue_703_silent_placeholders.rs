@@ -153,7 +153,7 @@ fn tensor_relu_is_correct_and_emits_no_stub() {
     }
     let (emitted, stdout) = build_and_run_c(
         "def f(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
-         out = f(to_tensor([-1.0, 2.0, -3.0, 4.0]))\n",
+         out = f(to_tensor([-1.0, 2.0, -3.0, 4.0], f32))\n",
         "tensor_relu",
     )
     .expect("tensor relu should build and run");

@@ -319,10 +319,11 @@ pub use chelis_deep::LiteralSuffix;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
-    /// Bare integer literal. Defaults to `i32` per spec §5.3 unless
-    /// disambiguated by a suffix variant or surrounding context.
+    /// Bare integer literal. Defaults to `i32` per spec §5.3 unless a
+    /// construct that directly contains it states a dtype (spec/04 §5.6).
     Int(i64),
-    /// Bare float literal. Defaults to `f32` per spec §5.3.
+    /// Bare float literal. Defaults to `f32` per spec §5.3, with the same
+    /// exception.
     Float(f64),
     /// Integer literal carrying an explicit precision suffix per spec §5.5.
     /// Suffix is part of the literal token; binds at exactly that

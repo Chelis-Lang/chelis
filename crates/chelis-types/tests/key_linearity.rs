@@ -960,8 +960,13 @@ fn key_is_not_a_numeric_or_castable_dtype() {
         "def bad() -> tensor[2, key] = to_tensor([1i64, 2i64])\n",
         CheckErrorKind::TypeMismatch,
     );
-    verdict("def bad() -> tensor[2, key] = {\n  x: tensor[2, key] = [1, 2]\n  x\n}\n")
-        .expect_err("a contextual key literal");
+    // spec/04 §5.6 Binding: no numeric literal binds at `key`, so Surf
+    // ingress rejects a declared key tensor literal.
+    let decls =
+        parse_str("def bad() -> tensor[2, key] = {\n  x: tensor[2, key] = [1, 2]\n  x\n}\n")
+            .expect("fixture parses");
+    let error = desugar_program(&decls).expect_err("a declared key literal");
+    assert!(error.to_string().contains("cannot bind at key"), "{error}");
 }
 
 /// chelis#2216 / PR #2517: a builtin's operand rule is decided at every

@@ -898,6 +898,7 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `cast_trunc(e, i32)` | `(cast {} e' (t-prim {} i32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
 | `cast_saturate(e, i8)` | `(cast {} e' (t-prim {} i8) saturate)` | Named saturating cast to a signed integer ([05-OP-23]) |
 | `cast_wrap(e, i8)` | `(cast {} e' (t-prim {} i8) wrap)` | Named wrapping signed-integer cast ([05-OP-24]) |
+| `to_tensor(e, f64)` | `(app {} (var {} to_tensor) e' (t-prim {} f64))` | Optional second argument is a dtype; `to_tensor` is reserved |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
@@ -934,7 +935,7 @@ their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
-The second argument to `cast` is a precision type literal (`f32`, `bf16`, etc.) in expression position. This is the one special form where a type appears as an argument.
+The second argument of `cast`, and the optional second argument of a call to the reserved name `to_tensor` (§P10b), is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast, and the value of a final `accumulator=<dtype>` argument (spec/04 §5.7), are likewise dtypes. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
 
 ### P10: Numeric Literals
 
@@ -960,7 +961,7 @@ canonical token, so a transcribed reference constant is repaired by
 `chelis fmt` rather than refused by the parser.
 
 This allowance does not admit malformed separators, a non-canonical decimal
-body on an integer-bodied literal, a suffix with different type/adoption
+body on an integer-bodied literal, a suffix with a different type
 meaning, or a token whose decoded value is non-finite.
 Surf has no infinity or NaN literal. A token that decodes to a finite value
 is still not a literal of a dtype at which that value is non-finite
@@ -972,15 +973,17 @@ at type `i32`; an unsuffixed float literal binds at type `f32`, each under
 `spec/04-type-system.md` [04-LIT-2]. The default is the **user-facing
 contract** and is non-overridable except by:
 
-1. an explicit literal suffix (P10a)
-2. the contextual tensor-literal inference rule (P10b) when the literal
-   appears inside a tensor body in a known-element-type position
-3. an explicit `cast(literal, p)` around the literal expression
+1. an explicit literal suffix (P10a);
+2. a dtype-stating construct that directly contains the literal (P10b): the
+   declared type of the binding or function result it initializes, the
+   `cast` whose operand it is, or the dtype argument of the `to_tensor` call
+   it is an element of.
 
-There is no implicit precision promotion. A bare `42` in any unannotated
-position binds at `i32`, not `i64`. A bare `1.0` binds at `f32`, not
-`f64`. See `spec/04-type-system.md` §5.3 for the type-system statement of
-this rule.
+A literal element of a `to_tensor` argument has no default: an unsuffixed one
+in a call without a dtype argument is rejected (P10b). There is no implicit
+precision promotion. A bare `42` in any unannotated position binds at `i32`,
+not `i64`. A bare `1.0` binds at `f32`, not `f64`. See
+`spec/04-type-system.md` §5.3 for the type-system statement of this rule.
 
 **Negative literals:** `-42` is always parsed as unary minus applied to `42`,
 not as a signed literal token. A negative argument is written `f(-42)`.
@@ -1007,8 +1010,8 @@ narrowing. The closed suffix set is:
 
 Default-type suffixes are semantic commitments, not syntax-safe aliases. In
 particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
-`cast(1.1, f64)` contextually binds the literal at `f64` under P10b. Both are
-therefore canonical.
+`cast(1.1, f64)` binds the literal at `f64` under P10b and is the same value
+as `1.1f64`.
 
 A float suffix accepts either a float body or an integer body, and the two are
 semantically distinct rather than spellings of one another. `42.0f32` decodes
@@ -1040,9 +1043,8 @@ parse error.
 **Adjacency rule.** A suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
 comment, or other character. `1.0 f32` (with whitespace) is two tokens (a
-float literal followed by an identifier-position token); the literal then
-binds at the §P10 default and is subject to the surrounding-position rules in
-the type checker.
+float literal followed by an identifier-position token); the literal is
+unsuffixed, and its dtype follows §P10.
 
 Hexadecimal and binary integers may carry an integer suffix; the decoded value
 is printed as a canonical decimal token. A radix integer may not carry a float
@@ -1076,73 +1078,81 @@ without making them valid at normal compiler ingress. Neither the canonical
 names nor the retired names may be rebound as type variables under
 `spec/04-type-system.md` §5.8.1.
 
-### P10b: Contextual Tensor-Literal Inference
+### P10b: Tensor Literals and Dtype-Stating Constructs
 
 A bracket literal `[e1, e2, ...]` is a `List`: it desugars to the `Cons`/`Nil`
-chain of its elements (`spec/03-deep-syntax.md` §6). Neither the spelling of its
-elements nor the position it stands in selects another kind. A tensor is
+chain of its elements (`spec/03-deep-syntax.md` §6). Neither the spelling of
+its elements nor the position it stands in selects another kind. A tensor is
 written in one of two ways:
 
-- as a `to_tensor` call, `to_tensor([1.0, 2.0, 3.0])`, in any position. Its
-  argument is an ordinary `List`, so its numeric literals bind at their suffix
-  or the §P10 default: `to_tensor([1.1f64, 2.2f64])` is a `tensor[2, f64]`,
-  and `to_tensor([1.1, 2.2])` a `tensor[2, f32]`, wherever the call stands;
+- as a `to_tensor` call, such as `to_tensor([1.0, 2.0, 3.0], f32)`, in any
+  position. Its first argument is an ordinary `List`, and its optional second
+  argument is a dtype (§P9);
 - as a **tensor literal**: a bare bracket literal whose own declaration states
   a tensor type. That is the right-hand side of a binding whose declared type,
   by inline annotation or standalone `sig`, is a tensor type, or the body of a
   `def` whose declared result type is a tensor type. A `def`'s inline result
   type decides; a `def` without one takes the result type of its standalone
-  `sig`. The desugarer emits the `to_tensor` call. A bare bracket literal that
-  its declaration converts is rejected where a lexical binding named
-  `to_tensor` is in scope, because the conversion would resolve to that
-  binding.
+  `sig`. The desugarer emits the `to_tensor` call.
 
-A position with a **known element type** gives a literal that dtype instead
-of the §P10 default. The closed set of such positions is exactly:
+A numeric literal takes its dtype from its suffix (§P10a) or else from a
+**dtype-stating construct** that directly contains it, when its kind admits
+the stated dtype, and never from a callee's signature or from anything
+further away. The closed set is exactly
+(`spec/04-type-system.md` §5.6 states the full rule):
 
-- **Position 1**: the right-hand side of a `let`-binding whose declared type
-  is a tensor type, when it is a tensor literal —
-  `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` makes the literals bind at `f64`
-- **Position 3**: the body of a function with a declared return type that is
-  a tensor type, when the body is a tensor literal
-- **Position 4**: the first argument of an explicit `cast(literal, p)`
-  expression, where the literal is a bare scalar numeric literal or its unary
-  negation — it binds at `p`, which may also be a dtype-bounded type binder;
-  the literal then binds at each admissible instantiation
-  (`spec/04-type-system.md` §5.6)
+- **Declaration**: the declared type of the binding or function result whose
+  initializer is the literal (`x: f64 = 1.1`, `def f() -> i8 = -128`), or,
+  for a tensor literal, the declared element dtype, which every literal
+  element takes (`xs: tensor[2, f64] = [1.1, 2.2]`);
+- **Cast**: the target of the `cast` whose first argument is the literal
+  (`cast(1.1, f64)`); the named casts state no dtype;
+- **Dtype argument**: the second argument of the `to_tensor` call whose
+  bracket-literal first argument has the literal as an element
+  (`to_tensor([1.1, 2.2], f64)`).
 
-A callee's declared parameter type and a `cast` never make a bracket literal a
-tensor: a bare bracket literal passed as an argument or cast stays a `List`.
-A tensor argument or tensor cast operand is a `to_tensor` call whose elements
-carry the dtype they keep, e.g. `f(to_tensor([1.0f64, 2.0f64]))`.
+The stated dtype may be a primitive or a dtype-bounded type binder; for a
+binder the literal binds at each admissible instantiation
+(`spec/04-type-system.md` §5.6). An element is an item of the bracket literal,
+recursively through nested bracket literals, and grouping parentheses are
+transparent. A unary negation folds into the literal it negates, so
+`cast(-1.1, f64)` binds `-1.1` at `f64` and `x: i8 = -128` binds the `i8`
+minimum. An explicit `neg(1.1)` call, like any other expression between the
+construct and the literal, leaves the literal an ordinary operand that keeps
+its suffix or default. The rule is judged on the source text after pipe
+normalization (§0.2); a literal written as a macro argument is governed by the
+constructs around the macro call.
 
-Position 4 adopts a bare scalar numeric literal: `cast(1.1, f64)` binds the
-decimal at `f64` directly (the desugarer emits
-`(lit {type: (t-prim {} f64)} 1.1)`), not "narrow to the f32 default, then
-widen". A unary negation folds into the literal first, so `cast(-1.1, f64)`
-binds `-1.1` at `f64`; an explicit `neg(1.1)` call is an ordinary operand
-whose literal keeps the §P10 default. Suffixed literals keep their
-suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
-float literal under an integer `p` keeps its float source type and then
-uses the checked target-finalization rule: an integral value casts exactly,
-while a fractional value traps `domain`. See `spec/04-type-system.md` §5.2
-and [04-NUM-14] for the full statement.
+`cast(1.1, f64)` with a primitive target desugars to exactly the Deep of
+`1.1f64`, `(lit {type: (t-prim {} f64)} 1.1)`, with no `cast` node; it does not
+narrow to the `f32` default and then widen. A cast to a binder keeps its
+`cast` node, because at an integer member the cast converts a float literal.
+Suffixed literals keep their suffix binding (§P10a; `cast(1.1f32, f64)` widens
+the `f32` value), and a float literal under an integer target, or any
+numeric literal under `bool`, keeps its default and then uses the checked
+target-finalization rule: an integral value casts exactly, a fractional value
+under an integer target traps `domain`, and `cast(1, bool)` is `true`. See
+`spec/04-type-system.md` §5.2 and [04-NUM-14] for the full statement.
 
-Outside this closed set, numeric literals keep the §P10 literal defaults:
-integer literals to `i32`, float literals to `f32`. In an unannotated binding,
-`to_tensor([1, 2, 3])` evaluates to `tensor[3, i32]` and
-`to_tensor([1.0, 2.0, 3.0])` to `tensor[3, f32]`, while a bare `[1, 2, 3]` is
-a `List i32`.
+**Tensor elements state their dtype.** A literal element of a `to_tensor`
+argument has no default: `to_tensor([1.1, 2.2])` is rejected, and the
+diagnostic names the dtype-argument spelling. A tensor literal's elements
+always take the declaration's dtype. A callee's declared parameter type and a
+`cast` never make a bracket literal a tensor and state no dtype for its
+elements: a bare bracket literal passed as an argument or cast stays a `List`
+whose literals keep their own suffix or default.
 
-**Mixed suffixes inside a contextual literal.** A suffixed entry inside a
-contextual tensor literal is well-formed only if its suffix matches the
-inferred element type. `[1.0, 2.0f64, 3.0]` in an `f32`-context is a type
-error: the f64-suffixed literal at index 1 has an explicit dtype that
-disagrees with the surrounding `f32` element type. The diagnostic identifies
-the offending index and suggests removing the suffix.
+**Mixed suffixes.** A suffixed element of a tensor literal, or under a dtype
+argument, is well formed only if its suffix matches the stated dtype.
+`[1.0, 2.0f64, 3.0]` declared `tensor[3, f32]` is a type error: the
+f64-suffixed literal at index 1 has an explicit dtype that disagrees with the
+stated `f32` element type. The diagnostic identifies the offending index and
+suggests removing the suffix.
 
-See `spec/04-type-system.md` §5.6 for the type-system statement of the
-contextual-inference rule.
+**Reserved names.** `to_tensor` may not be bound by any declaration,
+parameter, binding, pattern, or import (`spec/04-type-system.md` §8.6), so a
+`to_tensor` call always denotes the intrinsic conversion. `cast` and the named
+casts are keywords (§1).
 
 ### P11: Strings
 
@@ -1498,6 +1508,10 @@ AccumArg      <- 'accumulator' S '=' S PrecType  # spec/04 §5.7; `accumulator`
                                                   # stays an ordinary identifier
 AppExpr       <- AtomExpr CallArgs?
                / TransformExpr CallArgs?
+# A call whose callee is the reserved identifier 'to_tensor' parses its
+# arguments as ordinary CallArgs; desugaring requires an optional second
+# argument to be an identifier naming a dtype, a primitive or a
+# dtype-bounded binder in scope, never a value (§P9, §P10b).
 
 # ── Atoms ──
 

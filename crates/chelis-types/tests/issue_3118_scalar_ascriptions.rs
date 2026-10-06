@@ -20,11 +20,18 @@ fn scalar_expression_and_local_binding_ascriptions_reject_dtype_changes() {
         ("1i64", "i32"),
         ("1i32", "i64"),
     ] {
-        for source in [
-            format!("out = ({literal} : {target})\n"),
-            format!("out = {{\n  y: {target} = {literal}\n  y\n}}\n"),
-            format!("out: {target} = {literal}\n"),
-        ] {
+        // A declaration states the dtype of an unsuffixed literal initializer
+        // (spec/04 §5.6), so only a suffixed one can mismatch there; an
+        // ascription states nothing and always checks.
+        let suffixed = ["f32", "f64", "i32", "i64"]
+            .iter()
+            .any(|suffix| literal.ends_with(suffix));
+        let mut sources = vec![format!("out = ({literal} : {target})\n")];
+        if suffixed {
+            sources.push(format!("out = {{\n  y: {target} = {literal}\n  y\n}}\n"));
+            sources.push(format!("out: {target} = {literal}\n"));
+        }
+        for source in sources {
             let error = check(&source).expect_err(&source);
             assert!(
                 error.contains("PrecisionMismatch") || error.contains("TypeMismatch"),
@@ -50,6 +57,14 @@ fn matching_ascriptions_and_explicit_casts_keep_their_literal_binding() {
         for source in [
             format!("out = ({literal} : {target})\n"),
             format!("out = {{\n  y: {target} = {literal}\n  y\n}}\n"),
+        ] {
+            check(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
+    for (literal, target) in [("1.1", "f64"), ("1", "f64"), ("3000000000", "i64")] {
+        for source in [
+            format!("out = {{\n  y: {target} = {literal}\n  y\n}}\n"),
+            format!("out: {target} = {literal}\n"),
         ] {
             check(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
         }

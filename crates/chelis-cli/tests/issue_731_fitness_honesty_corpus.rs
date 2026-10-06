@@ -136,7 +136,7 @@ fn surf_known_bad_programs_score_below_one() {
                e = insert(x, 0i32, 2i64)\n\
                add(s, e)\n\
              }\n\
-             out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"
+             out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], f32))\n"
                 .to_string(),
             ".ch",
         ),

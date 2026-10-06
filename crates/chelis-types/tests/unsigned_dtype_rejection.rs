@@ -88,8 +88,8 @@ fn cast_scalar_to_uint64_alias_rejected_with_spec_1_1_1_diagnostic() {
 
 #[test]
 fn tensor_element_u8_rejected_with_spec_1_1_1_diagnostic() {
-    let src = "def main() -> tensor[3, i32] = cast(to_tensor([1, 2, 3]), i32)\n\
-               def stash() -> tensor[3, u8] = to_tensor([1, 2, 3])";
+    let src = "def main() -> tensor[3, i32] = cast(to_tensor([1, 2, 3], i32), i32)\n\
+               def stash() -> tensor[3, u8] = to_tensor([1, 2, 3], i32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("tensor[..., u8] must error per spec §1.1.1");

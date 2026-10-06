@@ -108,7 +108,7 @@ fn nullary_alias_is_a_value_not_an_implicitly_applied_declaration() {
 
 #[test]
 fn tensor_function_alias_preserves_concrete_call_result() {
-    let source = "def anchor(x: tensor[2, i32]) -> tensor[2, i32] = x\nalias = anchor\ndef user() -> tensor[2, i32] = alias(to_tensor([1, 2]))";
+    let source = "def anchor(x: tensor[2, i32]) -> tensor[2, i32] = x\nalias = anchor\ndef user() -> tensor[2, i32] = alias(to_tensor([1, 2], i32))";
     let result = eval_selected(request(source.into()), &["user".into()]).unwrap();
     assert_eq!(
         result.roots[0].display.as_deref(),

@@ -181,7 +181,7 @@ fn issue_273_hello_tensor_style_output_inferred_dim_type_checks() {
     let path = dir.path().join("output_inferred.ch");
     write_file(
         &path,
-        "def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -261,7 +261,7 @@ fn issue_273_body_internal_pin_not_coinciding_with_params_type_checks() {
     let path = dir.path().join("body_internal.ch");
     write_file(
         &path,
-        "def f[k](x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def f[k](x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);

@@ -79,7 +79,8 @@ fn resugaring_the_deep_prints_calls() {
     let deep_path = fixture(&dir, "piped_resugar.dp", &deep_of(&path, false));
     let printed = run(&["surf", deep_path.to_str().unwrap()]);
     assert!(
-        printed.contains("sum(x, cast(0, i32))"),
+        // chelis#3164: the stage's `cast(0, i32)` is the literal `0i32`.
+        printed.contains("sum(x, 0i32)"),
         "the pipe decompiles to a call: {printed}"
     );
 }

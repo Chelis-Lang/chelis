@@ -284,8 +284,8 @@ fn hydronnx_h3_layer_norm_batch2_hidden4_matches_ir_eval() {
     // gamma = [1, 2, 3, 4], beta = [0.1, 0.2, 0.3, 0.4]
     let src = r#"
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0], [4.0, 2.0, 0.0, 6.0]], 0.0)
-g = to_tensor([1.0, 2.0, 3.0, 4.0])
-b = to_tensor([0.1, 0.2, 0.3, 0.4])
+g = to_tensor([1.0, 2.0, 3.0, 4.0], f32)
+b = to_tensor([0.1, 0.2, 0.3, 0.4], f32)
 out = layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let result = eval_surf(src);

@@ -80,7 +80,7 @@ fn eval_numel_three_element_tensor() {
     let path = write_program(
         dir.path(),
         "numel_three.ch",
-        "result = numel(to_tensor([1, 2, 3]))\n",
+        "result = numel(to_tensor([1, 2, 3], i32))\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
@@ -103,7 +103,7 @@ fn eval_numel_single_element_tensor() {
     let path = write_program(
         dir.path(),
         "numel_single.ch",
-        "result = numel(to_tensor([1.0]))\n",
+        "result = numel(to_tensor([1.0], f32))\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(

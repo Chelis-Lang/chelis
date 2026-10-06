@@ -67,7 +67,7 @@ fn cast_tensor_to_f8e4m3_rejected_with_spec_diagnostic() {
 fn declared_tensor_with_f8e4m3_rejected_with_spec_diagnostic() {
     // Direct `(t-tensor ... (t-prim {} f8e4m3))` use in a declared
     // signature must surface the same f8e4m3-specific message.
-    let src = "def x() -> tensor[3, f8e4m3] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
+    let src = "def x() -> tensor[3, f8e4m3] = cast(to_tensor([1.0, 2.0, 3.0], f32), f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("tensor[..., f8e4m3] must be a type error");

@@ -48,7 +48,7 @@ use std::fs;
 const INPUT: [f32; 3] = [1.0, 2.0, 3.0];
 const SEED: i64 = 7;
 const RATE: f32 = 0.5;
-const CALL: &str = "out = f(key_from_seed(7i64), to_tensor([1.0, 2.0, 3.0]))\n";
+const CALL: &str = "out = f(key_from_seed(7i64), to_tensor([1.0, 2.0, 3.0], f32))\n";
 
 /// `g` calls `f` with key 7. It sums the draw, because a Tensor entry has no
 /// C representation for a runtime-extent result or input (chelis#600), and a

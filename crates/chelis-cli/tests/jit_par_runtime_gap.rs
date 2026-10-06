@@ -149,7 +149,7 @@ fn eval_jit_tensor_returns_inner_value() {
     let path = write_program(
         dir.path(),
         "tensor_jit.ch",
-        "result = jit(to_tensor([1.5, 2.5, 3.5]))\n",
+        "result = jit(to_tensor([1.5, 2.5, 3.5], f32))\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
@@ -180,7 +180,7 @@ fn eval_par_tensor_is_fenced_before_execution() {
     let path = write_program(
         dir.path(),
         "tensor_par.ch",
-        "result = par {\n  to_tensor([1.0, 2.0]);\n  to_tensor([3.0, 4.0, 5.0])\n}\n",
+        "result = par {\n  to_tensor([1.0, 2.0], f32);\n  to_tensor([3.0, 4.0, 5.0], f32)\n}\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(!ok, "tensor par must be rejected; stdout={stdout}");
@@ -252,7 +252,7 @@ fn build_c_jit_tensor_runs_and_prints_value() {
     let src = write_program(
         dir.path(),
         "tensor_jit.ch",
-        "result = jit(to_tensor([1.5, 2.5, 3.5]))\n",
+        "result = jit(to_tensor([1.5, 2.5, 3.5], f32))\n",
     );
     let out = dir.path().join("out");
     let stdout = build_c_and_run(&out, &src);
@@ -267,7 +267,7 @@ fn build_c_par_tensor_is_fenced_before_emission() {
     let src = write_program(
         dir.path(),
         "tensor_par.ch",
-        "result = par {\n  to_tensor([1.0, 2.0]);\n  to_tensor([3.0, 4.0, 5.0])\n}\n",
+        "result = par {\n  to_tensor([1.0, 2.0], f32);\n  to_tensor([3.0, 4.0, 5.0], f32)\n}\n",
     );
     let out = dir.path().join("out");
     let output = Command::cargo_bin("chelis")

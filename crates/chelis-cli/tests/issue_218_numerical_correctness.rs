@@ -47,12 +47,12 @@ fn assert_grad_matches(actual: &[f64], expected: &[f64], tol: f64, msg: &str) {
 fn issue_218_grad_of_sum_mul_x_w_equals_w() {
     let stdout = build_and_run(
         "def g(x: tensor[3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([1.5, 2.5, 3.5])\n\
+           w = to_tensor([1.5, 2.5, 3.5], f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[3, f32]) -> tensor[3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([0.1, 0.2, 0.3]))\n",
+         out = compute_grad(to_tensor([0.1, 0.2, 0.3], f32))\n",
         "grad_sum_mul",
     );
     let actual = parse_tensor_data(&stdout, "out");
@@ -73,12 +73,12 @@ fn issue_218_grad_of_sum_mul_x_w_equals_w() {
 fn issue_218_grad_of_sum_sum_matmul_x_w_equals_broadcast_w_transpose() {
     let stdout = build_and_run(
         "def g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([[1.0], [2.0], [3.0]])\n\
+           w = to_tensor([[1.0], [2.0], [3.0]], f32)\n\
            sum(sum(matmul(copy(x), w), 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]]))\n",
+         out = compute_grad(to_tensor([[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]], f32))\n",
         "grad_matmul_reduce",
     );
     let actual = parse_tensor_data(&stdout, "out");
@@ -97,12 +97,12 @@ fn issue_218_grad_of_sum_sum_matmul_x_w_equals_broadcast_w_transpose() {
 fn issue_218_grad_of_sum_relu_matmul_when_all_positive() {
     let stdout = build_and_run(
         "def g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([[1.0], [2.0], [3.0]])\n\
+           w = to_tensor([[1.0], [2.0], [3.0]], f32)\n\
            sum(sum(relu(matmul(copy(x), w)), 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]]))\n",
+         out = compute_grad(to_tensor([[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]], f32))\n",
         "grad_relu_matmul",
     );
     let actual = parse_tensor_data(&stdout, "out");
@@ -118,12 +118,12 @@ fn issue_218_grad_of_sum_relu_matmul_when_all_positive() {
 fn issue_218_grad_of_sum_mul_with_negative_literal_weight() {
     let stdout = build_and_run(
         "def g(x: tensor[3, f32]) -> tensor[f32] = {\n\
-           w = to_tensor([-1.0, 2.0, -3.0])\n\
+           w = to_tensor([-1.0, 2.0, -3.0], f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[3, f32]) -> tensor[3, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([1.0, 1.0, 1.0]))\n",
+         out = compute_grad(to_tensor([1.0, 1.0, 1.0], f32))\n",
         "grad_neg_literal",
     );
     let actual = parse_tensor_data(&stdout, "out");
@@ -145,13 +145,13 @@ fn issue_218_grad_of_sum_mul_with_negative_literal_weight() {
 fn issue_218_grad_of_two_layer_matmul_with_to_tensor_weights() {
     let stdout = build_and_run(
         "def g(x: tensor[1, 2, f32]) -> tensor[f32] = {\n\
-           w1 = to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])\n\
-           w2 = to_tensor([[1.0], [1.0], [1.0]])\n\
+           w1 = to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32)\n\
+           w2 = to_tensor([[1.0], [1.0], [1.0]], f32)\n\
            sum(sum(matmul(matmul(copy(x), w1), w2), 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[1, 2, f32]) -> tensor[1, 2, f32] =\n\
            grad(g, wrt=x)(x)\n\
-         out = compute_grad(to_tensor([[0.25, 0.75]]))\n",
+         out = compute_grad(to_tensor([[0.25, 0.75]], f32))\n",
         "grad_two_layer",
     );
     let actual = parse_tensor_data(&stdout, "out");

@@ -92,6 +92,7 @@ pub(super) fn collect_all_declarations(
     report_duplicate_defsigs(&bare_items, errors);
     report_orphan_defsigs(items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    report_reserved_binders(&bare_items, errors);
     note_eager_value_ordinals(items, env);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
@@ -696,6 +697,83 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
                  internal-name-rewritten before checking"
             )],
         ));
+    }
+}
+
+/// spec/04-type-system.md §8.6: the intrinsic names no binder may bind.
+pub(super) const RESERVED_INTRINSIC_NAMES: &[&str] = &["to_tensor"];
+
+/// spec/04-type-system.md §8.6 at Deep ingress: a binder of a reserved
+/// intrinsic name in any scope (a `def` or `defsig`, an import, a function
+/// parameter, a `bind`, or a pattern variable) is `ReservedName`.
+pub(super) fn report_reserved_binders(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
+    fn reserved(name: &str, binder: &str, expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
+        if !RESERVED_INTRINSIC_NAMES.contains(&name) {
+            return;
+        }
+        let error = CheckError::new(
+            CheckErrorKind::ReservedName,
+            format!(
+                "`{name}` is reserved and cannot be bound (spec/04-type-system.md \u{00a7}8.6): \
+                 it states literal dtypes (\u{00a7}5.6) and always names the intrinsic \
+                 conversion; rename this {binder}"
+            ),
+            vec![],
+        );
+        errors.push(match TypeDiagnosticLocation::from_expr(expr) {
+            Some(location) => location.attach(error),
+            None => error,
+        });
+    }
+    fn walk(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
+        stack_guard!("report_reserved_binders", expr);
+        match expr {
+            deep::Expr::BareList(elements, _) => {
+                for element in elements {
+                    walk(element, errors);
+                }
+                return;
+            }
+            deep::Expr::MetaExpr(meta, _) => return walk(&meta.expr, errors),
+            _ => {}
+        }
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return;
+        };
+        match tag {
+            DeepTag::Def | DeepTag::Defsig | DeepTag::Bind | DeepTag::PatVar => {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    let binder = match tag {
+                        DeepTag::Def => "definition",
+                        DeepTag::Defsig => "signature",
+                        DeepTag::Bind => "binding",
+                        _ => "pattern binder",
+                    };
+                    reserved(name, binder, expr, errors);
+                }
+            }
+            DeepTag::Params => {
+                for param in kids {
+                    if let Some(name) = param_name_for_refs(param) {
+                        reserved(&name, "parameter", expr, errors);
+                    }
+                }
+            }
+            DeepTag::Import => {
+                if let Some(deep::Expr::BareList(names, _)) = kids.get(1) {
+                    for name in names.iter().filter_map(symbol_name) {
+                        reserved(name, "import", expr, errors);
+                    }
+                }
+            }
+            _ => {}
+        }
+        for kid in kids {
+            walk(kid, errors);
+        }
+    }
+    for item in items {
+        walk(item, errors);
     }
 }
 

@@ -79,6 +79,83 @@ pub(crate) fn visit_expr_mut(expr: &mut Expr, visit: &mut impl FnMut(&mut Expr))
     visit(expr);
 }
 
+/// Visit every expression read-only, in the same post-order as
+/// [`visit_expr_mut`].
+pub(crate) fn visit_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+    match expr {
+        Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => {}
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
+            for item in items {
+                visit_expr(item, visit);
+            }
+        }
+        Expr::Apply(head, args, _) => {
+            visit_expr(head, visit);
+            for arg in args {
+                visit_expr(arg, visit);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                visit_expr(value, visit);
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            visit_expr(base, visit);
+            for (_, value) in fields {
+                visit_expr(value, visit);
+            }
+        }
+        Expr::Access(value, _, _)
+        | Expr::Accumulate(value, _, _)
+        | Expr::TupleGet(value, _, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Cast(value, _, _, _)
+        | Expr::Grad(value, _, _)
+        | Expr::Vmap(value, _, _)
+        | Expr::Jit(value, _)
+        | Expr::Realize(value, _)
+        | Expr::Copy(value, _)
+        | Expr::Borrow(value, _)
+        | Expr::Quote(value, _)
+        | Expr::Unquote(value, _)
+        | Expr::Splice(value, _)
+        | Expr::Annotate(value, _, _) => visit_expr(value, visit),
+        Expr::Binary(_, a, b, _) | Expr::WithDevice(a, b, _) => {
+            visit_expr(a, visit);
+            visit_expr(b, visit);
+        }
+        Expr::Pipe(seed, stages, _) => {
+            visit_expr(seed, visit);
+            for stage in stages {
+                visit_expr(&stage.expression, visit);
+            }
+        }
+        Expr::If(c, a, b, _) => {
+            visit_expr(c, visit);
+            visit_expr(a, visit);
+            visit_expr(b, visit);
+        }
+        Expr::Match(value, arms, _) => {
+            visit_expr(value, visit);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    visit_expr(guard, visit);
+                }
+                visit_expr(&arm.body, visit);
+            }
+        }
+        Expr::Lambda(_, body, _) => visit_expr(body, visit),
+        Expr::Block(bindings, tail, _) => {
+            for binding in bindings {
+                visit_expr(&binding.value, visit);
+            }
+            visit_expr(tail, visit);
+        }
+    }
+    visit(expr);
+}
+
 pub(crate) fn visit_program_mut(decls: &mut [Decl], visit: &mut impl FnMut(&mut Expr)) {
     for decl in decls {
         match decl {

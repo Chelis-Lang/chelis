@@ -204,8 +204,8 @@ fn issue_530_arith_over_tuple_get_size_never_lowers_to_the_default_extent() {
 #[test]
 fn issue_530_shape_sourced_size_still_lowers_clean() {
     let src = "def g[n, a](b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, cast(0, i32)))\n\
-         xs = to_tensor([1.0, 2.0])\n\
-         cs = to_tensor([10.0, 20.0, 30.0])\n\
+         xs = to_tensor([1.0, 2.0], f32)\n\
+         cs = to_tensor([10.0, 20.0, 30.0], f32)\n\
          out = g(&xs, &cs)\n";
     let dag = lower_surf(src).expect("a shape-sourced Form-3 expand size must still lower");
     let errors = verify::verify(&dag);

@@ -61,7 +61,7 @@ fn ordinary_aliases_have_distinct_roots_on_eval_and_c() {
     for (value, expected) in [
         ("1", "value = 1\nother = 1\nuser = 1\n"),
         (
-            "to_tensor([1, 2])",
+            "to_tensor([1, 2], i32)",
             "value = tensor(shape=[2], data=[1, 2])\nother = tensor(shape=[2], data=[1, 2])\nuser = tensor(shape=[2], data=[1, 2])\n",
         ),
     ] {

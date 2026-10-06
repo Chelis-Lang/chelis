@@ -163,7 +163,7 @@ fn bool_mean_rejected_too() {
 #[test]
 fn float_mean_still_computes() {
     let got = eval_program(
-        "module M.Main\nout = print(mean(cast(to_tensor([1.0, 2.0, 3.0, 4.0]), f32), 0))\n",
+        "module M.Main\nout = print(mean(cast(to_tensor([1.0, 2.0, 3.0, 4.0], f32), f32), 0))\n",
     )
     .expect("float mean");
     assert_eq!(got, "2.5");
@@ -399,7 +399,7 @@ fn float_pipe_stages_still_compute() {
         "0.5"
     );
     assert_eq!(
-        eval_program("module M.Main\nout = print(to_tensor([4.0]) |> sqrt)\n")
+        eval_program("module M.Main\nout = print(to_tensor([4.0], f32) |> sqrt)\n")
             .expect("float pipe sqrt"),
         "tensor(shape=[1], data=[2.0])"
     );

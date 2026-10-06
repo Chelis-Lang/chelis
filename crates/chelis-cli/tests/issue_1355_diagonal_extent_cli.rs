@@ -20,7 +20,7 @@ use tempfile::{TempDir, tempdir};
 /// The `tensor[3, 4, f32]` operand shared by every fixture, whose diagonal
 /// over axes (0, 1) is the three cells `[1.0, 6.0, 11.0]`.
 const OPERAND: &str =
-    "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]])\n";
+    "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], f32)\n";
 
 fn program(declared: &str) -> String {
     format!(
@@ -150,13 +150,13 @@ fn correct_declared_extent_scores_one_and_matches_the_runtime_shape() {
 /// A three-row operand, whose diagonal against a four-wide axis is
 /// `[1.0, 6.0, 11.0]`.
 const THREE_BY_FOUR: &str =
-    "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]])\n";
+    "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], f32)\n";
 
 /// A five-row operand, whose diagonal against a four-wide axis reaches the
 /// bound exactly: `[1.0, 6.0, 11.0, 16.0]`.
 const FIVE_BY_FOUR: &str = "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], \
                             [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0], \
-                            [17.0, 18.0, 19.0, 20.0]])\n";
+                            [17.0, 18.0, 19.0, 20.0]], f32)\n";
 
 fn symbolic_program(declared: &str, operand: &str) -> String {
     format!(

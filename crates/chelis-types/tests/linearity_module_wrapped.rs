@@ -36,7 +36,7 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 fn bare_top_level_realize_then_borrow_errors_today() {
     let errors = linearity_errors(
         r#"
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = add(x, y)
 "#,
@@ -57,7 +57,7 @@ fn bare_top_level_consuming_call_then_borrow_errors_today() {
         r#"
 def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
 
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = consume_it(x)
 b = mul(x, y)
 "#,
@@ -76,7 +76,7 @@ b = mul(x, y)
 fn bare_top_level_multi_realize_then_borrow_errors_today() {
     let errors = linearity_errors(
         r#"
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = realize(x)
 c = realize(x)
@@ -103,7 +103,7 @@ fn module_wrapped_realize_then_borrow_errors() {
         r#"
 module Test
 
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = add(x, y)
 "#,
@@ -129,7 +129,7 @@ module Test
 
 def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
 
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = consume_it(x)
 b = mul(x, y)
 "#,
@@ -154,7 +154,7 @@ fn module_wrapped_multi_realize_then_borrow_errors() {
         r#"
 module Test
 
-x = to_tensor([1.0, 2.0, 3.0])
+x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = realize(x)
 c = realize(x)

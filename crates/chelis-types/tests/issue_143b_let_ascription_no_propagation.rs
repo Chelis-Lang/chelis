@@ -83,7 +83,7 @@ fn errors_summary(errors: &[CheckError]) -> String {
 #[test]
 fn let_binding_ascription_propagates_to_to_tensor_rhs() {
     // Desired post-fix behavior: the ascription `a: tensor[3, f32]`
-    // should unify with the RHS `to_tensor([1.0, 2.0, 3.0])`, binding
+    // should unify with the RHS `to_tensor([1.0, 2.0, 3.0], f32)`, binding
     // `a` to `tensor[Lit(3), f32]`. The follow-on `pair_id(&a, &b)`
     // then unifies sig's `n` against `Lit(3)`, then `Lit(3)` vs
     // `Lit(5)` from `b` → DimensionMismatch.
@@ -97,8 +97,8 @@ sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
-    a: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
-    b: tensor[5, f32] = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    a: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
+    b: tensor[5, f32] = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0], f32)
     pair_id(&a, &b)
   }
 "#,
@@ -144,8 +144,8 @@ sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
-    a: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
-    b: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
+    a: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
+    b: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
     pair_id(&a, &b)
   }
 "#,
@@ -240,7 +240,7 @@ fn let_ascription_type_mismatch_reports_type_mismatch_with_template() {
 def caller() -> tensor[3, f32] =
   {
     x: tensor[3, f32] = cast(1.0, f32)
-    to_tensor([1.0, 2.0, 3.0])
+    to_tensor([1.0, 2.0, 3.0], f32)
   }
 "#,
     );

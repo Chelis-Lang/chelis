@@ -36,16 +36,20 @@ lengths.
 - Arithmetic does not promote precision implicitly. Use `cast(x, f32)` when a
   conversion is intended.
 - An unsuffixed integer literal has type `i32`; an unsuffixed float literal has
-  type `f32`. A suffix such as `1.0f64` selects another dtype explicitly.
+  type `f32`. A suffix such as `1.0f64` selects another dtype explicitly, and so
+  does the construct that directly contains the literal: a declaration
+  (`x: f64 = 1.0`), a `cast` (`cast(1.0, f64)`), or the dtype argument of
+  `to_tensor`.
 - A bracket literal is a `List`: `xs = [1.0, 2.0, 3.0]` has type `List f32`.
-  It becomes a tensor only through `to_tensor([1.0, 2.0, 3.0])`, which has type
+  It becomes a tensor only through `to_tensor([1.0, 2.0, 3.0], f32)`, which has type
   `tensor[3, f32]`, or where its own binding or function result declares a
   tensor type, as in `xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Nested brackets
   supply a tensor's dimensions, and the declaration gives the unsuffixed
   elements its element dtype. A tensor parameter or a `cast` never converts a
-  bracket literal, and `to_tensor` keeps each element's suffix or default, so
-  write `f(to_tensor([1.0f64, 2.0f64]))` for an `f64` tensor argument:
-  `cast(to_tensor([1.1, 2.2]), f64)` widens `f32` values. Explicit suffixes
+  bracket literal, and an element of `to_tensor` takes its dtype from its
+  suffix or the dtype argument, never a default, so write
+  `f(to_tensor([1.0, 2.0], f64))` for an `f64` tensor argument:
+  `cast(to_tensor([1.1, 2.2], f32), f64)` widens `f32` values. Explicit suffixes
   remain exact; mixed dtypes and ragged tensor literals are rejected.
 
 An empty list supplies no element values from which to determine a tensor's
@@ -56,8 +60,8 @@ empty_values: List[f64] = []
 empty_tensor = to_tensor(empty_values)
 ```
 
-Here `empty_tensor` has shape `[0]` and dtype `f64`. An unconstrained
-`to_tensor([])` is rejected by the checker.
+Here `empty_tensor` has shape `[0]` and dtype `f64`, as `to_tensor([], f64)`
+has. An unconstrained `to_tensor([])` is rejected by the checker.
 
 ## Dtype parameters
 
@@ -101,5 +105,6 @@ to the local function is an ordinary call: its bracket argument stays a
 An ascription checks the value's type. `(1.5f64 : f64)` agrees;
 `(1.5f64 : f32)` is a precision mismatch. The same rule applies to
 `value: f64 = 1.5f64` inside a block. Use an explicit `cast` to convert
-a value, and a suffix or an adopting literal position to choose its dtype.
+a value, and a suffix, a declaration, a cast, or a dtype argument to choose a
+literal's dtype.
 Nested ascriptions retain each check.

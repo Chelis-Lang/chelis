@@ -1760,8 +1760,8 @@ fn test_assert_close_tensor_reports_first_mismatch_index() {
     // index 2 is the first mismatch.
     let checked = checked_surf(
         r#"
-actual: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
-expected: tensor[4, f32] = to_tensor([1.0, 2.0, 99.0, 4.0])
+actual: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0], f32)
+expected: tensor[4, f32] = to_tensor([1.0, 2.0, 99.0, 4.0], f32)
 x = test_assert_close_tensor(actual, expected, 0.001, "close")
 "#,
     );
@@ -1778,8 +1778,8 @@ x = test_assert_close_tensor(actual, expected, 0.001, "close")
 fn test_assert_close_tensor_match_returns_unit() {
     let checked = checked_surf(
         r#"
-actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
-expected: tensor[3, f32] = to_tensor([1.001, 2.001, 3.001])
+actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
+expected: tensor[3, f32] = to_tensor([1.001, 2.001, 3.001], f32)
 x = test_assert_close_tensor(actual, expected, 0.01, "close")
 "#,
     );
@@ -1796,8 +1796,8 @@ fn test_assert_close_tensor_zero_tol_passes_bit_exact() {
     // Regression: tol = 0 with identical data must pass, not report a false mismatch.
     let checked = checked_surf(
         r#"
-actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
-expected: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
+actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
+expected: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)
 x = test_assert_close_tensor(actual, expected, 0.0, "bit-exact")
 "#,
     );
@@ -1813,8 +1813,8 @@ x = test_assert_close_tensor(actual, expected, 0.0, "bit-exact")
 fn test_assert_close_tensor_zero_tol_rejects_any_delta() {
     let checked = checked_surf(
         r#"
-actual: tensor[2, f32] = to_tensor([1.0, 2.0])
-expected: tensor[2, f32] = to_tensor([1.0, 2.00001])
+actual: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
+expected: tensor[2, f32] = to_tensor([1.0, 2.00001], f32)
 x = test_assert_close_tensor(actual, expected, 0.0, "strict")
 "#,
     );
@@ -1833,8 +1833,8 @@ fn test_assert_close_tensor_nan_actual_fails() {
     let checked = checked_surf(
         r#"
 nan_val: f32 = sqrt(-1.0)
-actual: tensor[2, f32] = to_tensor([1.0, nan_val])
-expected: tensor[2, f32] = to_tensor([1.0, 2.0])
+actual: tensor[2, f32] = to_tensor([1.0, nan_val], f32)
+expected: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
 x = test_assert_close_tensor(actual, expected, 0.01, "nan-actual")
 "#,
     );
@@ -1851,8 +1851,8 @@ fn test_assert_close_tensor_nan_expected_fails() {
     let checked = checked_surf(
         r#"
 nan_val: f32 = sqrt(-1.0)
-actual: tensor[2, f32] = to_tensor([1.0, 2.0])
-expected: tensor[2, f32] = to_tensor([1.0, nan_val])
+actual: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
+expected: tensor[2, f32] = to_tensor([1.0, nan_val], f32)
 x = test_assert_close_tensor(actual, expected, 0.01, "nan-expected")
 "#,
     );
@@ -1868,8 +1868,8 @@ x = test_assert_close_tensor(actual, expected, 0.01, "nan-expected")
 fn test_assert_close_tensor_negative_tol_rejected() {
     let checked = checked_surf(
         r#"
-actual: tensor[2, f32] = to_tensor([1.0, 2.0])
-expected: tensor[2, f32] = to_tensor([1.0, 2.0])
+actual: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
+expected: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
 x = test_assert_close_tensor(actual, expected, -0.001, "neg-tol")
 "#,
     );
@@ -1886,8 +1886,8 @@ fn test_assert_close_tensor_nan_tol_rejected() {
     let checked = checked_surf(
         r#"
 nan_tol: f32 = sqrt(-1.0)
-actual: tensor[2, f32] = to_tensor([1.0, 2.0])
-expected: tensor[2, f32] = to_tensor([1.0, 4.0])
+actual: tensor[2, f32] = to_tensor([1.0, 2.0], f32)
+expected: tensor[2, f32] = to_tensor([1.0, 4.0], f32)
 x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
 "#,
     );

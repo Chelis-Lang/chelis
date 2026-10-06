@@ -297,7 +297,7 @@ fn tensor_gt_agrees_between_eval_and_c() {
     // The tensor path lowers `gt` through the Tier 2 DAG rewrite to
     // cmplt(b, a) over already-evaluated operand values; both lanes must
     // produce the same elementwise verdicts.
-    let program = "mask = to_tensor([1.0, 3.0]) > to_tensor([2.0, 2.0])\n";
+    let program = "mask = to_tensor([1.0, 3.0], f32) > to_tensor([2.0, 2.0], f32)\n";
     let eval = eval_stdout(program).expect("eval succeeds");
     assert!(
         eval.contains("mask ="),

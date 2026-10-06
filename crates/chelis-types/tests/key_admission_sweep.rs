@@ -289,7 +289,7 @@ fn the_admitting_tags_are_exactly_moves_joins_aggregates_and_applications() {
 fn a_transform_application_passes_keys_to_its_targets_key_parameters() {
     for source in [
         "def g(k: key, x: f32) -> f32 = {\n  _ = drop(k)\n  mul(x, x)\n}\n\ndef f(k: key) -> f32 = grad(g, wrt=x)(k, 1.0)\n",
-        "def g(k: key) -> tensor[2, f32] = uniform_like(k, to_tensor([0.0, 0.0]), 0.0, 1.0)\n\ndef f(k: key) -> tensor[2, 2, f32] = vmap(g)(split_keys(k, 2i64))\n",
+        "def g(k: key) -> tensor[2, f32] = uniform_like(k, to_tensor([0.0, 0.0], f32), 0.0, 1.0)\n\ndef f(k: key) -> tensor[2, 2, f32] = vmap(g)(split_keys(k, 2i64))\n",
         "def g(k: key) -> tensor[2, key] = split_keys(k, 2i64)\n\ndef f(k: key) -> tensor[2, key] = jit(g)(k)\n",
     ] {
         verdict(source).unwrap_or_else(|errors| panic!("{errors:?}\n{source}"));
@@ -510,7 +510,7 @@ fn an_extent_read_neither_follows_nor_repeats_the_keys_one_use() {
             "expected a KeyReuse containing {fragment:?}, got {errors:?}\n{source}"
         );
     }
-    let source = "def w(ks: tensor[2, key], k: key) -> i64 = {\n  _ = drop(ks)\n  shape(to_tensor([1.0]), k)\n}\n";
+    let source = "def w(ks: tensor[2, key], k: key) -> i64 = {\n  _ = drop(ks)\n  shape(to_tensor([1.0], f32), k)\n}\n";
     let errors = verdict(source).expect_err(source);
     assert!(errors.iter().any(refuses_a_key), "{errors:?}\n{source}");
 }

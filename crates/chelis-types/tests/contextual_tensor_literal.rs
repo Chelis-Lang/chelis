@@ -185,9 +185,13 @@ fn position_4_to_tensor_elements_keep_their_defaults_under_a_cast() {
     // The cast converts the tensor's values; it never retypes the List
     // argument of `to_tensor`.
     for (src, element, target) in [
-        ("xs = cast(to_tensor([1, 2, 3]), i8)", "i32", "i8"),
-        ("xs = cast(to_tensor([1.0, 2.0, 3.0]), f64)", "f32", "f64"),
-        ("xs = cast(to_tensor([1.5, 2.5]), i32)", "f32", "i32"),
+        ("xs = cast(to_tensor([1, 2, 3], i32), i8)", "i32", "i8"),
+        (
+            "xs = cast(to_tensor([1.0, 2.0, 3.0], f32), f64)",
+            "f32",
+            "f64",
+        ),
+        ("xs = cast(to_tensor([1.5, 2.5], f32), i32)", "f32", "i32"),
     ] {
         let (printed, result) = pipeline(src);
         assert!(
@@ -250,7 +254,7 @@ fn a_to_tensor_argument_at_a_tensor_parameter_keeps_its_literal_defaults() {
         "def f(xs: tensor[3, f64]) -> tensor[3, f64] = xs\n",
         "sig f: tensor[3, f64] -> tensor[3, f64]\ndef f(xs) = xs\n",
     ] {
-        let src = format!("{declaration}ys = f(to_tensor([1.0, 2.0, 3.0]))");
+        let src = format!("{declaration}ys = f(to_tensor([1.0, 2.0, 3.0], f32))");
         let (printed, result) = pipeline(&src);
         assert!(
             !contains_lit_with_prim(&printed, "f64"),
@@ -499,7 +503,7 @@ fn only_a_bracket_literal_where_a_tensor_is_expected_gets_the_list_hint() {
         // A List value that is not a bracket literal.
         "def g(x: tensor[2, f64]) -> i32 = 1\ndef h(xs: List[f32]) -> i32 = g(xs)",
         // A join, where neither side is expected.
-        "def h(c: bool) -> i32 = {\n  v = if c then to_tensor([1.0, 2.0]) else [1.0, 2.0]\n  1\n}",
+        "def h(c: bool) -> i32 = {\n  v = if c then to_tensor([1.0, 2.0], f32) else [1.0, 2.0]\n  1\n}",
         // The truncating rung, which a suffixed spelling would not keep.
         "xs = cast_trunc([1.9, 2.7], i32)",
     ] {

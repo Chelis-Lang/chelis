@@ -83,15 +83,17 @@ fn direct_witness_guards_retained_result_on_eval_and_linked_c() {
     // C constructs both tensors with chelis_tensor_from_values at execution.
     // The callable's received axes are runtime observations on both lanes.
     assert_check_accepts(&format!(
-        "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n"
+        "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n"
     ));
     assert_result_value(
-        &format!("{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]))\n"),
+        &format!(
+            "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0], f32))\n"
+        ),
         "2], data=[4.0, 5.0]",
     );
     assert_result_trap(
         &format!(
-            "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n"
+            "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n"
         ),
         2,
         3,
@@ -106,12 +108,14 @@ def invoke(f: List[tensor[seq, f32]] -> tensor[*, f32] -> tensor[seq, f32], xs: 
 #[test]
 fn list_witness_guards_retained_result_when_list_entry_agrees() {
     assert_result_value(
-        &format!("{LIST}out = invoke(broad, [to_tensor([1.0, 2.0])], to_tensor([4.0, 5.0]))\n"),
+        &format!(
+            "{LIST}out = invoke(broad, [to_tensor([1.0, 2.0], f32)], to_tensor([4.0, 5.0], f32))\n"
+        ),
         "2], data=[4.0, 5.0]",
     );
     assert_result_trap(
         &format!(
-            "{LIST}out = invoke(broad, [to_tensor([1.0, 2.0])], to_tensor([4.0, 5.0, 6.0]))\n"
+            "{LIST}out = invoke(broad, [to_tensor([1.0, 2.0], f32)], to_tensor([4.0, 5.0, 6.0], f32))\n"
         ),
         2,
         3,
@@ -126,11 +130,15 @@ def adapter(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], x: tensor
 def outer(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = adapter(f, x, y)
 ";
     assert_result_value(
-        &format!("{prefix}out = outer(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]))\n"),
+        &format!(
+            "{prefix}out = outer(broad, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0], f32))\n"
+        ),
         "2], data=[4.0, 5.0]",
     );
     assert_result_trap(
-        &format!("{prefix}out = outer(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n"),
+        &format!(
+            "{prefix}out = outer(broad, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n"
+        ),
         2,
         3,
     );
@@ -158,8 +166,9 @@ def invoke(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], x: tensor[
         } else {
             "[4.0, 5.0, 6.0]"
         };
-        let source =
-            format!("{prefix}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor({values}))\n");
+        let source = format!(
+            "{prefix}out = invoke(broad, to_tensor([1.0, 2.0], f32), to_tensor({values}, f32))\n"
+        );
         let observations =
             [false, true].map(|native| (native, result_claims::run(&source, native)));
         let both = format!(
@@ -202,8 +211,8 @@ def invoke(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], x: tensor[
 #[test]
 fn earlier_matching_invocation_cannot_supply_later_result_witness() {
     let source = format!(
-        "{DIRECT}first = invoke(broad, to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0]))\n\
-         out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([7.0, 8.0, 9.0]))\n"
+        "{DIRECT}first = invoke(broad, to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n\
+         out = invoke(broad, to_tensor([1.0, 2.0], f32), to_tensor([7.0, 8.0, 9.0], f32))\n"
     );
     let observations = [false, true].map(|native| (native, result_claims::run(&source, native)));
     let both = format!(
@@ -306,12 +315,12 @@ def invoke(f: List[tensor[seq, f32]] -> tensor[*, f32] -> tensor[seq, f32], xs: 
 ";
     assert_result_value(
         &format!(
-            "{prefix}out = invoke(broad, [to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0])], to_tensor([5.0, 6.0]))\n"
+            "{prefix}out = invoke(broad, [to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32)], to_tensor([5.0, 6.0], f32))\n"
         ),
         "2], data=[5.0, 6.0]",
     );
     let source = format!(
-        "{prefix}out = invoke(broad, [to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0, 5.0])], to_tensor([6.0, 7.0, 8.0]))\n"
+        "{prefix}out = invoke(broad, [to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0, 5.0], f32)], to_tensor([6.0, 7.0, 8.0], f32))\n"
     );
     for native in [false, true] {
         let (ok, output) = result_claims::run(&source, native);
@@ -340,12 +349,13 @@ def invoke[n](f: Action[n], x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f
 ";
     assert_result_value(
         &format!(
-            "{prefix}out = invoke(own, to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0]))\n"
+            "{prefix}out = invoke(own, to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n"
         ),
         "3], data=[4.0, 5.0, 6.0]",
     );
-    let source =
-        format!("{prefix}out = invoke(own, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]))\n");
+    let source = format!(
+        "{prefix}out = invoke(own, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0], f32))\n"
+    );
     for native in [false, true] {
         let (ok, output) = result_claims::run(&source, native);
         assert!(!ok, "native={native}\n{source}\n{output}");
@@ -361,8 +371,9 @@ def invoke[n](f: Action[n], x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f
         );
         assert!(!output.contains("out ="), "native={native}: {output}");
     }
-    let source =
-        format!("{prefix}out = invoke(own, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n");
+    let source = format!(
+        "{prefix}out = invoke(own, to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n"
+    );
     for native in [false, true] {
         let (ok, output) = result_claims::run(&source, native);
         assert!(!ok, "native={native}\n{source}\n{output}");
@@ -400,7 +411,7 @@ def invoke(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[*, f32] -> bool -> te
 ";
     for second in [false, true] {
         let source = format!(
-            "{prefix}out = invoke(choose, to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0, 5.0]), to_tensor([6.0, 7.0]), {second})\n"
+            "{prefix}out = invoke(choose, to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0, 5.0], f32), to_tensor([6.0, 7.0], f32), {second})\n"
         );
         let observations =
             [false, true].map(|native| (native, result_claims::run(&source, native)));

@@ -50,7 +50,7 @@ use tempfile::tempdir;
 
 /// The headline reproducer: `tensor_full_like` behind the `[n]`-quantified
 /// callee — the exact downstream `tests_blocked/grad/full_like_scalar_broadcast.ch`
-/// idiom. `df(to_tensor([1,2,3])) = [2, 2, 2]`.
+/// idiom. `df(to_tensor([1,2,3], i32)) = [2, 2, 2]`.
 const REPRO_CALLEE: &str = "module Repro.GradFullLikeCallee\n\
 def tensor_full_like[n](x: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
   len = shape(x, cast(0, i32))\n\

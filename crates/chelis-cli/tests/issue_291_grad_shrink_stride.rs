@@ -48,7 +48,7 @@ def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 const SHRINK_EVAL: &str = "module Repro.GradShrink\n\
 def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
-out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+out = df(to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
 
 const STRIDE_DF: &str = "module Repro.GradStride\n\
 def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
@@ -57,7 +57,7 @@ def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 const STRIDE_EVAL: &str = "module Repro.GradStride\n\
 def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
-out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+out = df(to_tensor([10.0, 20.0, 30.0, 40.0], f32))\n";
 
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")

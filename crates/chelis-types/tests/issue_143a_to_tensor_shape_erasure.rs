@@ -5,7 +5,7 @@
 //! `to_tensor` is registered as `generic_unop` in
 //! `crates/chelis-types/src/builtins.rs:873`, which gives it the scheme
 //! `∀α β. α → β` — no dim variables, no shape constraints. When the user
-//! writes `to_tensor([1.0, 2.0, 3.0])`, the parser preserves the list
+//! writes `to_tensor([1.0, 2.0, 3.0], f32)`, the parser preserves the list
 //! length in `Expr::List(Vec<Expr>, Span)`
 //! (`crates/chelis-surf/src/ast.rs:125`), and the desugarer has
 //! `items.len()` available at
@@ -89,8 +89,8 @@ sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
-    a = to_tensor([1.0, 2.0, 3.0])
-    b = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    a = to_tensor([1.0, 2.0, 3.0], f32)
+    b = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0], f32)
     pair_id(&a, &b)
   }
 "#,
@@ -136,8 +136,8 @@ sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
-    a = to_tensor([1.0, 2.0, 3.0])
-    b = to_tensor([1.0, 2.0, 3.0])
+    a = to_tensor([1.0, 2.0, 3.0], f32)
+    b = to_tensor([1.0, 2.0, 3.0], f32)
     pair_id(&a, &b)
   }
 "#,

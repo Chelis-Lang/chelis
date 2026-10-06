@@ -8442,8 +8442,8 @@ fn split_kernel_tuple_root(x: &str, y: &str) -> String {
     format!(
         "def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> \
          (tensor[seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
-         a = to_tensor({x})\n\
-         b = to_tensor({y})\n\
+         a = to_tensor({x}, f32)\n\
+         b = to_tensor({y}, f32)\n\
          out = both(a, b)\n"
     )
 }
@@ -8455,8 +8455,8 @@ fn one_kernel_repeated_binder_root(x: &str, y: &str) -> String {
     format!(
         "def joined(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> tensor[seq, f32] = \
          add(x, sum(y, 0i32))\n\
-         a = to_tensor({x})\n\
-         b = to_tensor({y})\n\
+         a = to_tensor({x}, f32)\n\
+         b = to_tensor({y}, f32)\n\
          out = joined(a, b)\n"
     )
 }
@@ -8583,7 +8583,7 @@ fn aliased_parameter_types_keep_the_entry_binder_guard() {
             let source = format!(
                 "{aliases}def both(x: Row, y: Batch) -> (Row, Batch) ! {{ IO }} = {{\n \
                  _ = print(\"body\")\n (neg(x), neg(y))\n}}\n\
-                 out = both(to_tensor({x}), to_tensor({TWO_BY_TWO_Y}))\n"
+                 out = both(to_tensor({x}, f32), to_tensor({TWO_BY_TWO_Y}, f32))\n"
             );
             let path = dir.path().join("entry-alias.ch");
             fs::write(&path, &source).expect("source");
@@ -8625,7 +8625,7 @@ fn unused_parameters_keep_their_entry_witnesses_until_after_the_guard() {
                 "def both(x: tensor[seq, f32], y: tensor[seq, f32]) -> \
                  (tensor[seq, f32], tensor[seq, f32]) ! {{ IO }} = {{\n \
                  _ = print(\"body\")\n (neg({used}), neg({used}))\n}}\n\
-                 out = both(to_tensor({x}), to_tensor([1.0, 2.0]))\n"
+                 out = both(to_tensor({x}, f32), to_tensor([1.0, 2.0], f32))\n"
             );
             let evaluated = eval_result(&dir, "unused-entry.ch", &source);
             let compiled = c_run_result(&dir, "unused-entry-c", &source);
@@ -8664,8 +8664,8 @@ fn literal_parameter_obligations_keep_the_existing_helper_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "def both(x: tensor[2, seq, f32], y: tensor[batch, seq, f32]) -> \
                   (tensor[2, seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
-                  out = both(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), \
-                  to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+                  out = both(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), \
+                  to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     let path = fixture(&dir, "literal-entry.ch", source);
     let out_dir = dir.path().join("c");
     let built = build_c(&path, &out_dir);
@@ -8722,7 +8722,7 @@ fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "def both(x: tensor[seq, f32], y: tensor[seq, f32]) -> \
                   (tensor[seq, f32], tensor[seq, f32]) = (neg(x), neg(y))\n\
-                  out = both(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]))\n";
+                  out = both(to_tensor([1.0, 2.0], f32), to_tensor([1.0, 2.0], f32))\n";
     let path = fixture(&dir, "rank-entry.ch", source);
     let out_dir = dir.path().join("c");
     let built = build_c(&path, &out_dir);

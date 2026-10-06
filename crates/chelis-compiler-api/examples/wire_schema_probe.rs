@@ -396,7 +396,7 @@ fn diagnostic_projection(request: &Request) -> Result<Value, String> {
         source_kind: SourceKind::Surf,
         source: "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
                  reduce_window_max(x, [w], [s])\n\
-                 out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n"
+                 out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64)\n"
             .into(),
         target: CompileTarget::C,
         entry_name: None,

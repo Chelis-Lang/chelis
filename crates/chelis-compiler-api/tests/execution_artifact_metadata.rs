@@ -346,12 +346,15 @@ fn unused_scalar_sibling_does_not_disable_entry_lane() {
 }
 
 /// Fix 7 (negative): a zero-input entry (`def main() -> tensor[1,f32] =
-/// to_tensor([3.0])`) reports zero inputs and ONE output — it must NOT trip
+/// to_tensor([3.0], f32)`) reports zero inputs and ONE output — it must NOT trip
 /// any host-only / empty-manifest rejection. Pins that the manifest is
 /// callable-shaped (has an output) even with no inputs.
 #[test]
 fn zero_input_entry_reports_one_output_no_inputs() {
-    let artifact = compile_c("def main() -> tensor[1, f32] = to_tensor([3.0])\n", None);
+    let artifact = compile_c(
+        "def main() -> tensor[1, f32] = to_tensor([3.0], f32)\n",
+        None,
+    );
     assert!(
         input_names(&artifact).is_empty(),
         "zero-input entry must report no inputs, got {:?}",
@@ -411,7 +414,7 @@ fn selected_vmap_has_exact_entry_manifest() {
 #[test]
 fn global_referenced_by_entry_declines_entry_lane_no_phantom_input() {
     let artifact = compile_c(
-        "two = to_tensor([2.0])\n\
+        "two = to_tensor([2.0], f32)\n\
          def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), two)\n",
         None,
     );
@@ -446,7 +449,7 @@ fn global_referenced_by_entry_declines_entry_lane_no_phantom_input() {
 #[test]
 fn independent_global_computation_survives_host_lane_routing() {
     let artifact = compile_c(
-        "total = add(to_tensor([1.0]), to_tensor([2.0]))\n\
+        "total = add(to_tensor([1.0], f32), to_tensor([2.0], f32))\n\
          def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
         None,
     );

@@ -1508,7 +1508,7 @@ total = state.1
   fold(step, state0, idxs)
 }
 
-out = f(to_tensor([1.0, 2.0, 3.0]))
+out = f(to_tensor([1.0, 2.0, 3.0], f32))
 "#,
         )
         .expect("surf parse"),
@@ -2379,7 +2379,7 @@ fn generic_sum_result_is_one_type_across_the_bound_or_rejected() {
     // A `Float` generic instantiates at f16 and keeps the operand dtype.
     let errors = surf_check_errors(
         "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = cumsum(x, 0i32)\n\
-         out = f(cast(to_tensor([1.0, 2.0, 3.0]), f16))\n",
+         out = f(cast(to_tensor([1.0, 2.0, 3.0], f32), f16))\n",
     );
     assert!(errors.is_empty(), "{errors:?}");
 }

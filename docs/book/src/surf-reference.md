@@ -135,7 +135,7 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Bracket literals: `[1.0, 2.0, 3.0]` builds a `List`, whatever its elements and
   wherever it stands, and bracket lists pass list arguments to operators, for example
   the window and stride lists in `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`.
-  `to_tensor([1.0, 2.0, 3.0])` builds a tensor, and so does a bracket literal whose own
+  `to_tensor([1.0, 2.0, 3.0], f32)` builds a tensor, and so does a bracket literal whose own
   binding or function result declares a tensor type. A negative numeral is unary minus
   applied to a literal, so write `f(-42)` to pass a negative argument.
 
@@ -147,16 +147,19 @@ The parser accepts value-preserving digit separators, hexadecimal/binary integer
 finite decimal float body that decodes to the literal's value, and equivalent valid
 Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `fmt --check`
 rejects the resulting source diff. Malformed separators, a redundant leading zero on an
-integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
+integer body, invalid escapes, and semantic suffix changes remain errors.
 
-A bare bracket literal's unsuffixed elements adopt the declared element type when its
-own tensor-typed binding or declared tensor return body makes it a tensor. An unsuffixed
-scalar passed directly to `cast` adopts the cast target. These are the only adoption
-positions. A tensor parameter or a `cast` never turns a bracket literal into a tensor,
-and `to_tensor` keeps each element's suffix or default, so a tensor argument states its
-element dtype: `f(to_tensor([1.0f64, 2.0f64]))`. An unannotated `to_tensor([1, 2, 3])`
-uses `i32` elements, and a structural list such as the window sizes above needs
-explicit `i64` elements.
+A numeric literal's dtype is written at its site: its suffix, or the construct that
+directly contains it, or else its default. The constructs are the declared type of the
+binding or function result the literal initializes (`x: f64 = 1.1`), a `cast` whose
+operand it is (`cast(1.1, f64)` is exactly `1.1f64`), and the dtype argument of
+`to_tensor` (`to_tensor([1.1, 2.2], f64)`). A bare bracket literal under its own declared
+tensor type takes the element dtype. An unsuffixed element of `to_tensor` has no default,
+so `to_tensor([1.0, 2.0])` is an error that names the dtype argument. A tensor parameter
+or a `cast` never turns a bracket literal into a tensor, and a callee's signature never
+states a literal's dtype, so a tensor argument states its element dtype:
+`f(to_tensor([1.0, 2.0], f64))`. A structural list such as the window sizes above needs
+explicit `i64` elements. `to_tensor` is reserved: no binding may reuse the name.
 
 ## Operators
 

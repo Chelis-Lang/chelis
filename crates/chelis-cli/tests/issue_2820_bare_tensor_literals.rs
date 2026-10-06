@@ -27,10 +27,11 @@ fn explicit_and_declared_tensor_roots_agree_in_json_and_native_execution() {
             json!([2, 2]),
         ),
     ] {
+        let dtype = ty.trim_end_matches(']').rsplit(", ").next().unwrap();
         common::write_file(
             &app.join("src/main.ch"),
             &format!(
-                "module Demo.Main\nbare = {literal}\nexplicit = to_tensor({literal})\ndeclared: {ty} = {literal}\n"
+                "module Demo.Main\nbare = {literal}\nexplicit = to_tensor({literal}, {dtype})\ndeclared: {ty} = {literal}\n"
             ),
         );
         let checked = cli(&reef, &app)
@@ -98,8 +99,8 @@ fn explicit_list_roots_retain_list_kind_and_mixed_tensor_dtypes_reject() {
     for literal in [
         "[1.0, 2.0f64]",
         "[1i32, 2i64]",
-        "to_tensor([1.0, 2.0f64])",
-        "to_tensor([[1.0], [2.0, 3.0]])",
+        "to_tensor([1.0, 2.0f64], f32)",
+        "to_tensor([[1.0], [2.0, 3.0]], f32)",
     ] {
         common::write_file(
             &app.join("src/main.ch"),
@@ -129,8 +130,13 @@ fn captured_constructor_refuses_and_ragged_rejection_has_a_source_location() {
     ] {
         let output = cli(&reef, &app).args(command).output().unwrap();
         assert!(!output.status.success(), "{output:?}");
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("to_tensor"),
+            reported.contains("`to_tensor` is reserved and cannot be bound"),
             "{output:?}"
         );
     }

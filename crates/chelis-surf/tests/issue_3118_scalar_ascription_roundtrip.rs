@@ -44,18 +44,27 @@ fn matching_and_mismatched_literal_ascriptions_preserve_both_types_and_roundtrip
 
 #[test]
 fn checking_ascriptions_resugar_without_synthetic_do_blocks() {
-    for source in [
-        "out = (1.5f64 : f32)\n",
-        "out = (1.5f64 : f64)\n",
-        "out = ((1.5f64 : f32) : f64)\n",
-        "out = {\n  y: f32 = 1.5f64\n  y\n}\n",
-        "out = {\n  y: f64 = 1.5f64\n  y\n}\n",
-        "out = {\n  y: i32 = 1\n  y\n}\n",
-        "out = {\n  y: f64 = (1.5f64 : f32)\n  y\n}\n",
+    // spec/03 §6.3.1: a suffix equal to the dtype a declaration states is
+    // redundant, so `y: f64 = 1.5f64` prints bare.
+    for (source, printed) in [
+        ("out = (1.5f64 : f32)\n", None),
+        ("out = (1.5f64 : f64)\n", None),
+        ("out = ((1.5f64 : f32) : f64)\n", None),
+        ("out = {\n  y: f32 = 1.5f64\n  y\n}\n", None),
+        (
+            "out = {\n  y: f64 = 1.5f64\n  y\n}\n",
+            Some("out = {\n  y: f64 = 1.5\n  y\n}\n"),
+        ),
+        ("out = {\n  y: i32 = 1\n  y\n}\n", None),
+        ("out = {\n  y: f64 = (1.5f64 : f32)\n  y\n}\n", None),
     ] {
         let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
         let rendered = format_program(&resugar_program(&deep).unwrap());
-        assert_eq!(rendered, format_source(source).unwrap(), "{source}");
+        assert_eq!(
+            rendered,
+            format_source(printed.unwrap_or(source)).unwrap(),
+            "{source}"
+        );
         let recovered = desugar_program(&parse_str(&rendered).unwrap()).unwrap();
         assert_eq!(
             print_canonical_flat(&normalize_deep_for_surface_roundtrip(&deep).unwrap()),

@@ -1251,8 +1251,9 @@ mod tests {
 
     #[test]
     fn pure_tensor_def_routes_tensor() {
-        let checked =
-            check_program_from_source("x = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n");
+        let checked = check_program_from_source(
+            "x = add(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
+        );
         let result = infer_realizability(&checked, C_PRIMS);
         // to_tensor is HostOnly, so this routes Host
         assert_eq!(result.lane_by_def.get("x"), Some(&Lane::Host));
@@ -1289,7 +1290,7 @@ mod tests {
     #[test]
     fn top_level_host_value_dependency_propagates_without_touching_a_sibling() {
         let checked = check_program_from_source(
-            "source = to_tensor([1.0, 2.0])\n\
+            "source = to_tensor([1.0, 2.0], f32)\n\
              dependent = mul(source, source)\n\
              def sibling(value: tensor[2, f32]) -> tensor[2, f32] = mul(value, value)\n",
         );
@@ -1417,7 +1418,7 @@ mod tests {
         let checked = check_program_from_source(
             "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
                if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
-             out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
+             out = recur(to_tensor([1.0, 2.0], f32), cast(2, i64))\n",
         );
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(

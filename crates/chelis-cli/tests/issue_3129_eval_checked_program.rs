@@ -64,7 +64,7 @@ def main() -> f32 = gap(2.5, 7.0) |> gap(1.0)
 const TENSOR_AND_VALUE_ROOT: &str = "\
 def scale(t: tensor[3, f32], k: f32) -> tensor[3, f32] = t * expand(to_tensor([k]), 0i32, 3i64)
 
-def main() -> tensor[3, f32] = scale(to_tensor([1.0, 2.0, 3.0]), 2.0)
+def main() -> tensor[3, f32] = scale(to_tensor([1.0, 2.0, 3.0], f32), 2.0)
 
 offset = 4i64 + 5i64
 ";

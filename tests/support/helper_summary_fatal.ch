@@ -26,11 +26,11 @@ def causal_sdpa_with_sink(q, k, v, scale, mask, sink) = {
   out
 }
 def join_columns[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([x, y], 1i32)
-def zero_qk() -> tensor[2, 3, f32] = to_tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+def zero_qk() -> tensor[2, 3, f32] = to_tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], f32)
 def sink_output(sink: f32) -> tensor[2, 3, f32] = {
-  v = to_tensor([[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]])
-  scale = to_tensor([[1.0, 1.0], [1.0, 1.0]])
-  mask = to_tensor([[0.0, -1000000000.0], [0.0, 0.0]])
+  v = to_tensor([[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]], f32)
+  scale = to_tensor([[1.0, 1.0], [1.0, 1.0]], f32)
+  mask = to_tensor([[0.0, -1000000000.0], [0.0, 0.0]], f32)
   causal_sdpa_with_sink(zero_qk(), zero_qk(), v, scale, mask, sink)
 }
 output = sink_output(0.0)

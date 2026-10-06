@@ -163,7 +163,7 @@ pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
     // a non-erroring `_ => None` default, so a stamped `lit`/`cast`/`neg` leaf
     // fell to the default, `walk_static_cons_chain_shape` gave up, and
     // `to_tensor` produced a rank-1 WILDCARD instead of the real element
-    // count. That masked a genuine count mismatch: `to_tensor([-1.0, -2.0])`
+    // count. That masked a genuine count mismatch: `to_tensor([-1.0, -2.0], f32)`
     // declared `tensor[3, f32]` was accepted by `check_typed_program` and
     // rejected by `check_ir_program`. It bites positive literals too -- the
     // `neg` recognizer below is only one of the three shapes that were lost.

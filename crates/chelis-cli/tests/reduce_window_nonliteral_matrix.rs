@@ -126,7 +126,7 @@ fn partition_agrees_across_lanes() {
 fn literal_window_pools_correctly_in_both_lanes() {
     let program = "module M.Main\n\
          def f(x: tensor[6, f32]) -> tensor[5, f32] = reduce_window_max(x, [2i64], [1i64])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0])))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32)))\n";
     assert_eq!(eval_first_line(program).expect("eval"), POOLED);
     if c_toolchain_available() {
         let (ok, stderr, stdout) = c_outcome(program, "rw_literal");
@@ -142,7 +142,7 @@ fn eval_pools_correctly_with_nonliteral_window_and_strides() {
     let program = "module M.Main\n\
          def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64))\n";
     assert_eq!(eval_first_line(program).expect("eval"), POOLED);
 }
 
@@ -162,7 +162,7 @@ fn c_nonliteral_window_and_strides_pool_or_reject() {
     let program = "module M.Main\n\
          def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64, 1i64))\n";
     let (ok, stderr, stdout) = c_outcome(program, "rw_both_var");
     assert!(
         !stderr.contains("panicked"),
@@ -197,7 +197,7 @@ fn c_nonliteral_window_does_not_panic_the_compiler() {
     let program = "module M.Main\n\
          def f(x: tensor[6, f32], w: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [1i64])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0], f32), 2i64))\n";
     let (_, stderr, _) = c_outcome(program, "rw_one_var");
     assert!(
         !stderr.contains("panicked"),

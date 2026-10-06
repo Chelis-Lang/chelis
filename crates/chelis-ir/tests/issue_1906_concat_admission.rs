@@ -120,7 +120,7 @@ fn same_activation_dynamic_then_static_is_host() {
 #[test]
 fn literal_shadow_does_not_inherit_runtime_input_fact() {
     decision(
-        "def run(x: tensor[2, *, f32]) -> tensor[2, 4, f32] = {\n x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n softmax(concat([x, x], 1i32), -1)\n}\n",
+        "def run(x: tensor[2, *, f32]) -> tensor[2, 4, f32] = {\n x = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\n softmax(concat([x, x], 1i32), -1)\n}\n",
         "run",
         true,
     );

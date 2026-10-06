@@ -36,13 +36,13 @@ fn bounded_tensor_targets_preserve_shape_and_instantiate_independently() {
     ] {
         check(
             &format!(
-                "def recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\na = recast(cast(to_tensor([1, 2]), {first}))\nb = recast(cast(to_tensor([3, 4]), {second}))\n"
+                "def recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\na = recast(cast(to_tensor([1, 2], i32), {first}))\nb = recast(cast(to_tensor([3, 4], i32), {second}))\n"
             ),
             None,
         );
         check(
             &format!(
-                "def convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\na = convert(to_tensor([1, 2]), cast(0, {first}))\nb = convert(to_tensor([3, 4]), cast(0, {second}))\n"
+                "def convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\na = convert(to_tensor([1, 2], i32), cast(0, {first}))\nb = convert(to_tensor([3, 4], i32), cast(0, {second}))\n"
             ),
             None,
         );
@@ -56,7 +56,7 @@ fn invalid_target_and_family_are_still_type_errors() {
         Some("04-DTYPE-1"),
     );
     check(
-        "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\nout = f(to_tensor([1, 2]))\n",
+        "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\nout = f(to_tensor([1, 2], i32))\n",
         Some("Float"),
     );
     check(
@@ -68,7 +68,7 @@ fn invalid_target_and_family_are_still_type_errors() {
         Some("Numeric"),
     );
     check(
-        "out = cast(to_tensor([1, 2]), float64)\n",
+        "out = cast(to_tensor([1, 2], i32), float64)\n",
         Some("not a recognized primitive"),
     );
     check(
@@ -102,12 +102,12 @@ fn result_constraints_obey_bounded_target_family() {
     let declaration = "def convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\n";
     check(
         &format!(
-            "{declaration}a: tensor[2, f32] = convert(to_tensor([1, 2]))\nb: tensor[2, f64] = convert(to_tensor([1, 2]))\n"
+            "{declaration}a: tensor[2, f32] = convert(to_tensor([1, 2], i32))\nb: tensor[2, f64] = convert(to_tensor([1, 2], i32))\n"
         ),
         None,
     );
     check(
-        &format!("{declaration}a: tensor[2, i64] = convert(to_tensor([1, 2]))\n"),
+        &format!("{declaration}a: tensor[2, i64] = convert(to_tensor([1, 2], i32))\n"),
         Some("PrecisionMismatch"),
     );
 }

@@ -78,7 +78,9 @@ operations rather than running them on the CPU without notice.
   including supported batched forms.
 - `sort` returns values and `i64` indices. `diagonal` selects paired axes;
   `trace` reduces a diagonal.
-- `to_tensor` converts a rectangular nested list to a tensor; `to_list`
+- `to_tensor` converts a rectangular nested list to a tensor, and its optional
+  dtype argument, as in `to_tensor([1.1, 2.2], f64)`, states the dtype of the
+  list's unsuffixed literal elements; `to_list`
   converts a tensor to a list. `pad_sequences` makes a rectangular tensor from
   ragged rows. `cast` changes a numeric dtype explicitly. `shape(t, axis)`
   returns an `i64` extent for an `i32` axis; `rank` and `numel` report rank

@@ -2654,6 +2654,8 @@ fn rewrite_single_file_decls(
     module_name: &str,
     decls: &[Decl],
 ) -> Result<Vec<Decl>, String> {
+    chelis_surf::desugar::reject_reserved_binders(decls)
+        .map_err(|error| format!("{module_name}: {error}"))?;
     validate_source_signature_pairs(decls, module_name)?;
     let symbols = collect_symbol_kinds(decls);
     let mut internal_maps = graph.internal_maps.clone();
@@ -10928,6 +10930,7 @@ fn rewrite_module_decls(
     internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
+    reject_reserved_binders(module)?;
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
     let mut out = Vec::new();
     for decl in &module.decls {
@@ -10967,6 +10970,14 @@ fn rewrite_module_decls(
     Ok(out)
 }
 
+/// spec/04 §8.6: a package module may not bind the reserved `to_tensor`.
+/// Checked on the authored declarations, before internal-name rewriting
+/// hides the authored name.
+fn reject_reserved_binders(module: &ModuleSource) -> Result<(), String> {
+    chelis_surf::desugar::reject_reserved_binders(&module.decls)
+        .map_err(|error| format!("{}: {error}", module.file_rel.display()))
+}
+
 /// Turn any qualified-reference misses recorded during rewrite into a hard
 /// error (chelis#316). Reported deterministically (first by record order) so a
 /// program with several unknown qualified names fails on a stable one.
@@ -10983,6 +10994,7 @@ fn rewrite_eval_module_decls(
     internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
+    reject_reserved_binders(module)?;
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
     let mut out = Vec::new();
     for decl in &module.decls {

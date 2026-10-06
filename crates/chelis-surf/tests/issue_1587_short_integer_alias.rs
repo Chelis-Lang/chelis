@@ -123,17 +123,18 @@ fn contextual_tensor_literals_normalize_aliases_in_declared_positions() {
     }
 }
 
-/// [02-P10b]: an unsuffixed scalar adopts an aliased cast target too.
-/// Regression: before normalization the source retained its default i32.
+/// spec/04 §5.6 Cast: an unsuffixed scalar binds at an aliased cast target
+/// too, and the cast denotes the literal. Regression: before normalization
+/// the source retained its default i32.
 #[test]
-fn scalar_cast_literals_adopt_the_canonical_integer_target() {
+fn scalar_cast_literals_bind_at_the_canonical_integer_target() {
     for name in ["i8", "i16", "i32", "i64"] {
         for literal in ["5", "-5"] {
             let deep = deep_of(&format!("out = cast({literal}, {name})\n"));
             assert!(
-                deep.contains("surf_literal_style")
-                    && deep.contains(&format!("(t-prim {{}} {name})")),
-                "an unsuffixed scalar must adopt the canonical target: {deep}"
+                deep.contains(&format!("type: (t-prim {{}} {name})}} {literal})"))
+                    && !deep.contains("(cast "),
+                "an unsuffixed scalar must bind at the canonical target: {deep}"
             );
         }
     }

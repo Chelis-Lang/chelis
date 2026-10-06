@@ -3693,7 +3693,7 @@ pub fn unify_tensor_prec(
 /// asymmetry whereby `Var <-> Lit` was accepted at call sites but
 /// `Name <-> Lit` was rejected, which blocked stdlib sigs like
 /// `def f(x: tensor[batch, hidden, f32])` from being called with
-/// concrete-shaped inputs (e.g. `f(to_tensor([[1.0, 2.0, 3.0]]))`).
+/// concrete-shaped inputs (e.g. `f(to_tensor([[1.0, 2.0, 3.0]], f32))`).
 /// The relaxation is narrow: distinct `Name <-> Name` and
 /// distinct `Lit <-> Lit` continue to be rejected, and the
 /// `Var <-> Lit` cross-position contract is unaffected.

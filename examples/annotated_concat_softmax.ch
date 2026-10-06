@@ -1,4 +1,4 @@
 module Annotated_Concat_Softmax
 def join_columns[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([x, y], 1i32)
 def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = x |> join_columns(y) |> softmax(-1)
-output = probabilities(to_tensor([[0.0, 0.0], [0.0, 0.0]]), to_tensor([[0.0, 0.0], [0.0, 0.0]]))
+output = probabilities(to_tensor([[0.0, 0.0], [0.0, 0.0]], f32), to_tensor([[0.0, 0.0], [0.0, 0.0]], f32))

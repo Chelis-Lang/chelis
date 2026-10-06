@@ -254,7 +254,7 @@ def g(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4
 fn scatter_elements_int32_axis_accepted_int64_rejected() {
     let setup = r#"
 data = to_tensor([[0.0f32, 0.0f32], [0.0f32, 0.0f32]])
-indices = to_tensor([[1, 0], [0, 1]])
+indices = to_tensor([[1, 0], [0, 1]], i32)
 updates = to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])
 "#;
     assert_clean(

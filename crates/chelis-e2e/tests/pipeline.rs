@@ -219,7 +219,7 @@ fn pipeline_preserves_rejection_stage_messages() {
             "consumed",
         ),
         (
-            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5]))\n",
+            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5], f32))\n",
             "grad",
         ),
     ];

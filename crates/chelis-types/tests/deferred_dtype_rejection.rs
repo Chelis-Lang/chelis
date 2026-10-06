@@ -90,7 +90,7 @@ fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
         assert_deferred_rejection(
-            &format!("def stash() -> tensor[3, {name}] = to_tensor([1, 2, 3])"),
+            &format!("def stash() -> tensor[3, {name}] = to_tensor([1, 2, 3], i32)"),
             name,
         );
     }

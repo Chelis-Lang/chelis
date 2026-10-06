@@ -103,7 +103,7 @@ fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
     }
     let program = "module M.Main\n\
          def f(x: tensor[2, f32]) -> string = to_string(x)\n\
-         out = print(f(to_tensor([1.5, 2.5])))\n";
+         out = print(f(to_tensor([1.5, 2.5], f32)))\n";
     let eval_got = eval_first_line(program).expect("eval");
     assert_eq!(eval_got, "tensor(shape=[2], data=[1.5, 2.5])");
     let c_got = c_first_line(program, "ts_tensor");

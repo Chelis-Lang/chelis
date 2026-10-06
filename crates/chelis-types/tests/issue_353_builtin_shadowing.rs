@@ -69,7 +69,7 @@ fn def_sum_shadowing_rejected_with_spec_diagnostic() {
     let deep = surf_to_deep(
         "module Repro\n\
          def sum(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-         out = sum(to_tensor([1.0, -2.0]))\n",
+         out = sum(to_tensor([1.0, -2.0], f32))\n",
     );
     let errs = shadowing_errors(&deep);
     assert_eq!(
@@ -106,7 +106,7 @@ fn sig_only_shadowing_rejected() {
     let deep = surf_to_deep(
         "module SigOnly\n\
          sig sum: &tensor[batch, f32] -> tensor[batch, f32]\n\
-         out = relu(to_tensor([1.0, -2.0]))\n",
+         out = relu(to_tensor([1.0, -2.0], f32))\n",
     );
     let errs = shadowing_errors(&deep);
     assert_eq!(
@@ -128,7 +128,7 @@ fn sig_only_shadowing_rejected() {
 fn top_level_load_binding_shadowing_rejected() {
     let deep = surf_to_deep(
         "module TopBind\n\
-         sum = relu(to_tensor([1.0, -2.0]))\n\
+         sum = relu(to_tensor([1.0, -2.0], f32))\n\
          out = sum\n",
     );
     let errs = shadowing_errors(&deep);
@@ -201,7 +201,7 @@ fn near_miss_names_still_check_clean() {
         let deep = surf_to_deep(&format!(
             "module NearMiss\n\
              def {def_name}(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-             out = {def_name}(to_tensor([1.0, -2.0]))\n"
+             out = {def_name}(to_tensor([1.0, -2.0], f32))\n"
         ));
         let res = check_ir_program(&deep);
         assert!(
@@ -225,7 +225,7 @@ fn value_params_and_locals_may_reuse_builtin_names() {
     let param_case = surf_to_deep(
         "module Param\n\
          def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
+         out = f(to_tensor([1.0, -2.0], f32))\n",
     );
     assert!(
         check_ir_program(&param_case).is_ok(),
@@ -238,7 +238,7 @@ fn value_params_and_locals_may_reuse_builtin_names() {
            sum = relu(x)\n\
            sum\n\
          }\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
+         out = f(to_tensor([1.0, -2.0], f32))\n",
     );
     assert!(
         check_ir_program(&local_case).is_ok(),
@@ -298,7 +298,7 @@ fn builtin_named_param_called_in_body_is_accepted() {
     let value_only = surf_to_deep(
         "module ValueOnly\n\
          def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
+         out = f(to_tensor([1.0, -2.0], f32))\n",
     );
     assert!(
         check_ir_program(&value_only).is_ok(),

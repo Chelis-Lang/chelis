@@ -6,6 +6,7 @@ pub mod desugar;
 mod dtype_name;
 pub mod format;
 pub mod lexer;
+mod literal_sites;
 pub mod module_identity;
 pub mod parser;
 #[cfg(feature = "pre-020-pipe-migration")]

@@ -672,7 +672,7 @@ fn c_f32_tensor_sqrt_is_correctly_rounded() {
     let (_, line) = c_lane(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
-         out = print(f(to_tensor([1.5, 3.0])))\n",
+         out = print(f(to_tensor([1.5, 3.0], f32)))\n",
         "c_sqrt_rounding",
     )
     .expect("C lane should run");
@@ -713,7 +713,7 @@ fn c_f32_tensor_sqrt_is_layout_independent() {
     let (_, contig) = c_lane(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
-         out = print(f(to_tensor([1.5, 3.0])))\n",
+         out = print(f(to_tensor([1.5, 3.0], f32)))\n",
         "c_sqrt_contig",
     )
     .expect("contiguous C lane should run");
@@ -722,7 +722,7 @@ fn c_f32_tensor_sqrt_is_layout_independent() {
     let (_, strided) = c_lane(
         "module M.Main\n\
          def f(x: tensor[2, 2, f32]) -> tensor[2, 2, f32] = sqrt(permute(x, 1, 0))\n\
-         out = print(f(to_tensor([[1.5, 3.0], [9.0, 4.0]])))\n",
+         out = print(f(to_tensor([[1.5, 3.0], [9.0, 4.0]], f32)))\n",
         "c_sqrt_strided",
     )
     .expect("strided C lane should run");
@@ -770,7 +770,7 @@ fn c_f32_tensor_sqrt_ordinary_values_agree_across_lanes() {
     }
     let program = "module M.Main\n\
          def f(x: tensor[4, f32]) -> tensor[4, f32] = sqrt(x)\n\
-         out = print(f(to_tensor([4.0, 2.0, 0.5, 1.5])))\n";
+         out = print(f(to_tensor([4.0, 2.0, 0.5, 1.5], f32)))\n";
     let eval_line = eval_first_line(program).expect("eval should run");
     let (_, c_line) = c_lane(program, "c_sqrt_ordinary").expect("C lane should build and run");
     assert_eq!(
@@ -874,7 +874,7 @@ fn tensor_forms_of_stubbed_ops_are_correct() {
     }
     let program = "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = floor(x)\n\
-         out = print(f(to_tensor([1.5, 0.25])))\n";
+         out = print(f(to_tensor([1.5, 0.25], f32)))\n";
     let eval_line = eval_first_line(program).expect("eval");
     let (emitted, c_line) = c_lane(program, "ctl_tensor_floor").expect("C lane");
     assert!(!emitted.contains(STUB_MARKER));
@@ -883,7 +883,7 @@ fn tensor_forms_of_stubbed_ops_are_correct() {
 
     let program = "module M.Main\n\
          def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = max_elem(x, y)\n\
-         out = print(f(to_tensor([1.5, 0.25]), to_tensor([0.5, 2.5])))\n";
+         out = print(f(to_tensor([1.5, 0.25], f32), to_tensor([0.5, 2.5], f32)))\n";
     let eval_line = eval_first_line(program).expect("eval");
     let (emitted, c_line) = c_lane(program, "ctl_tensor_maxelem").expect("C lane");
     assert!(!emitted.contains(STUB_MARKER));

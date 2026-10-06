@@ -2174,6 +2174,7 @@ pub(super) fn infer_top_level(
                         &resolved_body,
                         &resolved_decl,
                     )
+                    .or_else(|| declared_literal_hint(&kids[1], &resolved_decl))
                     .map(|note| format!("; {note}"))
                     .unwrap_or_default()
                 };
@@ -2275,3 +2276,14 @@ pub(super) fn infer_top_level(
 }
 
 // ── Core inference ───────────────────────────────────────────────
+
+/// The literal-dtype repair note for a declaration's body: a value's own
+/// literal, or a function's literal result body.
+fn declared_literal_hint(body: &deep::Expr, declared: &Type) -> Option<String> {
+    match (declared, stamped_parts(body)) {
+        (Type::Fn(_, result), Some((DeepTag::Fn, _, [_, function_body]))) => {
+            super::literal_width::literal_dtype_hint(function_body, result)
+        }
+        _ => super::literal_width::literal_dtype_hint(body, declared),
+    }
+}

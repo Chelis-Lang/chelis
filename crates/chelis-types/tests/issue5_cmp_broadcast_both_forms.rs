@@ -107,8 +107,8 @@ fn assert_accepted(source: &str, label: &str) {
 #[test]
 fn issue5_both_operand_orders_are_refused_alike() {
     assert_rejected_naming_the_replacement(
-        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)\n\
-         def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))\n",
+        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0], f32), 1.5)\n\
+         def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0], f32))\n",
         "both forms in one module",
     );
 }
@@ -117,11 +117,11 @@ fn issue5_both_operand_orders_are_refused_alike() {
 #[test]
 fn issue5_each_operand_order_alone_is_refused() {
     assert_rejected_naming_the_replacement(
-        "def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))\n",
+        "def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0], f32))\n",
         "scalar first, alone",
     );
     assert_rejected_naming_the_replacement(
-        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)\n",
+        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0], f32), 1.5)\n",
         "tensor first, alone",
     );
 }

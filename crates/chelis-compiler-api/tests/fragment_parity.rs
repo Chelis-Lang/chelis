@@ -885,7 +885,7 @@ fn value_binding_target_is_name_resolution_error() {
     // A module with a top-level value binding (not a function): resolving it as
     // a function is a NotAFunction -> tagged NameResolution error.
     let module = render_deep(
-        "module Frag.Value\nexport (target)\nshared: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])\ndef target(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
+        "module Frag.Value\nexport (target)\nshared: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0], f32)\ndef target(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
     );
     let body = render_body(
         "module M\ndef f(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",

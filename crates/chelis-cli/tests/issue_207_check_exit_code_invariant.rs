@@ -117,12 +117,14 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
         (
             "clean",
             "def answer() -> i32 = cast(7, i32)\n",
+            // chelis#3164: a primitive cast of an unsuffixed literal is the
+            // suffixed literal, one node with no `cast` node.
             serde_json::json!({
                 "score": 1,
                 "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
-                "typed_nodes": 2,
+                "typed_nodes": 1,
                 "untyped_nodes": 0,
-                "total_nodes": 2,
+                "total_nodes": 1,
                 "unresolved_names": [],
                 "errors": [],
             }),

@@ -21,10 +21,10 @@ type Column =
 
 def get_float(c: Column) -> tensor[4, f32] = match c with {
   | FloatCol(t) => t
-  | IntCol(_) => (to_tensor([0.0, 0.0, 0.0, 0.0]) : tensor[4, f32])
+  | IntCol(_) => (to_tensor([0.0, 0.0, 0.0, 0.0], f32) : tensor[4, f32])
 }
 
-value = get_float(FloatCol((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32])))
+value = get_float(FloatCol((to_tensor([1.0, 2.0, 3.0, 4.0], f32) : tensor[4, f32])))
 "#,
     );
     Command::cargo_bin("chelis")
@@ -44,7 +44,7 @@ value = get_float(FloatCol((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32])))
 
 def make_dict() -> Dict[string, tensor[4, f32]] = {
   d = dict_of([] : List[(string, tensor[4, f32])])
-  dict_insert(d, "price", (to_tensor([1.0, 1.0, 1.0, 1.0]) : tensor[4, f32]))
+  dict_insert(d, "price", (to_tensor([1.0, 1.0, 1.0, 1.0], f32) : tensor[4, f32]))
 }
 
 value = make_dict()
@@ -126,8 +126,8 @@ fn coral_where_indices_builds_and_matches_reference_values() {
 
 import Std.Tensor.Mask (where_indices)
 
-mixed_mask = cmplt((to_tensor([0.0, 1.0, 0.0, 1.0, 1.0]) : tensor[5, f32]), (to_tensor([0.5, 0.5, 0.5, 0.5, 0.5]) : tensor[5, f32]))
-all_true = cmplt((to_tensor([0.0, 0.0, 0.0]) : tensor[3, f32]), (to_tensor([1.0, 1.0, 1.0]) : tensor[3, f32]))
+mixed_mask = cmplt((to_tensor([0.0, 1.0, 0.0, 1.0, 1.0], f32) : tensor[5, f32]), (to_tensor([0.5, 0.5, 0.5, 0.5, 0.5], f32) : tensor[5, f32]))
+all_true = cmplt((to_tensor([0.0, 0.0, 0.0], f32) : tensor[3, f32]), (to_tensor([1.0, 1.0, 1.0], f32) : tensor[3, f32]))
 
 mixed_idx = where_indices(mixed_mask)
 all_true_idx = where_indices(all_true)
@@ -196,7 +196,7 @@ fn coral_where_indices_all_false_returns_empty_tensor() {
 
 import Std.Tensor.Mask (where_indices)
 
-all_false = cmplt((to_tensor([1.0, 1.0, 1.0]) : tensor[3, f32]), (to_tensor([0.0, 0.0, 0.0]) : tensor[3, f32]))
+all_false = cmplt((to_tensor([1.0, 1.0, 1.0], f32) : tensor[3, f32]), (to_tensor([0.0, 0.0, 0.0], f32) : tensor[3, f32]))
 value = where_indices(all_false)
 "#,
     );
@@ -283,7 +283,7 @@ fn coral_to_tensor_rejects_mixed_bool_and_float_list() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-bad = to_tensor([true, 1.0])
+bad = to_tensor([true, 1.0], f32)
 "#,
     );
     // Issue #207: type errors now produce exit 2; assert on stdout
@@ -320,7 +320,7 @@ fn coral_comparison_ops_broadcast_tensor_scalar() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
+def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0], f32) : tensor[3, f32])
 def mk_ints() -> tensor[3, i64] = (to_tensor([cast(1, i64), cast(2, i64), cast(3, i64)]) : tensor[3, i64])
 def mk_bools() -> tensor[3, bool] = to_tensor([true, false, true])
 
@@ -420,7 +420,7 @@ fn coral_comparison_ops_reject_mismatched_precision() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-xs = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
+xs = (to_tensor([1.0, 2.0, 3.0], f32) : tensor[3, f32])
 bad = gt(xs, cast(1, i64))
 "#,
     );
@@ -488,12 +488,12 @@ fn coral_comparison_ops_reject_a_scalar_operand_and_name_the_replacement() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
-def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
-def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)
-def lt_left() -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))
-def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)
-def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0], f32), 1.5)
+def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0], f32))
+def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0], f32), 2.5)
+def lt_left() -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0], f32))
+def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0], f32), 2.0)
+def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0], f32))
 "#,
     );
 
@@ -517,12 +517,12 @@ def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
         &migrated_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([1.5]), 0i32, 3i64))
-def below() -> tensor[3, bool] = gt(expand(to_tensor([1.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
-def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.5]), 0i32, 3i64))
-def lt_left() -> tensor[3, bool] = lt(expand(to_tensor([2.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
-def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.0]), 0i32, 3i64))
-def eq_left() -> tensor[3, bool] = eq(expand(to_tensor([2.0]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0], f32), expand(to_tensor([1.5], f32), 0i32, 3i64))
+def below() -> tensor[3, bool] = gt(expand(to_tensor([1.5], f32), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0], f32))
+def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0], f32), expand(to_tensor([2.5], f32), 0i32, 3i64))
+def lt_left() -> tensor[3, bool] = lt(expand(to_tensor([2.5], f32), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0], f32))
+def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0], f32), expand(to_tensor([2.0], f32), 0i32, 3i64))
+def eq_left() -> tensor[3, bool] = eq(expand(to_tensor([2.0], f32), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0], f32))
 "#,
     );
 

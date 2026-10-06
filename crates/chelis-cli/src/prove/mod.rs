@@ -1097,9 +1097,13 @@ fn tensor_surf_expr(shape: &[usize], precision: &str, values: &[f64]) -> Expr {
         }
     };
     if shape.len() == 1 {
+        let dtype = if precision == "f64" { "f64" } else { "f32" };
         return Expr::Apply(
             Box::new(Expr::Var("to_tensor".to_string(), sp)),
-            vec![Expr::List(values.iter().copied().map(scalar).collect(), sp)],
+            vec![
+                Expr::List(values.iter().copied().map(scalar).collect(), sp),
+                Expr::Var(dtype.to_string(), sp),
+            ],
             sp,
         );
     }

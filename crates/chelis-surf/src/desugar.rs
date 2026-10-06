@@ -26,6 +26,10 @@ use crate::ast::*;
 pub(crate) use crate::dtype_name::{
     canonical_primitive_name, is_reserved_dtype_name, migrated_integer_dtype_name,
 };
+use crate::literal_sites::{
+    self, DeclarationOwner, DeclarationSite, NumericLiteral, ProgramDeclarations, Site,
+    SiteVisitor, StatedDtype,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -51,12 +55,44 @@ pub enum DesugarError {
         "cannot resolve the parameter identity of `grad` target `{target}`; use a direct declaration, inline lambda, or immutable alias"
     )]
     UnresolvedGradTarget { target: String, span: Span },
-    #[error(
-        "unsupported tensor literal conversion: lexical `to_tensor` binding would capture the intrinsic constructor; rename that binding or use an explicit List annotation"
-    )]
-    CapturedTensorConstructor { span: Span },
     #[error("`grad` target `{target}` is not callable")]
     NonCallableGradTarget { target: String, span: Span },
+    /// spec/04 §8.6: `to_tensor` is reserved, so no binder may bind it.
+    #[error(
+        "`to_tensor` is reserved and cannot be bound (spec/04-type-system.md §8.6): it states literal dtypes (§5.6) and always names the intrinsic conversion; rename this {binder}"
+    )]
+    ReservedName { binder: &'static str, span: Span },
+    /// spec/04 §5.6: an unsuffixed literal element of a `to_tensor` call
+    /// without a dtype argument has no default.
+    #[error("{message}")]
+    MissingTensorDtype { message: String, span: Span },
+    /// spec/04 §5.6 Binding: the literal's kind does not admit the dtype a
+    /// declaration or dtype argument states.
+    #[error(
+        "the {kind} literal `{literal}` cannot bind at {dtype}, which {construct} states (spec/04-type-system.md §5.6)"
+    )]
+    LiteralCannotBind {
+        kind: &'static str,
+        literal: String,
+        dtype: String,
+        construct: String,
+        span: Span,
+    },
+    /// spec/02 §P9: the second argument of `to_tensor` is a dtype.
+    #[error(
+        "the second argument of `to_tensor` must be a dtype, a primitive such as `f64` or a dtype-bounded binder in scope; `{found}` is neither (spec/02-surf-syntax.md §P9)"
+    )]
+    NonDtypeArgument { found: String, span: Span },
+    /// spec/04 §5.6, fenced: a literal bound at a dtype binder by a
+    /// declaration or a dtype argument.
+    #[error(
+        "a literal bound at the dtype binder `{binder}` by a declaration or a dtype argument is not implemented yet (chelis#3148); write `cast({literal}, {binder})` for each literal"
+    )]
+    BinderLiteralNotImplemented {
+        binder: String,
+        literal: String,
+        span: Span,
+    },
 }
 
 impl DesugarError {
@@ -67,7 +103,11 @@ impl DesugarError {
             | Self::UnknownGradParameter { span, .. }
             | Self::UnresolvedGradTarget { span, .. }
             | Self::NonCallableGradTarget { span, .. }
-            | Self::CapturedTensorConstructor { span } => Some(*span),
+            | Self::ReservedName { span, .. }
+            | Self::MissingTensorDtype { span, .. }
+            | Self::LiteralCannotBind { span, .. }
+            | Self::NonDtypeArgument { span, .. }
+            | Self::BinderLiteralNotImplemented { span, .. } => Some(*span),
         }
     }
 }
@@ -93,6 +133,8 @@ pub fn desugar_program_with_context(
         })?;
         let normalized = crate::pipe_sugar::normalized_program(decls)?;
         let decls = normalized.as_slice();
+        reject_reserved_binders(decls)?;
+        validate_literal_sites(decls)?;
         let resolved_grad_indices =
             GradSelectorResolver::resolve_program_with_context(decls, context)?;
         let ctx = DesugarCtx::new(decls, resolved_grad_indices);
@@ -111,6 +153,8 @@ pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
     stacker::grow(64 * 1024 * 1024, || {
         let normalized = crate::pipe_sugar::normalized_expression(expr)?;
         let expr = &normalized;
+        reject_reserved_expression_binders(expr)?;
+        validate_expression_literal_sites(expr)?;
         let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
         Ok(DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr))
     })
@@ -138,6 +182,10 @@ pub fn desugar_expr_in_program_scope(
         let decls = normalized_decls.as_slice();
         let normalized = crate::pipe_sugar::normalized_expression(expr)?;
         let expr = &normalized;
+        reject_reserved_binders(decls)?;
+        validate_literal_sites(decls)?;
+        reject_reserved_expression_binders(expr)?;
+        validate_expression_literal_sites(expr)?;
         let resolved_grad_indices =
             GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
         Ok(
@@ -148,8 +196,11 @@ pub fn desugar_expr_in_program_scope(
 }
 
 #[derive(Default)]
-struct DesugarCtx {
+struct DesugarCtx<'a> {
     resolved_grad_indices: Vec<(usize, Vec<i64>)>,
+    /// Signatures and binders by declaration name, which give a binding or
+    /// function result its declared type (spec/04 §5.6 Declaration).
+    declarations: ProgramDeclarations<'a>,
     /// Names that carry an explicit standalone `sig`/signature declaration
     /// (`Decl::Sig`). When a `def` of the same name also has inline
     /// annotations, `desugar_fun_def` would otherwise synthesize a second
@@ -161,12 +212,6 @@ struct DesugarCtx {
     /// (chelis#285). When an explicit sig exists, the synthesized one is
     /// strictly redundant and weaker, so we suppress it here.
     explicit_sig_names: UnordSet<String>,
-    /// Standalone value signatures supply binding literal context just as
-    /// inline annotations do. List signatures still preserve List values.
-    top_level_binding_tensor_prec: UnordMap<String, String>,
-    /// Standalone function signatures declare a tensor result for a bare
-    /// bracket-literal body just as an inline result type does (position 3).
-    top_level_fn_result_tensor_prec: UnordMap<String, String>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -202,7 +247,7 @@ struct DesugarCtx {
     current_type_binders: std::cell::RefCell<UnordMap<String, Option<chelis_deep::DtypeBound>>>,
 }
 
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
     fn current_type_binder(&self, name: &str) -> Option<Option<chelis_deep::DtypeBound>> {
         // spec/02 §P4b: a quantifier list overrides the lexical
         // type-variable case split, not active primitive or rejected dtype
@@ -226,38 +271,21 @@ impl DesugarCtx {
         desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true)
     }
 
-    fn new(decls: &[Decl], resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
+    fn new(decls: &'a [Decl], resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
         let mut explicit_sig_names = UnordSet::new();
-        let mut top_level_binding_tensor_prec = UnordMap::new();
-        let mut top_level_fn_result_tensor_prec = UnordMap::new();
         let mut def_effects = UnordMap::new();
         let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
-                if let Decl::Sig { name, ty, .. } = d
-                    && let Some(precision) = tensor_element_prim_name(ty)
-                {
-                    top_level_binding_tensor_prec.insert(name.clone(), precision);
-                }
-                if let Decl::Sig {
-                    name,
-                    ty: TypeExpr::Arrow(_, result, _),
-                    ..
-                } = d
-                    && let Some(precision) = tensor_element_prim_name(result)
-                {
-                    top_level_fn_result_tensor_prec.insert(name.clone(), precision);
-                }
                 collect_def_effects(d, &mut def_effects);
                 collect_declared_type_binders(d, &mut declared_type_binders);
             });
         }
         Self {
             resolved_grad_indices,
+            declarations: ProgramDeclarations::collect(decls),
             explicit_sig_names,
-            top_level_binding_tensor_prec,
-            top_level_fn_result_tensor_prec,
             def_effects,
             next_destructure_temp: std::cell::Cell::new(0),
             declared_type_binders,
@@ -391,9 +419,6 @@ impl CallableScope {
 struct GradSelectorResolver {
     globals: CallableScope,
     resolved: Vec<(usize, Vec<i64>)>,
-    /// Functions whose standalone `sig` declares a tensor result, so that a
-    /// bare bracket-literal body receives a synthesized conversion.
-    tensor_result_signatures: UnordSet<String>,
     next_callable_identity: u64,
     deep_callable_identities: UnordMap<usize, LexicalCallableId>,
 }
@@ -514,13 +539,6 @@ impl GradSelectorResolver {
                     self.seed_function_origins(decl);
                 }
             }
-            Decl::Sig {
-                name,
-                ty: TypeExpr::Arrow(_, result, _),
-                ..
-            } if tensor_element_prim_name(result).is_some() => {
-                self.tensor_result_signatures.insert(name.clone());
-            }
             Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
                 let identity = self.fresh_callable_identity();
                 self.globals.bind(
@@ -573,20 +591,6 @@ impl GradSelectorResolver {
                             PropertyOption::Contract(..) => {}
                         }
                     }
-                }
-                // A tensor-result body that is a bare bracket literal receives
-                // a synthesized conversion, which no parameter may capture.
-                if let Decl::FunDef { ret_ty, .. } = decl
-                    && matches!(body, Expr::List(_, _))
-                    && match ret_ty {
-                        Some(ret_ty) => tensor_element_prim_name(ret_ty).is_some(),
-                        None => self.tensor_result_signatures.contains(name),
-                    }
-                    && scope.values.contains_key("to_tensor")
-                {
-                    return Err(DesugarError::CapturedTensorConstructor {
-                        span: expr_span(body),
-                    });
                 }
                 self.visit_expr(body, &scope)?;
                 self.globals.bind(name.clone(), callable);
@@ -792,20 +796,6 @@ impl GradSelectorResolver {
             Expr::Block(bindings, body, _) => {
                 let mut block_scope = scope.clone();
                 for binding in bindings {
-                    // A synthesized conversion must never resolve to authored
-                    // lexical code. This release boundary is established before
-                    // Deep construction and follows every lexical binder kind.
-                    let converts_literal = matches!(&binding.value, Expr::List(_, _))
-                        && binding
-                            .ty
-                            .as_ref()
-                            .and_then(tensor_element_prim_name)
-                            .is_some();
-                    if converts_literal && block_scope.values.contains_key("to_tensor") {
-                        return Err(DesugarError::CapturedTensorConstructor {
-                            span: expr_span(&binding.value),
-                        });
-                    }
                     let value = self.visit_expr(&binding.value, &block_scope)?;
                     bind_let_pattern(&binding.pattern, &value, &mut block_scope);
                 }
@@ -957,6 +947,278 @@ impl GradSelectorResolver {
             }
             _ => CallableOrigin::Unknown,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Literal-dtype ingress checks (spec/04 §5.6, §8.6)
+// ---------------------------------------------------------------------------
+
+/// spec/04 §8.6: no binder in any scope may bind the reserved `to_tensor`,
+/// so a `to_tensor` call always names the intrinsic conversion. Desugaring
+/// runs this check; the reef linker also runs it on a package module's
+/// authored declarations, before it rewrites them to internal names.
+pub fn reject_reserved_binders(decls: &[Decl]) -> Result<(), DesugarError> {
+    decls.iter().try_for_each(reserved_in_decl)
+}
+
+fn reject_reserved_expression_binders(expr: &Expr) -> Result<(), DesugarError> {
+    reserved_in_expr(expr)
+}
+
+fn reserved(name: &str, binder: &'static str, span: Span) -> Result<(), DesugarError> {
+    if name == "to_tensor" {
+        Err(DesugarError::ReservedName { binder, span })
+    } else {
+        Ok(())
+    }
+}
+
+fn reserved_in_params(params: &[Param], binder: &'static str) -> Result<(), DesugarError> {
+    params
+        .iter()
+        .try_for_each(|param| reserved(&param.name, binder, param.span))
+}
+
+fn reserved_in_decl(decl: &Decl) -> Result<(), DesugarError> {
+    match decl {
+        Decl::Module { decls, .. } => reject_reserved_binders(decls),
+        Decl::Import {
+            kind: ImportKind::Names(names),
+            span,
+            ..
+        } => names
+            .iter()
+            .try_for_each(|name| reserved(name, "import", *span)),
+        Decl::Sig { name, span, .. } => reserved(name, "signature", *span),
+        Decl::FunDef {
+            name,
+            params,
+            body,
+            span,
+            ..
+        } => {
+            reserved(name, "definition", *span)?;
+            reserved_in_params(params, "parameter")?;
+            reserved_in_expr(body)
+        }
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            span,
+            ..
+        } => {
+            reserved(name, "property", *span)?;
+            reserved_in_params(params, "parameter")?;
+            preconditions.iter().try_for_each(reserved_in_expr)?;
+            reserved_in_expr(body)?;
+            options.iter().try_for_each(|option| match option {
+                PropertyOption::Tolerance(value, _)
+                | PropertyOption::Seed(value, _)
+                | PropertyOption::Samples(value, _) => reserved_in_expr(value),
+                PropertyOption::Contract(..) => Ok(()),
+            })
+        }
+        Decl::LetDef {
+            name, value, span, ..
+        } => {
+            reserved(name, "binding", *span)?;
+            reserved_in_expr(value)
+        }
+        Decl::MacroDef {
+            name,
+            params,
+            body,
+            span,
+        } => {
+            reserved(name, "macro", *span)?;
+            params
+                .iter()
+                .try_for_each(|param| reserved(param, "macro parameter", *span))?;
+            reserved_in_expr(body)
+        }
+        Decl::TypeDef {
+            invariant: Some(invariant),
+            ..
+        } => {
+            reserved(&invariant.binder, "invariant binder", invariant.span)?;
+            reserved_in_expr(&invariant.body)
+        }
+        Decl::Import { .. }
+        | Decl::TypeDef { .. }
+        | Decl::TypeAlias { .. }
+        | Decl::Dim { .. }
+        | Decl::Export { .. } => Ok(()),
+    }
+}
+
+fn reserved_in_expr(expr: &Expr) -> Result<(), DesugarError> {
+    let mut found = Ok(());
+    crate::pipe_sugar::visit_expr(expr, &mut |expr| {
+        if found.is_err() {
+            return;
+        }
+        found = match expr {
+            Expr::Lambda(params, _, _) => reserved_in_params(params, "lambda parameter"),
+            Expr::Block(bindings, _, _) => bindings
+                .iter()
+                .try_for_each(|binding| reserved_in_let_pattern(&binding.pattern)),
+            Expr::Match(_, arms, _) => arms
+                .iter()
+                .try_for_each(|arm| reserved_in_pattern(&arm.pattern)),
+            _ => Ok(()),
+        };
+    });
+    found
+}
+
+fn reserved_in_let_pattern(pattern: &LetPattern) -> Result<(), DesugarError> {
+    match pattern {
+        LetPattern::Var(name, span) => reserved(name, "block binding", *span),
+        LetPattern::Wildcard(_) => Ok(()),
+        LetPattern::Tuple(patterns, _) => patterns.iter().try_for_each(reserved_in_let_pattern),
+    }
+}
+
+fn reserved_in_pattern(pattern: &Pattern) -> Result<(), DesugarError> {
+    match pattern {
+        Pattern::Var(name, span) => reserved(name, "pattern binder", *span),
+        Pattern::As(name, inner, span) => {
+            reserved(name, "pattern binder", *span)?;
+            reserved_in_pattern(inner)
+        }
+        Pattern::Constructor(_, patterns, _) | Pattern::Tuple(patterns, _) => {
+            patterns.iter().try_for_each(reserved_in_pattern)
+        }
+        Pattern::Record(_, fields, _) => fields
+            .iter()
+            .try_for_each(|(_, pattern)| reserved_in_pattern(pattern)),
+        Pattern::Wildcard(_) | Pattern::Lit(..) => Ok(()),
+    }
+}
+
+/// spec/04 §5.6 at Surf ingress: the rejections a literal's site decides
+/// before any Deep exists. The first in program order is reported.
+fn validate_literal_sites(decls: &[Decl]) -> Result<(), DesugarError> {
+    let mut validator = LiteralSiteValidator::default();
+    literal_sites::visit_program(decls, &mut validator);
+    validator.first.map_or(Ok(()), Err)
+}
+
+fn validate_expression_literal_sites(expr: &Expr) -> Result<(), DesugarError> {
+    let mut validator = LiteralSiteValidator::default();
+    literal_sites::visit_expression(expr, &mut validator);
+    validator.first.map_or(Ok(()), Err)
+}
+
+#[derive(Default)]
+struct LiteralSiteValidator {
+    first: Option<DesugarError>,
+}
+
+impl<'a> SiteVisitor<'a> for LiteralSiteValidator {
+    fn literal(&mut self, literal: NumericLiteral<'a>, site: Site<'a>) {
+        if self.first.is_some() || !literal.is_unsuffixed() {
+            return;
+        }
+        self.first = match site {
+            Site::Ordinary | Site::Cast => None,
+            Site::Declaration { stated, owner } => {
+                let construct = match owner {
+                    DeclarationOwner::Binding(name) => format!("the declaration of `{name}`"),
+                    DeclarationOwner::Result(name) => format!("the declared result of `{name}`"),
+                };
+                stated.and_then(|stated| unbindable_literal(&literal, stated, construct))
+            }
+            Site::DtypeArgument(stated) => stated.and_then(|stated| {
+                unbindable_literal(
+                    &literal,
+                    stated,
+                    "the dtype argument of `to_tensor`".to_string(),
+                )
+            }),
+            Site::MissingDtype {
+                argument,
+                cast_target,
+            } => Some(missing_tensor_dtype(&literal, argument, cast_target)),
+        };
+    }
+
+    fn dtype_argument(&mut self, dtype: &'a Expr, stated: Option<StatedDtype<'a>>) {
+        if self.first.is_none() && stated.is_none() {
+            self.first = Some(DesugarError::NonDtypeArgument {
+                found: crate::format::format_expression(dtype),
+                span: expr_span(dtype),
+            });
+        }
+    }
+}
+
+/// An unsuffixed literal under a stated dtype it cannot bind at: a kind the
+/// primitive does not admit, or a binder outside a cast (fenced, chelis#3148).
+fn unbindable_literal(
+    literal: &NumericLiteral<'_>,
+    stated: StatedDtype<'_>,
+    construct: String,
+) -> Option<DesugarError> {
+    let written = crate::format::format_expression(literal.expr);
+    let span = expr_span(literal.expr);
+    match stated {
+        StatedDtype::Primitive(primitive) if !literal.admits(primitive) => {
+            Some(DesugarError::LiteralCannotBind {
+                kind: match literal.kind {
+                    literal_sites::LiteralKind::Integer => "integer",
+                    literal_sites::LiteralKind::Decimal => "decimal",
+                },
+                literal: written,
+                dtype: primitive.to_string(),
+                construct,
+                span,
+            })
+        }
+        StatedDtype::Primitive(_) => None,
+        StatedDtype::Binder(binder) => Some(DesugarError::BinderLiteralNotImplemented {
+            binder: binder.to_string(),
+            literal: written,
+            span,
+        }),
+    }
+}
+
+/// The value-preserving fix names the token default, which an element of
+/// `to_tensor` had before it needed a dtype; under a primitive cast it also
+/// names the cast target.
+fn missing_tensor_dtype(
+    literal: &NumericLiteral<'_>,
+    argument: &Expr,
+    cast_target: Option<&str>,
+) -> DesugarError {
+    let element = crate::format::format_expression(literal.expr);
+    let argument = crate::format::format_expression(argument);
+    let default = literal.default_dtype();
+    let wide = match literal.kind {
+        literal_sites::LiteralKind::Integer => "i64",
+        literal_sites::LiteralKind::Decimal => "f64",
+    };
+    let mut message = format!(
+        "to_tensor element `{element}` states no dtype: a numeric literal inside `to_tensor` \
+         takes its dtype from a suffix or a dtype argument, never a default \
+         (spec/04-type-system.md §5.6). Write `to_tensor({argument}, {default})` to keep the \
+         `{default}` default's value, or state the dtype you mean, such as \
+         `to_tensor({argument}, {wide})`"
+    );
+    if let Some(target) = cast_target.and_then(canonical_primitive_name) {
+        message.push_str(&format!(
+            "; to build at `{target}` directly write `to_tensor({argument}, {target})`, and to \
+             keep the `{default}` rounding write `cast(to_tensor({argument}, {default}), {target})`"
+        ));
+    }
+    DesugarError::MissingTensorDtype {
+        message,
+        span: expr_span(literal.expr),
     }
 }
 
@@ -1849,19 +2111,7 @@ fn collect_def_effects(decl: &Decl, out: &mut UnordMap<String, Vec<EffectExpr>>)
     }
 }
 
-/// Return the precision name (e.g. `"f64"`, `"i32"`) for a tensor type
-/// expression, or `None` for any other shape. Tensor type expressions in
-/// Surf carry the spelling and exact token span in `TensorPrecision`.
-fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
-    match ty {
-        TypeExpr::Tensor(_, prec, _) => {
-            Some(canonical_primitive_name(prec).unwrap_or(prec).to_owned())
-        }
-        _ => None,
-    }
-}
-
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
     fn desugar_decl(&self, decl: &Decl) -> Vec<deep::Expr> {
         let mut lowered = match decl {
             Decl::FunDef {
@@ -1890,15 +2140,16 @@ impl DesugarCtx {
                 value,
                 ..
             } => {
-                // Position 1 (spec §P10b / §5.6): RHS of a let-binding
-                // whose declared type is a tensor type. Narrow numeric
-                // literals in `value` to the tensor element type.
-                let body = match (tensor_element_prim_name(t), value) {
-                    (Some(prec), Expr::List(items, _)) => {
-                        self.desugar_list_as_tensor_literal(items, &prec, &[])
-                    }
-                    _ => self.desugar_expr(value),
-                };
+                // spec/04 §5.6 Declaration: the inline annotation states the
+                // dtype of a literal initializer.
+                let restore_binders = self.current_type_binders.replace(
+                    self.declared_type_binders
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                let body = self.desugar_initializer(Some(t), value, &[]);
+                self.current_type_binders.replace(restore_binders);
                 vec![
                     node(DeepTag::Defsig, vec![sym(name), desugar_type(t)]),
                     node(DeepTag::Def, vec![sym(name), body]),
@@ -1927,12 +2178,10 @@ impl DesugarCtx {
                         .cloned()
                         .unwrap_or_default(),
                 );
-                let body = match (self.top_level_binding_tensor_prec.get(name), value) {
-                    (Some(precision), Expr::List(items, _)) => {
-                        self.desugar_list_as_tensor_literal(items, precision, &[])
-                    }
-                    _ => self.desugar_expr(value),
-                };
+                // spec/04 §5.6 Declaration: a standalone value `sig` states
+                // the dtype of a literal initializer.
+                let declared = self.declarations.binding_type(name, None);
+                let body = self.desugar_initializer(declared, value, &[]);
                 self.current_type_binders.replace(restore_binders);
                 vec![node(DeepTag::Def, vec![sym(name), body])]
             }
@@ -2145,29 +2394,20 @@ impl DesugarCtx {
             .collect();
         let params_node = node(DeepTag::Params, param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
-        // Position 3 (spec §P10b / §5.6): body expression of a function
-        // whose declared return type is a tensor type and whose body is
-        // itself a tensor literal. Narrow numeric literals in `body` to
-        // the tensor element type. An inline result type decides; only a
-        // `def` without one takes its standalone `sig`'s result, so an
-        // inline `List[...]` result keeps a `List` body under any `sig`.
-        // Binder scope controls `t-var` cast targets and literal adoption.
+        // spec/04 §5.6 Declaration: the declared result states the dtype of
+        // a literal body, or of a tensor literal body's literal elements. An
+        // inline result type decides; only a `def` without one takes its
+        // standalone `sig`'s result, so an inline `List[...]` result keeps a
+        // `List` body under any `sig`. Binder scope controls `t-var` cast
+        // targets.
         let restore_binders = self.current_type_binders.replace(
             self.declared_type_binders
                 .get(name)
                 .cloned()
                 .unwrap_or_default(),
         );
-        let declared_result = match ret_ty {
-            Some(ret_ty) => tensor_element_prim_name(ret_ty),
-            None => self.top_level_fn_result_tensor_prec.get(name).cloned(),
-        };
-        let desugared_body = match (declared_result, body) {
-            (Some(prec), Expr::List(items, _)) => {
-                self.desugar_list_as_tensor_literal(items, &prec, &body_scope)
-            }
-            _ => self.desugar_expr_with_scope(body, &body_scope),
-        };
+        let declared_result = self.declarations.result_type(name, ret_ty.as_ref());
+        let desugared_body = self.desugar_initializer(declared_result, body, &body_scope);
         self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
@@ -2408,7 +2648,7 @@ fn desugar_variant(variant: &Variant, explicit_params: &UnordSet<String>) -> dee
 // Expressions
 // ---------------------------------------------------------------------------
 
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
     fn desugar_expr(&self, expr: &Expr) -> deep::Expr {
         self.desugar_expr_with_scope(expr, &[])
     }
@@ -2657,33 +2897,30 @@ impl DesugarCtx {
             ),
 
             Expr::Cast(e, prec, mode, _) => {
-                // Normalize before choosing literal adoption as well as the
+                // Normalize before choosing literal binding as well as the
                 // target node: both denote the same primitive under §P10a.
                 let prec = canonical_primitive_name(prec).unwrap_or(prec);
-                // Position 4 (spec §P10b / §5.6): first argument of a
-                // `cast(literal, p)` expression. A cast never makes a bracket
-                // literal a tensor: a bare bracket literal here is a `List`,
-                // and the argument of a `to_tensor` call is an ordinary
-                // `List` whose literals keep their own dtypes.
-                //
-                // Issue #308: a bare scalar numeric literal adopts `p`. `cast(1.1, f64)` binds the
-                // decimal `1.1` AT f64 — it is NOT "narrow to the §5.3
-                // f32 default, then widen", which materializes the
-                // f32-truncation signature `1.100000023841858` in every
-                // value lane that honors the lit's type meta (the IR
-                // Const lowering, the runtime evaluator). Suffixed
-                // literals (spec §5.5) keep their explicit suffix
-                // binding; `cast(1.1f32, f64)` still means "widen this
-                // f32 value". A float literal under an integer target
-                // keeps its default float source because a decimal cannot
-                // bind at an integer type; the checked cast then requires
-                // the value to be integral (spec/04 [04-NUM-14]).
-                //
-                // The [05-OP-6] truncating rung takes NONE of this: its
-                // target is an integer width and its source must stay a
-                // float, so adopting a literal at the target would turn
-                // `cast_trunc(1.9, i32)` into an i32 literal and make the
-                // truncating cast a type error on its own argument.
+                // spec/04 §5.6 Cast: a checked cast whose primitive target
+                // binds its unsuffixed literal operand denotes the literal,
+                // and desugars to exactly the Deep of the suffixed literal
+                // (spec/03 §6.4). `cast(1.1, f64)` binds the decimal at f64;
+                // it never rounds through the f32 default first. A suffixed
+                // operand (`cast(1.1f32, f64)` widens an f32 value), a float
+                // literal under an integer target, any literal under a
+                // non-numeric target, a named cast, and a cast to a binder
+                // keep the cast node.
+                if let Some((literal, stated)) =
+                    literal_sites::cast_operand(e, prec, *mode, &self.is_type_binder())
+                    && let Some(primitive) = literal_sites::cast_collapse(&literal, stated)
+                {
+                    return attach_span_metadata(
+                        collapsed_cast_literal(&literal, primitive),
+                        expr_span(expr),
+                    );
+                }
+                // A cast to a dtype binder binds an unsuffixed literal at the
+                // binder (spec/04 §5.6), keeping the cast node because at a
+                // member the literal's kind does not admit, the cast converts.
                 let binder = self.current_type_binder(prec);
                 // `binder` is consulted again below for the unbounded case, so
                 // the bound is cloned out rather than moved.
@@ -2710,19 +2947,13 @@ impl DesugarCtx {
                                 self.desugar_expr_with_scope(other, local_fn_params)
                             });
                         let adopted = classify_literal_source(&ordinary).and_then(|source| {
-                            if scalar_literal_source_adopts_binder_target(
+                            scalar_literal_source_adopts_binder_target(
                                 source,
                                 binder_bound,
                                 unsuffixed,
-                            ) {
-                                adopted_scalar_literal_source(source, prec, DeepTag::TVar)
-                            } else if scalar_literal_source_adopts_cast_target(
-                                source, prec, unsuffixed,
-                            ) {
-                                adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
-                            } else {
-                                None
-                            }
+                            )
+                            .then(|| binder_literal_source(source, prec))
+                            .flatten()
                         });
                         adopted
                             .map(|literal| attach_span_metadata(literal, expr_span(other)))
@@ -2932,7 +3163,7 @@ fn fresh_destructure_temp(
     }
 }
 
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
     fn desugar_let_bindings(
         &self,
         bindings: &[LetBinding],
@@ -2944,21 +3175,10 @@ impl DesugarCtx {
         for binding in bindings.iter().rev() {
             match &binding.pattern {
                 LetPattern::Var(name, binding_span) => {
-                    // Position 1 (spec §P10b / §5.6) at block scope:
-                    // `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` inside
-                    // a block uses the same contextual rule as the
-                    // top-level form. Module-level LetDef and
-                    // block-level let bindings are both let-bindings
-                    // per §5.6 enumerated position 1.
-                    let value = match (
-                        binding.ty.as_ref().and_then(tensor_element_prim_name),
-                        &binding.value,
-                    ) {
-                        (Some(prec), Expr::List(items, _)) => {
-                            self.desugar_list_as_tensor_literal(items, &prec, &[])
-                        }
-                        _ => self.desugar_expr(&binding.value),
-                    };
+                    // spec/04 §5.6 Declaration at block scope: an annotated
+                    // binding states the dtype of a literal initializer, as
+                    // at top level.
+                    let value = self.desugar_initializer(binding.ty.as_ref(), &binding.value, &[]);
                     if let Some(ty) = &binding.ty {
                         let value = with_metadata_value(
                             inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
@@ -3095,23 +3315,6 @@ fn is_unsuffixed_surf_numeric_literal(expr: &Expr) -> bool {
         )
 }
 
-/// Position 4 (spec §5.6 / §P10b) admission test for a bare scalar
-/// literal under `cast(literal, p)` (issue #308). An unsuffixed numeric
-/// literal adopts the cast target when the binding is meaningful:
-///
-///   * float literal + float target (`f32`/`f64`/`bf16`/`f16`) — the
-///     decimal binds at `p` (single rounding, no round-trip through the
-///     §5.3 f32 default);
-///   * int literal + integer target (`i8`..`i64`) — the value binds
-///     at `p`, which is what makes the documented out-of-i32-range
-///     escape hatch `cast(N, i64)` actually work (and routes the
-///     i8/i16 forms through `infer_lit`'s contextual range check);
-///   * int literal + float target — the integer binds at `p` exactly.
-///
-/// Everything else keeps the §5.3 default-then-convert behavior:
-/// suffixed literals bind at their suffix (§5.5), float→integer keeps
-/// truncation semantics, and bool/string targets are not numeric
-/// binding precisions.
 /// [02-P10b] binder-target literal adoption. Float literals require `Float`
 /// or `Numeric`; integer literals also admit `Int`. Unbounded binders cannot
 /// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
@@ -3129,48 +3332,19 @@ fn scalar_literal_source_adopts_binder_target(
         })
 }
 
-fn scalar_literal_source_adopts_cast_target(
-    source: LiteralSource<'_>,
-    prec: &str,
-    unsuffixed: bool,
-) -> bool {
-    if !unsuffixed {
-        return false;
-    }
-    let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
-    let int_target = matches!(prec, "i8" | "i16" | "i32" | "i64");
-    match source.numeric_atom() {
-        Some(DeepAtom::Float(_)) => float_target,
-        Some(DeepAtom::Int(_)) => float_target || int_target,
-        _ => false,
-    }
-}
-
-/// Build the adopted-literal Deep node for a scalar literal under
-/// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
-/// construction. Exact Surf unary syntax is already a signed direct `lit`.
-/// Only called for a syntactically adopting source; the checker diagnoses an
-/// integer that cannot fit every member of a family bound.
-fn adopted_scalar_literal_source(
-    source: LiteralSource<'_>,
-    prec: &str,
-    target_tag: DeepTag,
-) -> Option<deep::Expr> {
-    let ty = node(target_tag, vec![sym(prec)]);
+/// Build the binder-bound Deep node for a scalar literal under
+/// `cast(literal, p)` with a dtype binder `p`. Exact Surf unary syntax is
+/// already a signed direct `lit`. Only called for a syntactically binding
+/// source; the checker diagnoses an integer that cannot fit every member of a
+/// family bound.
+fn binder_literal_source(source: LiteralSource<'_>, binder: &str) -> Option<deep::Expr> {
+    let ty = node(DeepTag::TVar, vec![sym(binder)]);
     match source.numeric_atom()? {
-        DeepAtom::Int(value) => {
-            let meta =
-                if target_tag == DeepTag::TPrim && matches!(prec, "f32" | "f64" | "bf16" | "f16") {
-                    meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
-                } else {
-                    numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
-                };
-            Some(node_meta(
-                DeepTag::Lit,
-                meta,
-                vec![deep::Expr::Atom(DeepAtom::Int(*value), sp())],
-            ))
-        }
+        DeepAtom::Int(value) => Some(node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(ty, LiteralStyle::Unsuffixed),
+            vec![deep::Expr::Atom(DeepAtom::Int(*value), sp())],
+        )),
         DeepAtom::Float(value) => Some(node_meta(
             DeepTag::Lit,
             numeric_literal_meta(ty, LiteralStyle::Unsuffixed),
@@ -3225,7 +3399,67 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
 // be inferred backward") is a spec change requiring an amendment to
 // §5.6 / §P10b.
 
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
+    fn is_type_binder(&self) -> impl Fn(&str) -> bool + '_ {
+        move |name| self.current_type_binder(name).is_some()
+    }
+
+    /// A declaration's initializer under its declared type (spec/04 §5.6
+    /// Declaration): a literal binds at a declared primitive, and a bare
+    /// bracket literal under a declared tensor type is a tensor literal.
+    fn desugar_initializer(
+        &self,
+        declared: Option<&TypeExpr>,
+        init: &Expr,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let site = declared.and_then(|declared| {
+            literal_sites::declaration_site(declared, init, &self.is_type_binder())
+        });
+        match site {
+            // A negated literal folds into one signed literal at the stated
+            // primitive, whether or not it repeats the primitive's suffix. An
+            // unnegated literal that would take the stated primitive anyway,
+            // by its suffix or its default, keeps the Deep it has without
+            // the declaration.
+            Some(DeclarationSite::Scalar {
+                literal,
+                stated: StatedDtype::Primitive(primitive),
+            }) if literal.binds_at(primitive)
+                && (literal.is_negated()
+                    || (literal.is_unsuffixed() && primitive != literal.default_dtype())) =>
+            {
+                attach_span_metadata(bound_literal(&literal, primitive), expr_span(init))
+            }
+            Some(DeclarationSite::Tensor {
+                items,
+                stated,
+                precision,
+            }) => {
+                let element = match stated {
+                    Some(StatedDtype::Primitive(primitive)) => primitive,
+                    _ => precision,
+                };
+                self.desugar_list_as_tensor_literal(items, element, local_fn_params)
+            }
+            _ => self.desugar_expr_with_scope(init, local_fn_params),
+        }
+    }
+
+    /// A bracket literal whose literal elements bind at `prec_name`.
+    fn desugar_bound_list(
+        &self,
+        items: &[Expr],
+        prec_name: &str,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let desugared_items: Vec<deep::Expr> = items
+            .iter()
+            .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
+            .collect();
+        desugar_list_literal(&desugared_items)
+    }
+
     /// Desugar `items` as the body of a contextual tensor literal whose
     /// element type is `prec_name` (a precision name like `"f64"` or
     /// `"i32"`). Numeric literals in `items` are emitted with
@@ -3239,104 +3473,98 @@ impl DesugarCtx {
         prec_name: &str,
         local_fn_params: &[String],
     ) -> deep::Expr {
-        let desugared_items: Vec<deep::Expr> = items
-            .iter()
-            .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
-            .collect();
-        let list = desugar_list_literal(&desugared_items);
+        let list = self.desugar_bound_list(items, prec_name, local_fn_params);
         node(DeepTag::App, vec![dvar("to_tensor"), list])
     }
 
-    /// Desugar a single entry of a contextual tensor literal. Numeric
-    /// literals are narrowed to the contextual element prim. Nested
-    /// `Expr::List` entries (rank > 1) recurse with the same element
-    /// type. Anything else falls back to the standard expression
-    /// desugarer; the type checker will validate compatibility via
-    /// the `Cons` element-type unification path.
+    /// Desugar a single entry of a bracket literal whose literal elements bind
+    /// at `prec_name` (spec/04 §5.6). An unsuffixed literal element, with a
+    /// folded negation, binds there; a nested bracket literal recurses with
+    /// the same element dtype. A suffixed literal keeps its suffix, and any
+    /// other entry desugars normally; the checker compares both with the
+    /// stated dtype.
     fn desugar_tensor_literal_item(
         &self,
         item: &Expr,
         prec_name: &str,
         local_fn_params: &[String],
     ) -> deep::Expr {
+        if let Some(literal) = literal_sites::numeric_literal(item)
+            && (literal.is_unsuffixed() || (literal.is_negated() && literal.binds_at(prec_name)))
+        {
+            return bound_literal(&literal, prec_name);
+        }
         match item {
-            Expr::Lit(Literal::Int(n), _) => {
-                let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
-                let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
-                let meta = if float_typed {
-                    meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
-                } else {
-                    numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
-                };
-                node_meta(
-                    DeepTag::Lit,
-                    meta,
-                    vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
-                )
-            }
-            Expr::Lit(Literal::Float(f), _) => node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(
-                    node(DeepTag::TPrim, vec![sym(prec_name)]),
-                    LiteralStyle::Unsuffixed,
-                ),
-                vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
-            ),
-            // RT-2 fixup P2: the surface parser turns `-128` into
-            // `Unary(Neg, Lit(Int(128)))`. In a contextual tensor
-            // literal position we fold the sign into the literal so
-            // the WS-A0 D1 / WS-A0 D1-extension range checks see the
-            // user-facing value (`-128` for i8) rather than the
-            // raw inner literal (`128`, which overflows i8 max).
-            // The same applies to negative float literals.
-            Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
-                Expr::Lit(Literal::Int(n), _) => {
-                    let value = fold_unary_minus_int(*n);
-                    let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
-                    let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
-                    let meta = if float_typed {
-                        meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
-                    } else {
-                        numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
-                    };
-                    node_meta(
-                        DeepTag::Lit,
-                        meta,
-                        vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
-                    )
-                }
-                Expr::Lit(Literal::Float(f), _) => node_meta(
-                    DeepTag::Lit,
-                    numeric_literal_meta(
-                        node(DeepTag::TPrim, vec![sym(prec_name)]),
-                        LiteralStyle::Unsuffixed,
-                    ),
-                    vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
-                ),
-                // Non-literal `neg` operand falls through to the
-                // standard desugar; the type checker will validate
-                // the resulting expression's type against the
-                // contextual element type via the Cons unification
-                // path.
-                _ => self.desugar_expr_with_scope(item, local_fn_params),
-            },
-            // Nested list — rank-N contextual tensor literal.
+            // Only the outermost level is wrapped in `to_tensor`.
             Expr::List(nested_items, _) => {
-                // The inner list is itself a contextual tensor literal
-                // body: numeric literals at every depth adopt the same
-                // element type. We do NOT wrap each inner level in
-                // to_tensor (only the outermost wrap is needed).
-                let inner_items: Vec<deep::Expr> = nested_items
-                    .iter()
-                    .map(|n| self.desugar_tensor_literal_item(n, prec_name, local_fn_params))
-                    .collect();
-                desugar_list_literal(&inner_items)
+                self.desugar_bound_list(nested_items, prec_name, local_fn_params)
             }
-            // Anything else: normal desugar. Type unification at Cons
-            // will catch a mismatch.
             other => self.desugar_expr_with_scope(other, local_fn_params),
         }
     }
+}
+
+/// The signed value of an unsuffixed literal or its negation.
+fn signed_literal_value(literal: &NumericLiteral<'_>) -> Literal {
+    let negated = matches!(literal.expr, Expr::Unary(UnaryOp::Neg, _, _));
+    match literal.token {
+        Expr::Lit(Literal::Int(value), _) if negated => Literal::Int(fold_unary_minus_int(*value)),
+        Expr::Lit(Literal::Float(value), _) if negated => Literal::Float(-*value),
+        Expr::Lit(Literal::TypedInt(value, suffix), _) if negated => {
+            Literal::TypedInt(fold_unary_minus_int(*value), *suffix)
+        }
+        Expr::Lit(Literal::TypedFloat(value, suffix), _) if negated => {
+            Literal::TypedFloat(-*value, *suffix)
+        }
+        Expr::Lit(literal, _) => literal.clone(),
+        _ => unreachable!("a numeric literal's token is a literal"),
+    }
+}
+
+/// A literal that a declaration or dtype argument binds at `prec_name`,
+/// marked unsuffixed; a suffix it carries already names `prec_name`.
+fn bound_literal(literal: &NumericLiteral<'_>, prec_name: &str) -> deep::Expr {
+    let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
+    let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
+    let value = match signed_literal_value(literal) {
+        Literal::TypedInt(value, _) => Literal::Int(value),
+        Literal::TypedFloat(value, _) => Literal::Float(value),
+        other => other,
+    };
+    match value {
+        Literal::Int(value) => {
+            let meta = if float_typed {
+                meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
+            } else {
+                numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
+            };
+            node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
+            )
+        }
+        Literal::Float(value) => node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(ty, LiteralStyle::Unsuffixed),
+            vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
+        ),
+        _ => unreachable!("only a numeric literal binds at a stated dtype"),
+    }
+}
+
+/// A cast that denotes its literal (spec/03 §6.4): exactly the Deep of the
+/// literal written with the target's suffix, with a negation folded into one
+/// signed literal.
+fn collapsed_cast_literal(literal: &NumericLiteral<'_>, primitive: &str) -> deep::Expr {
+    let suffix = literal_sites::primitive_suffix(primitive)
+        .expect("a cast collapses only at a numeric primitive");
+    let suffixed = match signed_literal_value(literal) {
+        Literal::Int(value) => Literal::TypedInt(value, suffix),
+        Literal::Float(value) => Literal::TypedFloat(value, suffix),
+        _ => unreachable!("only an unsuffixed literal collapses into a cast"),
+    };
+    desugar_literal(&suffixed)
 }
 
 fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
@@ -3351,8 +3579,37 @@ fn fold_unary_minus_int(value: i64) -> i64 {
     value.checked_neg().unwrap_or(i64::MIN)
 }
 
-impl DesugarCtx {
+impl<'a> DesugarCtx<'a> {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
+        // spec/04 §5.6 Dtype argument: `to_tensor(xs, p)` keeps `p` as a
+        // third `app` child (spec/03 §6.4) and binds every unsuffixed literal
+        // element of a bracket-literal `xs` at `p`.
+        if let Some(call) = literal_sites::to_tensor_call(func, args)
+            && let Some(dtype) = call.dtype
+            && let Some(stated) = literal_sites::dtype_argument(dtype, &self.is_type_binder())
+        {
+            let argument = match (stated, call.argument) {
+                (StatedDtype::Primitive(primitive), Expr::List(items, span)) => {
+                    attach_span_metadata(
+                        self.desugar_bound_list(items, primitive, local_fn_params),
+                        *span,
+                    )
+                }
+                _ => self.desugar_expr_with_scope(call.argument, local_fn_params),
+            };
+            let dtype_node = match stated {
+                StatedDtype::Primitive(primitive) => node(DeepTag::TPrim, vec![sym(primitive)]),
+                StatedDtype::Binder(binder) => node(DeepTag::TVar, vec![sym(binder)]),
+            };
+            return node(
+                DeepTag::App,
+                vec![
+                    self.desugar_expr_with_scope(func, local_fn_params),
+                    argument,
+                    dtype_node,
+                ],
+            );
+        }
         // A callee's declared parameter type never makes a bracket-literal
         // argument a tensor (spec §5.6): the argument desugars as written.
         let mut children = vec![self.desugar_expr_with_scope(func, local_fn_params)];
@@ -4291,17 +4548,16 @@ mod tests {
         );
     }
 
-    // --- Position 4 (spec §5.6 / §P10b) for bare scalar literals ---
+    // --- spec/04 §5.6 Cast for bare scalar literals ---
     //
-    // `cast(literal, p)` binds the literal AT `p`, not at the §5.3
-    // default narrowed-then-converted. Issue #308: `cast(1.1, f64)`
-    // previously desugared to `(cast (lit {type: f32} 1.1) f64)`, so
-    // every value lane that honors the lit's type meta materialized
-    // f32(1.1) and then widened — the f32-truncation signature
-    // `1.100000023841858` instead of exact f64 `1.1`.
+    // `cast(literal, p)` at a primitive `p` binds the literal AT `p` and
+    // desugars to exactly the suffixed literal's Deep, with no cast node
+    // (spec/03 §6.4). It never narrows to the §5.3 default and widens:
+    // issue #308's `cast(1.1, f64)` once materialized f32(1.1), the
+    // f32-truncation signature `1.100000023841858`.
 
     #[test]
-    fn cast_of_float_literal_adopts_target_precision() {
+    fn cast_of_float_literal_is_the_literal_at_the_target() {
         let expr = Expr::Cast(
             Box::new(float_lit(1.1)),
             "f64".to_string(),
@@ -4310,14 +4566,14 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 1.1)\n  (t-prim {} f64))"
+            "(lit {type: (t-prim {} f64)} 1.1)"
         );
     }
 
     #[test]
-    fn cast_of_negative_float_literal_folds_sign_and_adopts() {
-        // Mirror of the RT-2 P2 sign-fold in contextual tensor literals:
-        // the parser produces `Unary(Neg, Lit(1.1))` for `-1.1`.
+    fn cast_of_negative_float_literal_folds_sign_into_the_literal() {
+        // The parser produces `Unary(Neg, Lit(1.1))` for `-1.1`; the cast
+        // folds it into one signed literal at the target.
         let expr = Expr::Cast(
             Box::new(Expr::Unary(UnaryOp::Neg, Box::new(float_lit(1.1)), s())),
             "f64".to_string(),
@@ -4326,12 +4582,12 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} -1.1)\n  (t-prim {} f64))"
+            "(lit {type: (t-prim {} f64)} -1.1)"
         );
     }
 
     #[test]
-    fn cast_of_int_literal_adopts_integer_target() {
+    fn cast_of_int_literal_is_the_literal_at_an_integer_target() {
         // The documented §5.3 escape hatch for out-of-i32-range
         // literals: `cast(3000000000, i64)` must bind the literal at
         // i64 so `infer_lit` does not range-check it against i32.
@@ -4343,12 +4599,12 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i64)} 3000000000)\n  (t-prim {} i64))"
+            "(lit {type: (t-prim {} i64)} 3000000000)"
         );
     }
 
     #[test]
-    fn cast_of_int_literal_adopts_float_target() {
+    fn cast_of_int_literal_is_the_literal_at_a_float_target() {
         let expr = Expr::Cast(
             Box::new(int_lit(5)),
             "f64".to_string(),
@@ -4357,7 +4613,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {literal_source: integer, surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 5)\n  (t-prim {} f64))"
+            "(lit {literal_source: integer, type: (t-prim {} f64)} 5)"
         );
     }
 

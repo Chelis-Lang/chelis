@@ -882,7 +882,7 @@ fn eval_json_emits_int64_scalar() {
 // A tensor expression yields a `tensor` value carrying shape + data.
 #[test]
 fn eval_json_emits_tensor_shape_and_data() {
-    let json = run_eval_json_expr("to_tensor([1.0, 2.0, 3.0])");
+    let json = run_eval_json_expr("to_tensor([1.0, 2.0, 3.0], f32)");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
     let value = &roots[0]["value"];
@@ -1550,8 +1550,8 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
     let out_dir = dir.path().join("top-level-tensor-add-build-out");
     write_file(
         &path,
-        "result = add((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32]), \
-         (to_tensor([10.0, 20.0, 30.0, 40.0]) : tensor[4, f32]))\n",
+        "result = add((to_tensor([1.0, 2.0, 3.0, 4.0], f32) : tensor[4, f32]), \
+         (to_tensor([10.0, 20.0, 30.0, 40.0], f32) : tensor[4, f32]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -1694,8 +1694,8 @@ fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
     write_file(
         &path,
         "def combine(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = add(a, b)\n\
-         result = combine((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32]), \
-         (to_tensor([10.0, 20.0, 30.0, 40.0]) : tensor[4, f32]))\n",
+         result = combine((to_tensor([1.0, 2.0, 3.0, 4.0], f32) : tensor[4, f32]), \
+         (to_tensor([10.0, 20.0, 30.0, 40.0], f32) : tensor[4, f32]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -1750,7 +1750,7 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
     let out_dir = dir.path().join("tuple-abi-build-out");
     write_file(
         &path,
-        "def eig_pair() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+        "def eig_pair() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2051,8 +2051,8 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
         // Its projections on `state` are obligations that only an application
         // resolves, and a later top-level declaration is not a binding site for
         // them ([04-INF-1]).
-        "xs = to_list(to_tensor([1.0, 2.0]))\n\
-         state0 = (to_tensor([0.0, 0.0]), cast(0.0, f32))\n\
+        "xs = to_list(to_tensor([1.0, 2.0], f32))\n\
+         state0 = (to_tensor([0.0, 0.0], f32), cast(0.0, f32))\n\
          out = {\n\
            step = fn (state, x: f32) -> {\n\
              l_inner = state.0\n\
@@ -2103,7 +2103,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
            add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
          grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, 2.0]\n\
-         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
+         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0], f32), x), xs)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2167,7 +2167,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
            if x < 0.0 then tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)) else add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
          grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, -2.0]\n\
-         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
+         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0], f32), x), xs)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2223,7 +2223,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
            pairs = zip(to_list(xs), to_list(ys))\n\
            map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\
          }\n\
-         out = jac(to_tensor([1.0, 2.0]), to_tensor([1.0, -2.0]), to_tensor([3.0, 4.0]))\n",
+         out = jac(to_tensor([1.0, 2.0], f32), to_tensor([1.0, -2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2279,7 +2279,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
            sub(y, y_hat)\n\
          }\n\
-         out = jac_row(lm_model, to_tensor([1.0, 2.0]), cast(1.0, f32), cast(3.0, f32))\n",
+         out = jac_row(lm_model, to_tensor([1.0, 2.0], f32), cast(1.0, f32), cast(3.0, f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2824,7 +2824,7 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
            sum(mul(theta, x), 0)\n\
          def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
            grad(loss, wrt=theta)(theta, x)\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2889,7 +2889,7 @@ fn build_c_grad_locally_bound_alias_form_lowers() {
            g = grad(loss, wrt=theta)\n\
            g(theta, x)\n\
          }\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -2998,12 +2998,12 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
            g = grad(loss, wrt=theta)\n\
            g(theta, x)\n\
          }\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n";
     let inline_program = "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
            sum(mul(theta, x), 0)\n\
          def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
            grad(loss, wrt=theta)(theta, x)\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n";
 
     let alias_run_stdout = build_and_run(
         &alias_dir,
@@ -3051,7 +3051,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
         &path,
         "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
            sum(mul(theta, x), 0)\n\
-         out = grad(loss, wrt=x)(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = grad(loss, wrt=x)(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3117,7 +3117,7 @@ fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
         &path,
         "def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))\n\
          def gradient(theta: tensor[3, f32]) -> tensor[3, f32] = grad(sumsq)(theta)\n\
-         out = gradient(to_tensor([1.0, 2.0, 3.0]))\n",
+         out = gradient(to_tensor([1.0, 2.0, 3.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3177,7 +3177,7 @@ fn build_c_grad_over_named_fn_with_pipe_body_builds() {
         &path,
         "def sumsq(theta: tensor[3, f32]) -> f32 = mul(theta, theta) |> sum(0) |> tensor_to_scalar\n\
          def gradient(theta: tensor[3, f32]) -> tensor[3, f32] = grad(sumsq)(theta)\n\
-         out = gradient(to_tensor([1.0, 2.0, 3.0]))\n",
+         out = gradient(to_tensor([1.0, 2.0, 3.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3230,7 +3230,7 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
         &path,
         "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
            if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
-         out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
+         out = recur(to_tensor([1.0, 2.0], f32), cast(2, i64))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3277,7 +3277,7 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
     write_file(
         &path,
         "def chooser(x: tensor[2, f32]) -> tensor[2, f32] =\n\
-           fold(fn (acc, y) -> if y < 0.0 then acc else add(acc, x), to_tensor([0.0, 0.0]), to_list(to_tensor([1.0, -1.0])))\n",
+           fold(fn (acc, y) -> if y < 0.0 then acc else add(acc, x), to_tensor([0.0, 0.0], f32), to_list(to_tensor([1.0, -1.0], f32)))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3317,11 +3317,11 @@ fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
     write_file(
         &path,
         "def fold_if_tensor(xs: tensor[2, f32]) -> tensor[2, f32] = {\n\
-           state0 = to_tensor([0.0, 0.0])\n\
+           state0 = to_tensor([0.0, 0.0], f32)\n\
            step = fold(fn (acc, y) -> if y < 0.0 then acc else acc, state0, to_list(xs))\n\
            step\n\
          }\n\
-         out = fold_if_tensor(to_tensor([1.0, -2.0]))\n",
+         out = fold_if_tensor(to_tensor([1.0, -2.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4919,8 +4919,8 @@ fn surf_deep_cast_and_par_emit_canonical_spellings() {
         .assert()
         .success()
         .stdout(predicate::str::contains("par {"))
-        .stdout(predicate::str::contains("cast(1.0, f32)"))
-        .stdout(predicate::str::contains("cast(2.0, f32)"))
+        .stdout(predicate::str::contains("cast(1.0f32, f32)"))
+        .stdout(predicate::str::contains("cast(2.0f32, f32)"))
         .stdout(predicate::str::contains(" as ").not())
         .stdout(predicate::str::contains("par(").not());
 }
@@ -8354,7 +8354,7 @@ fn eval_grad_wrapper_fn_param_form_returns_correct_gradient() {
            sum(mul(theta, x), 0)\n\
          def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
            grad(loss, wrt=theta)(theta, x)\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -8384,7 +8384,7 @@ fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
            sum(mul(theta, x), 0)\n\
          def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
            grad(loss, wrt=theta)(theta, x)\n\
-         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = compute_grad(to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))\n",
     );
 
     // Host-eval lane.
@@ -10325,7 +10325,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     write_file(
         &path,
         "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
-         g = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
+         g = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0], f32))\n",
     );
 
     Command::cargo_bin("chelis")

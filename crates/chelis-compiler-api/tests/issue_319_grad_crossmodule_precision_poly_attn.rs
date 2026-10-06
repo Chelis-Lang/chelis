@@ -94,7 +94,7 @@ fn grad_driver(callee: &str) -> String {
     format!(
         "def loss(q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]) -> f32 =\n\
          \x20 tensor_to_scalar(sum(sum({callee}(q, k, v, scale), cast(0, i32)), cast(0, i32)))\n\
-         out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]))\n",
+         out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]], f32), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], f32), to_tensor([[1.0, 0.0], [0.0, 1.0]], f32))\n",
     )
 }
 
@@ -297,7 +297,7 @@ fn issue_319_negative_rank1_matmul_operand_still_rejected() {
     // regardless of the #319 fix. The pipeline must reject it (a clean
     // error), and in particular must NOT lower it as if it were rank-2.
     let src = "def bad(vec: tensor[3, f32], m: tensor[3, 3, f32]) -> tensor[3, f32] = matmul(vec, m)\n\
-               out = bad(to_tensor([1.0, 2.0, 3.0]), to_tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))\n";
+               out = bad(to_tensor([1.0, 2.0, 3.0], f32), to_tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], f32))\n";
     let outcome = try_eval(src);
     let message = match outcome {
         Ok(ok) => panic!(
@@ -379,7 +379,7 @@ fn issue_319_masked_causal_body_grad_matches_inline() {
         "q, k, v, scale, mask",
         "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(add(mul(scores, scale), mask), -1)\n  matmul(weights, v)\n}",
         "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32], mask: tensor[2, 2, f32]",
-        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]), to_tensor([[0.0, 0.0], [0.0, 0.0]])",
+        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]], f32), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], f32), to_tensor([[1.0, 0.0], [0.0, 1.0]], f32), to_tensor([[0.0, 0.0], [0.0, 0.0]], f32)",
     );
 }
 
@@ -395,7 +395,7 @@ fn issue_319_output_transpose_body_grad_matches_inline() {
         "q, k, v, scale",
         "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(mul(scores, scale), -1)\n  o = matmul(weights, v)\n  permute(o, 1, 0)\n}",
         "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]",
-        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]])",
+        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]], f32), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], f32), to_tensor([[1.0, 0.0], [0.0, 1.0]], f32)",
     );
 }
 
@@ -415,7 +415,7 @@ fn issue_319_output_transpose_body_grad_matches_inline() {
 fn issue_319_reshape_precision_poly_verb_lowers() {
     let src = "sig flat2d[s, d, p]: tensor[s, d, p] -> tensor[six, p]\n\
                def flat2d(x) = reshape(permute(x, 1, 0), [cast(6, i64)])\n\
-               out = flat2d(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+               out = flat2d(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(
             "issue #319: precision-poly separate-sig `reshape` verb must lower \
@@ -440,7 +440,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
 fn issue_319_expand_precision_poly_verb_lowers() {
     let src = "sig broadcast[s, c, p]: tensor[s, p] -> tensor[s, c, p]\n\
                def broadcast(b) = insert(b, cast(1, i32), cast(2, i64))\n\
-               out = broadcast(to_tensor([1.0, 2.0]))\n";
+               out = broadcast(to_tensor([1.0, 2.0], f32))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(
             "issue #319: precision-poly separate-sig `expand` verb must lower \
@@ -484,7 +484,7 @@ fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
-                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
+                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32))\n";
     let deep =
         chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
             source: twovar.to_owned(),
@@ -536,7 +536,7 @@ fn issue_319_one_precision_var_still_grads_at_a_monomorphic_call_site() {
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
-                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
+                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32))\n";
     let result = try_eval(onevar).unwrap_or_else(|err| {
         panic!("issue #319: a one-precision-binder verb must still grad at a monomorphic call site: {err}")
     });
@@ -564,7 +564,7 @@ fn issue_319_heterogeneous_precision_call_is_rejected_not_promoted() {
                   def f(a, b) = {\n  at = permute(a, 1, 0)\n  ar = permute(at, 1, 0)\n  add(ar, b)\n}\n\
                   def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\
-                  out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
+                  out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32), f64))\n";
     let outcome = try_eval(hetero);
     let message = match outcome {
         Ok(ok) => panic!(
@@ -591,7 +591,7 @@ fn issue_319_distinct_precisions_not_force_merged() {
                     def f(a, b) = {\n  bt = permute(b, 1, 0)\n  bp = permute(bt, 1, 0)\n  a\n}\n\
                     def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
                       tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\
-                    out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
+                    out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], f32), f64))\n";
     // The verb type-checks (no cross-precision op). It must NOT silently
     // promote f64→f32; either it evaluates correctly (f64 preserved in the
     // dropped chain) or it surfaces a clean diagnostic — never a wrong-

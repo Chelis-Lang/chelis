@@ -62,6 +62,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::OpaqueTypeViolation, "OpaqueTypeViolation"),
         (DiagnosticKind::ReservedLinkerName, "ReservedLinkerName"),
         (DiagnosticKind::BuiltinShadowing, "BuiltinShadowing"),
+        (DiagnosticKind::ReservedName, "ReservedName"),
         (DiagnosticKind::UnknownForm, "UnknownForm"),
         (DiagnosticKind::MalformedForm, "MalformedForm"),
         (DiagnosticKind::CheckOther, "Other"),
@@ -148,6 +149,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::OpaqueTypeViolation
             | DiagnosticKind::ReservedLinkerName
             | DiagnosticKind::BuiltinShadowing
+            | DiagnosticKind::ReservedName
             | DiagnosticKind::UnknownForm
             | DiagnosticKind::MalformedForm
             | DiagnosticKind::CheckOther

@@ -1564,7 +1564,7 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
     write_file(
         &path,
         "def run(y: tensor[4, f32]) -> tensor[4, f32] = abs(y)\n\
-         out = run(to_tensor([-1.0, 2.0, -3.0, 4.0]))\n",
+         out = run(to_tensor([-1.0, 2.0, -3.0, 4.0], f32))\n",
     );
     Command::cargo_bin("chelis")
         .expect("binary")

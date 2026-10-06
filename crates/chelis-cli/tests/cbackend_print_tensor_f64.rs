@@ -153,7 +153,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> Stri
 #[test]
 fn cbackend_print_tensor_f64() {
     let source = "def to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
-                  src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
+                  src = to_tensor([1.5, 2.5, 3.5, 4.5], f32)\n\
                   result = to_f64(src)\n";
     let eval_out = chelis_eval(source, "print_f64");
     let (build, kernel_c) = chelis_build_c(source, "print_f64");
@@ -191,7 +191,7 @@ fn cbackend_print_tensor_f64() {
 fn cbackend_print_tensor_int64() {
     let source = "def f32_to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
                   def f64_to_i64(y: tensor[4, f64]) -> tensor[4, i64] = cast(y, i64)\n\
-                  src = to_tensor([100000.0, 200000.0, 300000.0, 400000.0])\n\
+                  src = to_tensor([100000.0, 200000.0, 300000.0, 400000.0], f32)\n\
                   mid = f32_to_f64(src)\n\
                   result = f64_to_i64(mid)\n";
     let eval_out = chelis_eval(source, "print_i64");
@@ -229,8 +229,8 @@ fn cbackend_print_tensor_int64() {
 /// the emitted C `main()` always prints.
 #[test]
 fn cbackend_print_tensor_f32_control() {
-    let source = "src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
-                  result = to_tensor([10.0, 20.0, 30.0, 40.0])\n";
+    let source = "src = to_tensor([1.5, 2.5, 3.5, 4.5], f32)\n\
+                  result = to_tensor([10.0, 20.0, 30.0, 40.0], f32)\n";
     let eval_out = chelis_eval(source, "print_f32");
     let (build, kernel_c) = chelis_build_c(source, "print_f32");
     let cbuild_out = gcc_compile_and_run(build.path(), &kernel_c, "print_f32");

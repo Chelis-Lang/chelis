@@ -42,8 +42,8 @@ fn issue185_max_elem_runs_and_matches_ir_eval() {
     // b = [3.0, 1.0, 6.0, 0.5]
     // max_elem(a, b) -> [3.0, 4.0, 6.0, 5.0]
     let src = r#"
-a = to_tensor([1.0, 4.0, 2.0, 5.0])
-b = to_tensor([3.0, 1.0, 6.0, 0.5])
+a = to_tensor([1.0, 4.0, 2.0, 5.0], f32)
+b = to_tensor([3.0, 1.0, 6.0, 0.5], f32)
 out = max_elem(&a, &b)
 "#;
     let result = eval_surf(src);
@@ -60,8 +60,8 @@ out = max_elem(&a, &b)
 fn issue185_min_elem_runs_and_matches_ir_eval() {
     // min_elem(a, b) -> [1.0, 1.0, 2.0, 0.5]
     let src = r#"
-a = to_tensor([1.0, 4.0, 2.0, 5.0])
-b = to_tensor([3.0, 1.0, 6.0, 0.5])
+a = to_tensor([1.0, 4.0, 2.0, 5.0], f32)
+b = to_tensor([3.0, 1.0, 6.0, 0.5], f32)
 out = min_elem(&a, &b)
 "#;
     let result = eval_surf(src);

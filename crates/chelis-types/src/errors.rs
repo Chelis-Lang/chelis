@@ -307,6 +307,10 @@ pub enum CheckErrorKind {
     /// are internal-name-rewritten (`pkg__...`) before the checker runs, and
     /// their call sites are rewritten with them.
     BuiltinShadowing,
+    /// spec/04-type-system.md §8.6: a binder of the reserved intrinsic name
+    /// `to_tensor`, in any scope, at Deep ingress. `to_tensor` states literal
+    /// dtypes (§5.6), so no binding may rebind it.
+    ReservedName,
     /// chelis#731 / spec/04-type-system.md §10 [04-TOT-1]: a Deep tag
     /// reached `infer_expr`'s dispatch with no checker disposition. The
     /// parser already screens the 62-tag closed vocabulary
@@ -365,6 +369,7 @@ impl CheckErrorKind {
             CheckErrorKind::OpaqueTypeViolation => "OpaqueTypeViolation",
             CheckErrorKind::ReservedLinkerName => "ReservedLinkerName",
             CheckErrorKind::BuiltinShadowing => "BuiltinShadowing",
+            CheckErrorKind::ReservedName => "ReservedName",
             CheckErrorKind::UnknownForm => "UnknownForm",
             CheckErrorKind::MalformedForm => "MalformedForm",
             CheckErrorKind::UnsupportedFeature { .. } => "unsupported_feature",
@@ -406,6 +411,7 @@ impl CheckErrorKind {
             CheckErrorKind::OpaqueTypeViolation => 0.8,
             CheckErrorKind::ReservedLinkerName => 0.9,
             CheckErrorKind::BuiltinShadowing => 0.9,
+            CheckErrorKind::ReservedName => 0.9,
             // chelis#731 open question 4 (decided 2026-07-17): severity
             // parity with `TypeMismatch` (the 0.5 class); no new weight
             // class. The invariant that governs is that any pushed error

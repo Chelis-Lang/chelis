@@ -125,7 +125,7 @@ fn scalar_fractional_values_truncate_toward_zero() {
 #[test]
 fn tensor_surface_truncates_elementwise_toward_zero() {
     assert_eq!(
-        eval_expr("cast_trunc(to_tensor([1.9, -1.9, 0.5, -0.5, 3.0]), i32)")
+        eval_expr("cast_trunc(to_tensor([1.9, -1.9, 0.5, -0.5, 3.0], f32), i32)")
             .expect("tensor cast_trunc must evaluate"),
         "tensor(shape=[5], data=[1, -1, 0, 0, 3])"
     );
@@ -178,7 +178,7 @@ fn out_of_range_truncated_values_trap_overflow_never_saturate() {
         ("cast_trunc(1e30, i32)", "i32"),
         ("cast_trunc(-1e30, i32)", "i32"),
         ("cast_trunc(300.9, i8)", "i8"),
-        ("cast_trunc(to_tensor([300.9]), i8)", "i8"),
+        ("cast_trunc(to_tensor([300.9], f32), i8)", "i8"),
     ] {
         let stderr = eval_expr(expr).expect_err("an out-of-range value must trap");
         assert!(
@@ -194,7 +194,7 @@ fn non_finite_sources_trap_domain() {
     for expr in [
         "cast_trunc(sqrt(-1.0), i32)",
         "cast_trunc(div(1.0, 0.0), i32)",
-        "cast_trunc(sqrt(to_tensor([-1.0])), i32)",
+        "cast_trunc(sqrt(to_tensor([-1.0], f32)), i32)",
     ] {
         let stderr = eval_expr(expr).expect_err("a non-finite source must trap");
         assert!(
@@ -211,7 +211,7 @@ fn non_finite_sources_trap_domain() {
 
 #[test]
 fn a_non_float_source_is_a_check_time_type_error() {
-    for expr in ["cast_trunc(3, i64)", "cast_trunc(to_tensor([3]), i64)"] {
+    for expr in ["cast_trunc(3, i64)", "cast_trunc(to_tensor([3], i32), i64)"] {
         let stderr = eval_expr(expr).expect_err("an integer source is not a truncating cast");
         assert!(
             stderr.contains("is not a float dtype") && stderr.contains("cast_trunc"),
@@ -318,7 +318,7 @@ fn compiled_c_lane_traps_overflow_with_the_same_brand() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-                   def f() -> tensor[1, i8] = cast_trunc(to_tensor([300.9]), i8)\n\
+                   def f() -> tensor[1, i8] = cast_trunc(to_tensor([300.9], f32), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "ct_overflow").expect("C lane");
     assert!(
@@ -326,7 +326,8 @@ fn compiled_c_lane_traps_overflow_with_the_same_brand() {
         "the compiled lane must raise the SAME branded overflow diagnostic as \
          eval; got ok={ok} stdout={stdout} stderr={stderr}"
     );
-    let eval_err = eval_expr("cast_trunc(to_tensor([300.9]), i8)").expect_err("eval traps too");
+    let eval_err =
+        eval_expr("cast_trunc(to_tensor([300.9], f32), i8)").expect_err("eval traps too");
     assert!(
         eval_err.contains("numeric trap: overflow in cast_trunc at i8"),
         "and eval's brand must match: {eval_err}"
@@ -339,7 +340,7 @@ fn compiled_c_lane_traps_domain_on_non_finite_with_the_same_brand() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-                   def f() -> tensor[1, i32] = cast_trunc(sqrt(to_tensor([-1.0])), i32)\n\
+                   def f() -> tensor[1, i32] = cast_trunc(sqrt(to_tensor([-1.0], f32)), i32)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "ct_domain").expect("C lane");
     assert!(
@@ -365,7 +366,7 @@ fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
     }
     // `sqrt` over a tensor produces both offender kinds in one DAG-lane
     // op: a finite out-of-range element and a NaN. Building the buffer
-    // from scalar expressions instead (`to_tensor([1e30, sqrt(-1.0)])`)
+    // from scalar expressions instead (`to_tensor([1e30, sqrt(-1.0)], f32)`)
     // would route it through the HOST tensor lane, which is a different
     // code path and not what MEDIUM-1 is about.
     let cases = [
@@ -378,7 +379,7 @@ fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
         ("mix_nan_first_i8", "[-1.0, 90000.0]", "i8", "domain"),
     ];
     for (label, elements, target, expected_kind) in cases {
-        let expr = format!("cast_trunc(sqrt(to_tensor({elements})), {target})");
+        let expr = format!("cast_trunc(sqrt(to_tensor({elements}, f32)), {target})");
         let eval_err = eval_expr(&expr).expect_err("both elements offend; one must trap");
         let branded = format!("numeric trap: {expected_kind} in cast_trunc at {target}");
         assert!(
@@ -413,7 +414,7 @@ fn host_lane_tensor_cast_trunc_converts_as_eval_does() {
     }
     let program = "module M.Main\n\
                    def f() -> tensor[2, i32] = \
-                   cast_trunc(to_tensor([1.9, sqrt(4.0)]), i32)\n\
+                   cast_trunc(to_tensor([1.9, sqrt(4.0)], f32), i32)\n\
                    out = print(f())\n";
     let evaluated = eval_program(program).expect("eval lane");
     assert_eq!(evaluated, "tensor(shape=[2], data=[1, 2])");
@@ -423,7 +424,7 @@ fn host_lane_tensor_cast_trunc_converts_as_eval_does() {
 
     let trapping = "module M.Main\n\
                     def f() -> tensor[2, i8] = \
-                    cast_trunc(to_tensor([1.9, mul(300.5, 1.0)]), i8)\n\
+                    cast_trunc(to_tensor([1.9, mul(300.5, 1.0)], f32), i8)\n\
                     out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(trapping, "ct_host_tensor_trap").expect("C lane");
     assert!(

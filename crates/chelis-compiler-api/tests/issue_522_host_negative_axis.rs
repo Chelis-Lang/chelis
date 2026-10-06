@@ -68,8 +68,8 @@ fn assert_axis_parity_root(op: &str, neg_src: &str, pos_src: &str, root: &str) {
 fn issue522_sum_negative_axis_matches_positive() {
     assert_axis_parity(
         "sum",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = sum(&x, -1)\n",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = sum(&x, 1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = sum(&x, -1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = sum(&x, 1)\n",
     );
 }
 
@@ -77,8 +77,8 @@ fn issue522_sum_negative_axis_matches_positive() {
 fn issue522_mean_negative_axis_matches_positive() {
     assert_axis_parity(
         "mean",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = mean(&x, -1)\n",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = mean(&x, 1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = mean(&x, -1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = mean(&x, 1)\n",
     );
 }
 
@@ -86,8 +86,8 @@ fn issue522_mean_negative_axis_matches_positive() {
 fn issue522_max_reduce_negative_axis_matches_positive() {
     assert_axis_parity(
         "max_reduce",
-        "x = to_tensor([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]])\nout = max_reduce(&x, -1)\n",
-        "x = to_tensor([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]])\nout = max_reduce(&x, 1)\n",
+        "x = to_tensor([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], f32)\nout = max_reduce(&x, -1)\n",
+        "x = to_tensor([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], f32)\nout = max_reduce(&x, 1)\n",
     );
 }
 
@@ -95,8 +95,8 @@ fn issue522_max_reduce_negative_axis_matches_positive() {
 fn issue522_cumsum_negative_axis_matches_positive() {
     assert_axis_parity(
         "cumsum",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = cumsum(&x, -1)\n",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = cumsum(&x, 1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = cumsum(&x, -1)\n",
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = cumsum(&x, 1)\n",
     );
 }
 
@@ -105,8 +105,8 @@ fn issue522_sort_negative_axis_matches_positive() {
     // sort returns a `(values, indices)` tuple, which eval splits into the
     // `out.0` (sorted values) and `out.1` (permutation indices) roots; both
     // must match the positive-axis form.
-    let neg = "x = to_tensor([[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]])\nout = sort(&x, -1)\n";
-    let pos = "x = to_tensor([[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]])\nout = sort(&x, 1)\n";
+    let neg = "x = to_tensor([[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]], f32)\nout = sort(&x, -1)\n";
+    let pos = "x = to_tensor([[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]], f32)\nout = sort(&x, 1)\n";
     assert_axis_parity_root("sort values", neg, pos, "out.0");
     assert_axis_parity_root("sort indices", neg, pos, "out.1");
 }
@@ -115,10 +115,10 @@ fn issue522_sort_negative_axis_matches_positive() {
 fn issue522_gather_negative_axis_matches_positive() {
     assert_axis_parity(
         "gather",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          out = gather(&x, &idx, -1)\n",
-        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+        "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          out = gather(&x, &idx, 1)\n",
     );
@@ -128,13 +128,13 @@ fn issue522_gather_negative_axis_matches_positive() {
 fn issue522_scatter_negative_axis_matches_positive() {
     assert_axis_parity(
         "scatter",
-        "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+        "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
-         upd = to_tensor([[10.0, 20.0], [30.0, 40.0]])\n\
+         upd = to_tensor([[10.0, 20.0], [30.0, 40.0]], f32)\n\
          out = scatter(base, idx, upd, -1, \"replace\")\n",
-        "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+        "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\n\
          idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
-         upd = to_tensor([[10.0, 20.0], [30.0, 40.0]])\n\
+         upd = to_tensor([[10.0, 20.0], [30.0, 40.0]], f32)\n\
          out = scatter(base, idx, upd, 1, \"replace\")\n",
     );
 }
@@ -142,9 +142,9 @@ fn issue522_scatter_negative_axis_matches_positive() {
 #[test]
 fn scatter_duplicate_replace_host_eval_is_row_major_last_write_wins() {
     let result = eval_surf(
-        "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
+        "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], f32)\n\
          idx = to_tensor([cast(1, i64), cast(1, i64)])\n\
-         upd = to_tensor([[5.0, 5.0], [6.0, 6.0]])\n\
+         upd = to_tensor([[5.0, 5.0], [6.0, 6.0]], f32)\n\
          out = scatter(base, idx, upd, 0, \"replace\")\n",
     );
     let root = result
@@ -182,7 +182,7 @@ fn eval_is_err(source: &str) -> bool {
 fn issue522_sum_axis_equal_to_rank_rejects() {
     // rank-2 operand, axis == rank (2) is out of `0..2`.
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = sum(&x, 2)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = sum(&x, 2)\n"),
         "sum(x, 2) on a rank-2 operand must reject"
     );
 }
@@ -191,7 +191,7 @@ fn issue522_sum_axis_equal_to_rank_rejects() {
 fn issue522_sum_axis_too_negative_rejects() {
     // -rank-1 == -3 normalizes to -1, still out of `0..2`.
     assert!(
-        eval_is_err("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = sum(&x, -3)\n"),
+        eval_is_err("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = sum(&x, -3)\n"),
         "sum(x, -3) on a rank-2 operand must reject"
     );
 }
@@ -201,7 +201,7 @@ fn issue522_sum_axis_too_negative_rejects() {
 #[test]
 fn issue522_sum_root_is_a_tensor() {
     let result =
-        eval_surf("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\nout = sum(&x, -1)\n");
+        eval_surf("x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32)\nout = sum(&x, -1)\n");
     let root = result
         .roots
         .iter()

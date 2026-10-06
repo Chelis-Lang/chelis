@@ -229,7 +229,7 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (host_len)\n\n\
-                   def length_from_host() -> i64 = host_len(to_tensor([1.0, 2.0]))\n";
+                   def length_from_host() -> i64 = host_len(to_tensor([1.0, 2.0], f32))\n";
 
     let formatted = format_library_plus_snippet(&root, snippet);
     let baseline = eval(EvalRequest {

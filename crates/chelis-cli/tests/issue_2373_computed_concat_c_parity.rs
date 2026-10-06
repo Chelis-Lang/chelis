@@ -93,7 +93,7 @@ fn program(producer: &str) -> String {
         _ => panic!("unknown producer"),
     };
     format!(
-        "module Repro.ComputedConcat\ndef probabilities[s](x: tensor[s, s, f32]) -> tensor[s, *, f32] = {{\n  {binding}\n  softmax(concat([scores, scores], cast(1, i32)), -1)\n}}\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]]))\n"
+        "module Repro.ComputedConcat\ndef probabilities[s](x: tensor[s, s, f32]) -> tensor[s, *, f32] = {{\n  {binding}\n  softmax(concat([scores, scores], cast(1, i32)), -1)\n}}\noutput = probabilities(to_tensor([[0.0, 1.0], [2.0, 0.0]], f32))\n"
     )
 }
 

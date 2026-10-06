@@ -67,6 +67,7 @@ pub enum DiagnosticKind {
     OpaqueTypeViolation,
     ReservedLinkerName,
     BuiltinShadowing,
+    ReservedName,
     UnknownForm,
     MalformedForm,
     CheckOther,
@@ -88,7 +89,7 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -136,6 +137,7 @@ impl DiagnosticKind {
         Self::OpaqueTypeViolation,
         Self::ReservedLinkerName,
         Self::BuiltinShadowing,
+        Self::ReservedName,
         Self::UnknownForm,
         Self::MalformedForm,
         Self::CheckOther,
@@ -197,6 +199,7 @@ impl DiagnosticKind {
             Self::OpaqueTypeViolation => "OpaqueTypeViolation",
             Self::ReservedLinkerName => "ReservedLinkerName",
             Self::BuiltinShadowing => "BuiltinShadowing",
+            Self::ReservedName => "ReservedName",
             Self::UnknownForm => "UnknownForm",
             Self::MalformedForm => "MalformedForm",
             Self::CheckOther => "Other",

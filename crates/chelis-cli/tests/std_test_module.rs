@@ -378,7 +378,7 @@ fn std_test_assert_close_tensor_pass() {
 import Std.Test (assert_close_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]), 0.001, "close-tensor-pass")
+  assert_close_tensor(to_tensor([1.0, 2.0], f32), to_tensor([1.0, 2.0], f32), 0.001, "close-tensor-pass")
 
 ran = test_case()
 "#,
@@ -397,7 +397,7 @@ fn std_test_assert_close_tensor_fail_reports_label() {
 import Std.Test (assert_close_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 9.0]), 0.001, "close-tensor-fail")
+  assert_close_tensor(to_tensor([1.0, 2.0], f32), to_tensor([1.0, 9.0], f32), 0.001, "close-tensor-fail")
 
 ran = test_case()
 "#,
@@ -467,7 +467,7 @@ fn std_test_assert_shape_pass() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0, 3.0]), [cast(3, i64)], "shape-3-pass")
+  assert_shape(to_tensor([1.0, 2.0, 3.0], f32), [cast(3, i64)], "shape-3-pass")
 
 ran = test_case()
 "#,
@@ -487,7 +487,7 @@ fn std_test_assert_shape_fail_reports_label() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0]), [cast(7, i64)], "shape-fail")
+  assert_shape(to_tensor([1.0, 2.0], f32), [cast(7, i64)], "shape-fail")
 
 ran = test_case()
 "#,
@@ -610,7 +610,7 @@ fn std_test_assert_shape_reports_label_on_mismatch() {
 
 import Std.Test (assert_shape)
 
-def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), [cast(7, i64)], "shape-bad")
+def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0], f32), [cast(7, i64)], "shape-bad")
 
 ran = test_shape_bad()
 "#,

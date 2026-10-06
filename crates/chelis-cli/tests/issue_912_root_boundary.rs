@@ -375,7 +375,7 @@ fn issue_848_fixture_import_is_load_bearing() {
 #[test]
 fn issue_947_anonymous_tuple_roots_surface() {
     let source = r#"
-def compute() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))
+def compute() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32))
 result = compute()
 "#;
     let (stdout, _stderr, success) = eval_file(source);
@@ -746,11 +746,11 @@ y = mul(x, x)
 #[test]
 fn cohabitation_independence_same_root_different_cohabitants() {
     let source_alone = r#"
-x = to_tensor([1.0, 2.0, 3.0, 4.0])
+x = to_tensor([1.0, 2.0, 3.0, 4.0], f32)
 y = mul(x, x)
 "#;
     let source_with_print_def = r#"
-x = to_tensor([1.0, 2.0, 3.0, 4.0])
+x = to_tensor([1.0, 2.0, 3.0, 4.0], f32)
 y = mul(x, x)
 z = print("hello")
 "#;

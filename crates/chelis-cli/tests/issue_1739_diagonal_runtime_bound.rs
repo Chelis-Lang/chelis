@@ -115,7 +115,7 @@ const FIVE_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], \
 fn binding_root(declared: usize, operand: &str) -> String {
     format!(
         "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -125,7 +125,7 @@ fn binding_root(declared: usize, operand: &str) -> String {
 fn inlined_main_root(declared: usize, operand: &str) -> String {
     format!(
         "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
-         def main() -> tensor[{declared}, f32] = d(to_tensor({operand}))\n"
+         def main() -> tensor[{declared}, f32] = d(to_tensor({operand}, f32))\n"
     )
 }
 
@@ -137,7 +137,7 @@ fn alias_root(declared: usize, operand: &str) -> String {
     format!(
         "type Row = tensor[{declared}, f32]\n\
          def d[n](x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -148,7 +148,7 @@ fn block_bodied_root(declared: usize, operand: &str) -> String {
     format!(
         "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = {{\n  \
          y = diagonal(x, 0, 1)\n  y\n}}\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -161,7 +161,7 @@ fn call_bodied_root(declared: usize, operand: &str) -> String {
     format!(
         "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
          def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = inner(x)\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -173,7 +173,7 @@ fn effect_order_root(declared: usize, operand: &str) -> String {
     format!(
         "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = {{\n  \
          y = diagonal(x, 0, 1)\n  _ = print(\"after\")\n  y\n}}\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -187,7 +187,7 @@ fn callee_effect_root(declared: usize, operand: &str) -> String {
         "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n  \
          z = diagonal(x, 0, 1)\n  _ = print(\"inside-after\")\n  z\n}}\n\
          def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = inner(x)\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m)\n"
     )
 }
@@ -197,7 +197,7 @@ fn branchy_root(declared: usize, operand: &str) -> String {
     format!(
         "def d[n](x: tensor[n, 4, f32], flag: bool) -> tensor[{declared}, f32] = \
          if flag then diagonal(x, 0, 1) else diagonal(x, 0, 1)\n\
-         m = to_tensor({operand})\n\
+         m = to_tensor({operand}, f32)\n\
          out = d(m, true)\n"
     )
 }
@@ -577,7 +577,7 @@ fn value_aliases_keep_the_guard_at_the_original_producer() {
             let source = format!(
                 "def d[n](x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n \
                  _ = print(\"before\")\n y = diagonal(x, 0, 1)\n {aliases}\n}}\n\
-                 out = d(to_tensor({operand}))\n"
+                 out = d(to_tensor({operand}, f32))\n"
             );
             let input = dir.path().join("alias-input.ch");
             fs::write(&input, &source).expect("write source");
@@ -723,7 +723,7 @@ fn selected_branch_root(form: &str, second: bool, agrees: bool) -> String {
         (selected, TWO_BY_FOUR)
     };
     format!(
-        "{preamble}def d[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], {param}) -> tensor[3, f32] ! {{ IO }} = {{\n result = {selection}\n alias = result\n _ = print(\"outer-after\")\n alias\n}}\nout = d(to_tensor({x}), to_tensor({y}), {actual})\n"
+        "{preamble}def d[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], {param}) -> tensor[3, f32] ! {{ IO }} = {{\n result = {selection}\n alias = result\n _ = print(\"outer-after\")\n alias\n}}\nout = d(to_tensor({x}, f32), to_tensor({y}, f32), {actual})\n"
     )
 }
 
@@ -826,7 +826,7 @@ fn assert_shared_callee_claims(c_lane: bool) {
         let dir = tempdir().expect("tempdir");
         let last = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
         let source = format!(
-            "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n _ = print(\"inside-before\")\n z = diagonal(x, 0, 1)\n _ = print(\"inside-after\")\n z\n}}\ndef middle[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n y = inner(x)\n _ = print(\"middle-after\")\n y\n}}\ndef two[n](x: tensor[n, 4, f32]) -> tensor[2, f32] ! {{ IO }} = middle(x)\ndef three[n](x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = middle(x)\na = two(to_tensor({TWO_BY_FOUR}))\nb = three(to_tensor({THREE_BY_FOUR}))\nc = three(to_tensor({last}))\n"
+            "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n _ = print(\"inside-before\")\n z = diagonal(x, 0, 1)\n _ = print(\"inside-after\")\n z\n}}\ndef middle[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n y = inner(x)\n _ = print(\"middle-after\")\n y\n}}\ndef two[n](x: tensor[n, 4, f32]) -> tensor[2, f32] ! {{ IO }} = middle(x)\ndef three[n](x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = middle(x)\na = two(to_tensor({TWO_BY_FOUR}, f32))\nb = three(to_tensor({THREE_BY_FOUR}, f32))\nc = three(to_tensor({last}, f32))\n"
         );
         let source = canonical_fixture(&dir, &source);
         check_scores_one(&dir, "shared", &source);
@@ -975,7 +975,7 @@ fn the_c_lane_executes_exactly_when_the_literal_axis_wins_the_minimum() {
 fn a_symbolic_declared_result_is_not_guarded() {
     let dir = tempdir().expect("tempdir");
     let source = "def d[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
-                  m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+                  m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], f32)\n\
                   out = d(m)\n";
     let (ok, stdout, stderr) = eval_source(&dir, "symbolic", source);
     assert!(ok, "eval must execute; stderr was {stderr}");
@@ -1401,8 +1401,8 @@ fn the_census_reader_finds_an_entry_guard_that_is_there() {
     let path = dir.path().join("entry_witness.ch");
     let source = "def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> \
                   (tensor[seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
-                  a = to_tensor([1.0, 2.0])\n\
-                  b = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n\
+                  a = to_tensor([1.0, 2.0], f32)\n\
+                  b = to_tensor([[1.0, 2.0], [3.0, 4.0]], f32)\n\
                   out = both(a, b)\n";
     fs::write(&path, source).expect("write fixture");
     let emitted = emit_c(
@@ -1427,7 +1427,7 @@ fn the_census_reader_separates_mixed_entry_and_result_guards() {
     let path = dir.path().join("mixed_guard_witness.ch");
     let source = format!(
         "def d[n](x: tensor[n, 4, f32], y: tensor[n, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n\
-         out = d(to_tensor({TWO_BY_FOUR}), to_tensor([1.0, 2.0]))\n"
+         out = d(to_tensor({TWO_BY_FOUR}, f32), to_tensor([1.0, 2.0], f32))\n"
     );
     fs::write(&path, source).expect("write fixture");
     let emitted = emit_c(
@@ -1704,7 +1704,7 @@ fn host_selector_named_result_obligation_executes_and_traps_in_both_lanes() {
     ] {
         for (operand, agrees) in [(THREE_BY_FOUR, true), (FIVE_BY_FOUR, false)] {
             let source = format!(
-                "def pick[n](w: tensor[n, 4, f32], name: string) -> tensor[n, f32] = if eq(name, \"w\") then diagonal(w, 0i32, 1i32) else neg(diagonal(w, 0i32, 1i32))\nout = pick(to_tensor({operand}), \"{key}\")\n"
+                "def pick[n](w: tensor[n, 4, f32], name: string) -> tensor[n, f32] = if eq(name, \"w\") then diagonal(w, 0i32, 1i32) else neg(diagonal(w, 0i32, 1i32))\nout = pick(to_tensor({operand}, f32), \"{key}\")\n"
             );
             let stem = format!("selector-{key}-{agrees}");
             check_scores_one(&dir, &stem, &source);

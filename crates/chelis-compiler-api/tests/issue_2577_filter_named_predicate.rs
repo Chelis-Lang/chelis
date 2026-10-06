@@ -63,7 +63,7 @@ const KINDS: &[ItemKind] = &[
         ty: "tensor[3, f32]",
         prelude: "def keep(v: tensor[3, f32]) -> bool = gt(tensor_to_scalar(sum(v, 0)), 7.0)\n\
                   def pass(v: tensor[3, f32]) -> tensor[3, f32] = v\n",
-        items: "[to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])]",
+        items: "[to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)]",
     },
 ];
 

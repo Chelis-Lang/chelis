@@ -24,7 +24,7 @@ fn chelis(args: &[&str]) -> std::process::Output {
 const PROGRAM: &str = "module M.Main\n\
                        def sat(x: tensor[3, f32]) -> tensor[3, i8] = x |> cast_saturate(i8)\n\
                        def wrapped(x: i64) -> i8 = cast_wrap(x, i8)\n\
-                       a = print(sat(sqrt(to_tensor([90000.0, 4.0, 2.25]))))\n\
+                       a = print(sat(sqrt(to_tensor([90000.0, 4.0, 2.25], f32))))\n\
                        b = print(wrapped(300i64))\n";
 
 #[test]

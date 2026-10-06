@@ -1004,9 +1004,10 @@ fn cast_prim_to_f64_is_allowed() {
 fn surf_source_accepts_f64_tensor_ascription() {
     // v0.2.3: exercise the full surf → desugar → check pipeline to confirm
     // the user-facing syntax `(expr : tensor[4, f64])` is accepted.
-    let decls =
-        chelis_surf::parser::parse_str("y = (to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f64])")
-            .expect("surf parse");
+    let decls = chelis_surf::parser::parse_str(
+        "y = (to_tensor([1.0, 2.0, 3.0, 4.0], f32) : tensor[4, f64])",
+    )
+    .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(
@@ -1023,7 +1024,7 @@ fn surf_source_accepts_f64_tensor_ascription() {
 fn surf_source_accepts_cast_to_f64_tensor() {
     // v0.2.3: exercise the full pipeline for `cast(tensor, f64)`.
     let decls =
-        chelis_surf::parser::parse_str("y = cast(to_tensor([1.5]), f64)").expect("surf parse");
+        chelis_surf::parser::parse_str("y = cast(to_tensor([1.5], f32), f64)").expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(

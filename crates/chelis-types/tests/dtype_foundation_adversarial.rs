@@ -79,36 +79,37 @@ fn bare_int_literal_defaults_to_int32() {
     );
 }
 
-/// §5.3: bare integer literal must NOT default to i64.
-/// A program that asserts `i64` against bare `42` must fail.
+/// §5.6 Declaration: a declared `i64` result states the dtype of a literal
+/// that is the whole body, so bare `42` binds at `i64`. A literal anywhere
+/// else in the body keeps the §5.3 `i32` default, which is never promoted.
 #[test]
-fn bare_int_literal_rejected_against_int64_context() {
-    let src = "def main() -> i64 = 42";
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    // Per §5.3 contextual inference (§5.6) should NOT widen a bare
-    // integer literal to i64 outside a tensor literal context. So
-    // either: (a) the checker rejects mismatch, or (b) it silently
-    // widens. We pin (a) and let a failure flag (b) as a finding.
-    if res.is_ok() {
-        panic!(
-            "spec §5.3: bare integer literal `42` defaults to i32 and must NOT \
-             silently widen to i64 in a non-tensor scalar context. The program \
-             `def main() -> i64 = 42` should be rejected, not accepted."
-        );
-    }
+fn bare_int_literal_binds_at_a_declared_int64_result_and_nowhere_else() {
+    let res = check_ir_program(&surf_to_deep("def main() -> i64 = 42"));
+    assert!(
+        res.is_ok(),
+        "spec §5.6: a declared i64 result states the dtype of its literal body; \
+         got: {:?}",
+        res.err().map(|e| e.errors)
+    );
+    let res = check_ir_program(&surf_to_deep("def main() -> i64 = add(42, 0i64)"));
+    assert!(
+        res.is_err(),
+        "spec §5.3: an operand literal keeps the i32 default and must NOT \
+         silently widen to i64"
+    );
 }
 
 /// §5.3 + §5.6 boundary: bare float literal defaults to f32 even inside an
 /// i64-typed scalar binding. Should error.
 #[test]
 fn bare_float_literal_does_not_satisfy_int64() {
-    let src = "def main() -> i64 = 1.0";
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
+    // spec/04 §5.6 Binding: the declared i64 states a dtype a decimal
+    // literal cannot bind at, which Surf ingress rejects before any check.
+    let decls = parse_str("def main() -> i64 = 1.0").expect("surf parse");
+    let error = desugar_program(&decls).expect_err("a decimal literal never binds at i64");
     assert!(
-        res.is_err(),
-        "spec §5.3: bare float literal `1.0` is f32 by default, never i64"
+        error.to_string().contains("cannot bind at i64"),
+        "spec §5.6: {error}"
     );
 }
 
@@ -129,7 +130,7 @@ fn bare_float_literal_does_not_satisfy_int64() {
 /// indirect path. This pins it.
 #[test]
 fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
-    let src = "def main() -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
+    let src = "def main() -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0], f32), f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("indirect cast to f8e4m3 must still be rejected");
@@ -375,13 +376,14 @@ fn unknown_suffix_is_lex_error() {
 ///
 /// Distinct input from `int_literal_overflow.rs`: this snippet
 /// declares an `i64` return position (`def main() -> i64 = ...`),
-/// pinning that even an i64-typed context does not rescue a bare
-/// integer literal from the §5.3 i32 default and the D1 diagnostic
-/// still fires. The `ws_a0_*` exact-diagnostic version uses an `i32`
-/// return position, so it does not cover this case.
+/// pinning that an i64-typed context does not rescue an operand
+/// literal from the §5.3 i32 default (only a literal that is the whole
+/// body takes the declared dtype, §5.6) and the D1 diagnostic still
+/// fires. The `ws_a0_*` exact-diagnostic version uses an `i32` return
+/// position, so it does not cover this case.
 #[test]
 fn d1_diagnostic_mentions_i64_suffix_and_cast() {
-    let src = "def main() -> i64 = 2147483648";
+    let src = "def main() -> i64 = add(2147483648, 0i64)";
     let deep = surf_to_deep(src);
     let rep = check_ir_program(&deep).expect_err("D1: literal must overflow i32 default");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();

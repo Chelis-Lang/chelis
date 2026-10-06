@@ -776,12 +776,12 @@ width has not survived the boundary crossing [04-NUM-11] requires it to
 survive.
 
 Two boundary notes. Extent-domain slots do not adopt literals: no
-`spec/04-type-system.md` §5.6 position reaches a list literal or a
+`spec/04-type-system.md` §5.6 construct reaches a list literal or a
 scalar against a remote callee signature, so an extent literal states
 `i64` itself, with a suffix or an explicit `cast`
 (`reshape(x, [2i64, 2i64])`, `stride(x, 2i64)`), and an unsuffixed
 `i32` literal in an extent slot is a type error whose diagnostic names
-the fix. §5.6 records why that adoption set stays closed. And
+the fix. §5.6 records why that set stays closed. And
 arithmetic on extents is ordinary program arithmetic: it computes at the
 declared `i64` width like every other op ([04-NUM-8]), with no narrower
 internal substitute. The width of the loop counters and addressing
@@ -4319,18 +4319,25 @@ path even though bare `round` under `grad` remains a structural
 
 #### List/tensor conversion
 
-> **[05-OP-57]** Signature: `to_tensor(xs)` takes a rectangular, recursively nested List
-> with one active scalar tensor-element leaf dtype T. A nesting depth r
-> yields a rank-r tensor. `to_list(x)` borrows a tensor of any positive rank r
-> and returns r nested Lists with scalar leaf dtype T.
+> **[05-OP-57]** Signature: `to_tensor(xs)` and `to_tensor(xs, T)` take a
+> rectangular, recursively nested List with one active scalar tensor-element
+> leaf dtype T. A written `T` is a dtype, either an active tensor-element
+> primitive or a dtype-bounded type binder in scope ([04-DTYPE-2]), and it
+> states the leaf dtype. A nesting depth r yields a rank-r tensor. `to_list(x)`
+> borrows a tensor of any positive rank r and returns r nested Lists with
+> scalar leaf dtype T. `to_tensor` is a reserved name (spec/04 section 8.6).
 >
 > Domain: All active tensor element dtypes, including bool, are admitted
 > without conversion. The recursive shape relation is `shape(scalar) = []`
 > and `shape([v0, ..., vn-1]) = [n] ++ s` when every child has the same
 > shape s and leaf dtype T. This admits arbitrary List nesting, including
 > spec/04 section 4.5.1's rectangular nested construction; it has no
-> rank-two exception or maximum nesting depth. A List's element type
-> determines an empty result's dtype. Inner extents that an empty outer
+> rank-two exception or maximum nesting depth. A written `T` states the
+> dtype of the argument's unsuffixed literal elements (spec/04 section 5.6);
+> without `T`, an unsuffixed literal element is a type error, and no default
+> dtype applies to it. With `T`, the leaf dtype SHALL equal `T`; `to_tensor`
+> never converts. A List's element type determines an empty result's dtype;
+> a written `T` states that element type. Inner extents that an empty outer
 > List cannot establish remain explicit shape obligations; no default f32
 > or invented trailing extent is permitted. Strings and mixed leaf dtypes
 > are type errors.
@@ -4348,8 +4355,10 @@ path even though bare `round` under `grad` remains a structural
 >
 > Failure: Inconsistent child shapes reject, statically when known and at
 > runtime otherwise. Unresolved required extents and unrepresentable size
-> arithmetic fail loudly. Invalid leaf types, mixed leaf dtypes, and
-> scalar or rank-zero `to_list` operands are type errors; use [05-OP-50]'s
+> arithmetic fail loudly. Invalid leaf types, mixed leaf dtypes, a leaf
+> dtype other than a written `T` (a conversion is an explicit `cast` of the
+> result), a written `T` that is not a dtype, an unsuffixed literal element
+> without `T`, and scalar or rank-zero `to_list` operands are type errors; use [05-OP-50]'s
 > explicit scalar conversion for rank zero.
 >
 > Adjoint: For float T, `to_tensor` reconstructs the saved source List

@@ -545,12 +545,16 @@ const BF16_ROWS: &[FRow] = &[
 fn float_specials_body(dt: &str) -> (String, String) {
     let ret = format!("tensor[3, {dt}]");
     let body = match dt {
-        "f32" => "div(to_tensor([1.0, 0.0, -1.0]), to_tensor([0.0, 0.0, 0.0]))".to_string(),
+        "f32" => {
+            "div(to_tensor([1.0, 0.0, -1.0], f32), to_tensor([0.0, 0.0, 0.0], f32))".to_string()
+        }
         "f64" => "div(to_tensor([cast(1.0, f64), cast(0.0, f64), cast(-1.0, f64)]), \
                   to_tensor([cast(0.0, f64), cast(0.0, f64), cast(0.0, f64)]))"
             .to_string(),
         narrow => {
-            format!("cast(div(to_tensor([1.0, 0.0, -1.0]), to_tensor([0.0, 0.0, 0.0])), {narrow})")
+            format!(
+                "cast(div(to_tensor([1.0, 0.0, -1.0], f32), to_tensor([0.0, 0.0, 0.0], f32)), {narrow})"
+            )
         }
     };
     (ret, body)
@@ -817,9 +821,9 @@ fn float_table_program(dt: &str, rows: &[FRow], via_cast: bool) -> String {
     let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
     let n = rows.len();
     let body = if via_cast {
-        format!("cast(to_tensor([{}]), {dt})", elems.join(", "))
+        format!("cast(to_tensor([{}], f32), {dt})", elems.join(", "))
     } else {
-        format!("to_tensor([{}])", elems.join(", "))
+        format!("to_tensor([{}], {dt})", elems.join(", "))
     };
     exits_program(&format!("tensor[{n}, {dt}]"), &body)
 }
@@ -829,7 +833,7 @@ fn int_table_program(dt: &str, rows: &[IRow]) -> String {
     let n = rows.len();
     exits_program(
         &format!("tensor[{n}, {dt}]"),
-        &format!("to_tensor([{}])", elems.join(", ")),
+        &format!("to_tensor([{}], {dt})", elems.join(", ")),
     )
 }
 
@@ -1064,7 +1068,7 @@ fn eval_f64_cast_tensor_root_renders_stored_width() {
     let cases = [
         (
             "f32 tensor widened as a tensor",
-            "cast(to_tensor([0.1, 0.3]), f64)",
+            "cast(to_tensor([0.1, 0.3], f32), f64)",
         ),
         (
             "f32-suffixed leaves widened as scalars",
@@ -1118,7 +1122,7 @@ fn c_boxed_f32_renders_at_own_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "module M.Main\nout = print(to_list(to_tensor([0.1, 0.3])))\n";
+    let program = "module M.Main\nout = print(to_list(to_tensor([0.1, 0.3], f32)))\n";
     let out = c_stdout(program, "obs_boxed_f32").expect("C lane");
     let lline = list_lines(&out)
         .first()
@@ -1288,7 +1292,7 @@ fn eval_unit_valued_sole_print_root_keeps_its_name_issue_862() {
             "tensor-reduction-root",
             "module M.Main\n\
              def f(x: tensor[4, f32]) -> tensor[f32] = sum(x, 0)\n\
-             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n"
+             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5], f32)))\n"
                 .to_string(),
             "out = ()",
         ),
@@ -1400,7 +1404,7 @@ fn eval_tensor_renders_truncate_at_32_with_marker() {
     let elems: Vec<String> = (1..=33).map(|i| format!("{i}.0")).collect();
     let program = format!(
         "module M.Main\n\
-         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}], f32)\n\
          shown = print(mk())\n\
          troot = mk()\n",
         elems.join(", ")
@@ -1429,7 +1433,7 @@ fn eval_tensor_renders_truncate_at_32_with_marker() {
     // to_list (full-element fidelity is to_list's job, [05-OBS-5]).
     let list_program = format!(
         "module M.Main\n\
-         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}], f32)\n\
          lroot = to_list(mk())\n",
         elems.join(", ")
     );
@@ -1800,9 +1804,9 @@ fn c_defcall_root_rescued_beside_direct_root_issue_750() {
         return;
     }
     let program = "module M.Main\n\
-         def mk() -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n\
+         def mk() -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0], f32)\n\
          ra = mk()\n\
-         rb = to_tensor([9.0, 8.0])\n";
+         rb = to_tensor([9.0, 8.0], f32)\n";
     let eval_out = eval_stdout(program).expect("eval");
     let c_out = c_stdout(program, "issue750_mixed").expect("C lane");
 
@@ -2031,7 +2035,7 @@ fn c_f16_bf16_tensor_print_is_dtype_faithful() {
         let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
         let program = format!(
             "module M.Main\n\
-             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}]), {dt})\n\
+             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}], f32), {dt})\n\
              shown = print(mk())\n",
             n = rows.len(),
             e = elems.join(", ")
@@ -2064,7 +2068,7 @@ fn c_f16_bf16_to_list_completes_per_dtype() {
         let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
         let program = format!(
             "module M.Main\n\
-             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}]), {dt})\n\
+             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}], f32), {dt})\n\
              out = print(to_list(mk()))\n",
             n = rows.len(),
             e = elems.join(", ")
@@ -2289,7 +2293,7 @@ fn c_nested_tensor_truncates_at_32_with_marker() {
     let elems: Vec<String> = (1..=33).map(|i| format!("{i}.0")).collect();
     let program = format!(
         "module M.Main\n\
-         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}], f32)\n\
          out = print([mk()])\n",
         elems.join(", ")
     );
@@ -2398,12 +2402,15 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
         ),
         (
             "f32-dyadic-exits",
-            exits_program("tensor[4, f32]", "to_tensor([1.5, -0.25, 2048.0, 0.75])"),
+            exits_program(
+                "tensor[4, f32]",
+                "to_tensor([1.5, -0.25, 2048.0, 0.75], f32)",
+            ),
         ),
         (
             "f16-dyadic-print",
             "module M.Main\n\
-             def mk() -> tensor[3, f16] = cast(to_tensor([0.75, 2048.0, -1.5]), f16)\n\
+             def mk() -> tensor[3, f16] = cast(to_tensor([0.75, 2048.0, -1.5], f32), f16)\n\
              shown = print(mk())\n\
              listed = print(to_list(mk()))\n"
                 .to_string(),
@@ -2436,8 +2443,8 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
             "rank0-reduction-root",
             "module M.Main\n\
              def f(x: tensor[4, f32]) -> tensor[f32] = sum(x, 0)\n\
-             shown = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n\
-             root = f(to_tensor([1.5, 4.5, 2.5, 0.5]))\n"
+             shown = print(f(to_tensor([1.5, 4.5, 2.5, 0.5], f32)))\n\
+             root = f(to_tensor([1.5, 4.5, 2.5, 0.5], f32))\n"
                 .to_string(),
         ),
     ];

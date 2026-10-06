@@ -184,7 +184,7 @@ fn borrowed_but_never_consumed_is_auto_dropped() {
         r#"
 def ok() -> tensor[4, f32] =
   {
-    x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
+    x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0], f32)
     y: tensor[4, f32] = relu(x)
     y
   }

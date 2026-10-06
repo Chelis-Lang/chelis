@@ -26,12 +26,12 @@ out = rank_zero_grad(seed)\n";
 const SYMBOLIC_ZERO_PROGRAM: &str = "\
 def constant[n](x: tensor[n, f32]) -> f32 = cast(1.0, f32)\n\
 def zero_grad[n](x: tensor[n, f32]) -> tensor[n, f32] = grad(constant, wrt=x)(x)\n\
-out = zero_grad(to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
+out = zero_grad(to_tensor([1.0, 2.0, 3.0, 4.0], f32))\n";
 
 const MULTIDIMENSIONAL_SYMBOLIC_ZERO_PROGRAM: &str = "\
 def constant_matrix[rows, cols](x: tensor[rows, cols, f32]) -> f32 = cast(1.0, f32)\n\
 def zero_matrix_grad[rows, cols](x: tensor[rows, cols, f32]) -> tensor[rows, cols, f32] = grad(constant_matrix, wrt=x)(x)\n\
-out = zero_matrix_grad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+out = zero_matrix_grad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n";
 
 const INDIRECT_CALLABLE_PROGRAM: &str = "\
 def apply(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> f32 = model(x)\n\
@@ -45,7 +45,7 @@ def indirect_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, 
   target = fn (v: tensor[3, f32]) -> apply_pipe(model, v)\n\
   grad(target, wrt=v)(x)\n\
 }\n\
-x = to_tensor([1.0, 2.0, 3.0])\n\
+x = to_tensor([1.0, 2.0, 3.0], f32)\n\
 direct_out = indirect(sumsq, x)\n\
 pipe_out = indirect_pipe(sumsq, x)\n";
 
@@ -62,7 +62,7 @@ def live_callable(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, 
   target = fn (v: tensor[3, f32]) -> model(v)\n\
   grad(target, wrt=v)(x)\n\
 }\n\
-x = to_tensor([1.0, 2.0, 3.0])\n\
+x = to_tensor([1.0, 2.0, 3.0], f32)\n\
 dead_out = dead_callable(sumsq, x)\n\
 live_out = live_callable(sumsq, x)\n";
 

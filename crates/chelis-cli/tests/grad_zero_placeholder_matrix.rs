@@ -101,9 +101,9 @@ fn c_first_line(program: &str, name: &str) -> Result<String, String> {
 /// eval-shaped `print(...)` binding vs the compiled-shaped bare binding.
 fn grad_program(weight_op: &str, print_form: bool) -> String {
     let out = if print_form {
-        "out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4])))"
+        "out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32)))"
     } else {
-        "out = compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4]))"
+        "out = compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32))"
     };
     format!(
         "def g(x: tensor[4, f32]) -> tensor[f32] = {{\n\
@@ -238,7 +238,7 @@ fn c_tensor_abs_min_traps_at_every_integer_width() {
     ] {
         let program = format!(
             "def int_abs(x: tensor[1, {prim}]) -> tensor[1, {prim}] = abs(x)\n\
-             out = int_abs(cast(to_tensor([{minimum}]), {prim}))\n"
+             out = int_abs(cast(to_tensor([{minimum}], f32), {prim}))\n"
         );
         let error = c_first_line(&program, &format!("c_abs_min_{prim}"))
             .expect_err("compiled minimum abs must trap");
@@ -271,8 +271,8 @@ fn c_tensor_abs_min_traps_at_every_integer_width() {
 /// a trailing zero root or failing during DAG lowering.
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
-    let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
-                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), i64)), \
+    let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4], f32), \
+                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0], f32), i64)), \
                   f32)), 0))\n";
     let line = eval_first_line(inline).expect("the host-runtime forward must evaluate");
     // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
@@ -283,7 +283,7 @@ fn forward_pass_without_grad_is_correct_in_eval() {
          cast(-300, i64), cast(400, i64)])), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
-         out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
+         out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4], f32)))\n";
     let line = eval_first_line(def_rooted).expect("the def-rooted program must evaluate");
     assert_eq!(
         line, "300.0",
@@ -302,7 +302,7 @@ fn grad_without_abs_is_correct_in_both_lanes() {
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[4, f32]) -> tensor[4, f32] = grad(g, wrt=x)(x)\n\
-         out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
+         out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32)))\n";
     let line = eval_first_line(eval_program).expect("eval should run");
     assert!(
         line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
@@ -310,8 +310,8 @@ fn grad_without_abs_is_correct_in_both_lanes() {
     );
     if c_toolchain_available() {
         let c_program = eval_program.replace(
-            "out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4])))",
-            "out = compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4]))",
+            "out = print(compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32)))",
+            "out = compute_grad(to_tensor([0.1, 0.2, 0.3, 0.4], f32))",
         );
         let line = c_first_line(&c_program, "grad_noabs").expect("C lane");
         assert!(

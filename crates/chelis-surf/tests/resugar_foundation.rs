@@ -35,7 +35,8 @@ fn cast_resugars_through_the_canonical_surf_ast_printer() {
     let surf_ast = resugar_expression(&deep).expect("valid Deep cast resugars");
     let surf = format_expression(&surf_ast);
 
-    assert_eq!(surf, "cast(1.0, f32)");
+    // A cast's literal operand keeps its suffix (spec/03 §6.3.1).
+    assert_eq!(surf, "cast(1.0f32, f32)");
     let redesugared = redesugar_expression(&surf);
     assert!(
         redesugared.contains("(cast {"),
@@ -214,7 +215,8 @@ fn par_resugars_through_the_canonical_surf_ast_printer() {
 
 #[test]
 fn public_decompiler_uses_the_shared_ast_spelling_for_cast_and_par() {
-    let source = "def result() = par { cast(1.0, f32); cast(2.0, f32) }";
+    // Suffixed operands keep their cast nodes (spec/04 §5.6).
+    let source = "def result() = par { cast(1.0f64, f32); cast(2.0f64, f32) }";
     let decls = parse_surf(source).expect("canonical Surf fixture parses");
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
 

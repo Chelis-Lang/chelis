@@ -63,7 +63,7 @@ const CASES: &[Case] = &[
         name: "map_some_tensor",
         prelude: "",
         result: "List[Option[tensor[3, f32]]]",
-        body: "map(fn (x: tensor[3, f32]) -> Some((x + x)), [to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])",
+        body: "map(fn (x: tensor[3, f32]) -> Some((x + x)), [to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])",
     },
     Case {
         name: "map_nested_option",
@@ -128,7 +128,7 @@ const ROOT_CASES: &[Case] = &[
         name: "root_some_tensor",
         prelude: "",
         result: "Option[tensor[3, f32]]",
-        body: "if flag then Some(to_tensor([1.0, 2.0, 3.0])) else None",
+        body: "if flag then Some(to_tensor([1.0, 2.0, 3.0], f32)) else None",
     },
     Case {
         name: "tuple_component",

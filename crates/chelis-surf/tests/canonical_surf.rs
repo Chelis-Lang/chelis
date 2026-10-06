@@ -889,9 +889,18 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
     let deep = print_canonical(&desugared);
     assert!(deep.contains("(t-prim {} f64)"));
     assert!(deep.contains("(t-prim {} f32)"));
+    // spec/03 §6.4: a cast its primitive target binds is the suffixed
+    // literal, so it prints as one.
     assert_eq!(
         format_program(&resugar_program(&desugared).expect("contextual literals resugar")),
-        source,
+        concat!(
+            "direct = 1.1f64\n",
+            "direct_i = 42i64\n",
+            "widened = cast(1.1f32, f64)\n",
+            "widened_i = cast(42i32, i64)\n",
+            "explicit_default_float = 1.0f32\n",
+            "explicit_default_int = 42i32\n",
+        ),
     );
 }
 
@@ -904,7 +913,14 @@ fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
     let deep = desugar_program(&parse_str(source).expect("signed minima parse"))
         .expect("Surf fixture must desugar");
     let surf = format_program(&resugar_program(&deep).expect("signed minima resugar"));
-    assert_eq!(surf, source);
+    // The collapsed cast prints as the suffixed signed minimum.
+    assert_eq!(
+        surf,
+        concat!(
+            "contextual = -9223372036854775808i64\n",
+            "explicit = cast(-9223372036854775808i64, i64)\n",
+        )
+    );
     let redesugared = desugar_program(&parse_str(&surf).expect("signed minima reparse"))
         .expect("Surf fixture must desugar");
     assert_eq!(

@@ -37,7 +37,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_identity",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32]) -> tensor[n, f32] = t0\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -46,13 +46,13 @@ const CASES: &[Case] = &[
     Case {
         name: "named_identity_agrees",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32]) -> tensor[n, f32] = t0\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]))\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0], f32))\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[4.0, 5.0])"),
     },
     Case {
         name: "named_taken_arm",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then t0 else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -62,13 +62,13 @@ const CASES: &[Case] = &[
     Case {
         name: "named_untaken_arm",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then t0 else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[1.0, 2.0])"),
     },
     Case {
         name: "named_builtin_in_taken_arm",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then neg(t0) else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, neg axis 0 = 3",
             "numeric trap: domain in neg at i64",
@@ -77,13 +77,13 @@ const CASES: &[Case] = &[
     Case {
         name: "named_builtin_in_untaken_arm",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then neg(t0) else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[1.0, 2.0])"),
     },
     Case {
         name: "named_second_axis",
         source: "def f[n](a: tensor[2, n, f32], t0: tensor[2, *, f32], b: bool) -> tensor[2, n, f32] = if b then t0 else a\n\
-                 out = f(to_tensor([[1.0, 2.0], [3.0, 4.0]]), to_tensor([[4.0, 5.0, 6.0], [1.0, 1.0, 1.0]]), true)\n",
+                 out = f(to_tensor([[1.0, 2.0], [3.0, 4.0]], f32), to_tensor([[4.0, 5.0, 6.0], [1.0, 1.0, 1.0]], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 1 = 2, load axis 1 = 3",
             "numeric trap: domain in load at i64",
@@ -93,7 +93,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_two_binders",
         source: "def f[n, m](a: tensor[n, m, f32], t0: tensor[*, *, f32], b: bool) -> tensor[n, m, f32] = if b then t0 else a\n\
-                 out = f(to_tensor([[1.0, 2.0]]), to_tensor([[4.0, 5.0, 6.0], [1.0, 1.0, 1.0]]), true)\n",
+                 out = f(to_tensor([[1.0, 2.0]], f32), to_tensor([[4.0, 5.0, 6.0], [1.0, 1.0, 1.0]], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 1, load axis 0 = 2",
             "numeric trap: domain in load at i64",
@@ -103,7 +103,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_repeated_binder_names_its_first_witness",
         source: "def f[n](a: tensor[n, f32], c: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then t0 else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([7.0, 8.0]), to_tensor([4.0, 5.0, 6.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([7.0, 8.0], f32), to_tensor([4.0, 5.0, 6.0], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -113,7 +113,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_distinct_same_sized_witness_is_not_the_source",
         source: "def f[k, m](u: tensor[k, f32], w: tensor[m, f32], t0: tensor[*, f32], b: bool) -> tensor[m, f32] = if b then t0 else w\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([7.0, 8.0]), to_tensor([4.0, 5.0, 6.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([7.0, 8.0], f32), to_tensor([4.0, 5.0, 6.0], f32), true)\n",
         expect: Expect::Trap(
             "extent `m`: w axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -124,7 +124,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_source_spelled_as_a_c_keyword",
         source: "def f[n](int: tensor[n, f32], t0: tensor[*, f32]) -> tensor[n, f32] = t0\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `n`: int axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -134,7 +134,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_through_recursion",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], k: i64) -> tensor[n, f32] = if k > 0i64 then f(a, t0, k - 1i64) else t0\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), 2i64)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), 2i64)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -146,7 +146,7 @@ const CASES: &[Case] = &[
         name: "named_claim_inherited_by_a_kernel_call",
         source: "def g(t: tensor[*, f32]) -> tensor[*, f32] = neg(t)\n\
                  def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then g(t0) else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, neg axis 0 = 3",
             "numeric trap: domain in neg at i64",
@@ -156,14 +156,14 @@ const CASES: &[Case] = &[
         name: "named_claim_inherited_by_a_kernel_call_agrees",
         source: "def g(t: tensor[*, f32]) -> tensor[*, f32] = neg(t)\n\
                  def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then g(t0) else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]), true)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0], f32), true)\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[-4.0, -5.0])"),
     },
     Case {
         name: "named_claim_inherited_by_an_untaken_kernel_call",
         source: "def g(t: tensor[*, f32]) -> tensor[*, f32] = neg(t)\n\
                  def f[n](a: tensor[n, f32], t0: tensor[*, f32], b: bool) -> tensor[n, f32] = if b then g(t0) else a\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[1.0, 2.0])"),
     },
     // chelis#1900's original reproducer, its isolated forms and an agreeing
@@ -172,7 +172,7 @@ const CASES: &[Case] = &[
         name: "issue_1900_original",
         source: "module HostNamed\n\
                  def probe[m, n](w: tensor[m, 3, f32], v: tensor[n, 3, f32]) -> tensor[m, 3, f32] = concat(append([v], v), 0i32)\n\
-                 def main() -> tensor[1, 3, f32] = probe(to_tensor([[1.0, 2.0, 3.0]]), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]))\n",
+                 def main() -> tensor[1, 3, f32] = probe(to_tensor([[1.0, 2.0, 3.0]], f32), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], f32))\n",
         expect: Expect::Trap(
             "extent `m`: w axis 0 = 1, concat axis 0 = 8",
             "numeric trap: domain in concat at i64",
@@ -181,7 +181,7 @@ const CASES: &[Case] = &[
     Case {
         name: "issue_1900_top_level_value",
         source: "def probe[m, n](w: tensor[m, 3, f32], v: tensor[n, 3, f32]) -> tensor[m, 3, f32] = concat(append([v], v), 0i32)\n\
-                 out = probe(to_tensor([[1.0, 2.0, 3.0]]), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]))\n",
+                 out = probe(to_tensor([[1.0, 2.0, 3.0]], f32), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], f32))\n",
         expect: Expect::Trap(
             "extent `m`: w axis 0 = 1, concat axis 0 = 8",
             "numeric trap: domain in concat at i64",
@@ -190,7 +190,7 @@ const CASES: &[Case] = &[
     Case {
         name: "issue_1900_undeclared_main",
         source: "def probe[m, n](w: tensor[m, 3, f32], v: tensor[n, 3, f32]) -> tensor[m, 3, f32] = concat(append([v], v), 0i32)\n\
-                 def main() = probe(to_tensor([[1.0, 2.0, 3.0]]), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]))\n",
+                 def main() = probe(to_tensor([[1.0, 2.0, 3.0]], f32), to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], f32))\n",
         expect: Expect::Trap(
             "extent `m`: w axis 0 = 1, concat axis 0 = 8",
             "numeric trap: domain in concat at i64",
@@ -199,14 +199,14 @@ const CASES: &[Case] = &[
     Case {
         name: "issue_1900_agrees",
         source: "def probe[m, n](w: tensor[m, 3, f32], v: tensor[n, 3, f32]) -> tensor[m, 3, f32] = concat(append([v], v), 0i32)\n\
-                 out = probe(to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]), to_tensor([[7.0, 8.0, 9.0]]))\n",
+                 out = probe(to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], f32), to_tensor([[7.0, 8.0, 9.0]], f32))\n",
         expect: Expect::Value("out = tensor(shape=[2, 3], data=[7.0, 8.0, 9.0, 7.0, 8.0, 9.0])"),
     },
     // A literal claim keeps its literal rendering.
     Case {
         name: "literal_identity",
         source: "def f(a: tensor[2, f32], t0: tensor[*, f32]) -> tensor[2, f32] = t0\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -217,7 +217,7 @@ const CASES: &[Case] = &[
     Case {
         name: "literal_block_pass_through",
         source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
-                 out = f(to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = f(to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, t0 axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -226,7 +226,7 @@ const CASES: &[Case] = &[
     Case {
         name: "literal_block_pass_through_agrees",
         source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
-                 out = f(to_tensor([4.0, 5.0]))\n",
+                 out = f(to_tensor([4.0, 5.0], f32))\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[4.0, 5.0])"),
     },
     // Untaken-arm negative for that guard: the callee never runs.
@@ -234,7 +234,7 @@ const CASES: &[Case] = &[
         name: "literal_pass_through_in_an_untaken_arm",
         source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
                  def g(t: tensor[*, f32], b: bool) -> tensor[*, f32] = if b then f(t) else t\n\
-                 out = g(to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = g(to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = tensor(shape=[3], data=[4.0, 5.0, 6.0])"),
     },
     // A callee inlined into another tensor kernel does not turn its
@@ -247,7 +247,7 @@ const CASES: &[Case] = &[
                  def g(u: tensor[2, f32], t: tensor[*, f32], b: bool) -> tensor[f32] = {\n  \
                  s = if b then sum(f(t), 0i32) else sum(u, 0i32)\n  \
                  mul(s, s)\n}\n\
-                 out = g(to_tensor([7.0, 1.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = g(to_tensor([7.0, 1.0], f32), to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = 64.0"),
     },
     Case {
@@ -256,7 +256,7 @@ const CASES: &[Case] = &[
                  def g(u: tensor[2, f32], t: tensor[*, f32], b: bool) -> tensor[f32] = {\n  \
                  s = if b then sum(f(t), 0i32) else sum(u, 0i32)\n  \
                  mul(s, s)\n}\n\
-                 out = g(to_tensor([7.0, 1.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+                 out = g(to_tensor([7.0, 1.0], f32), to_tensor([4.0, 5.0, 6.0], f32), false)\n",
         expect: Expect::Value("out = 64.0"),
     },
     Case {
@@ -266,7 +266,7 @@ const CASES: &[Case] = &[
                  z = add(u, u)\n  \
                  w = f(t)\n  \
                  add(w, cast(z, f32))\n}\n\
-                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::TrapOnly("numeric trap: overflow in add at i32"),
     },
     Case {
@@ -276,7 +276,7 @@ const CASES: &[Case] = &[
                  z = add(u, u)\n  \
                  w = f(t)\n  \
                  add(w, cast(z, f32))\n}\n\
-                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::TrapOnly("numeric trap: overflow in add at i32"),
     },
     // Surf reaches the #2512 restamp path: an inlined callee's result binder
@@ -289,7 +289,7 @@ const CASES: &[Case] = &[
                  def f[n](x: tensor[n, f32], w: tensor[n, 2, f32], b: bool) -> tensor[n, 2, f32] = {\n  \
                  r = if b then g(x) else w\n  \
                  r\n}\n\
-                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]), false)\n",
+                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]], f32), false)\n",
         expect: Expect::Value(
             "out = tensor(shape=[4, 2], data=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])",
         ),
@@ -300,7 +300,7 @@ const CASES: &[Case] = &[
                  def f[n](x: tensor[n, f32], w: tensor[n, 2, f32], b: bool) -> tensor[n, 2, f32] = {\n  \
                  r = if b then g(x) else w\n  \
                  r\n}\n\
-                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]), true)\n",
+                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0], f32), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]], f32), true)\n",
         expect: Expect::Trap(
             "extent `n`: claimed = 4, reshape axis 0 = 2",
             "numeric trap: domain in reshape at i64",
@@ -311,7 +311,7 @@ const CASES: &[Case] = &[
     Case {
         name: "named_block_body_checks_at_entry",
         source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32]) -> tensor[n, f32] = {\n  y = t0\n  y\n}\n\
-                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n",
+                 out = f(to_tensor([1.0, 2.0], f32), to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `n`: a axis 0 = 2, t0 axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -408,7 +408,7 @@ struct Combinator {
     value: &'static str,
 }
 
-const XS: &str = "[to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])]";
+const XS: &str = "[to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)]";
 
 const COMBINATORS: &[Combinator] = &[
     Combinator {
@@ -432,7 +432,7 @@ const COMBINATORS: &[Combinator] = &[
     Combinator {
         op: "scan",
         source: "def f(xs: List[tensor[*, f32]], t0: tensor[*, f32]) -> tensor[{n}, f32] = index(scan(fn (acc: tensor[*, f32], x: tensor[*, f32]) -> (acc + x), t0, xs), 1i64)\n\
-                 a = f({xs}, to_tensor([0.5, 0.5, 0.5]))\n",
+                 a = f({xs}, to_tensor([0.5, 0.5, 0.5], f32))\n",
         value: "tensor(shape=[3], data=[5.5, 7.5, 9.5])",
     },
     Combinator {
@@ -445,7 +445,7 @@ const COMBINATORS: &[Combinator] = &[
     Combinator {
         op: "append",
         source: "def f(xs: List[tensor[*, f32]], t0: tensor[*, f32]) -> tensor[{n}, f32] = index(append(xs, t0), 0i64)\n\
-                 a = f({xs}, to_tensor([7.0, 8.0, 9.0]))\n",
+                 a = f({xs}, to_tensor([7.0, 8.0, 9.0], f32))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
     Combinator {
@@ -494,7 +494,7 @@ const COMBINATORS: &[Combinator] = &[
     Combinator {
         op: "dict_values",
         source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = index(dict_values(dict_of([(\"a\", t0)])), 0i64)\n\
-                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
+                 a = f(to_tensor([1.0, 2.0, 3.0], f32))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
     // [05-OP-56]: a Dict operation is a Container operation too.
@@ -502,9 +502,9 @@ const COMBINATORS: &[Combinator] = &[
         op: "dict_get",
         source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = match dict_get(dict_of([(\"a\", t0)]), \"a\") with {\n    \
                  | Some(t) => t\n    \
-                 | None => to_tensor([0.0, 0.0])\n  \
+                 | None => to_tensor([0.0, 0.0], f32)\n  \
                  }\n\
-                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
+                 a = f(to_tensor([1.0, 2.0, 3.0], f32))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
     // [05-OP-56]: a Dict operation is a Container operation too.
@@ -513,7 +513,7 @@ const COMBINATORS: &[Combinator] = &[
         source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = match index(dict_entries(dict_of([(\"a\", t0)])), 0i64) with {\n    \
                  | (k, v) => v\n  \
                  }\n\
-                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
+                 a = f(to_tensor([1.0, 2.0, 3.0], f32))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
 ];
@@ -529,7 +529,7 @@ const COMBINATOR_CASES: &[Case] = &[
                  }, (t0, 0i64), xs) with {\n    \
                  | (t, n) => t\n  \
                  }\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0])], to_tensor([4.0, 5.0, 6.0]))\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32)], to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, fold axis 0 = 3",
             "numeric trap: domain in fold at i64",
@@ -543,16 +543,16 @@ const COMBINATOR_CASES: &[Case] = &[
                  }, (t0, 0i64), xs) with {\n    \
                  | (t, n) => t\n  \
                  }\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0])], to_tensor([4.0, 5.0, 6.0]))\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32)], to_tensor([4.0, 5.0, 6.0], f32))\n",
         expect: Expect::Value("a = tensor(shape=[3], data=[5.0, 7.0, 9.0])"),
     },
     Case {
         name: "map_result_projected_by_a_cons_pattern",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = match map(fn (x: tensor[*, f32]) -> x, xs) with {\n    \
                  | Cons(h, t) => h\n    \
-                 | Nil => to_tensor([0.0, 0.0])\n  \
+                 | Nil => to_tensor([0.0, 0.0], f32)\n  \
                  }\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, map axis 0 = 3",
             "numeric trap: domain in map at i64",
@@ -561,7 +561,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "named_claim_on_a_map_result",
         source: "def f[n](w: tensor[n, f32], xs: List[tensor[*, f32]]) -> tensor[n, f32] = index(map(fn (x: tensor[*, f32]) -> x, xs), 1i64)\n\
-                 a = f(to_tensor([1.0, 2.0]), [to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f(to_tensor([1.0, 2.0], f32), [to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Trap(
             "extent `n`: w axis 0 = 2, map axis 0 = 3",
             "numeric trap: domain in map at i64",
@@ -572,7 +572,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "split_result_projected_by_index",
         source: "def f(t0: tensor[*, f32]) -> tensor[3, f32] = index(split(t0, 0i32, [2i64, 2i64]), 0i64)\n\
-                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0]))\n",
+                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0], f32))\n",
         expect: Expect::Trap(
             "extent `3`: claimed = 3, split axis 0 = 2",
             "numeric trap: domain in split at i64",
@@ -581,7 +581,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "split_result_projected_by_index_agrees",
         source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = index(split(t0, 0i32, [2i64, 2i64]), 0i64)\n\
-                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0]))\n",
+                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0], f32))\n",
         expect: Expect::Value("a = tensor(shape=[2], data=[1.0, 2.0])"),
     },
     // The selections `take` and `skip` project: the element keeps its own
@@ -589,7 +589,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "take_keeps_the_element_producer",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(take(xs, 1i64), 0i64)\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -598,13 +598,13 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "take_agrees",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[3, f32] = index(take(xs, 1i64), 0i64)\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Value("a = tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
     },
     Case {
         name: "skip_keeps_the_element_producer",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(skip(xs, 1i64), 0i64)\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, load axis 0 = 3",
             "numeric trap: domain in load at i64",
@@ -613,7 +613,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "take_of_a_map_result_keeps_the_map_producer",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(take(map(fn (x: tensor[*, f32]) -> x, xs), 1i64), 0i64)\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)])\n",
         expect: Expect::Trap(
             "extent `2`: claimed = 2, map axis 0 = 3",
             "numeric trap: domain in map at i64",
@@ -622,7 +622,7 @@ const COMBINATOR_CASES: &[Case] = &[
     Case {
         name: "map_result_in_an_untaken_arm",
         source: "def f(xs: List[tensor[*, f32]], b: bool, w: tensor[2, f32]) -> tensor[2, f32] = if b then index(map(fn (x: tensor[*, f32]) -> x, xs), 1i64) else w\n\
-                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])], false, to_tensor([1.0, 1.0]))\n",
+                 a = f([to_tensor([1.0, 2.0, 3.0], f32), to_tensor([4.0, 5.0, 6.0], f32)], false, to_tensor([1.0, 1.0], f32))\n",
         expect: Expect::Value("a = tensor(shape=[2], data=[1.0, 1.0])"),
     },
 ];

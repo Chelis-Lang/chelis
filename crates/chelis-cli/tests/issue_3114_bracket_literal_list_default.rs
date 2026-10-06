@@ -260,7 +260,7 @@ fn a_cast_or_tensor_parameter_never_converts_a_bare_bracket_literal() {
     let directory = tempdir().expect("tempdir");
     common::write_file(
         &directory.path().join("wrapped.ch"),
-        "values = cast(to_tensor([1.1, 2.2]), f64)\n",
+        "values = cast(to_tensor([1.1, 2.2], f32), f64)\n",
     );
     let report = eval_json(directory.path(), "wrapped.ch");
     assert_eq!(
