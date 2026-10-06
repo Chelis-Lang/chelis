@@ -10967,6 +10967,7 @@ fn rewrite_module_decls(
         }
     }
     drain_qualified_failures(&resolver)?;
+    reject_standard_prelude_collisions(&module.decls)?;
     Ok(out)
 }
 
@@ -10976,6 +10977,35 @@ fn rewrite_module_decls(
 fn reject_reserved_binders(module: &ModuleSource) -> Result<(), String> {
     chelis_surf::desugar::reject_reserved_binders(&module.decls)
         .map_err(|error| format!("{}: {error}", module.file_rel.display()))
+}
+
+/// Apply spec/02 §P5b to a module whose declaration names this rewrite
+/// replaces with internal names. Macro expansion compares declaration names
+/// with the standard prelude macros, so after the rewrite a colliding
+/// declaration would pass unseen and its calls would bypass the macro. The
+/// rule is applied here to the authored names instead, with the verdict and
+/// diagnostic expansion gives the same declarations unlinked: every Surf
+/// declaration that desugars to a top-level `def` counts as a `def`.
+fn reject_standard_prelude_collisions(decls: &[Decl]) -> Result<(), String> {
+    use chelis_macros::CallableDeclaration;
+    let declarations = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::Property { name, .. } => {
+                Some((name.as_str(), CallableDeclaration::Def))
+            }
+            Decl::Sig { name, .. } => Some((name.as_str(), CallableDeclaration::Sig)),
+            Decl::TypeDef { .. }
+            | Decl::TypeAlias { .. }
+            | Decl::MacroDef { .. }
+            | Decl::Import { .. }
+            | Decl::Export { .. }
+            | Decl::Module { .. }
+            | Decl::Dim { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    chelis_macros::reject_standard_prelude_collisions(&declarations)
+        .map_err(|error| error.to_string())
 }
 
 /// Turn any qualified-reference misses recorded during rewrite into a hard
@@ -14685,6 +14715,100 @@ version = "0.1.0"
             err.contains("does not export") && err.contains("Missing"),
             "diagnostic must name the unexported leaf; got: {err}"
         );
+    }
+
+    /// chelis#3270: the linker applies spec/02 §P5b to authored declaration
+    /// names because expansion only sees the internal names it gives them.
+    /// Its verdict must be the one expansion gives the same declarations
+    /// unlinked, for every Surf declaration form that can collide.
+    #[test]
+    fn linker_prelude_collision_verdict_matches_unlinked_expansion() {
+        let cases = [
+            ("def residual(x: i32) -> i32 = x\n", true),
+            ("linear_layer = 1i32\n", true),
+            ("cross_entropy: i32 = 1i32\n", true),
+            ("sig residual: i32 -> i32\n", true),
+            (
+                "sig residual: i32 -> i32\nresidual = fn (x: i32) -> x\n",
+                true,
+            ),
+            ("@property residual forall(x: f32): true\n", true),
+            (
+                "macro residual(x, y) = sub(x, y)\ndef residual(x: i32) -> i32 = x\n",
+                true,
+            ),
+            (
+                "def keep(x: i32) -> i32 = x\nsig cross_entropy: i32 -> i32\ndef linear_layer(x: i32) -> i32 = x\n",
+                true,
+            ),
+            (
+                "macro residual(x, y) = sub(x, y)\nout = residual(5i32, 2i32)\n",
+                false,
+            ),
+            (
+                "def residual_step(x: i32) -> i32 = x\ntype Residual = | Residual\n",
+                false,
+            ),
+        ];
+        for (source, collides) in cases {
+            let decls = chelis_surf::parser::parse_str(source).expect("fixture parses");
+            let expansion = expanded_desugared_program(&decls).map(drop);
+            assert_eq!(expansion.is_err(), collides, "{source}: {expansion:?}");
+            assert_eq!(
+                reject_standard_prelude_collisions(&decls),
+                expansion,
+                "{source}"
+            );
+        }
+    }
+
+    /// chelis#3270: a package module's colliding declaration is rejected when
+    /// the package is linked, under its authored name, whether the module is
+    /// the file being checked or a module it imports.
+    #[test]
+    fn package_modules_reject_prelude_macro_names_by_authored_name() {
+        for (main, other) in [
+            (
+                "def residual(x: i32) -> i32 = x\nout = residual(1i32)\n",
+                None,
+            ),
+            (
+                "import Demo.Layers (linear_layer)\nout = linear_layer(1i32)\n",
+                Some("export (linear_layer)\ndef linear_layer(x: i32) -> i32 = x\n"),
+            ),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path().join("demo");
+            write(
+                &root.join("reef.toml"),
+                &format!(
+                    "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Demo\"\n"
+                ),
+            );
+            write(
+                &root.join("src/main.ch"),
+                &format!("module Demo.Main\n{main}"),
+            );
+            if let Some(other) = other {
+                write(
+                    &root.join("src/layers.ch"),
+                    &format!("module Demo.Layers\n{other}"),
+                );
+            }
+            let error = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+                .expect_err("a prelude macro name must reject the package");
+            let name = if other.is_some() {
+                "linear_layer"
+            } else {
+                "residual"
+            };
+            assert!(
+                error.starts_with(&format!(
+                    "`def {name}` collides with the standard prelude macro `{name}`"
+                )) && !error.contains("pkg__"),
+                "{error}"
+            );
+        }
     }
 
     /// #1878: a real private name is not the same control as a nonexistent

@@ -200,6 +200,37 @@ pub fn expand_program(
     })
 }
 
+/// An ordinary top-level declaration kind that the standard-prelude
+/// collision rule governs (spec/02-surf-syntax.md §P5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallableDeclaration {
+    Def,
+    Sig,
+}
+
+impl CallableDeclaration {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Def => "def",
+            Self::Sig => "sig",
+        }
+    }
+}
+
+/// Apply the §P5b standard-prelude collision rule to one module's
+/// declarations by the names they are written with, in declaration order.
+///
+/// Expansion applies the same rule to the declarations it sees, but a reef
+/// package module reaches expansion with linker-rewritten internal names, so
+/// the package linker applies it here to the authored names first. The
+/// prelude is the one [`expand_program`] loads by default, and the verdict
+/// and diagnostic are the ones expansion gives the same declarations.
+pub fn reject_standard_prelude_collisions(
+    declarations: &[(&str, CallableDeclaration)],
+) -> Result<(), ExpansionError> {
+    first_standard_prelude_collision(&standard_prelude_macros()?, declarations)
+}
+
 struct Expander {
     remaining_expansions: usize,
     hygiene_counter: usize,
@@ -254,8 +285,8 @@ impl Expander {
     /// The check reads the exact prelude map used by expansion, so adding or
     /// removing a standard macro changes collision detection in the same
     /// operation. An inline-annotated `def` desugars to `defsig` plus `def`;
-    /// collect the def names first so its one diagnostic names the authored
-    /// `def`, even when the synthesized `defsig` appears first.
+    /// [`first_standard_prelude_collision`] names the authored `def` even
+    /// when the synthesized `defsig` appears first.
     fn reject_standard_prelude_callable_collisions(
         &self,
         exprs: &[Expr],
@@ -263,30 +294,18 @@ impl Expander {
         if self.prelude_macros.is_empty() {
             return Ok(());
         }
-
-        let def_names = exprs
+        let declarations = exprs
             .iter()
-            .filter_map(|expr| standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros))
-            .collect::<UnordSet<_>>();
-
-        for expr in exprs {
-            let name = standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros)
-                .or_else(|| {
-                    standard_prelude_decl_name(expr, DeepTag::Defsig, &self.prelude_macros)
-                });
-            let Some(name) = name else {
-                continue;
-            };
-            return Err(ExpansionError::StandardPreludeNameCollision {
-                name: name.to_string(),
-                declaration: if def_names.contains(name) {
-                    "def"
-                } else {
-                    "sig"
-                },
-            });
-        }
-        Ok(())
+            .filter_map(|expr| {
+                top_level_callable_name(expr, DeepTag::Def)
+                    .map(|name| (name, CallableDeclaration::Def))
+                    .or_else(|| {
+                        top_level_callable_name(expr, DeepTag::Defsig)
+                            .map(|name| (name, CallableDeclaration::Sig))
+                    })
+            })
+            .collect::<Vec<_>>();
+        first_standard_prelude_collision(&self.prelude_macros, &declarations)
     }
 
     fn expand_expr(
@@ -1407,15 +1426,13 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn standard_prelude_decl_name<'a>(
-    expr: &'a Expr,
-    expected: DeepTag,
-    prelude: &UnordMap<String, MacroDef>,
-) -> Option<&'a str> {
+/// The name of a top-level `expected` declaration (`def` or `defsig`),
+/// looking through a metadata wrapper.
+fn top_level_callable_name(expr: &Expr, expected: DeepTag) -> Option<&str> {
     let kids = match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) if tag == expected => children,
         ExprCarrier::MetadataExpression(meta) => {
-            return standard_prelude_decl_name(&meta.expr, expected, prelude);
+            return top_level_callable_name(&meta.expr, expected);
         }
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
@@ -1423,9 +1440,34 @@ fn standard_prelude_decl_name<'a>(
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_) => return None,
     };
-    kids.first()
-        .and_then(symbol_name)
-        .filter(|name| prelude.contains_key(*name))
+    kids.first().and_then(symbol_name)
+}
+
+/// The §P5b verdict over one declaration sequence, in declaration order.
+/// The first declaration whose name is a `prelude` macro is rejected, and
+/// the diagnostic names it as a `def` when any declaration of that name is a
+/// `def`, so an inline-annotated `def` is reported as written.
+fn first_standard_prelude_collision(
+    prelude: &UnordMap<String, MacroDef>,
+    declarations: &[(&str, CallableDeclaration)],
+) -> Result<(), ExpansionError> {
+    let Some(&(name, _)) = declarations
+        .iter()
+        .find(|(name, _)| prelude.contains_key(*name))
+    else {
+        return Ok(());
+    };
+    let is_def = declarations
+        .iter()
+        .any(|&(other, kind)| other == name && kind == CallableDeclaration::Def);
+    Err(ExpansionError::StandardPreludeNameCollision {
+        name: name.to_string(),
+        declaration: if is_def {
+            CallableDeclaration::Def.keyword()
+        } else {
+            CallableDeclaration::Sig.keyword()
+        },
+    })
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
