@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,14 +117,19 @@ def harness_mapping(source: str) -> dict[str, list[str]]:
 def classify(oracle: str, code: int, output: str, timeout: bool) -> str:
     if timeout or (oracle == "kani" and re.search(r"(?:CBMC|verification|solver).*timed out", output, re.I)):
         return "timeout"
-    if oracle == "kani" and (re.search(r"Failed Checks:[^\n]*unsupported", output, re.I)
+    failed_checks = [block for block in re.split(r"(?m)^Check \d+: ", output)[1:]
+                     if re.search(r"(?m)^\s*- Status: FAILURE\s*$", block)] if oracle == "kani" else []
+    if oracle == "kani" and (any("unsupported_construct" in block.splitlines()[0]
+                                  or "not currently supported by Kani" in block for block in failed_checks)
+                             or re.search(r"Failed Checks:[^\n]*unsupported", output, re.I)
                              or re.search(r"Description:[^\n]*unsupported[^\n]*\nStatus: FAILURE", output, re.I)):
         return "tool_error"
-    if oracle == "kani" and re.search(r"unwind(?:ing)? assertion[^\n]*(?:\n[^\n]*){0,2}?FAILURE", output, re.I):
+    if oracle == "kani" and (any("unwinding assertion" in block for block in failed_checks)
+                             or re.search(r"unwind(?:ing)? assertion[^\n]*(?:\n[^\n]*){0,2}?FAILURE", output, re.I)):
         return "unwind_failure"
     if code == 0:
         return "pass"
-    if oracle == "verus" and re.search(r"(?:postcondition|invariant|assertion).*?(?:not satisfied|failed)|possible arithmetic (?:underflow|overflow)|decreases.*(?:not|failed)", output, re.I):
+    if oracle == "verus" and re.search(r"(?:precondition|postcondition|invariant|assertion).*?(?:not satisfied|not met|failed)|possible arithmetic (?:underflow|overflow)|decreases.*(?:not|failed)", output, re.I):
         return "proof_failure"
     if oracle == "kani" and "VERIFICATION:- FAILED" in output:
         return "assertion_failure"
@@ -145,6 +151,24 @@ def selected_for_vermilion(row: dict) -> bool:
             or (proof == "pass" and bool(row.get("witness"))))
 
 
+def execution_environment(original: dict[str, str]) -> dict[str, str]:
+    env = original.copy()
+    env.setdefault("PYO3_PYTHON", sys.executable)
+    env["CARGO_BUILD_JOBS"] = "8"
+    env.pop("RUSTFLAGS", None)
+    return env
+
+
+def vermilion_status(receipt: dict, structural: dict, source: str, refused: bool) -> str:
+    if receipt["timeout"]:
+        return "timeout"
+    if refused or structural.get("source") != source or structural.get("phase") != "lean":
+        return "tool_error"
+    if receipt["exit_code"] == 0 and structural.get("exit") == 0:
+        return "pass"
+    return "proof_failure" if receipt["exit_code"] == 1 else "tool_error"
+
+
 def group_rss(group: int) -> int:
     total = 0
     for entry in Path("/proc").iterdir():
@@ -158,6 +182,24 @@ def group_rss(group: int) -> int:
     return total
 
 
+def stop_process(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    # The parent can exit before a compiler/solver child; terminate the whole
+    # group before the campaign restores its source or starts another command.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
 def execute(command: list[str], cwd: Path, env: dict[str, str], log: Path, timeout: float = 900,
             rss_limit_bytes: int | None = None) -> dict:
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -166,18 +208,18 @@ def execute(command: list[str], cwd: Path, env: dict[str, str], log: Path, timeo
     with log.open("w") as stream:
         process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream,
                                    stderr=subprocess.STDOUT, start_new_session=True)
-        while process.poll() is None:
-            peak = max(peak, group_rss(process.pid))
-            if time.monotonic() - started > timeout or (rss_limit_bytes is not None and peak > rss_limit_bytes):
-                memory_limited = rss_limit_bytes is not None and peak > rss_limit_bytes
-                timed_out = not memory_limited
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                break
-            time.sleep(0.05)
+        try:
+            while process.poll() is None:
+                peak = max(peak, group_rss(process.pid))
+                if time.monotonic() - started > timeout or (rss_limit_bytes is not None and peak > rss_limit_bytes):
+                    memory_limited = rss_limit_bytes is not None and peak > rss_limit_bytes
+                    timed_out = not memory_limited
+                    stop_process(process)
+                    break
+                time.sleep(0.05)
+        except BaseException:
+            stop_process(process)
+            raise
         code = process.wait()
     return {"command": command, "exit_code": code, "timeout": timed_out,
             "memory_limit": memory_limited, "rss_limit_bytes": rss_limit_bytes,
@@ -386,7 +428,7 @@ def costs(args: argparse.Namespace, source: str) -> None:
             elif oracle == "kani":
                 args.kani_target = args.output / "targets/cost-kani"
                 receipts = [run_kani(args, harness, bound, key, unwind=settings["unwind_by_harness"][harness]) for harness in HARNESS_ROOTS]
-                del args.kani_target
+                delattr(args, "kani_target")
             else:
                 receipt = execute([args.verus, "--crate-type=lib", str(SOURCE), "--time", "--output-json"],
                                   args.checkout, args.env, args.output / f"logs/{key}.log", 300)
@@ -440,6 +482,15 @@ def costs(args: argparse.Namespace, source: str) -> None:
         save(path, rows)
 
 
+def insert_tactic_helper(text: str, helper: str) -> str:
+    marker = "namespace verified.is_permutation\n"
+    if text.count(marker) != 1:
+        raise ValueError("generated twin lacks exact expected namespace")
+    if text.count(helper) > 1 or ("-- vrml:user:begin" in text and helper not in text):
+        raise ValueError("preserved Lean helper is duplicated or differs from the checked helper")
+    return text if helper in text else text.replace(marker, helper + "\n" + marker, 1)
+
+
 def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> None:
     """Fresh statements, replayed tactics, then Lean checks every proof term."""
     if args.vermilion is None:
@@ -451,6 +502,7 @@ def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> N
         raise ValueError("Vermilion checkout differs from the reviewed pin")
     path = args.output / "vermilion.json"
     rows = json.loads(path.read_text()) if path.exists() else {}
+    validate_receipts(rows)
     results = json.loads((args.output / "results.json").read_text())
     module_path = ROOT / "crates/chelis-axis-core/proofs/axis_vermilion_proofs.py"
     spec = importlib.util.spec_from_file_location("axis_lean_tactics", module_path)
@@ -471,6 +523,8 @@ def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> N
         env.pop("CARGO_TARGET_DIR", None)
         env["PATH"] = f"{Path.home() / '.elan/bin'}:{env['PATH']}"
         command = ["./scripts/run_example.sh", str(case), "verified.rs", "--per-file", "--manual-proofs", "--lib", "Vermilion"]
+        run_path = home / ".vermilion/verified-run.json"
+        run_path.unlink(missing_ok=True)
         first = execute(command, home, env, args.output / f"logs/vermilion-{label}-fresh.log", 900)
         proof = case / "proofs/verified.lean"
         installed = []
@@ -480,10 +534,7 @@ def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> N
                 tactics.main(proof)
                 installed = [name for name, _ in tactics.PROOFS]
             else:
-                marker = "namespace verified.is_permutation\n"
-                if marker not in twin:
-                    raise ValueError("generated twin lacks expected namespace")
-                twin = twin.replace(marker, tactics.HELPER + "\n" + marker, 1)
+                twin = insert_tactic_helper(twin, tactics.HELPER)
                 for (name, _), body in tactics.PROOFS.items():
                     # Mutants deliberately change statements. No trusted cache or
                     # old statement hashes: replay tactics against NEW statements.
@@ -496,20 +547,22 @@ def vermilion(args: argparse.Namespace, source: str, inventory: list[dict]) -> N
                     twin = twin[:block.start()] + value[:start] + body + value[end:] + twin[block.end():]
                     installed.append(name)
                 proof.write_text(twin)
+            run_path.unlink(missing_ok=True)
             final = execute(command, home, env, args.output / f"logs/vermilion-{label}-checked.log", 900)
         else:
             final = first
-        run_path = home / ".vermilion/verified-run.json"
         structural = json.loads(run_path.read_text()) if run_path.exists() else {}
-        status = ("timeout" if final["timeout"] else "pass" if final["exit_code"] == 0 else
-                  "proof_failure" if structural.get("phase") == "lean" and final["exit_code"] == 1 else "tool_error")
+        generated = case / "generated/verified.json"
+        refused = json.loads(generated.read_text()).get("refused", []) if generated.exists() else []
+        status = vermilion_status(final, structural, str(case.relative_to(home) / "verified.rs"), bool(refused))
         rows[label] = {"source_sha256": digest(text), "fresh": first, "checked": final,
                        "structural_verdict": structural, "status": status, "replayed_tactics": installed,
+                       "refused_functions": refused,
                        "credit": verus_credit(status, mutant_row.get("witness") if mutant_row else None),
                        "obligations": proof.read_text().count("-- vrml:begin ") if proof.exists() else 0}
         save(path, rows)
         print(f"Vermilion {label}: {status}", flush=True)
-        if label == "baseline" and status != "pass":
+        if label == "baseline" and (status != "pass" or rows[label]["obligations"] != 75):
             raise RuntimeError("Vermilion baseline did not kernel-check")
 
 
@@ -527,10 +580,7 @@ def main() -> None:
     if args.checkout == Path(primary).resolve():
         raise ValueError("experiment must not run in the primary developer checkout")
     args.output.mkdir(parents=True, exist_ok=True)
-    args.env = os.environ.copy()
-    args.env["PYO3_PYTHON"] = str(ROOT / ".venv/bin/python")
-    args.env["CARGO_BUILD_JOBS"] = "8"
-    args.env.pop("RUSTFLAGS", None)
+    args.env = execution_environment(os.environ.copy())
     source = subprocess.check_output(["git", "show", f"HEAD:{SOURCE}"], cwd=args.checkout).decode()
     current = (args.checkout / SOURCE).read_text()
     if current != source:

@@ -1,0 +1,30 @@
+{
+  "103a5ee4a87a": {
+    "classification": "real_gap",
+    "reason": "The final inverse counter never advances. For rank 1 and axes [0], the initialized vector is repeatedly assigned zero and the loop never exits. Timeout/unwind outcomes are inconclusive, not finite violation witnesses."
+  },
+  "4717add51eae": {
+    "classification": "real_gap",
+    "reason": "The inverse initialization counter never advances. For rank 1 and axes [0], the loop keeps appending zeros without reaching its exit. Allocation exhaustion is capped and reported inconclusive; the source establishes a liveness defect but no finite violation witness is credited."
+  },
+  "4c10346320a2": {
+    "classification": "real_gap",
+    "reason": "The survivor counter never advances. For rank 1 and axis 0, i remains zero and no allocation occurs: the loop never terminates. Other inputs can append indefinitely. Resource/timeout/unwind outcomes are inconclusive, not finite contract-violation witnesses."
+  },
+  "597bbc64294a": {
+    "classification": "real_gap",
+    "reason": "The outer admission counter never advances. For rank 1 and axes [0], the loop remains at i=0 forever. This is a liveness defect; resource/timeout/unwind outcomes are inconclusive, not finite contract-violation witnesses."
+  },
+  "a29c46f04e93": {
+    "classification": "real_gap",
+    "reason": "The inner duplicate-check counter never advances. For rank 2 and axes [0,1], the second outer iteration remains at j=0 forever. This is a liveness defect established by the fixed counter in source; timeout or unwind failure is inconclusive and receives no contract-detection credit without a finite violation witness."
+  },
+  "a84366d80e77": {
+    "classification": "equivalent",
+    "reason": "The first inverse assignment writes index zero at axes[0], already initialized to zero. Skipping it leaves that entry correct; uniqueness ensures subsequent writes target other entries. Rank zero returns the same empty vector; invalid permutations still return None. Independent concrete probe covered ranks 0..4; the argument applies to every rank."
+  },
+  "fb94e51e18a5": {
+    "classification": "equivalent",
+    "reason": "Changing the inverse vector filler from zero to one is unobservable: admission establishes a full permutation and the following loop overwrites every vector position exactly once with its original index before returning. Rank zero is empty; invalid permutations return before allocation."
+  }
+}

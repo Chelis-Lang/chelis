@@ -1,0 +1,92 @@
+{
+  "bound": {
+    "bound": 5,
+    "metal_movement_rank_ceiling": 8,
+    "runtime_abi_rank_ceiling": 2147483647,
+    "unwind_by_harness": {
+      "admission": 8,
+      "inverse": 8,
+      "normalization": 32,
+      "survivors": 8
+    }
+  },
+  "catches": {
+    "kani": 36,
+    "tests": 36,
+    "verus": 40
+  },
+  "equivalent": 2,
+  "inconclusive_classifications": 0,
+  "individual_maxima": {
+    "admission": 13,
+    "inverse": 12,
+    "normalization": 18446744073709551615,
+    "survivors": 5
+  },
+  "kani_reclassified": [
+    "a29c46f04e93",
+    "597bbc64294a",
+    "4717add51eae",
+    "103a5ee4a87a"
+  ],
+  "marginal_catches": {
+    "kani": [],
+    "tests": [],
+    "verus": [
+      "b44bf8a3f4db"
+    ]
+  },
+  "mutants": 48,
+  "outcomes": {
+    "kani": {
+      "caught": 36,
+      "inconclusive": 8,
+      "pass": 1,
+      "unwitnessed_proof_failure": 0
+    },
+    "tests": {
+      "caught": 36,
+      "inconclusive": 5,
+      "pass": 4,
+      "unwitnessed_proof_failure": 0
+    },
+    "verus": {
+      "caught": 40,
+      "inconclusive": 0,
+      "pass": 0,
+      "unwitnessed_proof_failure": 5
+    }
+  },
+  "real_gaps": 45,
+  "unwitnessed_proof_rejections": [
+    "a29c46f04e93",
+    "597bbc64294a",
+    "4c10346320a2",
+    "4717add51eae",
+    "a84366d80e77",
+    "103a5ee4a87a"
+  ],
+  "unwitnessed_real_gaps": [
+    "a29c46f04e93",
+    "597bbc64294a",
+    "4c10346320a2",
+    "4717add51eae",
+    "103a5ee4a87a"
+  ],
+  "vermilion": {
+    "outcomes": {
+      "caught": 4,
+      "unwitnessed_proof_failure": 6
+    },
+    "selected_mutants": 10
+  },
+  "verus_only_confirmed": [
+    "b44bf8a3f4db"
+  ],
+  "verus_reclassified": [
+    "d8dfcb8df199",
+    "d3506369ffb4"
+  ],
+  "viable": 47,
+  "witnessed_real_gaps": 40
+}
