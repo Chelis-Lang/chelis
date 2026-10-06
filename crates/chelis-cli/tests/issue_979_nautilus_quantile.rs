@@ -144,11 +144,17 @@ median = quantile_vec(observations(), 0.5)
         .as_array()
         .and_then(|roots| roots.iter().find(|root| root["name"] == "median"))
         .expect("median root");
-    let value = median["value"]["value"]
-        .as_f64()
-        .or_else(|| median["value"]["value"]["data"][0].as_f64())
-        .expect("scalar median value");
-    assert!((value - 2.0).abs() <= f32::EPSILON as f64, "median={value}");
+    // `eval --json` carries a scalar as the tagged numeric carrier: its dtype
+    // and its stored IEEE bits in hex, never a bare float. The median of
+    // [3.0, 1.0, 2.0] is exactly f32 2.0.
+    assert_eq!(
+        median["value"],
+        serde_json::json!({
+            "type": "scalar",
+            "value": { "dtype": "f32", "bits": format!("{:08x}", 2.0f32.to_bits()) },
+        }),
+        "median={median}"
+    );
 }
 
 #[test]
