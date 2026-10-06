@@ -62,6 +62,16 @@ internals.
 ### `chelis tide mcp`
 
 Launch the MCP server on stdio.
+Messages are UTF-8 JSON-RPC objects, one per newline-terminated line, following
+the [MCP stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
+JSON strings may contain escaped newlines; messages may not span physical lines.
+This transport does not use LSP `Content-Length` headers. Stdout contains only
+MCP messages; diagnostics go to stderr. Invalid JSON or an unterminated final
+line fails the stdio session instead of being interpreted as another protocol.
+Responses retain the request ID. Notifications, including
+`notifications/initialized`, receive no response and do not invoke tools.
+The `ping` request returns an empty result. Closing stdin ends the server.
+
 The MCP tool surface is:
 
 - `chelis_check`

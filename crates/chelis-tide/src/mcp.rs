@@ -35,7 +35,8 @@ pub fn run_stdio_blocking(runtime: &'static EmbeddedRuntime) -> io::Result<()> {
 
 pub fn handle_message(message: &Value, runtime: &'static EmbeddedRuntime) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
-    let id = message.get("id").cloned();
+    // JSON-RPC notifications never receive a response or execute a tool.
+    let id = Some(message.get("id")?.clone());
     match method {
         "initialize" => Some(success(
             id,
@@ -52,6 +53,7 @@ pub fn handle_message(message: &Value, runtime: &'static EmbeddedRuntime) -> Opt
         )),
         "tools/list" => Some(success(id, json!({ "tools": tool_list() }))),
         "tools/call" => Some(handle_tool_call(id, message.get("params"), runtime)),
+        "ping" => Some(success(id, json!({}))),
         "shutdown" => Some(success(id, json!({}))),
         "exit" => None,
         other => Some(error(id, -32601, format!("unknown method `{other}`"))),
@@ -248,38 +250,17 @@ fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Value {
 }
 
 fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            let parsed = value.trim().parse::<usize>().map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid content length: {err}"),
-                )
-            })?;
-            content_length = Some(parsed);
-        }
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
     }
-
-    let Some(content_length) = content_length else {
+    if !line.ends_with('\n') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "missing Content-Length header",
+            "MCP message must end with a newline",
         ));
-    };
-
-    let mut buf = vec![0; content_length];
-    reader.read_exact(&mut buf)?;
-    let value = serde_json::from_slice(&buf)
+    }
+    let value = serde_json::from_str(&line)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     Ok(Some(value))
 }
@@ -287,8 +268,8 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
 fn write_message(writer: &mut impl Write, value: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(value)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
     writer.write_all(&body)?;
+    writer.write_all(b"\n")?;
     writer.flush()
 }
 
