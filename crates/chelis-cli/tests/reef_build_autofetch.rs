@@ -197,6 +197,34 @@ fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock
     ]
 }
 
+fn public_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock> {
+    vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.2.0")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(metadata_json(
+                "v0.2.0",
+                &[
+                    (ARCHIVE_ASSET_ID, "nautilus-0.2.0.tar.zst"),
+                    (SHELL_ASSET_ID, "nautilus-0.2.0.chb"),
+                ],
+            ))),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "chelis-lang",
+                "nautilus",
+                ARCHIVE_ASSET_ID,
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "chelis-lang",
+                "nautilus",
+                SHELL_ASSET_ID,
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes)),
+    ]
+}
+
 /// Wiremock harness — same shape as Item 6's oracle file. See its
 /// rustdoc for why the runtime stays alive while we run sync code
 /// against it.
@@ -601,10 +629,8 @@ fn oracle_autofetch_event_observable() {
 // Negative-parity tests (separate `#[test]` functions).
 // ============================================================
 
-/// Negative parity: `GITHUB_TOKEN` unset and no `gh` on PATH means
-/// auto-fetch's first step (resolving the token) fails with the
-/// `auth-missing` typed category. The error names the env-var fix
-/// suggestion. Build must not silently proceed.
+/// Negative parity: a private server rejects an anonymous auto-fetch with
+/// the `auth-missing` category. Build must not silently proceed.
 #[test]
 fn phaseA_item8_auth_missing_during_autofetch_names_env_fix() {
     let _g = file_lock();
@@ -613,13 +639,17 @@ fn phaseA_item8_auth_missing_during_autofetch_names_env_fix() {
     let reef_home = outer.path().join("reef-home");
     let app = stage_downstream_project(outer.path());
 
-    // No GITHUB_TOKEN, no `gh` (PATH empty). Wiremock not needed —
-    // we never get past auth resolution.
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(401)),
+    ]);
+    // No GITHUB_TOKEN and no `gh` (PATH empty): the private server refuses
+    // the anonymous request.
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
-        .env("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9")
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env_remove("GITHUB_TOKEN")
         .env("PATH", "")
         .current_dir(&app)
@@ -642,6 +672,47 @@ fn phaseA_item8_auth_missing_during_autofetch_names_env_fix() {
     assert!(
         !reef_home.join("index.json").exists(),
         "no half-install on auth-missing"
+    );
+    assert_eq!(
+        harness
+            .rt
+            .block_on(harness.server.received_requests())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn phaseA_item8_public_autofetch_without_token() {
+    let _g = file_lock();
+    let (archive, shell) = synthetic_nautilus_artifacts();
+    let harness = WiremockHarness::new();
+    harness.mount_all(public_api_mocks(archive, shell));
+    let outer = tempdir().expect("tempdir");
+    let reef_home = outer.path().join("reef-home");
+    let app = stage_downstream_project(outer.path());
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env_remove("GITHUB_TOKEN")
+        .env("PATH", "")
+        .current_dir(&app)
+        .args(["reef", "build"])
+        .assert()
+        .success();
+    assert_nautilus_installed(&reef_home);
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization"))
     );
 }
 

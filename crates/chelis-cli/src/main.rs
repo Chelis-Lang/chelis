@@ -611,8 +611,8 @@ enum ReefCommand {
     ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` via
     ///   the GitHub REST API. Both assets are validated through the
     ///   same on-disk verification path as `--from-monorepo`. Every
-    ///   request is authenticated, also for a public repository, with
-    ///   `GITHUB_TOKEN`, falling back to `gh auth token`.
+    ///   request uses `GITHUB_TOKEN`, falling back to `gh auth token`, when
+    ///   available. Public releases also work without a token.
     /// * `--from-lockfile` — read the project's `reef.lock`, walk every
     ///   dependency, and re-fetch each one from the `remote_origin` it
     ///   recorded. Hashes are verified against the lockfile pins; any
@@ -641,9 +641,8 @@ enum ReefCommand {
         from_monorepo: Option<PathBuf>,
         /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
         /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
-        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`): Reef
-        /// fetches release assets through the authenticated GitHub REST
-        /// API, also for a public repository.
+        /// Public releases need no token. For private releases, set
+        /// `GITHUB_TOKEN` or sign in with `gh auth login`.
         #[arg(long, value_name = "ORG/REPO@TAG", conflicts_with_all = ["from_lockfile", "bootstrap"])]
         from_github: Option<String>,
         /// Re-install every dependency named by the project's

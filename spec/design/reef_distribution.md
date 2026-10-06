@@ -211,10 +211,9 @@ attaches the prebuilt `<name>-<version>.chb` and
 `<name>-<version>.tar.zst` files (filenames omit the leading `v` even
 though the tag carries it).
 
-The dev team has authenticated access to the canonical org. Authentication is via
-standard GitHub PATs supplied through the `GITHUB_TOKEN` environment variable; there is
-no unauthenticated fallback because the canonical repos are private, so
-unauthenticated fetch would simply 404.
+Public releases are fetched anonymously when no token is available. For private
+repositories, `GITHUB_TOKEN` or `gh auth token` supplies a token with read
+access. Authenticated requests also have a higher GitHub API rate limit.
 
 The post-launch endgame is a registry server (Item 10). That is recorded
 here as future work but is not designed in this round.
@@ -243,10 +242,9 @@ Multiple `--from-github` flags are independent installs.
 
 - Parse `<org>/<repo>@<tag>` into components.
 - Resolve auth: read `GITHUB_TOKEN` from the environment; if unset, shell
-  out to `gh auth token` to obtain one. Hard-fail with a clear error if
-  neither yields a token, suggesting `export GITHUB_TOKEN=$(gh auth token)`
-  as the fix. Authentication is mandatory because the canonical repos are
-  private.
+  out to `gh auth token`. If neither yields a token, fetch anonymously.
+  A private release that rejects an anonymous request reports the token
+  needed to access it.
 - Fetch the two release assets via the GitHub REST API in two steps:
   1. `GET https://api.github.com/repos/<org>/<repo>/releases/tags/<tag>`
      with `Accept: application/vnd.github+json` to look up the
@@ -254,14 +252,13 @@ Multiple `--from-github` flags are independent installs.
      `<repo>-<ver>.tar.zst` and `<repo>-<ver>.chb`; capture each
      asset's numeric `id`.
   2. `GET https://api.github.com/repos/<org>/<repo>/releases/assets/<asset_id>`
-     with `Accept: application/octet-stream` and the auth header to
-     stream the bytes to a temp directory.
+     with `Accept: application/octet-stream` to stream the bytes to a
+     temp directory. Send the auth header only when a token is available.
 
   GitHub's public-facing `/releases/download/<tag>/<asset>` URL form
   does not serve private-repo asset bytes even with a valid
   `Authorization: token …` header — it returns 404. The canonical
-  chelis-lang shells are private during the pre-launch era; the API
-  path is required, not optional. Test fixtures inject a localhost
+  API path also serves public releases anonymously. Test fixtures inject a localhost
   base URL via `CHELIS_REEF_GITHUB_BASE_API` (default
   `https://api.github.com`).
 - Call the existing validation and placement logic, refactored out of
@@ -298,7 +295,8 @@ Multiple `--from-github` flags are independent installs.
   `GITHUB_TOKEN` set in env successfully fetches and installs Nautilus.
   The local registry afterward has `packages/nautilus/0.5.0/` populated
   identically to the `--from-monorepo` outcome.
-- Without the token, fails with a clear error pointing at the env var.
+- Without a token, a public release installs and a private release reports
+  the token needed to access it.
 - With a tampered local cache (alter the archive's hash), subsequent
   install fails with hash-mismatch error.
 - The MCP and HTTP surfaces of Tide are unaffected.
@@ -647,8 +645,8 @@ Per item:
   dependency set, retiring the out-of-band download-and-verify channel.
 
 With Items 6-9 shipped, a fresh dev environment's onboarding is
-`git clone <project> && export GITHUB_TOKEN=$(gh auth token) &&
-chelis reef build`. That is the experience. Item 11 extends it to binary
+`git clone <project> && chelis reef build` for public dependencies. Private
+dependencies require a token. Item 11 extends this to binary
 dependencies; the full cross-class onboarding becomes `chelis reef setup`
 ([`chelis_packaging_and_install.md`](chelis_packaging_and_install.md) §7).
 

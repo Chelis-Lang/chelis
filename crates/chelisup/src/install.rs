@@ -19,8 +19,9 @@
 //!   tests.
 //! - default (real installs): the GitHub REST two-step fetch
 //!   (metadata-by-tag, then asset-by-id with `Accept: octet-stream`),
-//!   authenticated via `GITHUB_TOKEN` or `gh auth token`. This is the
-//!   only form that serves **private**-repo asset bytes; the public
+//!   authenticated via `GITHUB_TOKEN` or `gh auth token` when available,
+//!   otherwise anonymous. The API form serves **private**-repo asset bytes;
+//!   the public
 //!   `/releases/download/...` URL does not. The API base is overridable
 //!   via `CHELISUP_GITHUB_BASE_API` (the wiremock seam), and the repo via
 //!   `CHELISUP_REPO`.
@@ -206,10 +207,10 @@ fn fetch_from_base(base: &str, assets: &[String], dir: &Path) -> Result<usize, S
     Ok(index)
 }
 
-/// GitHub REST two-step fetch (the real, private-repo-capable path) of the
+/// GitHub REST two-step fetch (public or private) of the
 /// first of `assets` the release lists, into `dir`.
 fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usize, String> {
-    let token = resolve_github_token()?;
+    let token = resolve_github_token().ok();
     let api = github_api_base();
     let repo = github_repo();
     let tag = format!("v{version}");
@@ -226,12 +227,15 @@ fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usi
         repo,
         tag
     );
-    let resp = client
+    let mut request = client
         .get(&meta_url)
-        .header("Authorization", format!("token {token}"))
         .header("User-Agent", "chelisup")
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = &token {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+    let resp = request
         .send()
         .map_err(|e| format!("network error fetching {meta_url}: {e}"))?;
     if !resp.status().is_success() {
@@ -240,6 +244,7 @@ fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usi
             resp.status().as_u16(),
             &tag,
             &repo,
+            token.is_some(),
         ));
     }
     let body = resp
@@ -259,13 +264,103 @@ fn fetch_from_github(version: &str, assets: &[String], dir: &Path) -> Result<usi
         &dir.join(&assets[index]),
         Some(GithubAuth {
             client: &client,
-            token: &token,
+            token: token.as_deref(),
             tag: &tag,
             repo: &repo,
         }),
     )
     .map_err(GetError::into_message)?;
     Ok(index)
+}
+
+#[cfg(test)]
+mod public_release_tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn public_release_fetches_without_gh_and_private_release_reports_auth() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(MockServer::start());
+        let asset = "chelis-v0.19.0-test.tar.gz".to_string();
+        let metadata = serde_json::json!({"assets": [{"id": 77, "name": asset}]}).to_string();
+        rt.block_on(async {
+            Mock::given(method("GET"))
+                .and(path("/repos/Chelis-Lang/chelis/releases/tags/v0.19.0"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(metadata.clone()))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/Chelis-Lang/chelis/releases/assets/77"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"public bytes"))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/Chelis-Lang/chelis/releases/tags/v0.19.1"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/Chelis-Lang/chelis/releases/tags/v0.19.2"))
+                .and(header("authorization", "token unit-test-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(metadata))
+                .mount(&server)
+                .await;
+        });
+
+        let old_base = std::env::var_os("CHELISUP_GITHUB_BASE_API");
+        let old_token = std::env::var_os("GITHUB_TOKEN");
+        let old_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("CHELISUP_GITHUB_BASE_API", server.uri());
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("PATH", "");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = fetch_from_github("0.19.0", std::slice::from_ref(&asset), dir.path());
+        let private_error = fetch_from_github("0.19.1", std::slice::from_ref(&asset), dir.path())
+            .expect_err("a private release must explain the missing token");
+        unsafe { std::env::set_var("GITHUB_TOKEN", "unit-test-token") };
+        let private_result = fetch_from_github("0.19.2", std::slice::from_ref(&asset), dir.path());
+        unsafe {
+            match old_base {
+                Some(v) => std::env::set_var("CHELISUP_GITHUB_BASE_API", v),
+                None => std::env::remove_var("CHELISUP_GITHUB_BASE_API"),
+            }
+            match old_token {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(private_result.unwrap(), 0);
+        assert_eq!(
+            std::fs::read(dir.path().join(&asset)).unwrap(),
+            b"public bytes"
+        );
+        assert!(private_error.contains("GITHUB_TOKEN"), "{private_error}");
+        let requests = rt.block_on(server.received_requests()).unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(
+            requests[..3]
+                .iter()
+                .all(|r| !r.headers.contains_key("authorization"))
+        );
+        assert!(
+            requests[3..]
+                .iter()
+                .all(|r| r.headers.contains_key("authorization"))
+        );
+    }
 }
 
 /// Why a GET failed: the server has no such file (HTTP 404), or anything else.
@@ -285,7 +380,7 @@ impl GetError {
 /// Optional GitHub auth context for [`http_get_to_file`].
 struct GithubAuth<'a> {
     client: &'a reqwest::blocking::Client,
-    token: &'a str,
+    token: Option<&'a str>,
     tag: &'a str,
     repo: &'a str,
 }
@@ -297,15 +392,18 @@ struct GithubAuth<'a> {
 fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Result<(), GetError> {
     let owned_client;
     let (client, builder) = match &auth {
-        Some(a) => (
-            a.client,
-            a.client
+        Some(a) => {
+            let mut builder = a
+                .client
                 .get(url)
-                .header("Authorization", format!("token {}", a.token))
                 .header("User-Agent", "chelisup")
                 .header("Accept", "application/octet-stream")
-                .header("X-GitHub-Api-Version", "2022-11-28"),
-        ),
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            if let Some(token) = a.token {
+                builder = builder.header("Authorization", format!("token {token}"));
+            }
+            (a.client, builder)
+        }
         None => {
             owned_client = reqwest::blocking::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
@@ -323,7 +421,7 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
     let status = resp.status();
     if !status.is_success() {
         let message = match &auth {
-            Some(a) => github_status_error(url, status.as_u16(), a.tag, a.repo),
+            Some(a) => github_status_error(url, status.as_u16(), a.tag, a.repo, a.token.is_some()),
             None => format!("fetching {url} returned HTTP {}", status.as_u16()),
         };
         return Err(if status.as_u16() == 404 {
@@ -340,11 +438,19 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
 }
 
 /// Map a GitHub HTTP status to a loud, actionable message.
-fn github_status_error(url: &str, status: u16, tag: &str, repo: &str) -> String {
+fn github_status_error(url: &str, status: u16, tag: &str, repo: &str, has_token: bool) -> String {
     match status {
+        401 | 403 if !has_token => format!(
+            "GitHub requires authentication (HTTP {status}) for {url}: \
+             set GITHUB_TOKEN or run gh auth login to access a private release"
+        ),
         401 | 403 => format!(
             "GitHub rejected the token (HTTP {status}) for {url}: \
              the token may be invalid or lack `contents: read` on {repo}"
+        ),
+        404 if !has_token => format!(
+            "release {tag} on {repo} returned HTTP 404 for {url}. The release may be missing \
+             or private; set GITHUB_TOKEN or run gh auth login if it is private"
         ),
         404 => format!(
             "release {tag} on {repo} returned HTTP 404 for {url}. This is ambiguous: \
@@ -743,7 +849,7 @@ mod tests {
 
     #[test]
     fn github_404_message_is_ambiguity_aware() {
-        let msg = github_status_error("u", 404, "v0.1.0", "Chelis-Lang/chelis");
+        let msg = github_status_error("u", 404, "v0.1.0", "Chelis-Lang/chelis", true);
         assert!(msg.contains("gh release view v0.1.0"), "{msg}");
         assert!(msg.contains("private"), "{msg}");
     }

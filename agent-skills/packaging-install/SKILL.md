@@ -25,19 +25,12 @@ Three layers (design: `spec/design/chelis_packaging_and_install.md`):
   unified `chelis reef doctor`.
 
 **Bootstrap & private-repo auth.** `chelisup.sh` drops the `chelisup` prebuilt on
-a bare machine; `chelisup install <ver>` then fetches toolchains. While
-`Chelis-Lang/chelis` is **private**, the public
-`curl -fsSL .../releases/latest/download/chelisup.sh | sh` line returns a **404**
-— GitHub serves no asset bytes for a private release to an unauthenticated client
-— so both the bootstrap and `chelisup install` require an authenticated `gh`. The
-checkout-free new-user command is the direct `gh` analogue of `curl | sh`:
-`gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh`
-(the script itself then `gh release download`s the `chelisup-<slug>` binary when
-`gh` is present, falling back to the public curl URL only once releases are
-public). `chelisup` resolves the token as `GITHUB_TOKEN` first, then
-`gh auth token` (`install.rs::resolve_github_token`). A bootstrap 404 is **auth,
-not a bad URL** — never "fix" it by making the release public or hand-placing a
-binary. Docs to keep in sync: `docs/book/src/install.md` §1, `README.md`, and the
+a bare machine; `chelisup install <ver>` then fetches toolchains. Public releases
+work without a GitHub token. The script uses an authenticated `gh` when
+available and otherwise fetches the public release URL with `curl`. `chelisup`
+resolves `GITHUB_TOKEN` first, then `gh auth token`; without either it sends
+anonymous GitHub REST requests. Private releases require a token with read
+access. Docs to keep in sync: `docs/book/src/install.md` §1, `README.md`, and the
 design doc §5.5.
 
 ## Store Layout

@@ -433,6 +433,7 @@ fn phaseA_item6_from_github_oracle() {
     let _g = file_lock();
     oracle_happy_path_via_lib_and_cli();
     oracle_byte_equality_with_from_monorepo();
+    oracle_public_release_without_token();
     oracle_auth_missing_no_gh();
     oracle_auth_rejected_401_distinct_from_missing();
     oracle_auth_rejected_403_also_typed();
@@ -594,9 +595,59 @@ fn oracle_byte_equality_with_from_monorepo() {
     );
 }
 
+fn oracle_public_release_without_token() {
+    let (archive, shell) = chelis_std_artifacts();
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path(
+                "chelis-lang",
+                "chelis-std",
+                &std_tag(),
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(metadata_json(
+                &std_tag(),
+                &[
+                    (ARCHIVE_ASSET_ID, std_asset("tar.zst").as_str()),
+                    (SHELL_ASSET_ID, std_asset("chb").as_str()),
+                ],
+            ))),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "chelis-lang",
+                "chelis-std",
+                ARCHIVE_ASSET_ID,
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive)),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "chelis-lang",
+                "chelis-std",
+                SHELL_ASSET_ID,
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell)),
+    ]);
+    let dir = tempdir().expect("tempdir");
+    let registry = dir.path().join("reef-home");
+    lib_install_from_github(&std_spec(), &harness.uri(), None, &registry)
+        .expect("public release must install without a token or gh");
+    assert!(registry.join(std_installed("tar.zst")).is_file());
+    assert!(registry.join(std_installed("chb")).is_file());
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization"))
+    );
+}
+
 fn oracle_auth_missing_no_gh() {
-    // No GITHUB_TOKEN, no `gh` on PATH (we drop PATH inside the
-    // helper). The error must name the env var and the actionable fix.
+    // A private release rejects the anonymous request. The error must
+    // explain how to supply a token, and the request must have reached it.
     let (harness, _, _) = fixture_canonical_release();
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
@@ -616,6 +667,12 @@ fn oracle_auth_missing_no_gh() {
         msg.contains("gh auth token"),
         "auth-missing message must suggest `gh auth token`: {msg}"
     );
+    let requests = harness
+        .rt
+        .block_on(harness.server.received_requests())
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].headers.contains_key("authorization"));
 }
 
 /// Wrong token (not empty, just wrong) yields a 401 from the GitHub

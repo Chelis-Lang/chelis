@@ -4236,8 +4236,8 @@ const DEFAULT_GITHUB_BASE: &str = "https://github.com";
 /// GitHub's public-facing `/releases/download/...` URL form does not
 /// serve private-repo asset bytes even with a valid `Authorization:
 /// token …` header — it returns 404. The canonical chelis-lang shells
-/// are private during the pre-launch era, so the API path is required,
-/// not optional. See `spec/design/reef_distribution.md` § Item 6.
+/// API path also serves public releases anonymously. See
+/// `spec/design/reef_distribution.md` § Item 6.
 ///
 /// Tests inject a localhost wiremock URL via `CHELIS_REEF_GITHUB_BASE_API`.
 const DEFAULT_GITHUB_BASE_API: &str = "https://api.github.com";
@@ -4253,11 +4253,11 @@ pub enum GitHubFetchError {
     /// `<org>/<repo>@<tag>` did not parse: missing slash, missing `@`,
     /// empty component, etc.
     Parse { input: String, reason: String },
-    /// Auth was unobtainable: `GITHUB_TOKEN` unset and `gh auth token`
-    /// shell-out also failed.
+    /// An anonymous request was rejected after `GITHUB_TOKEN` and
+    /// `gh auth token` yielded no token.
     AuthMissing { reason: String },
-    /// HTTP 401/403 from the release-asset URL even with a token; the
-    /// token is invalid or lacks scope.
+    /// HTTP 401/403 from a release API endpoint with a token; the token
+    /// is invalid or lacks scope.
     AuthRejected { url: String, status: u16 },
     /// HTTP 404 — the release tag exists but the named asset is not
     /// attached to it. This fires only after the release metadata has
@@ -4317,12 +4317,12 @@ impl std::fmt::Display for GitHubFetchError {
             Self::ReleaseTagNotFoundOrUnauthorized { url, tag } => write!(
                 f,
                 "release tag `{tag}` at {url} returned HTTP 404. This is ambiguous: \
-                 either (a) the tag does not exist on that repo, or (b) your token \
-                 (GITHUB_TOKEN / `gh auth token`) lacks `contents: read` access to \
+                 either (a) the tag does not exist on that repo, or (b) the request \
+                 lacks `contents: read` access to \
                  the repo. GitHub returns 404 (not 403) in case (b) as a privacy \
                  measure, so the two cannot be told apart from this response alone. \
-                 Verify with `gh release view {tag} --repo <org>/<repo>` using the \
-                 same token."
+                 For a private repo, set GITHUB_TOKEN or sign in with gh auth login. \
+                 Verify with `gh release view {tag} --repo <org>/<repo>`."
             ),
             Self::RateLimited { url, retry_after } => match retry_after {
                 Some(r) => write!(
@@ -5136,9 +5136,8 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
 }
 
 /// Best-effort GitHub token for source-store fetches: `GITHUB_TOKEN`, else
-/// `gh auth token`, else `None`. Unlike the install path, a source sync may
-/// still succeed without a token (a cached mirror, or a local/public
-/// remote in tests), so this returns `Option` rather than erroring.
+/// `gh auth token`, else `None`. Public release installs and source syncs
+/// may succeed without a token, so this returns `Option` rather than erroring.
 pub fn try_github_token() -> Option<String> {
     resolve_github_token().ok()
 }
@@ -5164,11 +5163,17 @@ fn github_api_base_url() -> String {
 fn map_http_error_status(
     url: &str,
     response: &reqwest::blocking::Response,
+    has_token: bool,
     not_found: impl FnOnce() -> GitHubFetchError,
 ) -> GitHubFetchError {
     let status = response.status();
     let code = status.as_u16();
     if code == 401 || code == 403 {
+        if !has_token {
+            return GitHubFetchError::AuthMissing {
+                reason: format!("GitHub returned HTTP {code} for anonymous request to {url}"),
+            };
+        }
         return GitHubFetchError::AuthRejected {
             url: url.to_string(),
             status: code,
@@ -5217,33 +5222,39 @@ fn map_http_error_status(
 fn fetch_release_metadata(
     client: &reqwest::blocking::Client,
     url: &str,
-    token: &str,
+    token: Option<&str>,
     tag: &str,
 ) -> Result<Vec<ReleaseAsset>, GitHubFetchError> {
-    let response = client
+    let mut request = client
         .get(url)
-        .header("Authorization", format!("token {token}"))
         .header("User-Agent", "chelis-reef/0.5")
         // GitHub's recommended Accept for the v3 REST API. Without
         // this some endpoints return v3-deprecated responses.
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .map_err(|e| GitHubFetchError::Network {
-            url: url.to_string(),
-            message: e.to_string(),
-        })?;
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+    let response = request.send().map_err(|e| GitHubFetchError::Network {
+        url: url.to_string(),
+        message: e.to_string(),
+    })?;
     if !response.status().is_success() {
-        return Err(map_http_error_status(url, &response, || {
-            // Metadata-step 404 is ambiguous: a missing tag and a
-            // private repo the token cannot read both return 404. Emit
-            // the dedicated variant whose message names both cases
-            // rather than the misleading "asset not found" wording.
-            GitHubFetchError::ReleaseTagNotFoundOrUnauthorized {
-                url: url.to_string(),
-                tag: tag.to_string(),
-            }
-        }));
+        return Err(map_http_error_status(
+            url,
+            &response,
+            token.is_some(),
+            || {
+                // Metadata-step 404 is ambiguous: a missing tag and a
+                // private repo the token cannot read both return 404. Emit
+                // the dedicated variant whose message names both cases
+                // rather than the misleading "asset not found" wording.
+                GitHubFetchError::ReleaseTagNotFoundOrUnauthorized {
+                    url: url.to_string(),
+                    tag: tag.to_string(),
+                }
+            },
+        ));
     }
     let body = response.text().map_err(|e| GitHubFetchError::Network {
         url: url.to_string(),
@@ -5299,31 +5310,35 @@ fn download_asset_by_id(
     client: &reqwest::blocking::Client,
     url: &str,
     asset_name: &str,
-    token: &str,
+    token: Option<&str>,
     target: &Path,
 ) -> Result<(), GitHubFetchError> {
-    let response = client
+    let mut request = client
         .get(url)
-        .header("Authorization", format!("token {token}"))
         .header("User-Agent", "chelis-reef/0.5")
         // CRITICAL: octet-stream tells the API to send the raw bytes.
         // Without this header the same URL returns the asset's JSON
         // descriptor instead of the binary payload.
         .header("Accept", "application/octet-stream")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .map_err(|e| GitHubFetchError::Network {
-            url: url.to_string(),
-            message: e.to_string(),
-        })?;
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+    let response = request.send().map_err(|e| GitHubFetchError::Network {
+        url: url.to_string(),
+        message: e.to_string(),
+    })?;
 
     if !response.status().is_success() {
-        return Err(map_http_error_status(url, &response, || {
-            GitHubFetchError::ReleaseAssetNotFound {
+        return Err(map_http_error_status(
+            url,
+            &response,
+            token.is_some(),
+            || GitHubFetchError::ReleaseAssetNotFound {
                 url: url.to_string(),
                 asset_name: asset_name.to_string(),
-            }
-        }));
+            },
+        ));
     }
     let mut response = response;
     let mut out = fs::File::create(target).map_err(|e| GitHubFetchError::Io {
@@ -5383,12 +5398,11 @@ fn find_asset_id(
 /// `CHELIS_REEF_GITHUB_BASE_API` defaults to `https://api.github.com`.
 /// The web-host URL form `/<org>/<repo>/releases/download/<tag>/<asset>`
 /// is **not used**; that form 404s on private repos. The canonical
-/// chelis-lang shells are private during the pre-launch era, so the
-/// API path is required.
+/// API path serves both public and private releases.
 ///
 /// Authentication: `GITHUB_TOKEN` env var, or `gh auth token`
-/// shell-out fallback. Auth is mandatory; an unauthenticated fetch
-/// hard-fails with an actionable message.
+/// shell-out fallback. Without a token, public releases install anonymously;
+/// private releases that reject the request return an actionable error.
 ///
 /// On error, the function returns without updating the registry
 /// index; any tempdir created for the download is removed. On
@@ -5399,7 +5413,7 @@ pub fn install_from_github(
     registry_root: &Path,
 ) -> Result<InstalledArtifact, GitHubFetchError> {
     let spec = GitHubReleaseSpec::parse(org_repo_tag)?;
-    let token = resolve_github_token()?;
+    let token = try_github_token();
     let api_base = github_api_base_url();
 
     // Tempdir lives for the duration of the fetch+install. On any
@@ -5427,15 +5441,27 @@ pub fn install_from_github(
 
     // Step 1: fetch release metadata, extract asset ids.
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, token.as_deref(), &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let shell_id = find_asset_id(&assets, &shell_name, &metadata_url)?;
 
     // Step 2: stream asset bytes by id.
     let archive_url = spec.release_asset_url(&api_base, archive_id);
     let shell_url = spec.release_asset_url(&api_base, shell_id);
-    download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
-    download_asset_by_id(&client, &shell_url, &shell_name, &token, &shell_path)?;
+    download_asset_by_id(
+        &client,
+        &archive_url,
+        &archive_name,
+        token.as_deref(),
+        &archive_path,
+    )?;
+    download_asset_by_id(
+        &client,
+        &shell_url,
+        &shell_name,
+        token.as_deref(),
+        &shell_path,
+    )?;
 
     // Item 9 retrofit: stamp the registry entry with the
     // `github://<org>/<repo>@<tag>` origin so that downstream
@@ -5560,7 +5586,7 @@ pub fn install_binary_artifact(
         });
     }
 
-    let token = resolve_github_token()?;
+    let token = try_github_token();
     let api_base = github_api_base_url();
 
     let spec = GitHubReleaseSpec::parse(&format!("{org}/{repo}@{tag}"))?;
@@ -5579,12 +5605,12 @@ pub fn install_binary_artifact(
 
     // Step 1: release metadata -> asset id.
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, token.as_deref(), &spec.tag)?;
     let asset_id = find_asset_id(&assets, asset, &metadata_url)?;
 
     // Step 2: stream the asset bytes by id.
     let asset_url = spec.release_asset_url(&api_base, asset_id);
-    download_asset_by_id(&client, &asset_url, asset, &token, &asset_path)?;
+    download_asset_by_id(&client, &asset_url, asset, token.as_deref(), &asset_path)?;
 
     // Fail-closed SHA-256 verification BEFORE any placement.
     let got_sha = sha256_file(&asset_path).map_err(|message| GitHubFetchError::Validation {
@@ -6319,7 +6345,7 @@ impl From<BootstrapError> for String {
 /// network fetch is repeated for the archive byte stream, but the
 /// validated install path stays the same as the single-shell case.
 fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, BootstrapError> {
-    let token = resolve_github_token()?;
+    let token = try_github_token();
     let api_base = github_api_base_url();
     let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
 
@@ -6340,10 +6366,16 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, Bootstr
         })?;
 
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, token.as_deref(), &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let archive_url = spec.release_asset_url(&api_base, archive_id);
-    download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
+    download_asset_by_id(
+        &client,
+        &archive_url,
+        &archive_name,
+        token.as_deref(),
+        &archive_path,
+    )?;
 
     let extract_dir = tmp.path().join("extract");
     fs::create_dir_all(&extract_dir).map_err(|e| {
@@ -13313,9 +13345,9 @@ some-registry-lib = {{ version = "0.1.0" }}
         // What we CAN assert without waiting: if CHELIS_REEF_HOME is pointed at
         // an empty directory, load_registry_package errors immediately (no hang).
         //
-        // Item 8: auto-fetch is on by default for eval-side callers. Lock the
-        // env so auto-fetch surfaces `auth-missing` instantly instead of
-        // attempting a real network round trip:
+        // Item 8: auto-fetch is on by default for eval-side callers. Point
+        // anonymous requests at a closed local port so this test does not
+        // contact GitHub:
         // - `GITHUB_TOKEN` removed
         // - the test-only `gh auth token` fallback disabled
         // Do not mutate process-wide PATH: parallel Git fixtures need it
@@ -13324,11 +13356,13 @@ some-registry-lib = {{ version = "0.1.0" }}
         // negative test guards against.
         let prior_token = std::env::var_os("GITHUB_TOKEN");
         let prior_disable_fallback = std::env::var_os("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK");
+        let prior_api_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE_API");
         let path_before = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
             std::env::remove_var("GITHUB_TOKEN");
             std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
+            std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9");
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
@@ -13342,6 +13376,10 @@ some-registry-lib = {{ version = "0.1.0" }}
             match prior_disable_fallback {
                 Some(v) => std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", v),
                 None => std::env::remove_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK"),
+            }
+            match prior_api_base {
+                Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
+                None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE_API"),
             }
         }
         assert_eq!(

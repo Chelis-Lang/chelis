@@ -112,9 +112,10 @@ fetched files with the lockfile hashes and reports mismatches.
   shell release tags. You can supply explicit `ORG/REPO@TAG` entries
   instead.
 
-Remote GitHub fetches go through the authenticated GitHub REST API, so they
-need a token even for a public repository: Reef uses `GITHUB_TOKEN` if set,
-then `gh auth token`. A private repository also needs read access. Source
+The published 0.19.0 compiler requires a token for remote GitHub fetches,
+including public releases. Source-built Reef fetches public releases without a
+token when none is available. It uses `GITHUB_TOKEN` if set, then `gh auth token`,
+for private repositories and higher API rate limits. A private repository needs read access. Source
 packages install in the local Reef registry, normally `~/.chelis/reef`.
 `CHELIS_REEF_HOME` selects a different registry; setting `CHELIS_HOME` alone
 does not move it.
