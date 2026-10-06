@@ -189,6 +189,16 @@ class SecretScanIntegrationTests(unittest.TestCase):
                     msg="new candidate credentials must still fail the fallback scan",
                 )
 
+    def test_new_tag_on_main_scans_its_history(self):
+        (self.repo / "initial").write_text("initial clean state\n")
+        self.commit_all("initial")
+        (self.repo / "credential.txt").write_text(f"fixture_key = {FAKE_TOKEN}\n")
+        tagged = self.commit_all("credential in tagged history")
+        self.git("update-ref", "refs/remotes/origin/main", tagged)
+        (self.repo / ".gitleaks.toml").write_text('title = "Untrusted source config"\n')
+        result = self.run_driver({"ref": "refs/tags/release", "before": "0" * 40, "after": tagged})
+        self.assertEqual(result.returncode, 1, msg="a first tag push on main must scan the tagged history")
+
 
 
 if __name__ == "__main__":

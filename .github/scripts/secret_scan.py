@@ -42,7 +42,8 @@ def select_range(event_name,event,repo):
             # A new ref or rewritten history has no usable push boundary. Scan
             # the candidate since its fork from the trusted default branch,
             # without including unrelated refs or old main history.
-            if event.get('ref')=='refs/heads/main':
+            # Tags and a rewritten default branch have no branch fork to use.
+            if not event.get('ref','').startswith('refs/heads/') or event['ref']=='refs/heads/main':
                 return after
             main=valid_sha(git(repo,'rev-parse','--verify','refs/remotes/origin/main^{commit}').stdout.strip())
             ancestor=git(repo,'merge-base',main,after,check=False)

@@ -70,6 +70,12 @@ class SecretScanTests(unittest.TestCase):
     def test_main_force_push_scans_candidate_ancestry(self):
         self.assertEqual(scan.select_range('push',{'ref':'refs/heads/main','before':'a'*40,'after':self.after},self.repo),self.after)
 
+    def test_new_tag_scans_candidate_ancestry_even_when_main_contains_it(self):
+        self.git('update-ref','refs/remotes/origin/main',self.after)
+        for candidate in (self.before,self.after):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(scan.select_range('push',{'ref':'refs/tags/release','before':'0'*40,'after':candidate},self.repo),candidate)
+
     def test_unrelated_branch_scans_candidate_ancestry(self):
         self.git('checkout','--orphan','unrelated')
         self.git('rm','-rf','.')
