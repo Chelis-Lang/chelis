@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.1] - 2026-10-06
+
+### Fixed
+
+- Public Chelis toolchains and Reef packages install from GitHub releases without
+  a GitHub token. Private releases continue to use `GITHUB_TOKEN` or `gh auth token`.
+  See [#2840](https://github.com/Chelis-Lang/chelis/issues/2840).
+
+- The checker processes nested aggregate result constraints together, avoiding repeated traversal when checking long list literals. See [#2975](https://github.com/Chelis-Lang/chelis/issues/2975).
+
+- Reef builds with an exact package pin no longer fail because an excluded version in the local registry has an unreadable shell format. Errors for an unreadable matching candidate name its version and matching requirement. See [#3290](https://github.com/Chelis-Lang/chelis/issues/3290).
+
+- `chelis tide mcp` uses newline-delimited JSON instead of LSP-style
+  `Content-Length` headers, so standard MCP clients can initialize, discover tools,
+  and call them over stdio. Notifications no longer receive spurious error
+  responses, and the server answers `ping` requests.
+
+- The release E2E softmax probe states its tensor dtype explicitly, so it remains
+  valid under the tensor literal ingress contract.
+
 ## [0.19.0] - 2026-10-06
 
 ### Changed
