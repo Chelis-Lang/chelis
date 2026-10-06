@@ -39,7 +39,17 @@ def select_range(event_name,event,repo):
             raise ValueError('A deleted ref has no candidate history to scan')
         git(repo,'cat-file','-e',after+'^{commit}')
         if set(before)=={'0'} or git(repo,'cat-file','-e',before+'^{commit}',check=False).returncode:
-            return '--all'
+            # A new ref or rewritten history has no usable push boundary. Scan
+            # the candidate since its fork from the trusted default branch,
+            # without including unrelated refs or old main history.
+            # Tags and a rewritten default branch have no branch fork to use.
+            if not event.get('ref','').startswith('refs/heads/') or event['ref']=='refs/heads/main':
+                return after
+            main=valid_sha(git(repo,'rev-parse','--verify','refs/remotes/origin/main^{commit}').stdout.strip())
+            ancestor=git(repo,'merge-base',main,after,check=False)
+            if ancestor.returncode:
+                return after
+            return valid_sha(ancestor.stdout.strip())+'..'+after
         return before+'..'+after
     if event_name=='pull_request':
         pr=event['pull_request'];base=valid_sha(pr['base']['sha']);head=valid_sha(pr['head']['sha'])

@@ -127,6 +127,7 @@ class SecretScanIntegrationTests(unittest.TestCase):
         suppressions = self.commit_all("add candidate-controlled suppressions")
         (self.repo / "maintenance.txt").write_text("harmless cleanup follow-up\n")
         cleanup = self.commit_all("cleanup-only follow-up")
+        self.git("update-ref", "refs/remotes/origin/main", initial)
 
         cleanup_only = self.run_driver({"before": suppressions, "after": cleanup})
         self.assertEqual(cleanup_only.returncode, 0, msg="cleanup-only push range should contain no credential introduction")
@@ -136,8 +137,8 @@ class SecretScanIntegrationTests(unittest.TestCase):
         self.git("checkout", "--detach", cleanup)
         incremental = self.run_driver({"before": initial, "after": cleanup})
         self.assertEqual(incremental.returncode, 1, msg="incremental history must retain detection despite checkout suppressions")
-        full_history = self.run_driver({"before": "0" * 40, "after": cleanup})
-        self.assertEqual(full_history.returncode, 1, msg="new-ref fallback must find the removed historical credential")
+        new_ref = self.run_driver({"ref": "refs/heads/candidate", "before": "0" * 40, "after": cleanup})
+        self.assertEqual(new_ref.returncode, 1, msg="new-ref fallback must find a credential introduced after the main fork")
 
         prepared = secret_scan.prepare_source(self.repo, self.root / "prepared-bare")
         prepared_repo = prepared
@@ -154,6 +155,49 @@ class SecretScanIntegrationTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         ).strip()
         self.assertTrue(set(original_refs.splitlines()).issubset(set(copied_refs.splitlines())))
+
+    def test_new_branch_excludes_main_history_but_detects_candidate_secret(self):
+        (self.repo / "initial").write_text("initial clean state\n")
+        self.commit_all("initial")
+        (self.repo / "old-credential.txt").write_text(f"fixture_key = {FAKE_TOKEN}\n")
+        self.commit_all("historical main credential")
+        (self.repo / "old-credential.txt").unlink()
+        main = self.commit_all("remove historical main credential")
+        self.git("update-ref", "refs/remotes/origin/main", main)
+        self.git("checkout", "-b", "candidate")
+        (self.repo / ".gitleaks.toml").write_text('title = "Untrusted source config"\n')
+        (self.repo / "clean.txt").write_text("clean candidate change\n")
+        clean = self.commit_all("clean candidate")
+        self.gitleaks_report(self.root / "historical-findings.json")
+
+        zero_before = {"ref": "refs/heads/candidate", "before": "0" * 40, "after": clean}
+        missing_before = {"ref": "refs/heads/candidate", "before": "a" * 40, "after": clean}
+        for event in (zero_before, missing_before):
+            with self.subTest(event=event["before"]):
+                self.assertEqual(self.run_driver(event).returncode, 0)
+
+        (self.repo / "new-credential.txt").write_text(f"fixture_key = {FAKE_TOKEN}\n")
+        leaked = self.commit_all("candidate credential")
+        for event in (
+            {"ref": "refs/heads/candidate", "before": "0" * 40, "after": leaked},
+            {"ref": "refs/heads/candidate", "before": "a" * 40, "after": leaked},
+        ):
+            with self.subTest(event=event["before"]):
+                self.assertEqual(
+                    self.run_driver(event).returncode,
+                    1,
+                    msg="new candidate credentials must still fail the fallback scan",
+                )
+
+    def test_new_tag_on_main_scans_its_history(self):
+        (self.repo / "initial").write_text("initial clean state\n")
+        self.commit_all("initial")
+        (self.repo / "credential.txt").write_text(f"fixture_key = {FAKE_TOKEN}\n")
+        tagged = self.commit_all("credential in tagged history")
+        self.git("update-ref", "refs/remotes/origin/main", tagged)
+        (self.repo / ".gitleaks.toml").write_text('title = "Untrusted source config"\n')
+        result = self.run_driver({"ref": "refs/tags/release", "before": "0" * 40, "after": tagged})
+        self.assertEqual(result.returncode, 1, msg="a first tag push on main must scan the tagged history")
 
 
 
