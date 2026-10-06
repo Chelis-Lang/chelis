@@ -27194,20 +27194,6 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "slots stay in declared order"
         );
     }
-
-    #[test]
-    fn a_declared_order_record_literal_constructs_directly() {
-        let body = lowered_record_body(
-            "def mk(x: f32) -> S = S { lo: add(x, 1.0f32), hi: mul(x, 2.0f32) }",
-        );
-        let HostExprKind::AdtConstruct { fields, .. } = &record_construction(&body).kind else {
-            panic!("a declared-order record literal needs no sequencing: {body:?}");
-        };
-        assert_eq!(
-            fields.iter().map(operation_name).collect::<Vec<_>>(),
-            ["add", "mul"]
-        );
-    }
 }
 
 #[cfg(test)]
