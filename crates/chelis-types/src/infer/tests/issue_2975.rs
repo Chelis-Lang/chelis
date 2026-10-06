@@ -2,6 +2,7 @@
 //! Result-origin equalities remain required, including for Grad values in lists.
 
 use super::*;
+use std::time::Instant;
 
 fn check_surf(source: &str) -> Result<CheckedProgram, InferResult> {
     let declarations = chelis_surf::parser::parse_str(source).expect("Surf fixture parses");
@@ -47,6 +48,38 @@ fn numeric_list_replay_work_is_linear() {
     assert!(
         large_total <= small_total * 12,
         "100 -> 1000 elements: {small:?} -> {large:?} replay visits"
+    );
+}
+
+#[test]
+fn numeric_list_check_time_scales_with_element_count() {
+    let source = |elements| {
+        format!(
+            "probe = to_tensor([{}])",
+            vec!["0.0f64"; elements].join(", ")
+        )
+    };
+    let small_source = source(100);
+    let large_source = source(1000);
+    check_surf(&small_source).expect("warm the checker before timing");
+
+    let mut small_times = [0; 3];
+    let mut large_times = [0; 3];
+    for index in 0..3 {
+        let start = Instant::now();
+        check_surf(&small_source).expect("100-element list checks");
+        small_times[index] = start.elapsed().as_nanos();
+
+        let start = Instant::now();
+        check_surf(&large_source).expect("1000-element list checks");
+        large_times[index] = start.elapsed().as_nanos();
+    }
+    small_times.sort_unstable();
+    large_times.sort_unstable();
+
+    assert!(
+        large_times[1] <= small_times[1] * 30,
+        "100 -> 1000 elements took {small_times:?} -> {large_times:?} ns"
     );
 }
 
