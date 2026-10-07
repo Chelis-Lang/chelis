@@ -155,6 +155,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--workspace",
             "--all-targets",
             "--features",
+            "chelis-cli/clarabel-provider,"
             "chelis-cli/ownership-ledger,"
             "chelis-compiler-api/compilation-trace,"
             "chelis-compiler-api/ownership-ledger,"

@@ -4372,6 +4372,18 @@ packages = [
 
 # Exact release inputs; neighboring example and corpus sources stay unclassified.
 
+# The checked path dependency and solver call are exercised by the feature-gated
+# chelis-cli::clarabel_native_eval integration target.
+[[path_rule]]
+prefix = "examples/illustrative/clarabel_qp/"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "packages/chelis-clarabel/"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 [[path_rule]]
 prefix = "examples/illustrative/io_pipeline/reef.toml"
 disposition = "owner"

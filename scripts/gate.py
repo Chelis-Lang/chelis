@@ -318,6 +318,7 @@ CLIPPY_CORE_WITHOUT_MIGRATION: list[str] = [
 ]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
+    "chelis-cli/clarabel-provider,"
     "chelis-cli/ownership-ledger,"
     "chelis-compiler-api/compilation-trace,"
     "chelis-compiler-api/ownership-ledger,"
