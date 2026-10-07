@@ -8770,35 +8770,39 @@ fn load_registry_package_or_autofetch(
     }
 
     // Resolve the source: the lockfile `remote_origin` wins, then the
-    // canonical-org default. Messages name `source_origin` as written.
+    // canonical-org default. Fetch messages name `source_origin` as
+    // written. The `--no-auto-fetch` hint names the parsed coordinate.
     let locked_origin = lockfile_dep.and_then(lockfile_remote_origin);
     let source_origin = locked_origin
         .clone()
         .unwrap_or_else(|| canonical_origin_for(name, version));
 
+    // `install_from_github` takes `<org>/<repo>@<tag>`. A lockfile origin
+    // keeps its `github://` scheme, so parse it first (chelis#3314).
+    let fetch_coordinate = match locked_origin.as_deref().map(parse_remote_origin) {
+        None => Ok(source_origin.clone()),
+        Some(Ok(spec)) => Ok(format!("{}/{}@{}", spec.org, spec.repo, spec.tag)),
+        Some(Err(error)) => Err(GitHubFetchError::Parse {
+            input: source_origin.clone(),
+            reason: error.to_string(),
+        }),
+    };
+
     if !options.auto_fetch {
-        // Opt-out path. Improved error wording: name the URL that
-        // would have been tried so the user can run
-        // `chelis reef install --from-github <url>` themselves.
+        // Opt-out path. Name the coordinate that the user can pass to
+        // `chelis reef install --from-github` themselves.
         return Err(format_missing_dep_error(
             name,
             version,
-            &source_origin,
+            fetch_coordinate.as_ref().unwrap_or(&source_origin),
             None,
             false,
         ));
     }
 
-    // `install_from_github` takes `<org>/<repo>@<tag>`. A lockfile origin
-    // keeps its `github://` scheme, so parse it first (chelis#3314).
-    let fetch_coordinate = match locked_origin.as_deref().map(parse_remote_origin) {
-        None => source_origin.clone(),
-        Some(Ok(spec)) => format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
-        Some(Err(error)) => {
-            let fetch_err = GitHubFetchError::Parse {
-                input: source_origin.clone(),
-                reason: error.to_string(),
-            };
+    let fetch_coordinate = match fetch_coordinate {
+        Ok(coordinate) => coordinate,
+        Err(fetch_err) => {
             return Err(format_missing_dep_error(
                 name,
                 version,

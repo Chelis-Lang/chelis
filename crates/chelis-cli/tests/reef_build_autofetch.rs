@@ -944,8 +944,8 @@ fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
 ///
 /// Stages a hand-written `reef.lock` whose `[dependencies.source]`
 /// block sets `remote_origin = "github://other-org/nautilus@v0.2.0"`,
-/// then asserts the build fetches from `other-org`'s wiremock path
-/// rather than the canonical-org one.
+/// then asserts that `chelis reef install --from-lockfile` fetches from
+/// `other-org`'s wiremock path rather than the canonical-org one.
 #[test]
 fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
     let _g = file_lock();
@@ -1131,7 +1131,15 @@ fn locked_github_origin_autofetches_into_cold_registry() {
     );
 
     // Cold registry: only the lockfile names the source of nautilus.
+    // With auto-fetch off, the hint must name a coordinate that
+    // `chelis reef install --from-github` accepts.
     fs::remove_dir_all(&reef_home).expect("remove reef home");
+    chelis(&["reef", "build", "--no-auto-fetch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`chelis reef install --from-github other-org/nautilus@v0.2.0` manually",
+        ));
     chelis(&["reef", "build"])
         .assert()
         .success()
