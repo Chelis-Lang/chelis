@@ -12,9 +12,8 @@ import Std.Tensor.Construct (unsqueeze)
 y = unsqueeze(to_tensor([1.0, 2.0], f32), 0i32)
 ```
 
-```text
-`Std.Tensor.Construct.unsqueeze` argument 1; two adjacent rank spreads cannot be split against a concrete shape; the boundary between them is undetermined (outside the decidable fragment, spec/04-type-system.md §4.5.3)
-```
+`chelis check` reports a type error on argument 1 of `unsqueeze`, saying that
+two adjacent rank spreads cannot be split against a concrete shape.
 
 The built-in shape operations do the same jobs with an explicit axis or
 target shape:
@@ -36,6 +35,20 @@ stacked = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])
   axis of extent one at a constant position.
 - In place of `squeeze(x, axis)`, use `reshape(x, [...])` with the target
   extents written out as `i64` values.
-- In place of `stack(xs, axis)` over a fixed set of tensors, insert the new
-  axis into each and `concat` along it. A `List` whose length is known only
-  at run time has no equivalent recipe.
+- In place of `stack(xs, axis)`, insert the new axis into each tensor and
+  `concat` along it. `map` does this for a `List` of any length, including
+  one built at run time:
+
+```chelis-surf
+def stack_rows[n](xs: List[tensor[n, f32]]) -> tensor[*, n, f32] = concat(map(fn (x) -> insert(x, 0i32, 1i64), xs), 0i32)
+rows = [to_tensor([1.0, 2.0], f32), to_tensor([3.0, 4.0], f32), to_tensor([5.0, 6.0], f32)]
+stacked = stack_rows(rows)
+```
+
+```text
+rows = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0]), tensor(shape=[2], data=[5.0, 6.0])]
+stacked = tensor(shape=[3, 2], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+```
+
+The result's first extent is `*` because it depends on the list's length.
+The same program builds with `chelis build` and prints the same output.

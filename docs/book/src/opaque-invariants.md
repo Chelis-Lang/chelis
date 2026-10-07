@@ -65,7 +65,6 @@ the type.
 
 ```sh
 chelis check opaque_invariants.ch
-chelis eval --file opaque_invariants.ch --json
 chelis prove --capabilities
 chelis prove opaque_invariants.ch --json
 ```
@@ -180,9 +179,29 @@ for floating sums; exact equality to one would starve the sampler.
 Opacity does not add bounds to downstream arithmetic. `chelis check` does not
 infer from a `Probability` value that a later calculation lies in an interval.
 Only return values produced across the module boundary receive the producer
-obligations described here. If the defining module passes a raw opaque value,
-or a function able to produce one, outward as a call argument, that path needs
-module review; the `opaque-escape-site` lint identifies such calls.
+obligations described here. A value the defining module passes outward as a
+call argument is not checked: when `Stats.Opaque` calls a function from
+another module (or a function-typed parameter or stored closure) with a
+`Probability`, or with a function that can produce one such as the bare
+constructor, nothing proves that value satisfies the invariant.
+
+`chelis lint` reports every such call as an advisory `opaque-escape-site`
+diagnostic; it does not block any command. In this module, `leak` passes a
+raw construction and `pass` forwards its own parameter:
+
+```chelis-surf-fragment
+def leak(f: Probability -> f32, x: f32) -> f32 = f(Probability { value: x })
+def pass(f: Probability -> f32, p: Probability) -> f32 = f(p)
+```
+
+The diagnostic for `leak` says `UNATTESTED (traces to a raw construction or
+representation update): audit this leak path`, and the one for `pass` says
+`locally attested (traces to a producer call or a type-T input)`. An
+unattested value comes from `Probability { ... }` or a record update, which no
+obligation covers: confirm by reading the code that it satisfies the
+invariant, or build it through a producer such as `probability`. An attested
+value comes from a producer call or a parameter of the type, one call back;
+for a helper like `pass`, check the callers that supply `p`.
 
 Opacity also does not hide data in tooling output. When evaluation prints an
 opaque value as a root, it shows the constructor and fields. Sampling

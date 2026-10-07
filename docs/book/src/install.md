@@ -37,6 +37,10 @@ prefer to unpack a compiler yourself, each release archive
 holds `bin/chelis`, the runtime archive in `lib/`, and its headers in
 `include/`. Keep those three together.
 
+The runtime archive is built against glibc. On a musl distribution such as
+Alpine, `chelis check`, `eval`, `test` and `prove` work, but `chelis build`
+refuses to link with the system C compiler.
+
 ## Manage versions
 
 The first installed toolchain becomes the default outside a project.

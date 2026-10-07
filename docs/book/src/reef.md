@@ -19,7 +19,8 @@ cd demo
 nautilus = { version = "0.7.50" }
 ```
 
-Shell releases pin an exact Chelis compiler version. The compiler pin in your
+Chelis libraries distributed through Reef are called shells; Nautilus
+(numerical methods) is one. Each shell release pins an exact Chelis compiler version. The compiler pin in your
 project must match the version required by the shell release; Reef rejects a
 mismatch. For example, Nautilus 0.7.50 uses Chelis 0.19.1. Set the generated
 `compiler` field in `reef.toml` to `"=0.19.1"`, then prepare and build the

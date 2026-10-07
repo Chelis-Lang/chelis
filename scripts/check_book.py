@@ -43,7 +43,7 @@ RULES: dict[str, re.Pattern[str]] = {
         r"\b(?:red[- ]team(?:ed|ing)?|upstream (?:bugs?|gaps?|issues?)|import surface|manual gates?"
         r"|release gates?|CI gates?|contributors? (?:should|must)|maintainers? (?:should|must|run))\b", re.I),
     "unpublished name": re.compile(
-        r"(?<![\w-])(?:whale|school|beacon|hydronnx|betting|voyage|sonar|hull|calcify|octant|cove|compass|burn-?in)(?![\w-])",
+        r"(?<![A-Za-z])(?:whale|school|beacon|hydronnx|betting|voyage|sonar|hull|calcify|octant|cove|compass|burn-?in)(?![A-Za-z])(?!-White)",
         re.I),
 }
 
@@ -74,9 +74,20 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
+# A wrapped paragraph line that starts with "1." and a space
+# renders as a new list item and cuts the sentence in two.
+WRAPPED_MARKER = re.compile(r"^\d+\.\s")
+LIST_LINE = re.compile(r"^\s*(?:\d+\.|[-+*])\s|^\s*[|#>]|^\s{2,}")
+
+
 def lint_text(text: str) -> list[tuple[int, str, str]]:
     found = []
+    previous = ""
     for number, line in prose_lines(text):
+        if WRAPPED_MARKER.match(line) and previous.strip() and not LIST_LINE.match(previous) \
+                and not previous.rstrip().endswith(":"):
+            found.append((number, "wrapped line starts a list", line[:20]))
+        previous = line
         # Link targets are checked with their text: a link into src/ leaks too.
         line = ALLOWED.sub("", line)
         for label, pattern in RULES.items():

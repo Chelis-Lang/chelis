@@ -19,19 +19,19 @@ example, start with the [first program](first-program.md).
 | `chelis test` | Runs tests in the current Reef package; see [Testing](testing.md). |
 | `chelis prove` | Checks properties; see [Checking Properties](proving.md). |
 | `chelis reef` | Manages packages; see [Reef and Packages](reef.md). |
-| `chelis lane-check PATH` | Runs each program through the evaluator and a compiled C build and compares their complete stdout. |
 | `chelis cost FILE` | Counts the tensor copies the compiled program makes and the bytes they copy, for example `total_copy_count=0, total_bytes_copied=0`. |
 | `chelis runtime export DIR` | Writes the compiler's bundled runtime archive and public headers, plus a JSON record of the exported files. |
-| `chelis migrate surf --from 0.18 PATH...` | Rewrites Surf written for the 0.18 grammar into the current grammar; `migrate deep` does the same for Deep. It prints the result; `--inplace` writes it and `--check` exits nonzero if a file still needs migrating. |
 | `chelis tide` | Opens the interactive REPL. `chelis tide serve` and `chelis tide lsp` start the HTTP and language servers. |
 
 `validate` requires exactly one of `--surf`, `--deep`, or `--desugar`. It checks syntax; use
 `check` for type and effect errors. Run `chelis COMMAND --help` for the full options of any
 command.
 
-For agent integration, use the [agent workflow](https://chelis.ch/docs/chelis/agent-workflow/).
-It explains how to use the CLI and how to test an MCP connection to
-`chelis tide mcp` before an agent uses it.
+`chelis tide mcp` serves the compiler to a coding agent over the Model Context
+Protocol (MCP), the standard interface agent clients use to call external
+tools: the agent gets check, eval, prove, and structural edits as tools. The
+[agent workflow](https://chelis.ch/docs/chelis/agent-workflow/) shows how to connect a client
+and test the connection.
 
 ## Format, check, and run
 
@@ -95,9 +95,31 @@ definitions but no expression has nothing to display; with `--json`, a successfu
 of such a file prints a result whose `roots` array is empty. `chelis eval --file app.ch --timeout 30` bounds an
 evaluation in seconds. A timeout fails with a diagnostic.
 
-For scripts, `chelis eval --json --file app.ch` writes one JSON result to stdout on success. On
-failure, it writes no result JSON; diagnostics go to stderr. Effects already completed before
-the failure may still have produced output.
+For scripts, `chelis eval --json --file app.ch` writes one JSON object to stdout on success.
+For the [first program](first-program.md):
+
+```json
+{"schema_version":4,"roots":[{"node_id":0,"name":"result","value":{"type":"tensor","value":{"shape":[3],"data":{"dtype":"f32","bits":["3e590735","3e590735","3f137c65"]}}}}],"manifest":{"target":"Eval","entries":[{"name":"result","lane":"Host","required_inputs":[]}],"requires_main":true}}
+```
+
+`roots` has one entry per printed value, in print order, with its `name` and
+`value`. A tuple root is split into `pair.0`, `pair.1`, and so on. Values are
+exact, never decimal text:
+
+| `value.type` | Payload |
+|---|---|
+| `scalar` | `value` is `{"dtype":"f32","bits":"40d00000"}` for a float (the IEEE bits as lowercase hex: 8 digits for `f32`, 16 for `f64`, 4 for `f16` and `bf16`) or `{"dtype":"int64","value":4}` for an integer. Integer dtypes are spelled `int8` to `int64` here. |
+| `bool` | `value` is a JSON boolean. |
+| `string` | `value` is the string. |
+| `unit` | no payload. |
+| `tensor` | `value` is `{"shape":[...],"data":{"dtype":...,"bits":[...]}}` for floats, or `"values":[...]` for integers and `bool`, in row-major order. |
+| `dict` | `entries` is a list of `{"key":...,"value":...}`. |
+| `adt` | `ctor` names the constructor and `fields` holds its payload values, as in `{"type":"adt","ctor":"Some","fields":[...]}`. |
+
+Text printed by `print` during evaluation appears in a `transcript` list of
+strings. A file with only definitions gives `"roots":[]`. On failure, no JSON
+is written; diagnostics go to stderr and the exit status is nonzero. Effects
+completed before the failure may already have produced output.
 
 ## When a style check blocks progress
 
@@ -125,3 +147,7 @@ Add `--emit-c` to stop after source emission and runtime staging, without
 requiring a native compiler. A `.dp` input takes the Deep path automatically.
 See [Build programs](backends.md) for artifact names, compiler overrides,
 library linking, and platform requirements.
+
+## Upgrading source from 0.18
+
+Source written for the 0.18 grammar can be rewritten into the current grammar with `chelis migrate surf --from 0.18 PATH...` (or `migrate deep` for Deep files). It prints the result; `--inplace` writes it, and `--check` exits nonzero if a file still needs migrating.

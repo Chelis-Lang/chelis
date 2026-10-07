@@ -39,7 +39,7 @@ lengths.
   unsuffixed float literal has type `f32`. A numeric declaration, direct
   `cast`, or `to_tensor` dtype argument can state another dtype for a literal
   it directly contains. A suffix such as `1.0f64` selects a dtype explicitly.
-- A bracket literal is a `List`: `xs = [1.0, 2.0, 3.0]` has type `List f32`.
+- A bracket literal is a `List`: `xs = [1.0, 2.0, 3.0]` has type `List[f32]`.
   It becomes a tensor through `to_tensor([1.0, 2.0, 3.0], f32)`, which has type
   `tensor[3, f32]`, or where its own binding or function result declares a
   tensor type, as in `xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Nested brackets

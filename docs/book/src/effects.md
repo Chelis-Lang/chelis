@@ -33,8 +33,14 @@ more than its bound allows fails `chelis check`. With `! {}` on `report`:
 
 ## Random keys
 
-Random draws are pure functions of explicit keys. `dropout` and `uniform_like`
-take a key as their first argument and add no effect. Create a key from a seed,
+Random draws are pure functions of explicit keys and add no effect.
+`dropout(k, x, rate)` zeroes each element of the float tensor `x` with
+probability `rate` (finite, `0 <= rate < 1`) and divides the kept elements by
+`1 - rate`; `uniform_like(k, x, low, high)` returns a tensor of `x`'s shape
+filled from `[low, high]` (finite bounds, `low <= high`), ignoring `x`'s
+values. A rate or bound outside its domain stops evaluation before any value is
+drawn. See [explicit randomness](stdlib.md#explicit-randomness) for
+the key functions. Create a key from a seed,
 then split it when you need more than one draw. Each key can be used at most
 once along any execution path. Tuple destructuring such as the first binding below
 is written inside a function body:

@@ -37,7 +37,8 @@ chelis prove properties/nonnegative.ch --json
 chelis prove properties/ --only 'nonnegative*' --samples 1000 --seed 42
 ```
 
-`--only` filters property names; a trailing `*` matches a name prefix. `--samples` sets the
+`--only` keeps the properties and invariant obligations (named like
+`invariant:Probability:scale`) whose unqualified name contains the given text, or, with a trailing `*`, starts with the text before it. A `*` elsewhere is not a wildcard, and a module-qualified name such as `Stats.Opaque.prob_value_in_unit_interval` matches nothing. A filter that matches nothing is not an error: the run reports `0 passed, 0 failed, 0 unsupported, 0 errors` and exits `0`, so check the counts. `--samples` sets the
 requested sample count, and `--seed` makes sampling repeatable. The default `--tier auto` may
 use sampling. Use `--tier fuzz-only` to request sampling or `--tier smt-only` to request the
 solver. Check `status` and `proof_tier` together to see which method produced a passing result;

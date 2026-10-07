@@ -135,18 +135,18 @@ grads.1 = tensor(shape=[1], data=[-1.3333334])
 There is no broadcasting, so `predict` widens the one-element bias to `n`
 rows explicitly: `insert(b, 0, shape(x, 0))` adds axis 0 with the extent of
 `x`'s first axis. The predictions are `3, 2, 4`, so only the last row has an
-error (`-2`) and the mean squared error is `4 / 3`. A call to a function you
-define consumes its tensor arguments, so the first call passes copies and the
-second call can still use `x`, `y`, `w`, and `b`. `grad(loss, wrt=(w, b))`
+error (`-2`) and the mean squared error is `4 / 3`. The first call passes
+copies because the second use of `x`, `y`, `w`, and `b` is a call through
+`grad`, where the compiler does not insert copies for you; see
+[linearity and borrowing](type-reference.md#linearity-and-borrowing). `grad(loss, wrt=(w, b))`
 returns the two gradients in the order `wrt` names them; see
 [Transforms](transforms.md).
 
-## Larger definitions
+## Files with only definitions
 
 A file of definitions with no top-level value checks but prints nothing:
 `chelis eval` reports `warning: input contains only def declarations; nothing
 to evaluate`. Check such a file with `chelis check FILE.ch`, then add a
-top-level value that calls it. The
-[examples directory](https://github.com/Chelis-Lang/chelis/tree/main/examples)
-in the repository has more programs in this form, including a transformer
-block (`transformer_block.ch`) and batched ReLU with `vmap` (`vmap_relu.ch`).
+top-level value that calls it, as the linear regression above does for
+`loss`. [Transforms](transforms.md) has more complete programs,
+including batched ReLU with `vmap` and per-example gradients.

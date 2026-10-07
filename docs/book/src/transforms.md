@@ -12,11 +12,29 @@ such as `f32`, or a tensor with no dimensions such as `tensor[f32]`, can be
 that result. Reduce a larger tensor to a scalar before differentiating.
 `grad` returns the gradients, without the forward value.
 
-By default, `grad(f)` selects every differentiable parameter. A single selected
-parameter produces one gradient directly; multiple parameters produce a flat
-tuple in parameter order. Use `wrt` to select named parameters in the order
-you write them: `grad(loss, wrt=(weight, bias))` returns the gradient for
-`weight` followed by the gradient for `bias`. Parameters left out of `wrt`
+By default, `grad(f)` differentiates with respect to every parameter whose
+type contains a float: a float scalar, a float tensor, or a tuple, `List`, or
+data type with float components. Parameters of type `bool`, a signed integer,
+`string`, or a function get no gradient and are left out of the result.
+A single selected parameter produces one gradient directly; several produce a
+flat tuple in parameter order:
+
+```chelis-surf
+def scaled(w: f32, n: i32, x: tensor[2, f32]) -> f32 = (w * tensor_to_scalar(sum(x, 0i32)))
+g = grad(scaled)(2.0f32, 3i32, to_tensor([1.0, 4.0], f32))
+```
+
+```text
+g.0 = 5.0
+g.1 = tensor(shape=[2], data=[2.0, 2.0])
+```
+
+`g.0` is the gradient for `w` (the sum `1 + 4`) and `g.1` the gradient for
+`x` (`w` in each position); the `i32` parameter `n` has no entry. A tuple,
+`List`, or data-type parameter's gradient keeps its structure, with `unit` in
+place of each non-float component. Use `wrt` to select named parameters in the
+order you write them: `grad(loss, wrt=(weight, bias))` returns the gradient
+for `weight` followed by the gradient for `bias`. Parameters left out of `wrt`
 still supply values when you call the gradient function, but receive no
 gradient in its result.
 
@@ -84,12 +102,11 @@ The two agree to the last bit.
 
 ## Map across a batch with `vmap`
 
-`vmap(f)` adds a batch axis at position zero. To insert it elsewhere, write a
-named axis such as `vmap(f, axis=1)`. Each tensor parameter of `f` gains that
-axis. Ordinary non-tensor parameters are shared across the batch, as are
-values captured by `f`. A scalar `key` parameter is different: it takes a
-`tensor[batch, key]` with one key per row. A scalar key shared across rows is
-rejected.
+`vmap(f)` adds a batch axis at position zero of each tensor parameter of `f`
+and of its result. Ordinary non-tensor parameters are shared across the
+batch, as are values captured by `f`. A scalar `key` parameter is different:
+it takes a `tensor[batch, key]` with one key per row. A scalar key shared
+across rows is rejected.
 
 ```chelis-surf
 def process[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
@@ -104,6 +121,28 @@ ys = tensor(shape=[2, 2], data=[0.0, 2.0, 3.0, 0.0])
 `process` is written for one row of `n` values; `vmap(process)` applies it to
 each of the `b` rows. A reduction inside `process` would reduce its row's
 data axis, leaving the new batch axis intact.
+
+`vmap(f, axis=k)` inserts the batch axis at position `k` instead, in every
+mapped parameter and in the result. `k` is a nonnegative integer literal (a
+negative axis does not parse) and must be at most the rank of every mapped
+parameter and of the result; otherwise `chelis check` reports
+`vmap axis 2 is out of bounds for rank 1 tensor`. Mapping a function from
+`tensor[n, f32]` with `axis=1` takes and returns `tensor[n, b, f32]`, so `f`
+runs once per column:
+
+```chelis-surf
+def normalize[n](x: tensor[n, f32]) -> tensor[n, f32] = softmax(x, 0i32)
+def normalize_columns[n, b](xs: tensor[n, b, f32]) -> tensor[n, b, f32] = vmap(normalize, axis=1)(xs)
+cols = [[0.0, 1.0, 5.0], [0.0, 1.0, 5.0]] |> to_tensor(f32) |> normalize_columns
+```
+
+```text
+cols = tensor(shape=[2, 3], data=[0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
+```
+
+Each column holds two equal values, so softmax gives `0.5` for both. A
+function whose result is a scalar cannot take a nonzero axis, because its
+result has rank zero.
 
 ## Per-example gradients
 
@@ -126,12 +165,17 @@ differentiate it.
 
 ## Execution limits
 
-- A direct, unshadowed top-level function is a reliable named target for
-  `grad` and `vmap`. A direct alias of a top-level function, or a local
-  binding that shadows one, is rejected as a transform target even when
-  `grad` has a `wrt` selector. Inline and locally bound functions have
-  supported paths; this restriction does not make every local function an
-  error.
+- A transform target is a top-level function named directly, or a lambda.
+  `chelis eval` accepts a lambda written inline, `grad(fn (x: f32) -> ((x * x) * x))(2.0f32)`,
+  and a lambda bound to a local name and then transformed, as in
+  `cube = fn (x: f32) -> ((x * x) * x)` followed by `grad(cube)(2.0f32)`;
+  both give `12.0`. A local name bound to a top-level function
+  (`sq = square`, then `grad(sq)`) and a local binding that shadows a
+  top-level function are rejected by `chelis check`, even with `wrt`.
+- A C build accepts transforms of top-level functions, as in every example on
+  this page. It rejects a top-level value that applies `grad` or `vmap` to a
+  lambda, with an error naming the affected definitions; move the lambda into
+  a top-level function.
 - In the evaluator, gradients of ADT arguments keep the executed constructor
   and its fields. A discrete field remains in place as `unit`; a float field
   receives its gradient. A selected parameter with no differentiable float
@@ -144,7 +188,3 @@ differentiate it.
 - The evaluator can differentiate a selected local `List` argument. A C build
   rejects that form when it cannot reconstruct the List shape; a
   literal or resolved top-level List has a supported path.
-
-The limits above describe evaluator and C-build behavior; the
-[transformation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md)
-has the complete language rules for `grad` and `vmap`.

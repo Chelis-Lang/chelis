@@ -194,8 +194,36 @@ tightest binding:
 | `.` | field and tuple access |
 
 Equality and comparison do not chain: `a == b == c` is a parse error. There is no operator
-overloading and no infix bitwise operator; use the named builtins `bitand`, `bitor`,
-`bitxor`, `shl`, `shr`, and `pow` for exponentiation.
+overloading and no infix bitwise or power operator. The bitwise builtins are
+`bitand`, `bitor`, `bitxor`, `shl`, and `shr`. Each takes two values of one
+signed-integer dtype (two scalars, or two tensors of the same shape) and
+returns that dtype and shape; `bool` and float operands are type errors.
+`bitand`, `bitor`, and `bitxor` act on the two's-complement bits. `shl(x, n)`
+shifts left and discards bits past the width, so a count at or above the
+width gives `0`. `shr(x, n)` shifts right, copying the sign bit, so a large
+count gives `0` or `-1`. A negative count stops evaluation with
+`shift amount must be non-negative, got -1`. None of them traps on overflow.
+
+```chelis-surf
+a = bitand(12i32, 10i32)
+o = bitor(12i32, 10i32)
+x = bitxor(12i32, 10i32)
+l = shl(1i8, 7i8)
+r = shr(-16i32, 2i32)
+big = shl(1i32, 40i32)
+```
+
+```text
+a = 8
+o = 14
+x = 6
+l = -128
+r = -4
+big = 0
+```
+
+There is no `pow` builtin. Write an integer power as repeated `mul`, and a
+float power of a positive base as `exp(mul(y, log(x)))`.
 
 The pipe operator threads its left value as the first argument of the call on its right.
 `x |> f(y)` is `f(x, y)`, and stages chain from left to right:
@@ -422,7 +450,24 @@ for details.
 - Function names use snake_case. Types, constructors, and module path segments use
   PascalCase. Descriptive value, parameter, dimension, and field names use snake_case;
   a single uppercase letter is also valid for a value binding or parameter.
-- The parser enforces identifier roles; `chelis lint` checks additional naming
-  conventions, including `def` and `type` declaration names. Run `chelis fmt`
-  to format source consistently. See the [nomenclature specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md)
-  for the full rules.
+- The parser enforces identifier roles. `chelis lint` adds these blocking
+  rules for Chelis source, which `check`, `eval --file`, and `build` also run
+  before their main work:
+
+  | Rule | Requires |
+  |---|---|
+  | `surf-value-snake-case` | `def` names are lowercase ASCII with optional digits and underscores, no leading underscore. |
+  | `surf-type-pascal-case` | `type` names are ASCII alphanumeric with a leading uppercase letter and no underscores. |
+  | `module-compound-titlecase` | Module segments write abbreviations in title case (`Hamt`, never `HAMT`). |
+  | `surf-test-name-prefix` | A function carrying the `Test` effect is named `test_*` or `example_*`. |
+  | `surf-def-arrow-form` | A definition is written `def name(params) -> T = expr`, not with `:` before the result type. |
+  | `type-suffix-policy` | A name suffix such as `_f32`, `_int`, `_bool`, or `_string` describes the element type, not the container. |
+  | `prefix-namespace` | A shared function-name prefix inside a module names the module's domain or a documented sub-namespace. |
+  | `reef-module-identity` | In a Reef package, each file declares one module, named from `module_prefix` and its path. |
+  | `opaque-domain-construction` | An `@opaque` type is not constructed, updated, or cast outside its module. |
+  | `no-em-dash-in-public-strings` | String literals contain no em dash. |
+
+  `chelis lint --list` prints every rule with its severity, and
+  `chelis lint --fix` applies the available automatic fixes. Advisory rules
+  such as `opaque-escape-site` and `recursive-list-cursor` print without
+  blocking.

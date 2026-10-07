@@ -3,9 +3,7 @@
 Chelis records tensor shape and element dtype in types. It does not implicitly
 broadcast tensors or promote numeric operands. Dimension names preserve axis
 identity: distinct names do not unify, while a literal extent can satisfy a
-named dimension at a call site. The
-[type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md)
-has the complete rules.
+named dimension at a call site.
 
 ## Primitive types
 
@@ -317,9 +315,8 @@ tensor[n, f32] -> tensor[n, f32] -> tensor[f32]   -- two args, scalar result
   Recursive types refer to themselves by name.
 - Records: constructed with `Foo { x: e1, y: e2 }` (punning allowed), read with `e.field`.
 - Type aliases: a `type` without variants is transparent and expanded at desugaring.
-- Lists: `List[T]` holds rank-uniform elements; a list of tensors fixes one rank for every
-  element. The list builtins (`len`, `index`, `append`, `concat`, `range`, `zip`,
-  `enumerate`, `map`, `filter`, `fold`, and others) operate on these.
+- Lists: `List[T]` holds elements of one type; a list of tensors fixes one rank for every
+  element. The list builtins are below.
 - Dictionaries: `Dict[K, V]` maps keys of one type `K` (`string`, `bool`, or a
   signed integer; float keys are a type error) to values of one type `V`.
   Build one from a list of pairs with `dict_of`; a later pair wins over an
@@ -342,6 +339,59 @@ beta_id = Some(2)
 missing = None
 ```
 
+### List builtins
+
+Counts and indices are `i64`, and indices start at zero.
+
+| Builtin | Signature | Result and failure |
+|---|---|---|
+| `len(xs)` | `List[T] -> i64` (also takes a `Dict`) | Number of elements. |
+| `index(xs, i)` | `List[T], i64 -> T` | Element `i`. A negative or out-of-range `i` stops evaluation (`index 9 out of bounds for list of len 5`). |
+| `append(xs, x)` | `List[T], T -> List[T]` | `xs` with `x` at the end. |
+| `concat(xs, ys)` | `List[T], List[T] -> List[T]` | `xs` followed by `ys`. With an `i32` axis as the second argument, `concat` is the tensor operation instead. |
+| `take(xs, n)`, `skip(xs, n)` | `List[T], i64 -> List[T]` | The first `n` elements, or all but the first `n`. A count above the length takes everything or leaves nothing; a negative count stops evaluation. |
+| `chunk(xs, n)` | `List[T], i64 -> List[List[T]]` | Consecutive groups of `n`; the last may be shorter. `n` must be positive. |
+| `range(start, end)` | `i64, i64 -> List[i64]` | `start` up to but excluding `end`; empty when `end <= start`. |
+| `map(f, xs)` | `(T -> U), List[T] -> List[U]` | `f` applied to each element in order. |
+| `filter(f, xs)` | `(T -> bool), List[T] -> List[T]` | Elements where `f` is true, in order. `partition(f, xs)` returns the kept and rejected lists. |
+| `fold(f, init, xs)` | `((A, T) -> A), A, List[T] -> A` | The final accumulator. |
+| `scan(f, init, xs)` | `((A, T) -> A), A, List[T] -> List[A]` | The accumulator after each element, not including `init`. |
+| `flat_map(f, xs)`, `flatten(xss)` | `(T -> List[U]), List[T] -> List[U]`; `List[List[T]] -> List[T]` | Results joined in order; one level of nesting removed. |
+| `zip(xs, ys)` | `List[T], List[U] -> List[(T, U)]` | Pairs, stopping at the shorter list. |
+| `enumerate(xs)` | `List[T] -> List[(i64, T)]` | Each element with its index. |
+
+A callback runs once per element in order, and an effect it carries (such as
+`IO`) becomes an effect of the call.
+
+```chelis-surf
+xs = range(1i64, 6i64)
+doubled = map(fn (x) -> (x * 2i64), xs)
+evens = filter(fn (x) -> ((floor_div(x, 2i64) * 2i64) == x), xs)
+total = fold(fn (acc, x) -> (acc + x), 0i64, xs)
+running = scan(fn (acc, x) -> (acc + x), 0i64, xs)
+head = take(xs, 2i64)
+rest = skip(xs, 2i64)
+groups = chunk(xs, 2i64)
+third = index(xs, 2i64)
+size = len(xs)
+```
+
+```text
+xs = [1, 2, 3, 4, 5]
+doubled = [2, 4, 6, 8, 10]
+evens = [2, 4]
+total = 15
+running = [1, 3, 6, 10, 15]
+head = [1, 2]
+rest = [3, 4, 5]
+groups = [[1, 2], [3, 4], [5]]
+third = 3
+size = 5
+```
+
+A top-level definition cannot reuse a builtin's name: `count = len(xs)` is
+rejected because `count` is the boolean-count reduction.
+
 ## Effects in types
 
 A function type can declare an effect set. In Surf, write it as `! { ... }`
@@ -361,7 +411,29 @@ build target. See [Effects](effects.md) for the effect vocabulary.
 
 Tensor values are owned by default. A call with an owned parameter consumes
 its argument; read-only calls can borrow it. If an owned tensor feeds several
-ordinary consuming calls, the compiler inserts copies for the earlier uses.
+consuming calls, the compiler inserts copies for the earlier uses, so this
+checks and evaluates with no `copy`:
+
+```chelis-surf
+def total[n](x: tensor[n, f32]) -> tensor[f32] = sum(x, 0i32)
+x = to_tensor([1.0, 2.0], f32)
+a = total(x)
+b = total(x)
+```
+
+Write `copy(x)` yourself on the earlier use in these cases, where no copy is
+inserted and the later use fails `chelis check` with a `UseAfterConsume`
+error that names the earlier call:
+
+- the later use is a call through a transform, such as `grad(total)(x)`
+  after `total(x)`;
+- `x` is a component bound by a destructuring `let`, such as `(a, b) = ...`;
+- `x` carries a random key, which can never be copied;
+- the earlier use was `drop(x)`, a `match` on `x`, or a closure that
+  consumes `x`.
+
+The [linear regression example](examples.md)
+passes copies to `loss` for the first reason.
 An explicit `drop(x)` ends access through that owner. The compiler also drops
 an unused owner after its last use when it can establish that point.
 Keys are different: a key-carrying value can be used at most once on a path
