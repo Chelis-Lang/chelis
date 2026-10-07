@@ -911,9 +911,27 @@ enum ReefSrcCommand {
     },
 }
 
-/// The stack of the thread the CLI runs on under musl: the 8 MiB a Linux main
-/// thread has by default.
-const MUSL_MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// The stack of the thread the CLI runs on under musl: the soft `RLIMIT_STACK`,
+/// which bounds a Linux main thread's stack as `ulimit -s` sets it, or the usual
+/// 8 MiB when that limit is unlimited or cannot be read.
+fn musl_main_stack_bytes() -> usize {
+    const DEFAULT: usize = 8 * 1024 * 1024;
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `getrlimit` only writes the current and maximum limits into
+        // `limit`, which lives for the call.
+        if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } == 0
+            && limit.rlim_cur != libc::RLIM_INFINITY
+        {
+            return usize::try_from(limit.rlim_cur).unwrap_or(DEFAULT);
+        }
+    }
+    DEFAULT
+}
 
 /// Every allocation under musl, Rust's through this global allocator and the C
 /// and C++ libraries' (cvc5, GMP) through the `malloc` it defines: musl's own
@@ -933,7 +951,7 @@ fn main() {
     if cfg!(target_env = "musl") {
         let thread = std::thread::Builder::new()
             .name("main".to_owned())
-            .stack_size(MUSL_MAIN_STACK_BYTES)
+            .stack_size(musl_main_stack_bytes())
             .spawn(cli_main)
             .unwrap_or_else(|error| {
                 eprintln!("error: cannot start the chelis thread: {error}");

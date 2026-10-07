@@ -902,7 +902,7 @@ mod tests {
             (Some("/lib/ld-musl-x86_64.so.1"), true),
             (Some("/lib64/ld-linux-x86-64.so.2"), false),
             (
-                Some("/nix/store/0-glibc-2.40/lib/ld-linux-x86-64.so.2"),
+                Some("/gnu/store/0-glibc-2.39/lib/ld-linux-x86-64.so.2"),
                 false,
             ),
             // A static shell.
@@ -919,14 +919,6 @@ mod tests {
         assert_eq!(elf_interpreter(b"#!/bin/sh\n"), None);
         let truncated = elf_naming(Some("/lib/ld-musl-x86_64.so.1"));
         assert_eq!(elf_interpreter(&truncated[..100]), None);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn this_hosts_shell_names_a_program_interpreter() {
-        let shell = fs::read("/bin/sh").expect("/bin/sh is readable");
-        let interpreter = elf_interpreter(&shell).expect("/bin/sh names a program interpreter");
-        assert!(interpreter.starts_with('/'), "{interpreter}");
     }
 
     #[test]

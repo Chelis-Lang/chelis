@@ -503,26 +503,37 @@ class Proof:
             env=self.env(CHELIS_HOME=home),
             timeout=900,
         )
-        installed = next(
-            (
-                line
-                for line in stdout.splitlines()
-                if line.startswith("installed chelis")
-            ),
-            "chelisup printed no install line",
-        )
+        installed = self.require_installed_build(stdout)
         return f"from the GitHub API: {installed}; {self.require_version(home)}"
+
+    def require_installed_build(self, stdout: str) -> str:
+        """chelisup's install line, which names the build it installed.
+
+        chelisup tells musl from glibc by `/bin/sh`'s loader and this script by
+        its Python's C library, so a host where the two disagree fails here
+        rather than judging the steps below on a build it did not install.
+        """
+        line = next(
+            (line for line in stdout.splitlines() if line.startswith("installed chelis")),
+            None,
+        )
+        if line is None:
+            raise StepFailed("chelisup printed no install line")
+        if f"({self.build})" not in line:
+            raise StepFailed(f"this host expects the {self.build} build, but {line}")
+        return line
 
     def install_offline(self) -> str:
         home = self.work / "offline-home"
         installer = self.copy_installer(self.work / "offline-installer")
-        self.run(
+        _, stdout, _ = self.run(
             "install",
             [installer, "install", self.version],
             env=self.env(CHELIS_HOME=home, CHELISUP_RELEASE_BASE=self.install_assets),
             timeout=600,
         )
-        detail = "from local assets; " + self.require_version(home)
+        installed = self.require_installed_build(stdout)
+        detail = f"from local assets: {installed}; " + self.require_version(home)
         self.offline_home = home
         return detail
 

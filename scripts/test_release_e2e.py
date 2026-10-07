@@ -298,6 +298,18 @@ class HostLibcTests(unittest.TestCase):
             with self.assertRaisesRegex(e2e.StepFailed, "chelis is not static"):
                 proof.elf_linkage("chelis", root / "dynamic")
 
+    def test_an_install_of_another_build_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proof = self.proof(None, Path(directory))
+        proof.build = "linux-x86_64-musl"
+        musl = "installed chelis 0.7.24 (linux-x86_64-musl) into /h/toolchains/0.7.24"
+        self.assertEqual(proof.require_installed_build(f"{musl}\n"), musl)
+        static = "installed chelis 0.7.24 (linux-x86_64-static) into /h/toolchains/0.7.24"
+        with self.assertRaisesRegex(e2e.StepFailed, "expects the linux-x86_64-musl build"):
+            proof.require_installed_build(f"{static}\n")
+        with self.assertRaisesRegex(e2e.StepFailed, "no install line"):
+            proof.require_installed_build("")
+
 
 if __name__ == "__main__":
     unittest.main()
