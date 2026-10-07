@@ -1,8 +1,8 @@
-# CLI Workflow
+# CLI workflow
 
-Use this chapter when you have a Chelis source file and want to check, run, or build it. Surf
-files use `.ch`; Deep files use `.dp`. The [first program](first-program.md) introduces both
-forms.
+Surf files use `.ch`; Deep files use `.dp`. The commands below accept source
+files for formatting, checking, evaluation, and native builds. For a complete
+example, start with the [first program](first-program.md).
 
 ## Command map
 
@@ -15,21 +15,23 @@ forms.
 | `chelis surf FILE.dp` | Prints canonical Surf for Deep input. |
 | `chelis validate --surf FILE.ch` | Checks Surf syntax against the conformance grammar. Use `--deep` for Deep or `--desugar` to validate the Deep form of Surf input. |
 | `chelis eval --file FILE` | Evaluates a `.ch` or `.dp` file. `chelis eval 'EXPR'` evaluates an inline expression. |
-| `chelis build FILE.ch --target c --output out/` | Builds a native executable or static library. C is the default; [HIP and Metal](backends.md#gpu-backends) are experimental GPU targets. |
+| `chelis build FILE.ch --target c --output out/` | Builds a native executable or static library. C is the default target. |
 | `chelis test` | Runs tests in the current Reef package; see [Testing](testing.md). |
 | `chelis prove` | Checks properties; see [Checking Properties](proving.md). |
 | `chelis reef` | Manages packages; see [Reef and Packages](reef.md). |
 | `chelis lane-check PATH` | Runs each program through the evaluator and a compiled C build and compares their complete stdout. |
-| `chelis cost FILE` | Reports the copy cost of the lowered IR. |
-| `chelis runtime export DIR` | Writes the runtime archive, public headers, and staging receipt this compiler carries. |
-| `chelis migrate surf --from 0.18 PATH...` | Prints Surf written in the 0.18 grammar in the current grammar; `migrate deep` does the same for Deep. `--check` verifies the files are already migrated, and `--inplace` rewrites them. |
-| `chelis migrate pipes --baseline-compiler OLD PATH...` | Converts source that uses older pipe semantics with an explicit baseline compiler; run `chelis migrate pipes --help` for the supported modes. |
-| `chelis cove` | Opens the Cove terminal UI. |
-| `chelis tide` | Opens the interactive REPL. `chelis tide serve`, `chelis tide mcp`, and `chelis tide lsp` start the HTTP, MCP, and language servers. |
+| `chelis cost FILE` | Counts the tensor copies the compiled program makes and the bytes they copy, for example `total_copy_count=0, total_bytes_copied=0`. |
+| `chelis runtime export DIR` | Writes the compiler's bundled runtime archive and public headers, plus a JSON record of the exported files. |
+| `chelis migrate surf --from 0.18 PATH...` | Rewrites Surf written for the 0.18 grammar into the current grammar; `migrate deep` does the same for Deep. It prints the result; `--inplace` writes it and `--check` exits nonzero if a file still needs migrating. |
+| `chelis tide` | Opens the interactive REPL. `chelis tide serve` and `chelis tide lsp` start the HTTP and language servers. |
 
 `validate` requires exactly one of `--surf`, `--deep`, or `--desugar`. It checks syntax; use
 `check` for type and effect errors. Run `chelis COMMAND --help` for the full options of any
 command.
+
+For agent integration, use the [agent workflow](https://chelis.ch/docs/chelis/agent-workflow/).
+It explains how to use the CLI and how to test an MCP connection to
+`chelis tide mcp` before an agent uses it.
 
 ## Format, check, and run
 
@@ -42,17 +44,51 @@ chelis check app.ch
 chelis eval --file app.ch
 ```
 
-`check` prints a JSON report even when checking fails. For one file, an empty `errors` array
-means exit `0`; a nonempty one means exit `2`. `chelis check DIRECTORY` checks discovered
-`.ch` and `.dp` files and prints one JSON envelope with `files` and `errors`. Directory
-failures appear either in the affected file's report or in the envelope. A failing directory
-check exits `2`.
+`check` writes a JSON report to stdout even when checking fails, and nothing
+else: style-gate errors and lint warnings go to stderr. For one file, an empty
+`errors` array means exit `0`; a nonempty one means exit `2`. Here a function
+of one argument is called with two:
 
-File reports carry fitness components, checked-node counters, unresolved names,
-and diagnostics. `--show-inferred` requests callable signatures. Annotated Deep
-is available through the compiler checked-program API; the JSON report has no
-`typed_ast` member. A failure report still carries diagnostics even when no
-checked program can be produced.
+```chelis-surf-fragment
+def f(x: f32) -> f32 = (x * 2.0f32)
+y = f(1.0f32, 2.0f32)
+```
+
+```json
+{
+  "score": 0.925,
+  "components": {
+    "parse": 1,
+    "structure": 1,
+    "names": 1,
+    "types": 0.875
+  },
+  "typed_nodes": 7,
+  "untyped_nodes": 1,
+  "total_nodes": 8,
+  "unresolved_names": [],
+  "errors": [{"kind":"ArityMismatch","message":"call `f`: expected 1 argument, got 2 arguments","severity":0.7,"expected":"1 argument","got":"2 arguments","span":{"span":"point","offset":40},"span_id":"surf:40..57"}]
+}
+```
+
+`score` is the weighted sum of four components, each between 0 and 1: parse
+(weight 0.1), structure (0.1), names (0.2), and types (0.6, the fraction of
+subexpressions that type-check). Here 7 of 8 nodes typed, so `types` is
+0.875 and the score is `0.4 + 0.6 * 0.875 = 0.925`. Each error has a `kind`, a `message`, and a `severity` between 0
+and 1. When the failing node has a source location, the error also carries
+`span` and `span_id`: `"surf:40..57"` is the byte range `[40, 57)` of the Surf
+file, here the call `f(1.0f32, 2.0f32)`. An error without a location, such as
+a formatting failure, has neither field. `--show-inferred` adds the inferred
+signature of each callable to the report.
+
+The style gate runs first. An unformatted file fails before type checking,
+with `score` 0 and one error whose message says to run
+`chelis fmt --inplace FILE`.
+
+`chelis check DIRECTORY` checks every `.ch` and `.dp` file under it and prints
+one JSON object with a `files` array of per-file reports and an `errors`
+array for failures that belong to no single file. Any failure makes it exit
+`2`.
 
 For a short calculation without a file, use `chelis eval 'EXPR'`. A file containing
 definitions but no expression has nothing to display; with `--json`, a successful evaluation
@@ -80,12 +116,12 @@ errors still fail.
 chelis build app.ch --target c --output out/
 ```
 
-`c` is the default target. `hip` and `metal` are also available. `build` invokes
-its native toolchain and produces an executable for observable programs, or a
-static library for definitions-only modules. It retains generated sources and
-runtime support. Run `./out/app` after the example above.
+`c` is the default target. `build` invokes its native toolchain and produces
+an executable for observable programs, or a static library for
+definitions-only modules. It retains generated sources and runtime support.
+Run `./out/app` after the example above.
 
-Add `--emit-c` to stop after source emission and runtime staging, without requiring
-a native compiler. This flag also applies to HIP and Metal source. A `.dp` input
-takes the Deep path automatically. See [Backends](backends.md) for artifact names,
-compiler overrides, library linking, and platform requirements.
+Add `--emit-c` to stop after source emission and runtime staging, without
+requiring a native compiler. A `.dp` input takes the Deep path automatically.
+See [Build programs](backends.md) for artifact names, compiler overrides,
+library linking, and platform requirements.

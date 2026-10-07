@@ -18,7 +18,7 @@ C Note/Sonar receipt passed in
 open. Neither resolution claims acceptance of unavailable Voyage captures or
 other programs outside the recorded manifest.
 
-For supported operations and explicit C exclusions, see [C support](c-support.md).
+For supported operations and explicit C exclusions, see [C support](c_support.md).
 The [live P2 query](https://github.com/Chelis-Lang/chelis/issues?q=is%3Aissue+is%3Aopen+label%3Ascope%3Acore+label%3Alaunch%3Ap2)
 is current when issue state or labels differ from this dated snapshot.
 

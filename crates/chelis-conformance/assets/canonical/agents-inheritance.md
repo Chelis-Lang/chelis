@@ -538,7 +538,30 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 - `chelis build` invokes the native compiler for C, HIP, or Metal and produces an
   executable or static library, retaining sources and runtime artifacts. `--emit-c`
   stops after source emission. CPU is the acceptance priority; GPU targets remain
-  prerelease. See `docs/book/src/backends.md`.
+  prerelease. See `docs/book/src/backends.md` and `docs/gpu_backends.md`.
+
+## Book
+
+`docs/book/` is the user-facing book for this shell. chelis.ch mirrors it
+page for page (https://chelis.ch/docs/chelis/), and the chelis.ch text is
+canonical: book pages are rendered from the site by the website's
+`scripts/sync_books.py`, so edit prose on the site and re-render, or make the
+same edit in both places in the same change.
+
+The reader is an engineer, or an AI coding agent, writing Chelis code against
+this shell. They know the domain but not this repo's internals or history, and
+they want to call the API correctly the first time. Every page teaches: what the
+API does, a runnable example with its real output, the contract (inputs, domain,
+shapes, precision, errors) and the pitfalls.
+
+Never in the book: issue or PR numbers, repo-internal paths (`spec/`, `src/`
+internals, `scripts/`, `tests/`, maintainer docs), maintainer or CI commands,
+contributor history, process talk (gates, red teams, agent instructions),
+status words (planned, not yet, stub, phase, milestone), "see the source" in
+place of documentation, em-dashes, and the word "load-bearing".
+`scripts/check_book.py` enforces the mechanical part in CI.
+
+A change that alters the public API updates the book in the same PR.
 
 ## The Chelis-Lang Repositories
 

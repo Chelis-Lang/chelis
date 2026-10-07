@@ -23,7 +23,7 @@ the sum comes back as a plausible wrong number. `chelis check` rejects the same
 multiply before anything runs. The error from its JSON report:
 
 ```json
-{"kind":"DimensionMismatch","message":"tensor rank mismatch: 1 dims vs 2 dims","severity":0.8,"span":{"span":"point","offset":94},"span_id":"surf:94..103"}
+{"kind":"DimensionMismatch","message":"`mul` argument 2: expected rank-1 tensor, got rank-2 tensor","severity":0.8,"expected":"rank-1 tensor","got":"rank-2 tensor","span":{"span":"point","offset":94},"span_id":"surf:94..103"}
 ```
 
 - **Checked before it runs.** The compiler checks shapes, precision, effects, and
@@ -41,55 +41,21 @@ multiply before anything runs. The error from its JSON report:
   installed with Reef, cover numerical methods (Nautilus), dataframes (Coral), and
   quantitative finance (Shoals).
 
-## Install a release toolchain
+## Install
 
-Chelis releases include `chelisup`, which installs toolchains and selects the
-version used by each project. `chelisup` downloads public releases without a
-GitHub token. The commands below sign in with [`gh`](https://cli.github.com) to
-find and fetch the latest release.
+Chelis is distributed as prebuilt binaries for Linux x86_64 and macOS arm64,
+published on the [releases](https://github.com/Chelis-Lang/chelis/releases)
+page. The [install guide](https://chelis.ch/docs/chelis/install/) has the
+steps and the native C compiler `chelis build` needs on each platform.
 
-```sh
-gh auth login
-gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh
-# If the bootstrap says ~/.chelis/bin is not on PATH:
-export PATH="$HOME/.chelis/bin:$PATH"
-release_tag="$(gh release view --repo Chelis-Lang/chelis --json tagName --jq .tagName)"
-chelisup install "${release_tag#v}"
-chelis --version
-```
+## Documentation
 
-The bootstrap script installs `chelisup`; the next command installs the
-compiler. The release tag has a leading `v`, while `chelisup install` takes
-the bare `X.Y.Z` version. For a project with a `reef.toml`, install the
-version named by its `compiler` pin before running `chelis reef setup`, then
-run `chelis reef build`. The [install guide](docs/book/src/install.md)
-explains the project workflow.
-
-## Start here
-
-- [Chelis Guide](docs/book/src/README.md): first program, CLI, properties, and Reef.
-- [Examples](examples/): executable Chelis programs.
-- [Language spec](spec/00-context.md) and the
-  [canonical project reference](spec/design/chelis_canonical_reference.md).
-- [Architecture](ARCHITECTURE.md): compiler, evaluator, and code generation.
-- [Contributor setup](docs/contributor_setup.md), the
-  [contribution policy](CONTRIBUTING.md), the
-  [maintainer guide](docs/maintainer_guide.md), and the [agent contract](AGENTS.md).
+The [Chelis guide](https://chelis.ch/docs/chelis/) covers the first program,
+the CLI, types, effects, properties, and Reef packages. Its source is the
+mdBook in [`docs/book`](docs/book/); build it locally with
+`mdbook build docs/book`. The [examples](examples/) directory holds executable
+Chelis programs.
 
 ## License
 
 MIT
-
-### Build a native program
-
-```sh
-chelis build app.ch --output out/
-./out/app
-```
-
-`build` invokes the native compiler and links the runtime carried by this compiler.
-Definitions-only modules produce static libraries. Sources and headers remain
-available; `--emit-c` keeps source-only builds. CPU is the primary acceptance lane;
-HIP and Metal are prerelease targets with known imperfections. See the
-[backend guide](docs/book/src/backends.md) for tool requirements, artifact names,
-compiler overrides, and library linking.

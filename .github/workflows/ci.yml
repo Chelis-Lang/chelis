@@ -1834,6 +1834,11 @@ jobs:
       - name: Build mdBook
         run: mdbook build docs/book
 
+      # The book mirrors the chelis.ch docs; the lint keeps contributor
+      # material (issue numbers, internal paths, status words) out of it.
+      - name: Lint the user book and README
+        run: python scripts/check_book.py docs/book/src README.md
+
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
         uses: ./.github/actions/vendor/ci/actions/publish-build-cache

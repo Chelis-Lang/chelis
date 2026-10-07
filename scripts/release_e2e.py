@@ -8,7 +8,7 @@ run, whose archives carry a `dev-<sha8>` label, is installed from a copy under
 its release name, and the two online steps skip.
 
 - assets: the sha256 sidecars of this host's archive and installer match.
-- bootstrap: the install guide's `gh release download ... chelisup.sh | sh`,
+- bootstrap: the release's `gh release download ... chelisup.sh | sh`,
   which takes chelisup from the latest release (online runs with `gh` on PATH).
 - install-online: `chelisup install X.Y.Z` through the GitHub API.
 - install-offline: `chelisup install X.Y.Z` from the verified local assets.

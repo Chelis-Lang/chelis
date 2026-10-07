@@ -1,150 +1,99 @@
 # Install
 
-Install a release toolchain with `chelisup`, then use `chelis` to work in a
-project. `chelisup` keeps installed versions side by side and provides the
-`chelis` command that selects a version for each invocation. [Reef and
-Packages](reef.md) covers package creation and dependencies.
+Chelis ships as prebuilt binaries for Linux x86_64 and macOS arm64. Each
+release on [GitHub](https://github.com/Chelis-Lang/chelis/releases) carries the
+compiler archives, a `chelisup` binary for each platform, and `chelisup.sh`, a
+short script that detects your platform and installs `chelisup`. `chelisup` is
+the toolchain manager: it downloads compilers, keeps several versions side by
+side, and installs the `chelis` command that picks the right version for each
+invocation.
 
 ## Install a release toolchain
 
-`chelisup` downloads public releases without a GitHub token. The commands below
-use the [GitHub CLI](https://cli.github.com) to find and fetch the latest
-release. Private releases need `GITHUB_TOKEN` or a working `gh auth token` with
-read access. Prebuilt release assets are available for macOS arm64 and Linux
-x86-64.
-On Linux, `chelisup` and the toolchain it installs are static executables that
-need no system libraries, so they start on any x86-64 distribution, including
-NixOS without nix-ld. They resolve host names through `/etc/hosts` and the name
-servers in `/etc/resolv.conf` only, not through NSS plugins. Linux releases
-come in glibc builds and a musl build, which differ in the C library of the
-runtime that native builds link. `chelisup install` picks the musl build when
-`/bin/sh` is loaded by musl's dynamic loader, as on Alpine, and the static glibc
-build otherwise. For source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
-
-Run these commands in a terminal outside a Chelis project:
+The commands below use the [GitHub CLI](https://cli.github.com) (`gh`). Run
+them outside a Chelis project:
 
 ```sh
-gh auth login
-gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh
+# Download the installer script from the latest release and run it
+gh release download -R Chelis-Lang/chelis -p chelisup.sh
+sh chelisup.sh
+# Put ~/.chelis/bin on your PATH (add this line to ~/.zshrc or ~/.bashrc)
 export PATH="$HOME/.chelis/bin:$PATH"
-release_tag="$(gh release view --repo Chelis-Lang/chelis --json tagName --jq .tagName)"
+# Install the latest compiler and confirm it runs
+release_tag="$(gh release view -R Chelis-Lang/chelis --json tagName --jq .tagName)"
 chelisup install "${release_tag#v}"
 chelis --version
 ```
 
-The bootstrap script installs **only `chelisup`**. The separate `chelisup install`
-command downloads the toolchain and installs the `chelis` version-selecting
-shim. The script prints the PATH line for your install location; the line above
-uses the default `~/.chelis/bin`. `chelisup install` takes a bare `X.Y.Z`, while
-GitHub release tags begin with `v`.
+The script installs only `chelisup`; `chelisup install` downloads the compiler.
+Release tags start with `v`, while `chelisup install` takes a bare `X.Y.Z`
+version, which is why the last lines strip the `v`.
 
-The first installed toolchain becomes the default outside a project. Check the
-installed versions with `chelisup list-installed`, inspect the active selection
-with `chelisup show`, or set another installed default with
-`chelisup default X.Y.Z`.
+On Linux, `chelisup` and the compiler it installs are static executables with
+no system library dependencies, so they start on any x86_64 distribution. A
+build linked against glibc 2.31 is also attached to each release. If you
+prefer to unpack a compiler yourself, each release archive
+(`chelis-vX.Y.Z-darwin-arm64.tar.gz`, `chelis-vX.Y.Z-linux-x86_64-static.tar.gz`)
+holds `bin/chelis`, the runtime archive in `lib/`, and its headers in
+`include/`. Keep those three together.
 
-Before placing a toolchain, `chelisup` reads the unpacked compiler's live
-`chelis runtime export` receipt and checks its sealed archive and six public
-headers against the shipped `lib/` and `include/` files. Missing or crossed
-files and malformed or ambiguous receipts (including duplicate JSON keys in
-nested objects) refuse installation before store placement. A toolchain whose
-compiler has no runtime export installs with a warning that its runtime files
-are unchecked; if a newer receipt format is unreadable, update `chelisup` with
-the bootstrap.
+## Manage versions
 
-Publish the compiler, archive, and headers together as one versioned toolchain;
-never replace only an installed archive or header. A rejected install leaves
-the previous toolchain available. To roll back, select a previously installed
-complete version with `chelisup default X.Y.Z` outside a project; explicit
-version overrides and project pins must be changed separately.
+The first installed toolchain becomes the default outside a project.
+
+| Command | What it does |
+|---|---|
+| `chelisup install X.Y.Z` | Downloads and installs that version beside the others. |
+| `chelisup list-installed` | Lists installed versions. |
+| `chelisup show` | Prints the default, the version the current directory selects, and where toolchains are stored. |
+| `chelisup which` | Prints the compiler binary `chelis` runs in the current directory. |
+| `chelisup uninstall X.Y.Z` | Removes an installed version. |
+| `chelisup default X.Y.Z` | Sets the default for directories outside a project. |
+
+When you run `chelis`, it selects an installed version in this order, and the
+first match wins:
+
+1. a leading `+X.Y.Z` argument, as in `chelis +X.Y.Z --version`;
+2. the `CHELIS_TOOLCHAIN` environment variable;
+3. the nearest `chelis-toolchain` file in the current or a parent directory;
+4. the nearest `reef.toml`'s `compiler` pin;
+5. the default set by `chelisup default`.
+
+A selected version that is not installed is an error naming the
+`chelisup install` command to run; `chelis` never falls back to another
+version. Because the first three outrank the project pin, a stray
+`CHELIS_TOOLCHAIN` or `chelis-toolchain` file overrides `reef.toml`.
 
 ## Use a project
 
-A Reef project's `reef.toml` declares its toolchain under `[package]`, for
-example `compiler = "=0.18.12"`. With a current default toolchain installed,
-provision a fresh clone in one command:
+A Reef project's `reef.toml` pins its compiler under `[package]`, for example
+`compiler = "=X.Y.Z"`. In a fresh clone, one command installs that version if
+it is missing, installs the dependencies recorded in `reef.lock`, and prints a
+status summary:
 
 ```sh
-cd path/to/project
 chelis reef setup
 chelis reef build
 ```
 
-Bare `chelis reef setup` uses the recorded default compiler as its orchestrator,
-then installs the project's exact pin if missing. Setup also installs dependencies
-recorded in `reef.lock`, syncs declared Chelis source crates, and reports status.
-Build is a separate command and uses the project's pin. Explicit `+X.Y.Z`,
-`CHELIS_TOOLCHAIN`, and `chelis-toolchain` overrides still select the setup
-orchestrator; that selected compiler must already be installed and support setup.
-A missing default requires installing a current toolchain and recording it with
-`chelisup default X.Y.Z`.
+The [Reef and packages](reef.md) guide covers creating a project
+and managing dependencies.
 
-The shim chooses an installed toolchain in this order: a leading `+X.Y.Z`
-argument, `CHELIS_TOOLCHAIN`, the nearest `chelis-toolchain` file, the nearest
-`reef.toml` compiler pin, then the recorded default. For example,
-`chelis +0.18.12 --version` selects that installed version for one command.
-A missing selected version produces an error naming `chelisup install X.Y.Z`;
-there is no automatic fallback. `+latest` is unsupported. The project-pin
-level is skipped only for the explicit `reef setup` provisioning command.
+## Build requirements
 
-`chelis reef doctor` reports the installed toolchain, source-crate sync, and
-binary artifacts for the current project without installing anything. With
-`--root DIR`, it scans `DIR` and its immediate subdirectories for projects.
-It does not check whether source-package dependencies are installed.
+`chelis eval` and `chelis check` need nothing beyond the compiler.
+`chelis build` also needs a native C compiler, and a definitions-only module,
+which builds to a static library, needs the `ar` archiver:
 
-## Build from a checkout
+- On macOS, install Apple's Command Line Tools with `xcode-select --install`.
+- On Debian or Ubuntu, install `build-essential`.
+- On Fedora, install `gcc` and `binutils`.
 
-[Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md) covers the Rust, C, and Python
-tools needed to build Chelis from source. A checkout build is separate from a
-release installed by `chelisup`.
-
-### Nix source packages
-
-From the compiler checkout root, Nix provides source builds of `chelis`,
-`chelis-runtime`, and `chelisup` on `x86_64-linux` and `aarch64-darwin`:
-
-```sh
-nix build .#chelis
-nix run .#chelis -- --version
-```
-
-Both `chelis` and `chelis-runtime` verify their copied archive and all six
-public headers against the sealed compiler's export. `nix flake check`
-rechecks both outputs against the combined package's own compiler, then links
-and runs a native C consumer separately with each output's exact include
-directory and archive path. Rebuild both outputs from the same compiler
-revision; never mix an archive or header from another derivation. A failed
-Nix-wrapper installation leaves its previous stable GC root and selected
-toolchain untouched.
-
-### Build the Python distribution wheel
-
-With the [contributor prerequisites](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md) installed, run
-this from the compiler checkout root:
-
-```sh
-uv build --wheel --out-dir target/python-wheel/wheels bindings/python
-```
-
-This builds a wheel from the checkout. The Chelis GitHub toolchain release does
-not include a Python wheel. For editable Python bindings during development,
-see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md#python-311).
-
-## Native build prerequisites
-
-`chelis build` invokes a native compiler; `--emit-c` only generates sources.
-On macOS install Apple's Command Line Tools with `xcode-select --install`.
-On Debian/Ubuntu install `build-essential`, and on Fedora install `gcc gcc-c++`.
-BLAS-backed CPU operations additionally need OpenBLAS on Linux; macOS uses
-Accelerate. Definitions-only builds also require `ar` from the native toolchain.
-On Alpine install `gcc musl-dev`, and `openblas-dev` for OpenBLAS; BLAS-backed
-operations are untested on musl. The glibc builds carry a glibc runtime and the
-musl build a musl runtime, so `chelis build` needs a C compiler for the same C
-library and refuses one for the other before compiling anything
-([#3280](https://github.com/Chelis-Lang/chelis/issues/3280)). For a release
-without a musl build, `chelisup` installs the static glibc build on a musl
-system; there `chelis eval`, `check`, `test`, and `prove` work, and
-`chelis build` refuses the musl compiler.
-HIP requires ROCm's `hipcc` and its libraries; Metal requires the macOS SDK and
-`clang++`. A compatible GPU is required when executing GPU work. See
-[Backends](backends.md) for compiler overrides and prerelease target limitations.
+Generated C carries its own matrix-multiplication loops and correctly rounded
+math kernels, so an ordinary build links only the Chelis runtime archive and
+`-lm`; GCC builds add `-fopenmp` for parallel loops. The build prints the
+compiler it used, and `--emit-c` prints the exact compile command.
+`chelis build app.ch --emit-c` writes the C sources and runtime files without
+calling a compiler, so it needs none of these tools. See
+[Build programs](backends.md) for compiler overrides and linking a
+generated static library.

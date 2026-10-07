@@ -1,9 +1,9 @@
-# Type System Basics
+# Type system basics
 
 Chelis makes tensor dimensions and numeric precision explicit. The checker
 rejects an axis order that conflicts with a declared type and an arithmetic
 operation whose operands have different precision. See the
-[Type System Reference](type-reference.md) for the full type surface.
+[type system reference](type-reference.md) for the full type surface.
 
 ## Tensor types
 
@@ -35,22 +35,23 @@ lengths.
   axis, `reshape` to specify a new shape, or `permute` to reorder axes.
 - Arithmetic does not promote precision implicitly. Use `cast(x, f32)` when a
   conversion is intended.
-- An unsuffixed integer literal has type `i32`; an unsuffixed float literal has
-  type `f32`. A suffix such as `1.0f64` selects another dtype explicitly, and so
-  does the construct that directly contains the literal: a declaration
-  (`x: f64 = 1.0`), a `cast` (`cast(1.0, f64)`), or the dtype argument of
-  `to_tensor`.
+- An ordinary unsuffixed integer literal has type `i32`; an ordinary
+  unsuffixed float literal has type `f32`. A numeric declaration, direct
+  `cast`, or `to_tensor` dtype argument can state another dtype for a literal
+  it directly contains. A suffix such as `1.0f64` selects a dtype explicitly.
 - A bracket literal is a `List`: `xs = [1.0, 2.0, 3.0]` has type `List f32`.
-  It becomes a tensor only through `to_tensor([1.0, 2.0, 3.0], f32)`, which has type
+  It becomes a tensor through `to_tensor([1.0, 2.0, 3.0], f32)`, which has type
   `tensor[3, f32]`, or where its own binding or function result declares a
   tensor type, as in `xs: tensor[3, f64] = [1.0, 2.0, 3.0]`. Nested brackets
   supply a tensor's dimensions, and the declaration gives the unsuffixed
   elements its element dtype. A tensor parameter or a `cast` never converts a
-  bracket literal, and an element of `to_tensor` takes its dtype from its
-  suffix or the dtype argument, never a default, so write
-  `f(to_tensor([1.0, 2.0], f64))` for an `f64` tensor argument:
-  `cast(to_tensor([1.1, 2.2], f32), f64)` widens `f32` values. Explicit suffixes
-  remain exact; mixed dtypes and ragged tensor literals are rejected.
+  bracket literal. A numeric literal inside `to_tensor` needs a suffix or a
+  dtype argument; it has no default. Write `to_tensor([1.0, 2.0], f64)` or
+  `to_tensor([1.0f64, 2.0f64])` to bind the elements directly at `f64`.
+  `cast(to_tensor([1.1, 2.2], f32), f64)` instead widens `f32` values.
+  A dtype argument checks already-typed elements; it does not convert them.
+  `xs = [1.1, 2.2]` binds an ordinary `List[f32]`, so `to_tensor(xs)` keeps
+  those `f32` values. Mixed dtypes and ragged tensor literals are rejected.
 
 An empty list supplies no element values from which to determine a tensor's
 dtype. Give the list an element type before converting it:
@@ -82,7 +83,7 @@ def widen_only[p: {f32, f64}](x: p) -> p = add(x, x)
 
 For named dimensions, rank polymorphism, generic casts, ownership, the
 difference between the two bound forms, and the corresponding Deep forms, see
-the [Type System Reference](type-reference.md).
+the [type system reference](type-reference.md).
 For effects in function types, continue to [Effects](effects.md).
 
 ## Read-only tensor calls
@@ -97,11 +98,9 @@ passing a borrowed tensor to an owned parameter requires an explicit `copy`.
 Comparisons require matching dimensions and dtypes; borrowing does not
 permit implicit broadcasting or promotion.
 
-A local `to_tensor` binding or parameter that would capture the conversion
-of a bracket literal under its declared tensor type is refused with a source
-location. Rename the binding to use a tensor literal there. An explicit call
-to the local function is an ordinary call: its bracket argument stays a
-`List`.
+`to_tensor` is reserved. A definition, parameter, local binding, pattern, or
+import cannot reuse the name. The checker rejects these bindings before
+evaluation or compilation; this restriction also applies inside Reef packages.
 
 ### Scalar ascriptions
 
