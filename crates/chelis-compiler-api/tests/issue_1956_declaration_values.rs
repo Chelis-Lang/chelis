@@ -64,7 +64,7 @@ fn initializer_runs_once_eager_or_lazy_through_nested_calls() {
         );
     }
     assert_eq!(
-        results.map(|result| result.transcript),
+        results.each_ref().map(|result| result.transcript.clone()),
         [vec!["init".to_string()], vec!["init".to_string()]]
     );
 }

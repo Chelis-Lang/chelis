@@ -56,14 +56,13 @@ fn storage_elements(storage: &TensorStorage) -> Vec<Stored> {
 }
 
 fn eval_source(source: &str) -> Result<BTreeMap<String, TensorValue>, String> {
-    let result = eval(EvalRequest {
+    let mut result = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: source.to_string(),
         bindings: BTreeMap::new(),
     })
     .map_err(|err| format!("{err:?}"))?;
-    Ok(result
-        .roots
+    Ok(std::mem::take(&mut result.roots)
         .into_iter()
         .filter_map(|root| match (root.name, root.value) {
             (Some(name), ExecutionValue::Tensor { value }) => Some((name, value)),

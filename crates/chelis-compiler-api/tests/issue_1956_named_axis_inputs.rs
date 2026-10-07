@@ -80,8 +80,8 @@ fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
     }
     assert_eq!(
         results
-            .into_iter()
-            .map(|result| result.transcript)
+            .iter()
+            .map(|result| result.transcript.clone())
             .collect::<Vec<_>>(),
         vec![vec!["entry"], vec!["entry"]]
     );

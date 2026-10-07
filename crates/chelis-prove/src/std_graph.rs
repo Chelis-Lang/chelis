@@ -224,13 +224,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let _linked = chelis_types::install_linked_program_guard();
-        let roots = compiler::eval_decls_selected(
+        let result = compiler::eval_decls_selected(
             &program.decls,
             Default::default(),
             &["a".to_string(), "b".to_string(), "c".to_string()],
         )
-        .unwrap()
-        .roots;
+        .unwrap();
+        let roots = &result.roots;
         let expected = |name: &str| {
             let root = roots
                 .iter()

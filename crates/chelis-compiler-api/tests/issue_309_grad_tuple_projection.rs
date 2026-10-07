@@ -94,13 +94,12 @@ fn run_c(source: &str, driver: impl FnOnce(&str) -> String) -> String {
 }
 
 fn eval_result(source: &str) -> ExecutionValue {
-    let result = eval(EvalRequest {
+    let mut result = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: format!("{source}\nx = to_tensor([2.0f32, 3.0f32])\nw = to_tensor([5.0f32, 7.0f32])\nout = dloss(x, w)\n"),
         bindings: BTreeMap::new(),
     }).unwrap();
-    result
-        .roots
+    std::mem::take(&mut result.roots)
         .into_iter()
         .find(|root| root.name.as_deref() == Some("out"))
         .expect("out root")

@@ -22,7 +22,7 @@ fn scoped_capture_does_not_replace_the_success_transcript() {
     let _guard = install_transcript_capture(capture.clone());
     let result = eval(request("_ = print(\"first\")\n7i64")).unwrap();
     assert_eq!(result.transcript, ["first"]);
-    assert_eq!(capture.finish(), Some(result.transcript));
+    assert_eq!(capture.finish(), Some(result.transcript.clone()));
 }
 
 #[test]

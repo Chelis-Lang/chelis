@@ -119,9 +119,10 @@ pub fn eval_output(source: &str) -> String {
         Ok(result) => {
             let mut out = String::new();
             out.push_str("eval: zero-filled named bindings\n");
-            for root in result.roots {
+            for root in &result.roots {
                 let name = root
                     .name
+                    .clone()
                     .unwrap_or_else(|| format!("node_{}", root.node_id));
                 let _ = writeln!(&mut out, "{name}: {}", render_execution_value(&root.value));
             }
