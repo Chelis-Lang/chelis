@@ -6,23 +6,41 @@ upper bound on what a function may do.
 
 ## Host I/O and tests
 
-- `IO` covers host operations such as `print` and file access. It is allowed
-  at the program boundary.
-- `Test` comes from assertions and is handled by `chelis test`.
+- `IO` covers every host interaction: `print` and `debug`, file reads and
+  writes, directory listing, running a subprocess, and reading the wall or
+  monotonic clock. A function's inferred effects are the union of the effects
+  of the operations in its body, so any caller of an `IO` function is `IO`
+  too. `IO` is allowed at the top level of a program.
+- `Test` comes from assertions such as `test_assert`. `chelis test` runs
+  them and reports a failed assertion as a failed test; see
+  [Testing](testing.md).
 
 A function may declare an effect bound with `! { ... }`:
 
 ```chelis-surf
 def report(value: f32) -> unit ! { IO } = print(value)
+r = report(1.5f32)
 ```
 
-`! { IO }` permits host I/O. `! {}` declares a pure upper bound; leaving off
-the suffix lets the checker infer the effects.
+`chelis eval --file` prints `1.5` from the call and then the value of `r`,
+`r = ()`. `! { IO }` permits host I/O. `! {}` declares the function pure;
+leaving off the suffix lets the checker infer the effects. A body that does
+more than its bound allows fails `chelis check`. With `! {}` on `report`:
+
+```text
+{"kind":"UnhandledEffect","message":"Function `report` is declared with effects `{}` but its body performs effects `{IO}` that were not declared","severity":0.8,"suggestions":["Either add the missing effect(s) to the signature of `report` (e.g. `! { IO }`) or refactor the body so it does not perform them."]}
+```
 
 ## Random keys
 
-Random draws are pure functions of explicit keys. `dropout` and `uniform_like`
-take a key as their first argument and add no effect. Create a key from a seed,
+Random draws are pure functions of explicit keys and add no effect.
+`dropout(k, x, rate)` zeroes each element of the float tensor `x` with
+probability `rate` (finite, `0 <= rate < 1`) and divides the kept elements by
+`1 - rate`; `uniform_like(k, x, low, high)` returns a tensor of `x`'s shape
+filled from `[low, high]` (finite bounds, `low <= high`), ignoring `x`'s
+values. A rate or bound outside its domain stops evaluation before any value is
+drawn. See [explicit randomness](stdlib.md#explicit-randomness) for
+the key functions. Create a key from a seed,
 then split it when you need more than one draw. Each key can be used at most
 once along any execution path. Tuple destructuring such as the first binding below
 is written inside a function body:
@@ -48,7 +66,8 @@ request. For the C target, the accepted name is exactly `"cpu"`:
 def relu_on_cpu[n](x: tensor[n, f32]) -> tensor[n, f32] = with device("cpu") { relu(x) }
 ```
 
-A C build rejects any other device name before writing artifacts, with an
-error that names the region and the accepted device. For other targets and
-device support, see [Backends](backends.md). The precise effect and target
-rules are in §7 of the [type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md).
+Any other name is accepted by `chelis check` and `chelis eval`, but
+`chelis build` rejects it with an error that names the region and says that
+only `cpu` is accepted, before it writes any file. Nested regions are checked
+one by one, so a `cpu` region inside another region does not make the outer
+name acceptable.

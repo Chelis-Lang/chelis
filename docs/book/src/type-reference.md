@@ -1,10 +1,9 @@
-# Type System Reference
+# Type system reference
 
 Chelis records tensor shape and element dtype in types. It does not implicitly
 broadcast tensors or promote numeric operands. Dimension names preserve axis
 identity: distinct names do not unify, while a literal extent can satisfy a
-named dimension at a call site. This page covers the type surface and its
-checking rules. The [type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) defines the full semantics.
+named dimension at a call site.
 
 ## Primitive types
 
@@ -46,10 +45,20 @@ tensor[batch, bool]         -- boolean elements
 tensor[batch, key]          -- random keys
 ```
 
-Dimension positions can hold a declared name such as `batch`, a variable
-introduced in `[...]`, a nonnegative literal such as `512`, or the wildcard
-`*` for an unknown extent. A `..r` spread stands for a run of dimensions
-in a rank-polymorphic signature. See the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) for their Deep forms.
+A dimension position holds one of five forms. This signature uses all of
+them; `chelis deep` prints the Deep node for each:
+
+```chelis-surf
+def f[n, r](a: tensor[n, f32], b: tensor[batch, 4, f32], c: tensor[*, f32], d: tensor[..r, f32]) -> tensor[n, f32] = a
+```
+
+| Surf | Deep | Meaning |
+|---|---|---|
+| `n`, listed in `[...]` | `(d-var {} n)` | A dimension variable. Each call binds it to the caller's extent. |
+| `batch`, not listed in `[...]` | `(d-name {} batch)` | A named dimension. It needs no declaration; it matches the same name or a literal extent. |
+| `4` | `(d-lit {} 4)` | A literal extent. |
+| `*` | `(d-name {} *)` | The wildcard: an extent not known statically. |
+| `..r`, with `r` listed in `[...]` | `(d-rank {} r)` | A spread: a run of dimensions in a rank-polymorphic signature. |
 
 ## Named dimensions and polymorphism
 
@@ -81,7 +90,7 @@ the size cannot be proved statically.
 A binder in the `[...]` clause may carry a dtype bound, which restricts every dtype it can
 be instantiated at. A bound is written either as a family name or as an explicit dtype set.
 
-The families are `Float` (the four active floats), `Int` (the four active signed integers),
+The families are `Float` (the four floating dtypes), `Int` (the four signed integer dtypes),
 and `Numeric` (their union). `bool` and `string` belong to no family.
 
 ```chelis-surf
@@ -90,10 +99,9 @@ def add_floats[p: Float](x: p, y: p) -> p = add(x, y)
 def add_wide[p: {f32, f64}](x: p, y: p) -> p = add(x, y)
 ```
 
-An explicit set admits exactly the dtypes it lists. The difference from a family is not
-cosmetic: a family denotes whatever the active dtype set admits into it, so it widens if a
-dtype is activated later, while a set never does. A set is therefore the way to exclude a
-member a family would admit - which matters because a bound's literals must be valid at
+An explicit set admits exactly the dtypes it lists. A family can admit new
+members if the language adds dtypes; an explicit set stays fixed. Use a set to
+exclude a member a family would admit. A bound's literals must be valid at
 *every* admissible instantiation. Under `p: Float`, `cast(1000000.0, p)` is rejected,
 because `Float` admits `f16` and the literal rounds to infinity there; under
 `p: {f32, f64}` the same literal is fine.
@@ -130,7 +138,6 @@ Spreads can surround named axes, letting a definition reduce or insert an axis
 while preserving the others. To reduce a named `seq` axis:
 
 ```chelis-surf
-dim seq
 def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 
@@ -166,29 +173,74 @@ result = add(x, cast(y, f32))
 
 `cast(e, p)` explicitly converts a scalar or tensor to the named dtype; a
 tensor keeps its dimensions. Casts can cross numeric kinds and can target
-`bool`. An integer-to-float cast may round, and a float-to-integer cast
-requires a finite, integral value in range; any other value traps. To narrow
-on purpose, use a named conversion: `cast_trunc` truncates a float toward
-zero, `cast_saturate` clamps to the target's range, and `cast_wrap` wraps a
-signed integer modulo the target width. Integer literals default to
-`i32` and float literals to `f32`. A literal's dtype is written at its site:
+`bool`. An integer-to-float cast may round. A float-to-integer cast is
+checked: it requires a finite, integral value in the target's range, and
+`cast(2.5f32, i32)` stops evaluation with `numeric trap: domain in cast at i32`.
+
+To narrow on purpose, use one of three named conversions. Each takes a scalar
+or a tensor (`cast_x(source, target)`), keeps the tensor's dimensions, has a
+signed-integer target, and is not differentiable: `grad` rejects a path
+through it.
+
+| Conversion | Source | Finite value | NaN | Infinity |
+|---|---|---|---|---|
+| `cast_trunc(x, T)` | float | Truncates toward zero; a result outside `T` traps `overflow`. | Traps `domain`. | Traps `domain`. |
+| `cast_saturate(x, T)` | float or signed integer | Truncates a float toward zero, then clamps to `T`'s minimum and maximum. | Traps `domain`. | Returns `T`'s minimum or maximum. |
+| `cast_wrap(x, T)` | signed integer | Keeps the low bits: the result is congruent to `x` modulo `2^width(T)`. | Not applicable. | Not applicable. |
+
+```chelis-surf
+xs = to_tensor([-2.7, 2.7, 300.5], f32)
+truncated = cast_trunc(xs, i16)
+saturated = cast_saturate(xs, i8)
+wrapped = cast_wrap(300i32, i8)
+checked = cast(2.0f32, i32)
+```
+
+```text
+xs = tensor(shape=[3], data=[-2.7, 2.7, 300.5])
+truncated = tensor(shape=[3], data=[-2, 2, 300])
+saturated = tensor(shape=[3], data=[-2, 2, 127])
+wrapped = 44
+checked = 2
+```
+
+`300` wraps to `300 - 256 = 44` in `i8`. There is no rounding conversion:
+write `cast(round(x), T)`, where `round` rounds half to even and the cast
+checks the result.
+
+Ordinary integer literals default to `i32` and float literals to `f32`. These
+constructs state a dtype directly:
 
 1. A suffix binds a literal to its stated dtype.
-2. A declaration states the dtype of a literal that is its whole
-   initializer (`x: f64 = 1.1`), and of every unsuffixed element of a bare
-   bracket literal that its tensor type makes a tensor.
-3. A `cast` binds an unsuffixed literal operand at a numeric target its
-   kind admits; the cast is then the literal itself.
-4. `to_tensor(xs, p)` binds every unsuffixed literal element of a bracket
-   literal `xs` at `p`, and never converts. Without a dtype argument, an
-   unsuffixed literal element is an error.
+2. A binding or function result with a declared numeric type states the dtype
+   of its literal initializer or body. A declared tensor type states the dtype
+   of literal elements in the bracket literal that makes it a tensor.
+3. A direct `cast` binds an unsuffixed literal operand at a numeric target
+   its kind admits; a cast to a primitive target then denotes the literal
+   itself. A float literal admits float targets, while an integer literal
+   admits any numeric target.
+4. A dtype argument in `to_tensor([1.1, 2.2], f64)` states the dtype of the
+   bracket literal's numeric elements.
 
-A bracket literal is a `List`. It becomes a tensor through `to_tensor`, whose
-first argument is an ordinary `List`, or where its own binding or function
-result declares a tensor type. A tensor parameter or a `cast` never converts
-a bracket literal. A list literal and a bare scalar passed to an ordinary
-function never take a callee's dtype. Structural lists such as reshape sizes
+A bracket literal is a `List`. It becomes a tensor through `to_tensor` or
+where its own binding or function result declares a tensor type. No default
+applies to numeric literal elements inside `to_tensor`: write a dtype argument
+or suffix every numeric literal element. `to_tensor([1.1, 2.2])` is rejected;
+`to_tensor([1.1, 2.2], f64)` and `to_tensor([1.1f64, 2.2f64])` are accepted.
+This applies recursively to nested bracket literals and to negative literals.
+
+A dtype argument never converts an already-typed element. A named list such
+as `xs = [1.1, 2.2]` has `f32` elements, and `to_tensor(xs)` keeps that dtype;
+`to_tensor(xs, f64)` is a type error. Use `cast(to_tensor(xs), f64)` to widen
+those values. A tensor parameter or a `cast` never converts a bracket literal
+to a tensor. A list literal and a bare scalar passed to an ordinary function
+do not adopt a callee's dtype. Structural lists such as reshape sizes
 therefore spell their `i64` elements explicitly.
+
+For an empty list, its declared element type or a dtype argument determines
+the result dtype: `to_tensor([], f64)` has shape `[0]` and dtype `f64`.
+An unconstrained `to_tensor([])` is rejected. `to_tensor` is reserved and
+cannot be rebound in any scope, including by parameters or imports.
 
 ```chelis-surf-fragment
 -- explicit tensor conversion
@@ -223,7 +275,7 @@ and signed integer reductions, an explicitly wider permitted accumulator
 also widens the result. The requested accumulator must have the same numeric
 kind and be no narrower than either the operands or their default.
 
-Small-integer sums widen to `i32` (`spec/04` §5.7.1), because a total of N
+Small-integer sums widen to `i32`, because a total of N
 values needs more bits than its elements. Stored `i8` and `i16` tensors stay
 `i8` and `i16`; only the aggregate an operation returns widens:
 
@@ -262,9 +314,82 @@ tensor[n, f32] -> tensor[n, f32] -> tensor[f32]   -- two args, scalar result
   Recursive types refer to themselves by name.
 - Records: constructed with `Foo { x: e1, y: e2 }` (punning allowed), read with `e.field`.
 - Type aliases: a `type` without variants is transparent and expanded at desugaring.
-- Lists: `List[T]` holds rank-uniform elements; a list of tensors fixes one rank for every
-  element. The list builtins (`len`, `index`, `append`, `concat`, `range`, `zip`,
-  `enumerate`, `map`, `filter`, `fold`, and others) operate on these.
+- Lists: `List[T]` holds elements of one type; a list of tensors fixes one rank for every
+  element. The list builtins are below.
+- Dictionaries: `Dict[K, V]` maps keys of one type `K` (`string`, `bool`, or a
+  signed integer; float keys are a type error) to values of one type `V`.
+  Build one from a list of pairs with `dict_of`; a later pair wins over an
+  earlier one with the same key. `dict_get(d, k)` returns `Option[V]`, and
+  `dict_insert`, `dict_remove`, and `dict_merge` (right side wins) return a
+  new `Dict`. `dict_contains`, `dict_keys`, `dict_values`, `dict_entries`, and
+  `len` read it.
+
+```chelis-surf
+vocab: Dict[string, i64] = dict_of([("alpha", 1i64), ("beta", 2i64)])
+extended = dict_insert(vocab, "gamma", 3i64)
+beta_id = dict_get(extended, "beta")
+missing = dict_get(extended, "delta")
+```
+
+```text
+vocab = dict(alpha: 1, beta: 2)
+extended = dict(alpha: 1, beta: 2, gamma: 3)
+beta_id = Some(2)
+missing = None
+```
+
+### List builtins
+
+Counts and indices are `i64`, and indices start at zero.
+
+| Builtin | Signature | Result and failure |
+|---|---|---|
+| `len(xs)` | `List[T] -> i64` (also takes a `Dict`) | Number of elements. |
+| `index(xs, i)` | `List[T], i64 -> T` | Element `i`. A negative or out-of-range `i` stops evaluation (`index 9 out of bounds for list of len 5`). |
+| `append(xs, x)` | `List[T], T -> List[T]` | `xs` with `x` at the end. |
+| `concat(xs, ys)` | `List[T], List[T] -> List[T]` | `xs` followed by `ys`. With an `i32` axis as the second argument, `concat` is the tensor operation instead. |
+| `take(xs, n)`, `skip(xs, n)` | `List[T], i64 -> List[T]` | The first `n` elements, or all but the first `n`. A count above the length takes everything or leaves nothing; a negative count stops evaluation. |
+| `chunk(xs, n)` | `List[T], i64 -> List[List[T]]` | Consecutive groups of `n`; the last may be shorter. `n` must be positive. |
+| `range(start, end)` | `i64, i64 -> List[i64]` | `start` up to but excluding `end`; empty when `end <= start`. |
+| `map(f, xs)` | `(T -> U), List[T] -> List[U]` | `f` applied to each element in order. |
+| `filter(f, xs)` | `(T -> bool), List[T] -> List[T]` | Elements where `f` is true, in order. `partition(f, xs)` returns the kept and rejected lists. |
+| `fold(f, init, xs)` | `((A, T) -> A), A, List[T] -> A` | The final accumulator. |
+| `scan(f, init, xs)` | `((A, T) -> A), A, List[T] -> List[A]` | The accumulator after each element, not including `init`. |
+| `flat_map(f, xs)`, `flatten(xss)` | `(T -> List[U]), List[T] -> List[U]`; `List[List[T]] -> List[T]` | Results joined in order; one level of nesting removed. |
+| `zip(xs, ys)` | `List[T], List[U] -> List[(T, U)]` | Pairs, stopping at the shorter list. |
+| `enumerate(xs)` | `List[T] -> List[(i64, T)]` | Each element with its index. |
+
+A callback runs once per element in order, and an effect it carries (such as
+`IO`) becomes an effect of the call.
+
+```chelis-surf
+xs = range(1i64, 6i64)
+doubled = map(fn (x) -> (x * 2i64), xs)
+evens = filter(fn (x) -> ((floor_div(x, 2i64) * 2i64) == x), xs)
+total = fold(fn (acc, x) -> (acc + x), 0i64, xs)
+running = scan(fn (acc, x) -> (acc + x), 0i64, xs)
+head = take(xs, 2i64)
+rest = skip(xs, 2i64)
+groups = chunk(xs, 2i64)
+third = index(xs, 2i64)
+size = len(xs)
+```
+
+```text
+xs = [1, 2, 3, 4, 5]
+doubled = [2, 4, 6, 8, 10]
+evens = [2, 4]
+total = 15
+running = [1, 3, 6, 10, 15]
+head = [1, 2]
+rest = [3, 4, 5]
+groups = [[1, 2], [3, 4], [5]]
+third = 3
+size = 5
+```
+
+A top-level definition cannot reuse a builtin's name: `count = len(xs)` is
+rejected because `count` is the boolean-count reduction.
 
 ## Effects in types
 
@@ -283,9 +408,33 @@ build target. See [Effects](effects.md) for the effect vocabulary.
 
 ## Linearity and borrowing
 
-Tensor values are owned by default. A consuming use ends access through that
-binding; read-only uses can borrow it. The compiler inserts needed copies and
-drops an unused owner after its last use when it can establish that point.
+Tensor values are owned by default. A call with an owned parameter consumes
+its argument; read-only calls can borrow it. If an owned tensor feeds several
+consuming calls, the compiler inserts copies for the earlier uses, so this
+checks and evaluates with no `copy`:
+
+```chelis-surf
+def total[n](x: tensor[n, f32]) -> tensor[f32] = sum(x, 0i32)
+x = to_tensor([1.0, 2.0], f32)
+a = total(x)
+b = total(x)
+```
+
+Write `copy(x)` yourself on the earlier use in these cases, where no copy is
+inserted and the later use fails `chelis check` with a `UseAfterConsume`
+error that names the earlier call:
+
+- the later use is a call through a transform, such as `grad(total)(x)`
+  after `total(x)`;
+- `x` is a component bound by a destructuring `let`, such as `(a, b) = ...`;
+- `x` carries a random key, which can never be copied;
+- the earlier use was `drop(x)`, a `match` on `x`, or a closure that
+  consumes `x`.
+
+The [linear regression example](examples.md)
+passes copies to `loss` for the first reason.
+An explicit `drop(x)` ends access through that owner. The compiler also drops
+an unused owner after its last use when it can establish that point.
 Keys are different: a key-carrying value can be used at most once on a path
 and cannot be copied or borrowed.
 

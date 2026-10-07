@@ -21,6 +21,7 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
         "spec/design/guard_artifact_proposal_assessment.md",
         "scripts/changelog.py",
         "scripts/check_agent_skills.py",
+        "scripts/check_book.py",
         "scripts/check_configuration_closure.py",
         "scripts/check_rejection_authority_boundary.py",
         "scripts/diagnostic_kind_oracle.py",

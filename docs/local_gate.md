@@ -359,8 +359,8 @@ shared set, source/embedded byte agreement, and Claude/Codex review-command
 wrapper agreement; the validator and CI-routing tests exercise failure cases; and
 `chelis-conformance`'s `asset_drift_tripwire` and `skill_set_uniformity` tests
 exercise compiled assets and downstream distribution. Local reruns of these
-checks are optional. Docs also builds mdBook and validates the package
-skill/examples.
+checks are optional. Docs also builds mdBook, lints the book and `README.md`
+with `scripts/check_book.py`, and validates the package skill/examples.
 
 ## Inner-loop discipline
 

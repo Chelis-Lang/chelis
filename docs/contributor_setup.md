@@ -61,8 +61,9 @@ uv pip install -e bindings/python
 ```
 
 The second command makes an editable Python binding for development. Standard
-wheels embed their runtime; see the [install guide](book/src/install.md#build-the-python-distribution-wheel)
-and [bindings README](../bindings/python/README.md) for wheel checks.
+wheels embed their runtime; see
+[Build the Python distribution wheel](#build-the-python-distribution-wheel)
+and the [bindings README](../bindings/python/README.md) for wheel checks.
 
 ## Build and check
 
@@ -128,6 +129,37 @@ a commit stages a leg's input or output, and pre-push prints a notice and lets t
 through. `git commit --no-verify` and `git push --no-verify` are the only
 bypass.
 
+## Build the Python distribution wheel
+
+With the prerequisites above installed, run this from the checkout root:
+
+```sh
+uv build --wheel --out-dir target/python-wheel/wheels bindings/python
+```
+
+This builds a wheel from the checkout. The GitHub toolchain release does not
+include a Python wheel. For editable bindings during development, use the
+`uv pip install -e bindings/python` step under [Python 3.11](#python-311).
+
+## Nix source packages
+
+From the checkout root, Nix provides source builds of `chelis`,
+`chelis-runtime`, and `chelisup` on `x86_64-linux` and `aarch64-darwin`:
+
+```sh
+nix build .#chelis
+nix run .#chelis -- --version
+```
+
+Both `chelis` and `chelis-runtime` verify their copied archive and all six
+public headers against the sealed compiler's export. `nix flake check`
+rechecks both outputs against the combined package's own compiler, then links
+and runs a native C consumer separately with each output's exact include
+directory and archive path. Rebuild both outputs from the same compiler
+revision; never mix an archive or header from another derivation. A failed
+Nix-wrapper installation leaves its previous stable GC root and selected
+toolchain untouched.
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies
@@ -163,8 +195,8 @@ Inside a persistent shell, use `cargo build -p chelis-cli` and
 `chelis-gate --fast`. For one command outside it, use
 `devenv shell -- <command>`. The shell includes mdBook; run
 `mdbook build docs/book` to build the user book. The
-[Nix source packages](book/src/install.md#nix-source-packages) are a separate
-source-build channel.
+[Nix source packages](#nix-source-packages) are a separate source-build
+channel.
 
 For optional local direnv activation, install direnv and enable its hook in
 your shell after installing the pinned Devenv 2.2.3. Create an ignored `.envrc`

@@ -6,15 +6,52 @@ package does not provide the package graph this command needs.
 
 ## Write and run a test
 
-Put a `.ch` file under `tests/`, such as `tests/core.ch`. Test functions have a `test_` name,
-no parameters, and a `unit` result. For a package whose module prefix is `Demo`:
+Put a `.ch` file under `tests/`, such as `tests/core.ch`. A test is a
+definition whose name starts with `test_`, with no parameters and a `unit`
+result. Its body calls assertions. For a package whose module prefix is
+`Demo`:
 
 ```chelis-surf-fragment
 module Demo.Tests.Core
-def test_value() -> unit = test_assert(true, "value is valid")
+def test_value() -> unit = test_assert(gt(3i64, 2i64), "3 is greater than 2")
+def test_sum() -> unit = test_assert_eq(add(2i64, 2i64), 4i64, "2 + 2")
+def test_softmax() -> unit = test_assert_close_tensor(softmax(to_tensor([0.0, 0.0], f32), 0), to_tensor([0.5, 0.5], f32), 1e-6f32, "uniform softmax")
+def test_wrong() -> unit = test_assert_eq(mul(2i64, 3i64), 5i64, "2 * 3")
 ```
 
-Replace `true` with the condition your program must satisfy. From the package root, run:
+Running `chelis test` from the package root prints:
+
+```text
+tests/core.ch
+  test_value .................... PASS
+  test_sum ...................... PASS
+  test_softmax .................. PASS
+  test_wrong .................... FAIL (assert_eq (2 * 3): expected 5, got 6)
+
+3 passed, 1 failed
+```
+
+and exits `1` because `test_wrong` failed. The four assertions are built in,
+need no import, and carry the `Test` effect. Each takes a label last; a
+failure reports the label and stops that test.
+
+| Assertion | Arguments | Passes when |
+|---|---|---|
+| `test_assert` | `(cond: bool, label: string)` | `cond` is true. |
+| `test_assert_eq` | `(actual: Q, expected: Q, label: string)` | the values are equal. `Q` is any scalar, or a `List`, tuple, `Option`, or data type of comparable values. Float NaN is never equal; `0.0` equals `-0.0`. |
+| `test_assert_eq_tensor` | `(actual: &tensor[..r, p], expected: &tensor[..r, p], label: string)` | the shapes are equal and every element is equal. Integers and `bool` compare exactly, floats as in `test_assert_eq`. A failure names the first unequal element in row-major order. |
+| `test_assert_close_tensor` | `(actual: &tensor[..r, p], expected: &tensor[..r, p], tol: p, label: string)` | `p` is a float dtype, the shapes are equal, and every element satisfies `abs(actual - expected) <= tol`. |
+
+For `test_assert_close_tensor`, the tolerance has the tensors' dtype and must
+be finite and nonnegative; zero means exact equality. The difference is
+computed in `f32` for `f16`, `bf16`, and `f32` tensors and in `f64` for `f64`
+tensors. NaN is never close to anything, and an infinity is close only to the
+same signed infinity. The comparison is absolute, so choose `tol` for the
+magnitude of your values. `Std.Test` wraps these builtins with a named
+`assert_*` family, including a scalar `assert_close` and `assert_shape`; see
+[Runtime and standard library](stdlib.md).
+
+To run all tests, one file, or the tests whose name contains a string:
 
 ```sh
 chelis test

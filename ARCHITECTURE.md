@@ -51,8 +51,8 @@ Build emits files and compile instructions. A native compiler is a separate
 step. The C backend handles CPU execution and runtime integration; the HIP
 and Metal backends generate GPU helpers alongside host code where the
 program requires them. A target may reject a program it cannot lower or
-emit. The [backend guide](docs/book/src/backends.md) covers user-facing
-commands and target limits.
+emit. The [build guide](docs/book/src/backends.md) covers user-facing C
+builds; [GPU backends](docs/gpu_backends.md) covers the HIP and Metal targets.
 
 ## Workspace map
 

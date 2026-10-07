@@ -11,7 +11,7 @@ else:
     from check_single_compile import tokenize
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = Path("docs/book/src/c-support.md")
+OUTPUT = Path("docs/c_support.md")
 
 
 def literal_roster(source: str, name: str) -> tuple[str, ...]:
@@ -84,7 +84,7 @@ def render(root: Path) -> str:
         "| General function values stored or passed as data | Language-valid forms can execute | Partial; live lowering/ABI forms can refuse | [#909](https://github.com/Chelis-Lang/chelis/issues/909); use direct named calls or a documented admitted higher-order form. |",
         "| `to_string` of tensors/lists | Available | Live C host emission refuses these representations | [#1059](https://github.com/Chelis-Lang/chelis/issues/1059); extract and render admitted scalar elements explicitly. |",
         "| Dimension-generic ADTs read through generic containers | Can execute | Partial; live host lowering can refuse unresolved dimensions/types | [#730](https://github.com/Chelis-Lang/chelis/issues/730), [#1226](https://github.com/Chelis-Lang/chelis/issues/1226), and [coral#26](https://github.com/Chelis-Lang/coral/issues/26). No universal source-level workaround is promised. |",
-        "", "These partial surfaces are recorded boundaries, not whole-family bans. Successful concrete cases do not prove all instantiations. The launch contract and executable eval/C receipt are tracked by [#1362](https://github.com/Chelis-Lang/chelis/issues/1362) and [#2102](https://github.com/Chelis-Lang/chelis/issues/2102). GPU limits are described separately in [Backends](backends.md).", "",
+        "", "These partial surfaces are recorded boundaries, not whole-family bans. Successful concrete cases do not prove all instantiations. The launch contract and executable eval/C receipt are tracked by [#1362](https://github.com/Chelis-Lang/chelis/issues/1362) and [#2102](https://github.com/Chelis-Lang/chelis/issues/2102). C builds are described in [Build programs](book/src/backends.md); HIP and Metal in [GPU backends](gpu_backends.md).", "",
         "Regenerate with `.venv/bin/python scripts/generate_c_support_inventory.py --write`; check source agreement with the same command's `--check`.", "",
     ]
     return "\n".join(lines)

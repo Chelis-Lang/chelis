@@ -2,7 +2,7 @@
 
 This reference describes Chelis's purpose, architecture, and package boundaries.
 The [language specifications](../00-context.md) define syntax and semantics;
-the [Chelis Guide](../../docs/book/src/README.md) explains how to use the toolchain.
+the [Chelis Guide](../../docs/book/src/index.md) explains how to use the toolchain.
 
 ## 1. What Chelis Is
 
@@ -220,7 +220,7 @@ guide](../../docs/book/src/proving.md) explains methods and qualifiers.
 
 Use this reference for project purpose and the core, standard-library, and shell
 boundary. The [numbered specifications](../00-context.md) control language and
-CLI semantics. The [Chelis Guide](../../docs/book/src/README.md) explains
+CLI semantics. The [Chelis Guide](../../docs/book/src/index.md) explains
 usage; focused documents in this directory describe implementation choices; the
 [project plan](chelis_project_plan.md) records sequencing and acceptance work.
 Documents under [`spec/design/archive/`](archive/) preserve historical

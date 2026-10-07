@@ -1,18 +1,16 @@
-# Reference Map
+# Reference map
 
-This guide explains how to write and run Chelis programs. The numbered language
-specifications define the rules in full. Use the guide to get started and the
-specifications when you need the exact contract for a construct.
-
-| Subject | Guide | Specification |
+| Question | Page | What it gives |
 |---|---|---|
-| Surf syntax and Deep representation | [Surf Syntax Reference](surf-reference.md) | [Surf](https://github.com/Chelis-Lang/chelis/blob/main/spec/02-surf-syntax.md), [Deep](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) |
-| Types, shapes, precision, effects, and ownership | [Type System Reference](type-reference.md) | [Type System](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) |
-| Built-in operations and the standard library | [Runtime and Standard Library](stdlib.md) | [RISC Primitives](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md) |
-| Differentiation and vectorization | [Transforms](transforms.md) | [Transformations](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md) |
-| Generated code and targets | [Backends](backends.md) | [Backends](https://github.com/Chelis-Lang/chelis/blob/main/spec/08-backends.md) |
-| Source naming and packages | [Reef and Packages](reef.md) | [Nomenclature](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md) |
+| How do I write a definition, a pipe, a match, an import? | [Surf syntax reference](surf-reference.md) | Every Surf construct with an example, and how it maps to Deep. |
+| Which dtypes exist, how do shapes unify, how do casts behave? | [Type system reference](type-reference.md) | Primitive types, tensor and dimension rules, casts, dtype bounds, effects, and ownership. |
+| What does an operation take and return, and when does it fail? | [Runtime and standard library](stdlib.md) | Signatures, argument domains, and failure behavior of the built-in operations and `Std` modules. |
+| How do I differentiate or batch a function? | [Transforms](transforms.md) | `grad`, `wrt`, `vmap`, and their limits in the evaluator and C builds. |
+| Which effects does a function carry? | [Effects](effects.md) | `IO`, `Test`, random keys, and device regions. |
+| What does a build produce and how do I link it? | [Build programs](backends.md) | Output files, compiler flags, and calling a static library from C. |
+| How do I add a dependency or lay out a package? | [Reef and packages](reef.md) | `reef.toml`, setup, and dependency resolution. |
+| How do I test and check properties? | [Testing](testing.md), [Checking properties](proving.md) | The assertion builtins, `chelis test`, and `chelis prove` with its result fields. |
+| What does each command print and return? | [CLI workflow](cli.md) | The command map, the `check` report, and exit codes. |
 
-The [Examples](examples.md) chapter points to complete programs in the source
-repository. The [CLI Workflow](cli.md), [Testing](testing.md), and
-[Checking Properties](proving.md) chapters explain how to run and check them.
+The [Examples](examples.md) page has complete programs with their
+output.

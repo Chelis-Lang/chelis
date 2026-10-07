@@ -1,4 +1,4 @@
-# Opaque Types With Declared Invariants
+# Opaque types with declared invariants
 
 `@opaque` keeps a type's construction and representation inside its defining
 module. Other modules can use exported values and functions, but cannot build
@@ -9,7 +9,8 @@ checks that the declaration is well formed; it does not evaluate the condition.
 
 ## Declare the type and its producers
 
-This package module defines a probability in the unit interval. It exports
+Save the following module as `opaque_invariants.ch` to check its declarations
+and properties. It defines a probability in the unit interval and exports
 the type so another module can name it, while keeping construction and field
 access restricted to `Stats.Opaque`:
 
@@ -28,19 +29,30 @@ def prob_value(p: Probability) -> f32 = p.value
   ((prob_value(p) >= 0.0) && (prob_value(p) <= 1.0))
 ```
 
-The standalone runnable file, [`examples/opaque_invariants.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants.ch),
-contains these definitions but does not export `Probability`, since it has no
-consumer module. Use the export list above when callers need to write the type
-in their signatures.
+Keep the type's constructors and invariant in its defining module. Include
+`Probability` in the export list when other modules need to name it in their
+signatures.
 
-The invariant's binder, `p`, has the representation type. A declared invariant
-requires a named module and a single record-shaped variant. Its predicate can
-use field projections, literals, arithmetic, comparisons, boolean operators
-such as `&&`, `if`, selected math functions, `sum` over a fixed-shape tensor
-field, and in-module zero-argument constant definitions. General function
-calls, `match`, lambdas, and effects are not allowed in the predicate. The
-[type-system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) gives the full
-value and predicate rules.
+The invariant's binder, `p`, has the representation type. `chelis check`
+rejects a declaration that breaks one of these rules, with an
+`OpaqueTypeViolation` naming the field or expression:
+
+- The type must be `@opaque`, declared in a named module, with exactly one
+  record-shaped variant.
+- Every field must be a numeric or `bool` scalar (`f32`, `f64`, a signed
+  integer, `bool`), an `f32` or `f64` tensor whose dimensions are all
+  literals, or a nested single-variant record of such fields. `string`,
+  `List`, function, symbolic-dimension tensor, and multi-variant fields are
+  rejected.
+- The predicate must be boolean and may use only: literals; the binder and
+  its field projections; `+`, `-`, `*`, `/`; comparisons; `&&`, `||`, `not`;
+  `if`; `abs`, `min`, `max`, `sqrt`, `exp`, `log`, `sin`, `cos`; `sum` over a
+  tensor field; and zero-argument constant definitions in the same module.
+  Other function calls, `match`, lambdas, other tensor operations, and effects
+  are rejected.
+- Exact float equality (`==` on a field) is accepted with an
+  `invariant-float-equality` lint warning, because sampling almost never
+  generates a value that satisfies it. Use a tolerance band instead.
 
 `probability` returns `Some` only for accepted inputs. `scale` and `combine`
 return a new `Probability` from existing values. Their checks may assume that
@@ -52,26 +64,20 @@ the type.
 ## Check and prove
 
 ```sh
-chelis check examples/opaque_invariants.ch
-chelis eval --file examples/opaque_invariants.ch --json
+chelis check opaque_invariants.ch
 chelis prove --capabilities
-chelis prove examples/opaque_invariants.ch --json
+chelis prove opaque_invariants.ch --json
 ```
 
-`chelis check` reports score `1` with no errors for this example. That means
-the types and declaration form check; it does not certify the invariant. The
-example has no value to evaluate at top level, so the JSON evaluation result
-has `"roots":[]`. Building its C source likewise does not run the exported
-producer functions or verify the invariant.
+`chelis check` verifies the types and declaration form; it does not certify
+that producer functions preserve the invariant. Use `chelis prove` to check
+the property and eligible producer obligations.
 
-Before using a proof result, check `chelis prove --capabilities`: both
-`"obligation_engine_available"` and `"smt_available"` should be `true` for
-the SMT result shown below. Release binaries include SMT support. A
-plain local `cargo build` omits it; its default prover can validate producer
-obligations by sampling and emits a warning that they were not SMT-verified.
-If the obligation engine is unavailable, a successful property run does not
-verify producer obligations. See [Checking Properties](proving.md) for proof options,
-exit codes, and the complete output format.
+Before relying on an SMT result, check `chelis prove --capabilities` and
+confirm both `obligation_engine_available` and `smt_available` are true. If
+the obligation engine is unavailable, a successful property run does not
+verify producer obligations. See [Checking Properties](proving.md)
+for proof options and result qualifications.
 
 For the SMT-enabled binary, the example has one property and three producer
 obligations. These are **selected fields**, not complete output records or a
@@ -79,9 +85,9 @@ literal transcript:
 
 ```json
 {"kind":"property","name":"prob_value_in_unit_interval","status":"passed","proof_tier":"fuzz"}
+{"kind":"obligation","name":"invariant:Probability:combine","status":"passed","proof_tier":"smt","composite_verdict":"proven_modulo_real_arithmetic","arith_model":"real"}
 {"kind":"obligation","name":"invariant:Probability:probability","status":"passed","proof_tier":"smt","composite_verdict":"proven_modulo_real_arithmetic","arith_model":"real"}
 {"kind":"obligation","name":"invariant:Probability:scale","status":"passed","proof_tier":"smt","composite_verdict":"proven_modulo_real_arithmetic","arith_model":"real"}
-{"kind":"obligation","name":"invariant:Probability:combine","status":"passed","proof_tier":"smt","composite_verdict":"proven_modulo_real_arithmetic","arith_model":"real"}
 {"kind":"summary","total":4,"passed":4,"failed":0,"unsupported":0,"errors":0,"obligations":3}
 ```
 
@@ -137,21 +143,65 @@ def forge(x: f32) -> Probability = Probability { value: x }
 
 ## Tensor fields and proof boundaries
 
-[`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch)
-defines a fixed-size weight vector whose sum lies within a tolerance of one.
-Its `make_simplex` producer passes by validated sampling even in an
-SMT-enabled build: the record has `"proof_tier":"fuzz"` and no
-`"arith_model"`. Its property checks that valid `Simplex` values can be
-generated; it is not a proof that every possible input produces a valid sum.
-A tolerance band is practical for floating sums, while exact equality can
-starve sampled generation.
+This module keeps three weights whose sum lies within `eps` of one:
+
+```chelis-surf
+module Stats.Simplex
+export (make_simplex)
+@opaque
+@invariant(p) ((sum(p.weights) >= (1.0 - eps)) && (sum(p.weights) <= (1.0 + eps)))
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> f32 = 0.0001
+def make_simplex(a: f32, b: f32, c: f32) -> Simplex = {
+  s = (((abs(a) + abs(b)) + abs(c)) + 0.001)
+  Simplex { weights: to_tensor([(abs(a) / s), (abs(b) / s), ((abs(c) + 0.001) / s)]) }
+}
+@property simplex_binder_is_generated forall(p: Simplex):
+  true
+```
+
+`chelis prove simplex.ch --json --seed 42` reports these fields (selected
+from each record) even with SMT available:
+
+```json
+{"kind": "property", "name": "simplex_binder_is_generated", "status": "passed", "proof_tier": "fuzz", "composite_verdict": "fuzz_validated", "samples": 100}
+{"kind": "obligation", "name": "invariant:Simplex:make_simplex", "status": "passed", "proof_tier": "fuzz", "composite_verdict": "fuzz_validated", "samples": 100}
+{"kind": "summary", "total": 2, "passed": 2, "obligations": 1}
+```
+
+The `make_simplex` obligation passed on 100 sampled inputs, with no
+`arith_model`: the solver did not prove it, so it is validated, not proved,
+for inputs outside the sample. The property `true` checks only that the
+sampler can generate valid `Simplex` values. A tolerance band is practical
+for floating sums; exact equality to one would starve the sampler.
 
 Opacity does not add bounds to downstream arithmetic. `chelis check` does not
 infer from a `Probability` value that a later calculation lies in an interval.
 Only return values produced across the module boundary receive the producer
-obligations described here. If the defining module passes a raw opaque value,
-or a function able to produce one, outward as a call argument, that path needs
-module review; the `opaque-escape-site` lint identifies such calls.
+obligations described here. A value the defining module passes outward as a
+call argument is not checked: when `Stats.Opaque` calls a function from
+another module (or a function-typed parameter or stored closure) with a
+`Probability`, or with a function that can produce one such as the bare
+constructor, nothing proves that value satisfies the invariant.
+
+`chelis lint` reports every such call as an advisory `opaque-escape-site`
+diagnostic; it does not block any command. In this module, `leak` passes a
+raw construction and `pass` forwards its own parameter:
+
+```chelis-surf-fragment
+def leak(f: Probability -> f32, x: f32) -> f32 = f(Probability { value: x })
+def pass(f: Probability -> f32, p: Probability) -> f32 = f(p)
+```
+
+The diagnostic for `leak` says `UNATTESTED (traces to a raw construction or
+representation update): audit this leak path`, and the one for `pass` says
+`locally attested (traces to a producer call or a type-T input)`. An
+unattested value comes from `Probability { ... }` or a record update, which no
+obligation covers: confirm by reading the code that it satisfies the
+invariant, or build it through a producer such as `probability`. An attested
+value comes from a producer call or a parameter of the type, one call back;
+for a helper like `pass`, check the callers that supply `p`.
 
 Opacity also does not hide data in tooling output. When evaluation prints an
 opaque value as a root, it shows the constructor and fields. Sampling

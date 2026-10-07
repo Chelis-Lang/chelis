@@ -1,13 +1,13 @@
-# Surf Syntax Reference
+# Surf syntax reference
 
-Surf is Chelis's source syntax. This page shows how to write its declarations and
-expressions. The [Surf syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/02-surf-syntax.md) defines the full
-grammar; the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) defines the corresponding
-Deep representation.
+Surf is Chelis's source syntax, stored in `.ch` files. `chelis deep FILE.ch`
+prints the Deep form of a complete file, and `chelis surf FILE.dp` converts
+back.
 
-Fenced `chelis-surf` and `chelis-deep` blocks below are complete, canonically formatted
-programs and are validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
-construct and are not standalone programs.
+Examples here illustrate individual syntax forms. Some are complete
+definitions; others depend on surrounding bindings, imports, or declarations.
+For a complete file you can check and run, see the
+[first program](first-program.md).
 
 ## Modules
 
@@ -106,9 +106,15 @@ A tuple pattern on the left destructures a tuple result:
 A lambda is `fn (params) -> expr`. Note the body arrow is `->`, distinct from `=>` used in
 match arms.
 
-```chelis-surf-fragment
-loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
+```chelis-surf
+def apply_twice(f: f32 -> f32, x: f32) -> f32 = f(f(x))
+scale = 3.0f32
+tripled_twice = apply_twice(fn (v) -> (v * scale), 2.0f32)
 ```
+
+`chelis eval --file` prints `tripled_twice = 18.0`. The lambda captures
+`scale` from the enclosing scope, and its parameter type is inferred from
+`apply_twice`'s signature, where `f32 -> f32` is the function type.
 
 ## Literals
 
@@ -149,17 +155,25 @@ Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `f
 rejects the resulting source diff. Malformed separators, a redundant leading zero on an
 integer body, invalid escapes, and semantic suffix changes remain errors.
 
-A numeric literal's dtype is written at its site: its suffix, or the construct that
-directly contains it, or else its default. The constructs are the declared type of the
-binding or function result the literal initializes (`x: f64 = 1.1`), a `cast` whose
-operand it is (`cast(1.1, f64)` is exactly `1.1f64`), and the dtype argument of
-`to_tensor` (`to_tensor([1.1, 2.2], f64)`). A bare bracket literal under its own declared
-tensor type takes the element dtype. An unsuffixed element of `to_tensor` has no default,
-so `to_tensor([1.0, 2.0])` is an error that names the dtype argument. A tensor parameter
-or a `cast` never turns a bracket literal into a tensor, and a callee's signature never
-states a literal's dtype, so a tensor argument states its element dtype:
-`f(to_tensor([1.0, 2.0], f64))`. A structural list such as the window sizes above needs
-explicit `i64` elements. `to_tensor` is reserved: no binding may reuse the name.
+A numeric declaration states the dtype of an unsuffixed literal it directly
+contains. A direct `cast` does so when the literal's kind admits its numeric
+target: `cast(1.1, f64)` is exactly `1.1f64`. A tensor declaration states the
+element dtype of its bracket literal. `to_tensor` can state it with a dtype argument:
+`to_tensor([1.0, 2.0], f64)`. Without that argument, every numeric literal
+element needs a suffix: `to_tensor([1.0f64, 2.0f64])`. Unsuffixed numeric
+literal elements inside `to_tensor`, including integers and negative values,
+have no default, so `to_tensor([1, 2, 3])` is rejected.
+
+A dtype argument checks an already-typed element; it does not convert it.
+For `xs = [1.0, 2.0]`, the named list already has `f32` elements and
+`to_tensor(xs)` keeps them. A tensor parameter or a `cast` never turns a
+bracket literal into a tensor. Structural lists such as the window sizes
+above need explicit `i64` elements. See
+[precision rules](type-reference.md#precision-rules) for the full
+dtype-stating rules.
+
+`to_tensor` is reserved: no definition, parameter, local binding, pattern,
+or import may reuse the name, even inside a Reef package.
 
 ## Operators
 
@@ -174,14 +188,42 @@ tightest binding:
 | `==` `!=` | equality, non-associative |
 | `<` `>` `<=` `>=` | comparison, non-associative |
 | `+` `-` | additive |
-| `*` `/` `%` | multiplicative, `%` is integer modulo |
+| `*` `/` `%` | multiplicative, `%` is `mod` (integers and floats) |
 | unary `-` `!` | prefix |
 | function application | |
 | `.` | field and tuple access |
 
 Equality and comparison do not chain: `a == b == c` is a parse error. There is no operator
-overloading and no infix bitwise operator; use the named builtins `bitand`, `bitor`,
-`bitxor`, `shl`, `shr`, and `pow` for exponentiation.
+overloading and no infix bitwise or power operator. The bitwise builtins are
+`bitand`, `bitor`, `bitxor`, `shl`, and `shr`. Each takes two values of one
+signed-integer dtype (two scalars, or two tensors of the same shape) and
+returns that dtype and shape; `bool` and float operands are type errors.
+`bitand`, `bitor`, and `bitxor` act on the two's-complement bits. `shl(x, n)`
+shifts left and discards bits past the width, so a count at or above the
+width gives `0`. `shr(x, n)` shifts right, copying the sign bit, so a large
+count gives `0` or `-1`. A negative count stops evaluation with
+`shift amount must be non-negative, got -1`. None of them traps on overflow.
+
+```chelis-surf
+a = bitand(12i32, 10i32)
+o = bitor(12i32, 10i32)
+x = bitxor(12i32, 10i32)
+l = shl(1i8, 7i8)
+r = shr(-16i32, 2i32)
+big = shl(1i32, 40i32)
+```
+
+```text
+a = 8
+o = 14
+x = 6
+l = -128
+r = -4
+big = 0
+```
+
+There is no `pow` builtin. Write an integer power as repeated `mul`, and a
+float power of a positive base as `exp(mul(y, log(x)))`.
 
 The pipe operator threads its left value as the first argument of the call on its right.
 `x |> f(y)` is `f(x, y)`, and stages chain from left to right:
@@ -207,10 +249,16 @@ complement = p |> (fn (q) -> sub(1.0, q))
 
 ## Function application
 
-Application is `f(x, y)`. The standard call surface is positional. Two transforms take a
-named argument: `grad(f, wrt=w)` selects parameters to differentiate, and `vmap(f, axis=1)`
-selects a nonzero batch axis. Axis zero uses the sole default form `vmap(f)`. There is no
-general keyword-argument surface beyond these.
+Application is `f(x, y)`. Ordinary arguments are positional. These specific
+forms accept a named argument:
+
+- `grad(f, wrt=w)` selects parameters to differentiate.
+- `vmap(f, axis=1)` selects a nonzero batch axis. Axis zero uses `vmap(f)`.
+- `matmul`, `sum`, and `einsum` accept a final `accumulator=p`, as in
+  `sum(x, 0i32, accumulator=f64)`. See
+  [accumulator precision rules](type-reference.md#precision-rules).
+
+Other calls do not accept arbitrary keyword arguments.
 
 ## Tuples and projection
 
@@ -234,9 +282,8 @@ must be a literal or an integer-cast-wrapped literal, including negative
 axes. Variables, helper calls and other computed expressions are rejected
 at checking, even if they return a constant. `sort` preserves the input
 shape and accepts computed i32 axes; invalid runtime axes trap in both
-execution lanes. Negative axes count from the end. These rules are
-specified by [05-AXIS-2] in `spec/05-risc-primitives.md`; reductions,
-`expand` and `insert` retain their static constant-or-named-axis rule.
+the evaluator and compiled programs. Negative axes count from the end.
+Reductions, `expand`, and `insert` require a static constant or named axis.
 
 When projecting through nested tuples, group the inner numeric projection so
 the next suffix cannot merge with it as a float:
@@ -270,13 +317,19 @@ def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
 Patterns include variables, the wildcard `_`, literals, constructors with payloads,
 records with field punning, tuples, and guards introduced by `if` before the `=>`:
 
-```chelis-surf-fragment
-match n with {
-  | x if x > 0 => positive(x)
-  | x if x < 0 => negative(x)
-  | _          => zero_case
-}
+```chelis-surf
+def sign_label(n: i32) -> string =
+  match n with {
+    | x if (x > 0) => "positive"
+    | x if (x < 0) => "negative"
+    | _ => "zero"
+  }
+labels = (sign_label(5), sign_label(-2), sign_label(0))
 ```
+
+`chelis eval --file` prints `labels.0 = positive`, `labels.1 = negative`, and
+`labels.2 = zero`. Arms are tried in order, and the first whose pattern
+matches and whose guard is true wins.
 
 Negative numeric patterns are written directly (`-42`, `-1.5`, or `-0.0`);
 unlike expression position, pattern position has no unary-expression node.
@@ -330,8 +383,8 @@ modules that export the same name.
 A module cannot both import a name into unqualified scope and declare it:
 `import Std.Scalar (max)`, or `import Std.Scalar (..)`, beside a local `def max` is an error
 in every command, and the diagnostic names both. Rename the local declaration, or import the
-module qualified (`import Std.Scalar`) and call `Std.Scalar.max`. Parameters and local
-bindings may still reuse an imported name.
+module qualified (`import Std.Scalar`) and call `Std.Scalar.max`. Except for
+reserved names, parameters and local bindings may still reuse an imported name.
 
 A file belongs to the Reef package found by walking up from the file's own directory,
 whatever directory a command runs in. A file inside a package but outside its source roots,
@@ -351,7 +404,9 @@ export (forward, Linear)
 ## Dimensions
 
 A module-level `dim` declares concrete named dimensions used across the file. Function-level
-`[...]` parameters declare dimension variables local to one function.
+`[...]` parameters declare dimension variables local to one function. A
+file with a module-level `dim` checks but does not evaluate or build
+(see [Known issues](known-issues.md)).
 
 ```chelis-surf-fragment
 dim batch, vocab_size
@@ -397,7 +452,24 @@ for details.
 - Function names use snake_case. Types, constructors, and module path segments use
   PascalCase. Descriptive value, parameter, dimension, and field names use snake_case;
   a single uppercase letter is also valid for a value binding or parameter.
-- The parser enforces identifier roles; `chelis lint` checks additional naming
-  conventions, including `def` and `type` declaration names. Run `chelis fmt`
-  to format source consistently. See the [nomenclature specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md)
-  for the full rules.
+- The parser enforces identifier roles. `chelis lint` adds these blocking
+  rules for Chelis source, which `check`, `eval --file`, and `build` also run
+  before their main work:
+
+  | Rule | Requires |
+  |---|---|
+  | `surf-value-snake-case` | `def` names are lowercase ASCII with optional digits and underscores, no leading underscore. |
+  | `surf-type-pascal-case` | `type` names are ASCII alphanumeric with a leading uppercase letter and no underscores. |
+  | `module-compound-titlecase` | Module segments write abbreviations in title case (`Hamt`, never `HAMT`). |
+  | `surf-test-name-prefix` | A function carrying the `Test` effect is named `test_*` or `example_*`. |
+  | `surf-def-arrow-form` | A definition is written `def name(params) -> T = expr`, not with `:` before the result type. |
+  | `type-suffix-policy` | A name suffix such as `_f32`, `_int`, `_bool`, or `_string` describes the element type, not the container. |
+  | `prefix-namespace` | A shared function-name prefix inside a module names the module's domain or a documented sub-namespace. |
+  | `reef-module-identity` | In a Reef package, each file declares one module, named from `module_prefix` and its path. |
+  | `opaque-domain-construction` | An `@opaque` type is not constructed, updated, or cast outside its module. |
+  | `no-em-dash-in-public-strings` | String literals contain no em dash. |
+
+  `chelis lint --list` prints every rule with its severity, and
+  `chelis lint --fix` applies the available automatic fixes. Advisory rules
+  such as `opaque-escape-site` and `recursive-list-cursor` print without
+  blocking.
