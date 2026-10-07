@@ -27,34 +27,40 @@ pub enum ValidationError {
 }
 
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
-    // Phase 1f (spec/design/phase1f_executable_grammar.md): the pest
-    // grammar is an independent second implementation and is explicitly
-    // "not a replacement for the parser" — the hand-written compiler
-    // parser is the acceptance authority, and validator/compiler
-    // *agreement* is the oracle. The exit verdict therefore follows the
-    // parser in BOTH directions, not just when the grammar happens to
-    // reject:
-    //   * grammar accepts + parser accepts -> accept (agreement)
-    //   * grammar rejects + parser accepts -> accept; the grammar is
-    //     merely incomplete relative to the shipped surface (the
-    //     executable examples rely on this rescue path)
+    // The hand-written compiler parser decides acceptance. The independent
+    // PEG classifies a parser rejection when the source is lexically valid
+    // (spec/design/phase1f_executable_grammar.md):
+    //   * parser accepts -> accept without running the auxiliary grammar
+    //   * lexer rejects -> report its lexical error without running the grammar
     //   * grammar accepts + parser rejects -> REJECT with the compiler's
     //     reason (chelis#706: the grammar admits bare-statement
     //     juxtaposition the parser rejects). Reporting success here would
     //     disagree with the compile path — `check`/`fmt`/`build`/`eval`/
     //     `validate --desugar` all reject the same input.
     //   * grammar rejects + parser rejects -> reject, surfacing both views
-    // Whenever the two disagree the diagnostic names the split — the
-    // conformance tool's "valuable finding" is preserved, not papered over.
-    let grammar = surf::Grammar::parse(surf::Rule::program, source);
-    match (chelis_surf::parser::parse_str(source), grammar) {
-        (Ok(_), _) => Ok(()),
-        (Err(parse_err), Ok(_)) => Err(ValidationError::Failed(format!(
+    // On a nonlexical parser rejection, disagreement names the split.
+    // The compiler parser decides acceptance. Do not run the recursive PEG on
+    // accepted input: a valid, deeply nested comment may be cheap for the
+    // iterative lexer but exhaust the PEG's native stack.
+    let parse_err = match chelis_surf::parser::parse_str(source) {
+        Ok(_) => return Ok(()),
+        Err(err @ chelis_surf::parser::ParseError::Lex(_)) => {
+            // A lexical failure has no grammar/parser split to classify. In
+            // particular, an unterminated nested comment must not enter the
+            // recursive PEG merely to repeat the lexer's diagnosis.
+            return Err(ValidationError::Failed(format!(
+                "compiler parse failed: {err}"
+            )));
+        }
+        Err(err) => err,
+    };
+    match surf::Grammar::parse(surf::Rule::program, source) {
+        Ok(_) => Err(ValidationError::Failed(format!(
             "the Surf PEG grammar accepts this program but the compiler parser rejects it \
              (the grammar is too lenient, a chelis-validate conformance gap); \
              compiler parse failed: {parse_err}"
         ))),
-        (Err(parse_err), Err(pest_err)) => Err(ValidationError::Failed(format!(
+        Err(pest_err) => Err(ValidationError::Failed(format!(
             "{pest_err}\ncompiler parse failed: {parse_err}"
         ))),
     }

@@ -34,13 +34,12 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
   top-level bindings used by the executable examples, semicolon-separated block/par
   forms, and ordinary identifiers such as `axis` outside `vmap(..., axis=...)`.
   Because the pest grammar is "not a replacement for the parser", the hand-written
-  compiler parser is the acceptance authority: `validate --surf` cross-checks it in
-  both directions, so a program the parser rejects is never green-lit just because the
-  grammar admits it (chelis#706: the grammar accepted bare-statement juxtaposition the
-  parser rejects). When the grammar and parser disagree the diagnostic names the split —
-  the conformance "valuable finding" is surfaced, not silently accepted. The grammar
-  still *rescues* a parser-valid program it happens to reject (the grammar being
-  incomplete relative to the shipped surface is not a user-facing failure)
+  compiler parser is the acceptance authority. A parser-accepted program succeeds
+  without entering the recursive PEG; a lexical rejection returns the compiler's
+  error directly. For other parser rejections, the PEG classifies whether it also
+  rejects the source or is too lenient (chelis#706: bare-statement juxtaposition).
+  The latter diagnostic names the grammar/parser split. A parser-valid program is
+  never rejected because the auxiliary grammar is incomplete.
 - `chelis validate --deep file.dp` validates Deep PEG structure plus the closed tag
   vocabulary, metadata-map requirement, arity/helper-form invariants, and dotted module/import
   path names emitted by canonical Deep
