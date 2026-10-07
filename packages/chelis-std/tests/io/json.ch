@@ -341,6 +341,20 @@ def test_try_parse_json_many_small_objects() -> unit ! { Test } = {
     | None => assert_true(true, "malformed final object rejected")
   }
 }
+def test_try_parse_json_many_medium_strings() -> unit ! { Test } = {
+  word = "abcdefghijklmnopqrstuvwxyzabcdefg"
+  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, string_concat("\"", string_concat(word, "\","))), "", range(0i64, 200i64))
+  valid = string_concat("[", string_concat(prefix, "\"last\"]"))
+  invalid = string_concat("[", string_concat(prefix, "\"last\",]"))
+  _ = match json_array(Some(parse_json(valid))) with {
+    | Some(items) => assert_eq(len(items), 201i64, "medium strings keep every array element")
+    | None => fail("medium strings did not parse")
+  }
+  match try_parse_json(invalid) with {
+    | Some(_) => fail("medium strings with a trailing comma must be rejected")
+    | None => assert_true(true, "medium strings with a trailing comma rejected")
+  }
+}
 def test_try_parse_json_long_number_and_whitespace() -> unit ! { Test } = {
   digits = string_concat("1", fold(fn (acc: string, i: i64) -> string_concat(acc, "0"), "", range(0i64, 512i64)))
   spaces = fold(fn (acc: string, i: i64) -> string_concat(acc, " "), "", range(0i64, 2048i64))

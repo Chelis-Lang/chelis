@@ -207,7 +207,7 @@ def parse_object_rest(text: string, idx: i64, entries: List[(string, Json)]) -> 
   first = fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((idx, entries, false)), range(idx, limit))
   state = match first with {
     | Some((cursor, found, true)) => Some((cursor, found, true))
-    | Some((cursor, found, false)) => fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((cursor, found, false)), range(limit, string_len(text)))
+    | Some((cursor, found, false)) => scan_object_suffix(text, Some((cursor, found, false)), limit, string_len(text))
     | None => None
   }
   match state with {
@@ -215,6 +215,17 @@ def parse_object_rest(text: string, idx: i64, entries: List[(string, Json)]) -> 
     | _ => None
   }
 }
+-- Split the remaining input so a completed container does not visit its suffix.
+-- The recursion depth is logarithmic in the remaining document length.
+def scan_object_suffix(text: string, state: Option[(i64, List[(string, Json)], bool)], start: i64, end: i64) -> Option[(i64, List[(string, Json)], bool)] =
+  match state with {
+    | None => None
+    | Some((cursor, found, done)) => if or(done, gte(cursor, end)) then Some((cursor, found, done)) else if lte(sub(end, start), 32i64) then fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((cursor, found, done)), range(if gt(cursor, start) then cursor else start, end)) else {
+      middle = add(start, floor_div(sub(end, start), 2i64))
+      left = scan_object_suffix(text, state, start, middle)
+      scan_object_suffix(text, left, middle, end)
+    }
+  }
 def object_scan_step(text: string, acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> Option[(i64, List[(string, Json)], bool)] =
   match acc with {
     | Some((cursor, found, done)) => if or(done, lt(position, cursor)) then Some((cursor, found, done)) else {
@@ -253,7 +264,7 @@ def parse_array_rest(text: string, idx: i64, items: List[Json]) -> Option[(List[
   first = fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((idx, items, false)), range(idx, limit))
   state = match first with {
     | Some((cursor, found, true)) => Some((cursor, found, true))
-    | Some((cursor, found, false)) => fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((cursor, found, false)), range(limit, string_len(text)))
+    | Some((cursor, found, false)) => scan_array_suffix(text, Some((cursor, found, false)), limit, string_len(text))
     | None => None
   }
   match state with {
@@ -261,6 +272,15 @@ def parse_array_rest(text: string, idx: i64, items: List[Json]) -> Option[(List[
     | _ => None
   }
 }
+def scan_array_suffix(text: string, state: Option[(i64, List[Json], bool)], start: i64, end: i64) -> Option[(i64, List[Json], bool)] =
+  match state with {
+    | None => None
+    | Some((cursor, found, done)) => if or(done, gte(cursor, end)) then Some((cursor, found, done)) else if lte(sub(end, start), 32i64) then fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((cursor, found, done)), range(if gt(cursor, start) then cursor else start, end)) else {
+      middle = add(start, floor_div(sub(end, start), 2i64))
+      left = scan_array_suffix(text, state, start, middle)
+      scan_array_suffix(text, left, middle, end)
+    }
+  }
 def array_scan_step(text: string, acc: Option[(i64, List[Json], bool)], position: i64) -> Option[(i64, List[Json], bool)] =
   match acc with {
     | Some((cursor, found, done)) => if or(done, lt(position, cursor)) then Some((cursor, found, done)) else {
@@ -282,12 +302,21 @@ def parse_string_chars(text: string, idx: i64, acc: string) -> Option[(string, i
     first = fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((acc, idx, false)), range(idx, limit))
     state = match first with {
       | Some((found, cursor, true)) => Some((found, cursor, true))
-      | Some((found, cursor, false)) => fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((found, cursor, false)), range(limit, string_len(text)))
+      | Some((found, cursor, false)) => scan_string_suffix(text, Some((found, cursor, false)), limit, string_len(text))
       | None => None
     }
     match state with {
       | Some((found, cursor, true)) => Some((found, cursor))
       | _ => None
+    }
+  }
+def scan_string_suffix(text: string, state: Option[(string, i64, bool)], start: i64, end: i64) -> Option[(string, i64, bool)] =
+  match state with {
+    | None => None
+    | Some((found, cursor, done)) => if or(done, gte(cursor, end)) then Some((found, cursor, done)) else if lte(sub(end, start), 32i64) then fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((found, cursor, done)), range(if gt(cursor, start) then cursor else start, end)) else {
+      middle = add(start, floor_div(sub(end, start), 2i64))
+      left = scan_string_suffix(text, state, start, middle)
+      scan_string_suffix(text, left, middle, end)
     }
   }
 def string_scan_step(text: string, step: Option[(string, i64, bool)], position: i64) -> Option[(string, i64, bool)] =
@@ -403,14 +432,26 @@ def scan_number_end(text: string, idx: i64) -> i64 =
   if gte(add(idx, 1i64), string_len(text)) then add(idx, 1i64) else if not(is_number_char(char_at(text, add(idx, 1i64)))) then add(idx, 1i64) else {
     limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
     first = fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_number_char(char_at(text, position))) then add(end, 1i64) else end, idx, range(idx, limit))
-    if lt(first, limit) then first else fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_number_char(char_at(text, position))) then add(end, 1i64) else end, first, range(limit, string_len(text)))
+    if lt(first, limit) then first else scan_number_suffix(text, first, limit, string_len(text))
+  }
+def scan_number_suffix(text: string, cursor: i64, start: i64, end: i64) -> i64 =
+  if or(lt(cursor, start), gte(cursor, end)) then cursor else if lte(sub(end, start), 32i64) then fold(fn (next: i64, position: i64) -> if and(eq(next, position), is_number_char(char_at(text, position))) then add(next, 1i64) else next, cursor, range(start, end)) else {
+    middle = add(start, floor_div(sub(end, start), 2i64))
+    left = scan_number_suffix(text, cursor, start, middle)
+    scan_number_suffix(text, left, middle, end)
   }
 def is_number_char(ch: string) -> bool = or(is_digit(ch), or(eq(ch, "-"), or(eq(ch, "+"), or(eq(ch, "."), or(eq(ch, "e"), eq(ch, "E"))))))
 def skip_ws(text: string, idx: i64) -> i64 =
   if gte(idx, string_len(text)) then idx else if not(is_ws(char_at(text, idx))) then idx else {
     limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
     first = fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_ws(char_at(text, position))) then add(end, 1i64) else end, idx, range(idx, limit))
-    if lt(first, limit) then first else fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_ws(char_at(text, position))) then add(end, 1i64) else end, first, range(limit, string_len(text)))
+    if lt(first, limit) then first else scan_ws_suffix(text, first, limit, string_len(text))
+  }
+def scan_ws_suffix(text: string, cursor: i64, start: i64, end: i64) -> i64 =
+  if or(lt(cursor, start), gte(cursor, end)) then cursor else if lte(sub(end, start), 32i64) then fold(fn (next: i64, position: i64) -> if and(eq(next, position), is_ws(char_at(text, position))) then add(next, 1i64) else next, cursor, range(start, end)) else {
+    middle = add(start, floor_div(sub(end, start), 2i64))
+    left = scan_ws_suffix(text, cursor, start, middle)
+    scan_ws_suffix(text, left, middle, end)
   }
 def starts_with_at(text: string, idx: i64, prefix: string) -> bool = eq(string_slice(text, idx, string_len(prefix)), prefix)
 def char_at(text: string, idx: i64) -> string = string_slice(text, idx, cast(1, i64))

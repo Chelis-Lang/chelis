@@ -66,7 +66,12 @@ fn compiled_c_parses_object_beyond_the_prior_stack_limit_and_rejects_trailing_co
     let run = StdCommand::new(output.join("main"))
         .output()
         .expect("compiled JSON program");
-    assert!(run.status.success(), "compiled program: {:?}", run.status);
+    assert!(
+        run.status.success(),
+        "compiled program: {:?}; stderr: {}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.contains("valid = true"), "{stdout}");
     assert!(stdout.contains("invalid = true"), "{stdout}");
