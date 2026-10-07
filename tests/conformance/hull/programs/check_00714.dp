@@ -1,11 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (tb {type: (t-tensor {} (d-lit {} 3) (t-prim {} i64))}))
-    (fn {}
-      (params {} (ta {type: (t-tensor {} (d-name {} rdim) (t-prim {} bool))}))
-      (app {}
-        (var {} gather)
-        (var {} ta)
-        (var {} tb)
-        (lit {type: (t-prim {} i32)} 0)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true)) (lit {type: (t-prim {} string)} "bb") (lit {type: (t-prim {} f32)} 6.0))))

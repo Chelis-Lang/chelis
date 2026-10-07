@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 89) (d-lit {} 2) (d-name {} batch) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (d-lit {} 89))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} sqrt) (var {} xa)))))

@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} log) (app {} (var {} add) (lit {type: (t-prim {} f32)} 4.0) (app {} (var {} add) (lit {type: (t-prim {} f32)} 5.0) (lit {type: (t-prim {} f32)} 1.0)))))
+(def {} answer (app {} (var {} log) (app {} (var {} add) (app {} (var {} log) (app {} (var {} sin) (app {} (var {} log) (lit {type: (t-prim {} f32)} 6.0)))) (cast {} (let {} (bind {} xa (lit {type: (t-prim {} string)} "bb")) (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 5.0))) (t-prim {} f32)))))

@@ -1,6 +1,1 @@
-(def {}
-  g
-  (app {}
-    (var {} mul)
-    (lit {type: (t-prim {} i32)} 3)
-    (lit {type: (t-prim {} bool)} true)))
+(def {} g (app {} (var {} mul) (lit {type: (t-prim {} i32)} 3) (lit {type: (t-prim {} bool)} true)))

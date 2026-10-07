@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa)))
+(def {} answer (fn {} (params {} (xa {type: (t-prim {} string)})) (app {} (fn {} (params {} (xb {type: (t-prim {} string)})) (let {} (bind {} xc (lit {type: (t-prim {} i64)} 5)) (lit {type: (t-prim {} f32)} 7.0))) (var {} xa))))

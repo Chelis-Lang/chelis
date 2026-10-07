@@ -1,6 +1,6 @@
 [
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} string))",
     "id": "check_00049",
     "wire": {
       "display_signature_structured": {
@@ -13,7 +13,49 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "f32"
+          "name": "string"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-lit {} 2) (d-name {} seq) (t-prim {} f32)) (t-tensor {} (d-lit {} 2) (t-prim {} f32)))",
+    "id": "check_00099",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "lit",
+                "size": 2
+              },
+              {
+                "kind": "name",
+                "name": "seq"
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "f32"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "dims": [
+            {
+              "kind": "lit",
+              "size": 2
+            }
+          ],
+          "kind": "tensor",
+          "precision": {
+            "kind": "concrete",
+            "name": "f32"
+          }
         }
       },
       "effect_row": []
@@ -40,7 +82,7 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} string))",
     "id": "check_00199",
     "wire": {
       "display_signature_structured": {
@@ -53,14 +95,14 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "f32"
+          "name": "string"
         }
       },
       "effect_row": []
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} bool)) (t-tensor {} (d-lit {} 3) (t-prim {} bool)))",
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-lit {} 2) (d-name {} batch) (t-prim {} bool)))",
     "id": "check_00249",
     "wire": {
       "display_signature_structured": {
@@ -69,7 +111,11 @@
             "dims": [
               {
                 "kind": "lit",
-                "size": 3
+                "size": 1
+              },
+              {
+                "kind": "name",
+                "name": "batch"
               }
             ],
             "kind": "tensor",
@@ -84,7 +130,11 @@
           "dims": [
             {
               "kind": "lit",
-              "size": 3
+              "size": 2
+            },
+            {
+              "kind": "name",
+              "name": "batch"
             }
           ],
           "kind": "tensor",
@@ -98,7 +148,7 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-tuple {} (t-prim {} f32) (t-prim {} f32)))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} bool))",
     "id": "check_00299",
     "wire": {
       "display_signature_structured": {
@@ -110,17 +160,8 @@
         ],
         "kind": "fn",
         "ret": {
-          "items": [
-            {
-              "kind": "prim",
-              "name": "f32"
-            },
-            {
-              "kind": "prim",
-              "name": "f32"
-            }
-          ],
-          "kind": "tuple"
+          "kind": "prim",
+          "name": "bool"
         }
       },
       "effect_row": []
@@ -187,7 +228,7 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)) (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)))",
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} bool)) (t-tensor {} (d-lit {} 1) (t-prim {} bool)))",
     "id": "check_00499",
     "wire": {
       "display_signature_structured": {
@@ -195,18 +236,14 @@
           {
             "dims": [
               {
-                "kind": "name",
-                "name": "batch"
-              },
-              {
-                "kind": "name",
-                "name": "batch"
+                "kind": "lit",
+                "size": 1
               }
             ],
             "kind": "tensor",
             "precision": {
               "kind": "concrete",
-              "name": "int64"
+              "name": "bool"
             }
           }
         ],
@@ -214,18 +251,14 @@
         "ret": {
           "dims": [
             {
-              "kind": "name",
-              "name": "batch"
-            },
-            {
-              "kind": "name",
-              "name": "batch"
+              "kind": "lit",
+              "size": 1
             }
           ],
           "kind": "tensor",
           "precision": {
             "kind": "concrete",
-            "name": "int64"
+            "name": "bool"
           }
         }
       },
@@ -233,7 +266,7 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-tuple {} (t-prim {} f32) (t-prim {} f32)))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} string))",
     "id": "check_00549",
     "wire": {
       "display_signature_structured": {
@@ -245,17 +278,58 @@
         ],
         "kind": "fn",
         "ret": {
-          "items": [
+          "kind": "prim",
+          "name": "string"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 2) (d-lit {} 1) (t-prim {} i64)) (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} i64)))",
+    "id": "check_00599",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "hidden"
+              },
+              {
+                "kind": "lit",
+                "size": 2
+              },
+              {
+                "kind": "lit",
+                "size": 1
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "i64"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "dims": [
             {
-              "kind": "prim",
-              "name": "f32"
+              "kind": "lit",
+              "size": 2
             },
             {
-              "kind": "prim",
-              "name": "f32"
+              "kind": "lit",
+              "size": 1
             }
           ],
-          "kind": "tuple"
+          "kind": "tensor",
+          "precision": {
+            "kind": "concrete",
+            "name": "i64"
+          }
         }
       },
       "effect_row": []
@@ -263,26 +337,6 @@
   },
   {
     "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
-    "id": "check_00599",
-    "wire": {
-      "display_signature_structured": {
-        "args": [
-          {
-            "kind": "prim",
-            "name": "f32"
-          }
-        ],
-        "kind": "fn",
-        "ret": {
-          "kind": "prim",
-          "name": "f32"
-        }
-      },
-      "effect_row": []
-    }
-  },
-  {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} int64))",
     "id": "check_00649",
     "wire": {
       "display_signature_structured": {
@@ -295,14 +349,14 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "int64"
+          "name": "f32"
         }
       },
       "effect_row": []
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} i64))",
     "id": "check_00699",
     "wire": {
       "display_signature_structured": {
@@ -315,24 +369,29 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "f32"
+          "name": "i64"
         }
       },
       "effect_row": []
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-tensor {}  (t-prim {} int64)) (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} int64)))",
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} bool)) (t-tensor {} (d-lit {} 3) (t-prim {} bool)))",
     "id": "check_00749",
     "wire": {
       "display_signature_structured": {
         "args": [
           {
-            "dims": [],
+            "dims": [
+              {
+                "kind": "lit",
+                "size": 1
+              }
+            ],
             "kind": "tensor",
             "precision": {
               "kind": "concrete",
-              "name": "int64"
+              "name": "bool"
             }
           }
         ],
@@ -341,17 +400,13 @@
           "dims": [
             {
               "kind": "lit",
-              "size": 1
-            },
-            {
-              "kind": "lit",
-              "size": 1
+              "size": 3
             }
           ],
           "kind": "tensor",
           "precision": {
             "kind": "concrete",
-            "name": "int64"
+            "name": "bool"
           }
         }
       },
@@ -359,7 +414,27 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} string))",
+    "id": "check_00799",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "string"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} i64))",
     "id": "check_00849",
     "wire": {
       "display_signature_structured": {
@@ -372,7 +447,7 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "f32"
+          "name": "i64"
         }
       },
       "effect_row": []
@@ -399,7 +474,7 @@
     }
   },
   {
-    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} string))",
     "id": "check_00949",
     "wire": {
       "display_signature_structured": {
@@ -412,7 +487,7 @@
         "kind": "fn",
         "ret": {
           "kind": "prim",
-          "name": "f32"
+          "name": "string"
         }
       },
       "effect_row": []

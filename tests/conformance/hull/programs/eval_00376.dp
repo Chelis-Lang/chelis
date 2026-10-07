@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} log) (lit {type: (t-prim {} f32)} 1.0)))
+(def {} answer (app {} (var {} log) (let {} (bind {} xa (cast {} (lit {type: (t-prim {} i64)} 0) (t-prim {} i64))) (lit {type: (t-prim {} f32)} 3.0))))

@@ -25,8 +25,13 @@ Run with the uv-managed interpreter:
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from . import build_corpus as bc
+from . import run_conformance as rc
 
 HERE = Path(__file__).resolve().parent
 PROGRAMS_DIR = HERE / "programs"
@@ -183,9 +188,8 @@ class CorpusIntegrityTests(unittest.TestCase):
         self.assertEqual(self.manifest["golden_wire_count"], len(golden))
 
     def test_dropped_divergences_documented(self):
-        # The documented Hull-reference imprecisions dropped from the agreement
-        # corpus (gather-shape + int-div) are committed as evidence; the manifest
-        # count must match.
+        # Only the documented gather-shape cases are excluded from this frozen
+        # agreement corpus; the manifest count must match their evidence rows.
         dropped_path = HERE / "dropped_divergences.json"
         self.assertTrue(dropped_path.is_file(), "dropped_divergences.json must exist")
         dropped = json.loads(dropped_path.read_text())
@@ -193,6 +197,26 @@ class CorpusIntegrityTests(unittest.TestCase):
         for d in dropped:
             self.assertIn(d["lane"], ("check", "eval"))
             self.assertTrue(d["reason"], "each dropped divergence must carry a reason")
+            self.assertIn(
+                (d["lane"], d["rule_tag"]),
+                {("check", "RGather")},
+                "a new divergence class needs investigation before exclusion",
+            )
+            self.assertTrue(d["reason"].startswith("type mismatch: hull "))
+
+    def test_float_division_disagreement_is_not_a_documented_exclusion(self):
+        self.manifest["dropped_divergence_count"] = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "dropped_divergences.json").write_text(json.dumps([{
+                "lane": "eval",
+                "rule_tag": "RDiv",
+                "program": "(def {} g (app {} (var {} div) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} f32)} 2.0)))",
+                "reason": "float result differs: Hull 1.0 vs compiler 2.0",
+            }]))
+            with mock.patch(f"{__name__}.HERE", root):
+                with self.assertRaises(AssertionError):
+                    self.test_dropped_divergences_documented()
 
     def test_no_kept_program_is_a_known_divergence(self):
         # A kept program must not duplicate a dropped one (the filter must have
@@ -230,6 +254,42 @@ class CorpusIntegrityTests(unittest.TestCase):
                 text.startswith("(def {}"),
                 f"{v['id']} is not a bare top-level def: {text[:40]!r}",
             )
+
+
+class CorpusBuilderExclusionTests(unittest.TestCase):
+    def test_new_float_division_disagreement_stops_corpus_build(self):
+        program = "(def {} g (app {} (var {} div) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} f32)} 2.0)))"
+        record = {
+            "lane": "eval",
+            "rule_tag": "RDiv",
+            "program": program,
+            "hull_verdict": "accept",
+            "hull_type_canonical": "(t-prim {} f32)",
+            "hull_effects_canonical": "{}",
+            "hull_eval_value": "1.0",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export = root / "export.jsonl"
+            export.write_text(json.dumps(record) + "\n")
+            conservative = root / "known_conservative.json"
+            conservative.write_text('{"whitelist_entries": []}')
+            dropped = root / "dropped_divergences.json"
+            dropped.write_text("[]")
+            paths = {
+                "PROGRAMS_DIR": root / "programs",
+                "MANIFEST_PATH": root / "manifest.json",
+                "VERDICTS_PATH": root / "verdicts.jsonl",
+                "KNOWN_CONSERVATIVE_PATH": root / "generated_known_conservative.json",
+                "GOLDEN_WIRE_PATH": root / "golden_wire.json",
+                "DROPPED_PATH": dropped,
+            }
+            result = rc.ProgramResult(
+                "_probe", "eval", "disagree", "float result differs: Hull 1.0 vs compiler 2.0", "_probe.dp"
+            )
+            with mock.patch.multiple(bc, **paths), mock.patch.object(bc.rc, "run_program", return_value=result):
+                with self.assertRaisesRegex(ValueError, "unreviewed.*RDiv"):
+                    bc.build(export, conservative, "chelis", "hull-sha", "0.19.1", 1, 50, 30.0)
 
 
 if __name__ == "__main__":

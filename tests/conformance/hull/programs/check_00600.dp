@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (cast {} (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (let {} (bind {} xa (let {} (bind {} xa (lit {type: (t-prim {} f32)} 3.0)) (var {} xa))) (app {} (var {} neg) (var {} xa)))) (t-prim {} f32))))
+(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} hidden) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (t-prim {} f32))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 0)))))

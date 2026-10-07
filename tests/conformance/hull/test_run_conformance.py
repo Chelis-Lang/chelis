@@ -144,7 +144,7 @@ class CheckClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "agree")
 
     def test_disagree_both_accept_strings_differ(self):
-        rec = check_record("accept", "(t-fn {} (t-prim {} int64) (t-prim {} f32))")
+        rec = check_record("accept", "(t-fn {} (t-prim {} i64) (t-prim {} f32))")
         r = rc.classify_program(rec, 0, accept_check_json(FN_F32_F32))
         self.assertEqual(r.bucket, "disagree")
 
@@ -208,6 +208,21 @@ def eval_record(hull_eval_value):
 
 
 class EvalClassificationTests(unittest.TestCase):
+    def test_reference_f32_short_decimal_keeps_large_result_in_corpus(self):
+        reference = eval_record("5.148427e+23")
+        same_bits = rc.classify_program(
+            reference,
+            0,
+            eval_json(scalar_wire("f32", struct.unpack("!f", bytes.fromhex("66da0b5b"))[0])),
+        )
+        adjacent_bits = rc.classify_program(
+            reference,
+            0,
+            eval_json(scalar_wire("f32", struct.unpack("!f", bytes.fromhex("66da0b5c"))[0])),
+        )
+        self.assertEqual(same_bits.bucket, "agree")
+        self.assertEqual(adjacent_bits.bucket, "disagree")
+
     def test_eval_float32_shortest_decimal_is_read_at_its_tagged_width(self):
         # Rust serializes an f32 using the shortest decimal that round-trips
         # at f32 width. Reading that token as an f64 changes the represented
@@ -243,7 +258,7 @@ class EvalClassificationTests(unittest.TestCase):
             1318815700.0,
         )
 
-    def test_eval_v3_integer_scalar_tags_are_read_without_dtype_substitution(self):
+    def test_eval_v4_integer_scalar_tags_are_read_without_dtype_substitution(self):
         for tag in ("int8", "int16", "int32", "int64"):
             with self.subTest(tag=tag):
                 self.assertEqual(rc._read_root_scalar(scalar_wire(tag, -24)), -24)
@@ -285,7 +300,7 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_tensor_scalar(self):
-        # Execution wire v3: exact stored f32 bits.
+        # Execution wire v4: exact stored f32 bits.
         rec = eval_record("3.0")
         r = rc.classify_program(
             rec,

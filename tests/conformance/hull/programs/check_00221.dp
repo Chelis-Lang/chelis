@@ -1,11 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {}
-      (ta
-        {type: (t-tensor {} (d-name {} hidden) (d-lit {} 4) (t-prim {} bool))}))
-    (app {}
-      (var {} permute)
-      (var {} ta)
-      (lit {type: (t-prim {} i32)} 0)
-      (lit {type: (t-prim {} i32)} 1))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} i32)} 0) (var {} seq))))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} f32)} 7.0) (arm {} (pat-lit {} 3.0) () (lit {type: (t-prim {} f32)} 7.0)) (arm {} (pat-wild {}) () (lit {type: (t-prim {} f32)} 4.0)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} string)} "ccc") (arm {} (pat-wild {}) () (let {} (bind {} xa (lit {type: (t-prim {} f32)} 7.0)) (var {} xa))))))

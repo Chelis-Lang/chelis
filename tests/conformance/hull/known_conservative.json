@@ -2,6 +2,8 @@
   "_comment": "Hull Phase 5 hand-curated known-conservative whitelist. These are the documented, intentional Hull/compiler disagreements that the differential_check classifier must NOT label CompilerUnsound. The generated 10k+ campaign NEVER produces these (it is all Agree/AgreeReject: grad is Agree-at-check, and the ADT / builtin-shadowing reference gaps are never generated because the Phase 4 generator only emits Hull-accepted in-fragment programs). So this file is hand-written evidence, one entry per CHECK-TIME reference-gap family, per PHASE_STATE 'Phase 5 -- 0 campaign decision'.",
   "_schema": "Each whitelist_entries[] item: {rule, family, evidence_program, hull_verdict, compiler_verdict, explanation}. evidence_program is the compiler-runnable Deep (.dp) text; hull_verdict/compiler_verdict are the recorded verdicts; family is the ReferenceGapFamily the classifier must assign.",
   "_grad_family_note": "There are THREE documented reference-gap families in PHASE_STATE, but only TWO are CHECK-TIME divergences and therefore whitelist entries here. The third, the GRAD family (Hull's EGrad surface check accepts where the compiler's full linearity/Delta judgment rejects), is a BUILD-time divergence: at `chelis check` the compiler runs only the surface grad rule, which IS Hull's EGrad rule, so grad programs classify Agree at check (PHASE_STATE 'Differential-surface reality' #1). It is therefore documented as OUT OF CHECK-CAMPAIGN SCOPE (Hull v0.1.0 does check+eval differential, not build differential), NOT a check-campaign whitelist entry. Scoped for closure in docs/v0_2_0_roadmap.md.",
+  "_compiler_too_conservative_note": "Machine-reviewed Hull-accept/compiler-reject evidence belongs in compiler_too_conservative_entries. The orchestrator exact-matches each generated finding's program against this array and fails every unlisted result. The array is intentionally empty until a family is reproduced, justified, and reviewed.",
+  "compiler_too_conservative_entries": [],
   "whitelist_entries": [
     {
       "rule": "EConstruct / PConstruct deferred to v0.2.0 (no declaration layer in the v0.1.0 Expr-only grammar)",
@@ -9,7 +11,7 @@
       "evidence_program": "(deftype {} Maybe () (variant {} Just (t-prim {} i32)) (variant {} Nothing))\n(def {} g (app {} (var {} Just) (lit {type: (t-prim {} i32)} 1)))",
       "hull_verdict": "reject",
       "compiler_verdict": "accept",
-      "explanation": "ADT construction Just(1) requires a declaration layer (deftype + constructor signatures) that Hull's Expr-only v0.1.0 grammar lacks. Hull parses the construct expression `(app {} (var {} Just) 1)` as EApp(EVar(\"Just\"), ...); type_check of the unbound EVar(\"Just\") returns None (Hull rejects). The real 0.7.20 compiler accepts the full program (deftype declares Just) with score 1.0 / empty errors. This is a reference-gap (Hull-incomplete), NOT CompilerUnsound -- it is the Hull-rejects / compiler-accepts direction the classifier routes to KnownReferenceGap(GapAdtFragment). Safe in the soundness sense: a checker that rejects programs the compiler accepts can never miss a CompilerUnsound finding. Because the generator only emits Hull-accepted programs, ADT programs never arise in the generated campaign; this evidence is hand-curated. Gap-closing scope: docs/v0_2_0_roadmap.md (ADT fragment / declaration layer)."
+      "explanation": "ADT construction Just(1) requires a declaration layer (deftype + constructor signatures) that Hull's Expr-only v0.1.0 grammar lacks. Hull parses the construct expression `(app {} (var {} Just) 1)` as EApp(EVar(\"Just\"), ...); type_check of the unbound EVar(\"Just\") returns None (Hull rejects). The real 0.19.1 compiler accepts the full program (deftype declares Just) with score 1.0 / empty errors. This is a reference-gap (Hull-incomplete), NOT CompilerUnsound -- it is the Hull-rejects / compiler-accepts direction the classifier routes to KnownReferenceGap(GapAdtFragment). Safe in the soundness sense: a checker that rejects programs the compiler accepts can never miss a CompilerUnsound finding. Because the generator only emits Hull-accepted programs, ADT programs never arise in the generated campaign; this evidence is hand-curated. Gap-closing scope: docs/v0_2_0_roadmap.md (ADT fragment / declaration layer)."
     },
     {
       "rule": "EConstruct nullary constructor deferred to v0.2.0",
@@ -17,7 +19,7 @@
       "evidence_program": "(deftype {} Maybe () (variant {} Just (t-prim {} i32)) (variant {} Nothing))\n(def {} n (var {} Nothing))",
       "hull_verdict": "reject",
       "compiler_verdict": "accept",
-      "explanation": "The nullary ADT constructor Nothing is referenced as a bare `(var {} Nothing)`. Hull parses it as EVar(\"Nothing\"); type_check of the unbound EVar returns None (Hull rejects). The real 0.7.20 compiler accepts the full program (deftype declares Nothing) with score 1.0 / empty errors. Same GapAdtFragment direction (Hull-rejects / compiler-accepts); the classifier must label it KnownReferenceGap(GapAdtFragment), NOT CompilerUnsound. Distinguishes the nullary-constructor case from the applied-constructor case above."
+      "explanation": "The nullary ADT constructor Nothing is referenced as a bare `(var {} Nothing)`. Hull parses it as EVar(\"Nothing\"); type_check of the unbound EVar returns None (Hull rejects). The real 0.19.1 compiler accepts the full program (deftype declares Nothing) with score 1.0 / empty errors. Same GapAdtFragment direction (Hull-rejects / compiler-accepts); the classifier must label it KnownReferenceGap(GapAdtFragment), NOT CompilerUnsound. Distinguishes the nullary-constructor case from the applied-constructor case above."
     },
     {
       "rule": "builtin-name reservation: Hull deliberately rejects binding a builtin op name (Hull.Helpers.is_builtin_op_name)",
@@ -25,7 +27,7 @@
       "evidence_program": "(def {} f (fn {} (params {} (add {type: (t-prim {} f32)})) (var {} add)))",
       "hull_verdict": "reject",
       "compiler_verdict": "accept",
-      "explanation": "def f(add: f32) -> f32 = add binds the builtin op name `add` as a parameter. Hull's builtin-name reservation (the 19 names add/mul/sub/div/neg/exp/log/sqrt/sin/sum/gather/matmul/where/concat/reshape/permute/expand/cumsum/sort) makes type_check reject binding any of them, so reference_check returns None (Hull rejects). The real 0.7.20 compiler ACCEPTS builtin-name shadowing with score 1.0 / empty errors (verified). This is a reference-gap (Hull-rejects / compiler-accepts), NOT CompilerUnsound: the reservation only NARROWS Hull's accepted set (keeping the desugar collision out of the parser image so the parse-unparse round-trip holds), and a narrower accepter can never miss a CompilerUnsound. The classifier must label it KnownReferenceGap(GapBuiltinNameShadow). Gap-closing scope (scope-aware builtin desugaring): docs/v0_2_0_roadmap.md."
+      "explanation": "def f(add: f32) -> f32 = add binds the builtin op name `add` as a parameter. Hull's builtin-name reservation (the 19 names add/mul/sub/div/neg/exp/log/sqrt/sin/sum/gather/matmul/where/concat/reshape/permute/expand/cumsum/sort) makes type_check reject binding any of them, so reference_check returns None (Hull rejects). The real 0.19.1 compiler ACCEPTS builtin-name shadowing with score 1.0 / empty errors (verified). This is a reference-gap (Hull-rejects / compiler-accepts), NOT CompilerUnsound: the reservation only NARROWS Hull's accepted set (keeping the desugar collision out of the parser image so the parse-unparse round-trip holds), and a narrower accepter can never miss a CompilerUnsound. The classifier must label it KnownReferenceGap(GapBuiltinNameShadow). Gap-closing scope (scope-aware builtin desugaring): docs/v0_2_0_roadmap.md."
     },
     {
       "rule": "builtin-name reservation: a second builtin op name (mul) bound as a parameter",
@@ -33,7 +35,7 @@
       "evidence_program": "(def {} h (fn {} (params {} (mul {type: (t-prim {} f32)})) (var {} mul)))",
       "hull_verdict": "reject",
       "compiler_verdict": "accept",
-      "explanation": "def h(mul: f32) -> f32 = mul binds the builtin op name `mul`. Hull's reservation rejects it (reference_check None); the real 0.7.20 compiler accepts with score 1.0 / empty errors. Same GapBuiltinNameShadow direction; the classifier must label it KnownReferenceGap(GapBuiltinNameShadow), NOT CompilerUnsound. A second name pins that the reservation is the whole 19-name set, not a single special-cased `add`."
+      "explanation": "def h(mul: f32) -> f32 = mul binds the builtin op name `mul`. Hull's reservation rejects it (reference_check None); the real 0.19.1 compiler accepts with score 1.0 / empty errors. Same GapBuiltinNameShadow direction; the classifier must label it KnownReferenceGap(GapBuiltinNameShadow), NOT CompilerUnsound. A second name pins that the reservation is the whole 19-name set, not a single special-cased `add`."
     }
   ]
 }

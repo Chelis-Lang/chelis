@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (lit {type: (t-prim {} f32)} 2.0)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (fn {} (params {} (xa {type: (t-prim {} i64)})) (lit {type: (t-prim {} f32)} 4.0)) (if {} (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true)) (lit {type: (t-prim {} i64)} 4) (lit {type: (t-prim {} i64)} 6)))))

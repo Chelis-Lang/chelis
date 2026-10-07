@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (app {} (var {} add) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 8.0)) (lit {type: (t-prim {} f32)} 3.0) (lit {type: (t-prim {} f32)} 8.0)) 0)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} string)} "ccc") (arm {} (pat-lit {} "b") () (lit {type: (t-prim {} f32)} 0.0)) (arm {} (pat-wild {}) () (lit {type: (t-prim {} f32)} 7.0)))))

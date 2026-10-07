@@ -1,9 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (ta {type: (t-tensor {} (d-lit {} 89) (t-prim {} f32))}))
-    (app {}
-      (var {} expand)
-      (var {} ta)
-      (lit {type: (t-prim {} i32)} 0)
-      (lit {type: (t-prim {} i32)} 3))))
+(def {} answer (fn {} (params {} (xa {type: (t-prim {} string)})) (app {} (var {} sub) (lit {type: (t-prim {} f32)} 4.0) (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} f32)} 2.0) (lit {type: (t-prim {} f32)} 4.0)))))

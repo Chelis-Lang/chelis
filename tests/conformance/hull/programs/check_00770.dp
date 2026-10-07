@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} seq) (d-name {} seq) (t-prim {} f32))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 2) (d-name {} seq) (t-prim {} f32))})) (app {} (var {} matmul) (var {} ta) (var {} tb)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (app {} (var {} sin) (app {} (var {} log) (lit {type: (t-prim {} f32)} 0.0))) (app {} (fn {} (params {} (xa {type: (t-prim {} string)})) (lit {type: (t-prim {} i64)} 7)) (lit {type: (t-prim {} string)} "a")) (lit {type: (t-prim {} bool)} false))))

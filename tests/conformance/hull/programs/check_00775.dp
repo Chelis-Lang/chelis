@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} f32)} 1.0) (arm {} (pat-lit {} 4.0) () (lit {type: (t-prim {} f32)} 4.0)) (arm {} (pat-wild {}) () (lit {type: (t-prim {} f32)} 8.0)))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 2) (t-prim {} bool))})) (app {} (var {} reshape) (var {} ta) (app {} (var {} Cons) (cast {} (lit {type: (t-prim {} i32)} 2) (t-prim {} i64)) (var {} Nil)))))

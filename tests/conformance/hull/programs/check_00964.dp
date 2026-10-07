@@ -1,6 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {}
-      (ta {type: (t-tensor {} (d-lit {} 89) (d-lit {} 1) (t-prim {} i64))}))
-    (app {} (var {} sum) (var {} ta) (d-lit {} 89))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} sin) (if {} (lit {type: (t-prim {} bool)} true) (var {} xa) (var {} xa))))))

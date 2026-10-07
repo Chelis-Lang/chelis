@@ -1,15 +1,1 @@
-(def {}
-  answer
-  (grad {}
-    (fn {}
-      (params {} (xa {type: (t-prim {} f32)}))
-      (app {}
-        (var {} add)
-        (app {}
-          (var {} sin)
-          (let {}
-            (bind {}
-              xb
-              (lit {type: (t-prim {} i64)} 3))
-            (var {} xa)))
-        (app {} (var {} sin) (var {} xa))))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa))))

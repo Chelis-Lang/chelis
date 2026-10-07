@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} add) (var {} xa) (app {} (var {} add) (var {} xa) (var {} xa))))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (let {} (bind {} xa (lit {type: (t-prim {} i64)} 7)) (var {} xa)) (lit {type: (t-prim {} string)} "d") (lit {type: (t-prim {} bool)} true)) 1)))

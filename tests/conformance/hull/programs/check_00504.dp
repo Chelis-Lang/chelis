@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} neg) (let {} (bind {} xb (var {} xa)) (var {} xb)))) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 2.0)) (app {} (var {} neg) (var {} xa))))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (lit {type: (t-prim {} string)} "ccc")) (lit {type: (t-prim {} f32)} 7.0))))

@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} string)} "ccc") (let {} (bind {} xa (app {} (fn {} (params {} (xa {type: (t-prim {} string)})) (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} string)} "bb"))) (app {} (var {} div) (var {} xa) (var {} xa)))) 0)))

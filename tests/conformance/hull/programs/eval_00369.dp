@@ -1,1 +1,1 @@
-(def {} answer (cast {} (let {} (bind {} xa (app {} (var {} neg) (lit {type: (t-prim {} f32)} 8.0))) (var {} xa)) (t-prim {} f32)))
+(def {} answer (cast {} (app {} (var {} sub) (lit {type: (t-prim {} f32)} 8.0) (if {} (lit {type: (t-prim {} bool)} true) (let {} (bind {} xa (lit {type: (t-prim {} i64)} 2)) (lit {type: (t-prim {} f32)} 7.0)) (lit {type: (t-prim {} f32)} 8.0))) (t-prim {} f32)))

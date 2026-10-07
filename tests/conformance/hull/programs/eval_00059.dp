@@ -1,1 +1,1 @@
-(def {} answer (cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32)))
+(def {} answer (cast {} (let {} (bind {} xa (let {} (bind {} xa (if {} (let {} (bind {} xa (lit {type: (t-prim {} i64)} 6)) (lit {type: (t-prim {} bool)} true)) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true))) (lit {type: (t-prim {} f32)} 2.0))) (let {} (bind {} xb (let {} (bind {} xb (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 0))) (lit {type: (t-prim {} string)} "d"))) (var {} xa))) (t-prim {} f32)))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sqrt) (lit {type: (t-prim {} f32)} 4.0))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sqrt) (if {} (if {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} true)) (app {} (var {} sqrt) (app {} (var {} exp) (lit {type: (t-prim {} f32)} 4.0))) (let {} (bind {} xa (lit {type: (t-prim {} bool)} false)) (app {} (var {} log) (let {} (bind {} xb (lit {type: (t-prim {} f32)} 2.0)) (var {} xb))))))))

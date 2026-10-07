@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} log) (app {} (var {} neg) (app {} (var {} neg) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 7.0))))))
+(def {} answer (app {} (var {} log) (lit {type: (t-prim {} f32)} 2.0)))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (fn {} (params {} (xa {type: (t-prim {} string)})) (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} bool)} false))) (lit {type: (t-prim {} string)} "a"))))

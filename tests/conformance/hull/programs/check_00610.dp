@@ -1,16 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {}
-      (ta
-        {type: (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} i64))}))
-    (app {}
-      (var {} reshape)
-      (var {} ta)
-      (app {}
-        (var {} Cons)
-        (cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64))
-        (app {}
-          (var {} Cons)
-          (cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64))
-          (var {} Nil))))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} i64))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} i32)} 1) (var {} hidden))))

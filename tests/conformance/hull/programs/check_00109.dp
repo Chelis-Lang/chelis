@@ -1,5 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (ta {type: (t-tensor {} (d-lit {} 4) (t-prim {} bool))}))
-    (app {} (var {} permute) (var {} ta) (lit {type: (t-prim {} i32)} 0))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 3) (t-prim {} i64))})) (app {} (var {} permute) (var {} ta) (lit {type: (t-prim {} i32)} 0))))

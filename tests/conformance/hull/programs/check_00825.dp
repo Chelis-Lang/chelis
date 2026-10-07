@@ -1,11 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (tb {type: (t-tensor {} (d-lit {} 4) (t-prim {} i64))}))
-    (fn {}
-      (params {} (ta {type: (t-tensor {} (d-name {} rdim) (t-prim {} i64))}))
-      (app {}
-        (var {} gather)
-        (var {} ta)
-        (var {} tb)
-        (lit {type: (t-prim {} i32)} 0)))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (if {} (lit {type: (t-prim {} bool)} false) (var {} xa) (let {} (bind {} xb (lit {type: (t-prim {} bool)} false)) (var {} xa))))))

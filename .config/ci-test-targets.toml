@@ -2414,6 +2414,60 @@ reason = "the required Hull integrity and conformance gates load the committed c
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
+prefix = "tests/conformance/hull/dropped_divergences.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull integrity test checks every recorded corpus exclusion"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/golden_wire.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull integrity test checks canonical wire fixtures"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/test_corpus_integrity.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job executes corpus integrity tests"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/test_wire_canonical.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job executes canonical wire tests"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/verdicts.jsonl"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull integrity and conformance gates consume frozen verdicts"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/wire_canonical.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job imports the canonical wire normalizer"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
 prefix = "tests/support/c_preprocessor.rs"
 disposition = "packages"
 packages = ["chelis-cli"]

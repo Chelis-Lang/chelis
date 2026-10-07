@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} neg) (app {} (var {} neg) (app {} (var {} neg) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 4.0)) (var {} xa))))))
+(def {} answer (app {} (var {} neg) (app {} (var {} log) (lit {type: (t-prim {} f32)} 4.0))))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sin) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 7.0)) (if {} (lit {type: (t-prim {} bool)} false) (let {} (bind {} xb (var {} xa)) (var {} xb)) (var {} xa))))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} i64))})) (app {} (var {} sum) (var {} ta) (lit {type: (t-prim {} i32)} 0))))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))})) (app {} (var {} matmul) (var {} ta) (var {} tb)))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (let {} (bind {} xb (if {} (lit {type: (t-prim {} bool)} true) (app {} (var {} exp) (if {} (lit {type: (t-prim {} bool)} true) (var {} xa) (var {} xa))) (var {} xa))) (let {} (bind {} xc (lit {type: (t-prim {} i64)} 6)) (var {} xa))))))

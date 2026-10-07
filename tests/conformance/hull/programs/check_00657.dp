@@ -1,6 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {}
-      (ta {type: (t-tensor {} (d-lit {} 97) (d-name {} seq) (t-prim {} i64))}))
-    (app {} (var {} sum) (var {} ta) (d-lit {} 97))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} sqrt) (cast {} (app {} (var {} div) (var {} xa) (app {} (var {} sqrt) (var {} xa))) (t-prim {} f32))))))
