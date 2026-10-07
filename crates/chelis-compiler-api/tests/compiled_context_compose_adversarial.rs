@@ -1282,9 +1282,8 @@ fn gextra_eval_in_context_is_thread_safe_across_arc_clones() {
             let ctx = Arc::clone(&ctx);
             let snippet = snippet.to_string();
             thread::spawn(move || {
-                eval_in_context(&ctx, &snippet)
-                    .expect("threaded eval ok")
-                    .roots
+                let mut result = eval_in_context(&ctx, &snippet).expect("threaded eval ok");
+                std::mem::take(&mut result.roots)
             })
         })
         .collect();

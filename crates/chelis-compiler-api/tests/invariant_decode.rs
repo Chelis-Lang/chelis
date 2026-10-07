@@ -58,14 +58,13 @@ fn program_exprs(source: &str) -> Vec<Expr> {
 /// Evaluate `source` and return the `ExecutionValue` bound to top-level
 /// `result`. This is the ORACLE: the value the evaluator builds from text.
 fn eval_result_value(source: &str) -> ExecutionValue {
-    let outcome = eval(EvalRequest {
+    let mut outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: source.to_string(),
         bindings: Default::default(),
     })
     .expect("program evaluates");
-    outcome
-        .roots
+    std::mem::take(&mut outcome.roots)
         .into_iter()
         .find(|root| root.name.as_deref() == Some("result"))
         .expect("a `result` root")

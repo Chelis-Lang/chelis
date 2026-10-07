@@ -87,12 +87,12 @@ fn prepared_library_keeps_globals_strings_and_tensor_bindings() {
         // additionally lists library globals. DAG node IDs also depend on
         // that composition. Selected names and exact values must agree.
         assert_eq!(actual.roots.len(), baseline.roots.len());
-        for (actual, baseline) in actual.roots.into_iter().zip(baseline.roots) {
+        for (actual, baseline) in actual.roots.iter().zip(&baseline.roots) {
             assert_eq!(actual.name, baseline.name);
             assert_eq!(actual.display, baseline.display);
             assert_eq!(
-                serde_json::to_value(actual.value).unwrap(),
-                serde_json::to_value(baseline.value).unwrap()
+                serde_json::to_value(&actual.value).unwrap(),
+                serde_json::to_value(&baseline.value).unwrap()
             );
         }
     }

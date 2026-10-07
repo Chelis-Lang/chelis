@@ -99,8 +99,8 @@ fn source_program(codec: &str, source: &str) -> Result<Value, String> {
             .map_err(failure)?;
             let roots: Vec<_> = result
                 .roots
-                .into_iter()
-                .map(|root| json!({"name": root.name, "value": root.value}))
+                .iter()
+                .map(|root| json!({"name": &root.name, "value": &root.value}))
                 .collect();
             Ok(json!({"roots": roots}))
         }

@@ -1462,6 +1462,44 @@ pub struct EvalResult {
     pub transcript: Vec<String>,
 }
 
+/// Release a nested wire value without recursive enum/Vec drop glue. Keeping
+/// this at the result boundary leaves callers free to destructure the public
+/// `ExecutionValue` enum by value.
+fn drop_execution_value_iteratively(root: ExecutionValue) {
+    let mut pending = vec![root];
+    while let Some(value) = pending.pop() {
+        match value {
+            ExecutionValue::List { value } | ExecutionValue::Tuple { value } => {
+                pending.extend(value);
+            }
+            ExecutionValue::Adt { fields, .. } => pending.extend(fields),
+            ExecutionValue::Dict { entries } => {
+                for DictEntryValue { key, value } in entries {
+                    pending.push(key);
+                    pending.push(value);
+                }
+            }
+            ExecutionValue::Tensor { .. }
+            | ExecutionValue::Scalar { .. }
+            | ExecutionValue::Bool { .. }
+            | ExecutionValue::Key { .. }
+            | ExecutionValue::String { .. }
+            | ExecutionValue::Unit => {}
+        }
+    }
+}
+
+impl Drop for EvalResult {
+    fn drop(&mut self) {
+        for root in &mut self.roots {
+            drop_execution_value_iteratively(std::mem::replace(
+                &mut root.value,
+                ExecutionValue::Unit,
+            ));
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GradRequest {
     pub source_kind: SourceKind,
