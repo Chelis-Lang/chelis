@@ -44,9 +44,9 @@ multiply before anything runs. The error from its JSON report:
 ## Install a release toolchain
 
 Chelis releases include `chelisup`, which installs toolchains and selects the
-version used by each project. The published 0.19.0 installer uses an authenticated
-GitHub download, so the commands below sign in with [`gh`](https://cli.github.com).
-The source-built installer also supports anonymous downloads of public releases.
+version used by each project. `chelisup` downloads public releases without a
+GitHub token. The commands below sign in with [`gh`](https://cli.github.com) to
+find and fetch the latest release.
 
 ```sh
 gh auth login
