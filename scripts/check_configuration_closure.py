@@ -209,7 +209,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--workspace",
             "--all-targets",
             "--features",
-            "chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
+            "chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
             "--",
             "-D",
             "warnings",
