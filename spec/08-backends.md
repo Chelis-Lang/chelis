@@ -17,6 +17,10 @@ The backends are layered:
 
 Chelis does **not** maintain multiple competing native host code generators.
 
+When host lowering exhausts its native stack budget on a deeply nested checked
+expression, it reports a located lowering diagnostic before the process can
+abort. A shallow expression with the same operations still lowers normally.
+
 ### 1.1 Evaluation output and failure
 
 `chelis eval` preserves output produced before an evaluation failure in source
