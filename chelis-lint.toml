@@ -20,10 +20,3 @@ cross_ref = "§12.2"
 pattern = ".github/actions/vendor/ci/"
 class = "dependency"
 cross_ref = "§12.2"
-
-# Vendored byte for byte from the website book lint, whose em-dash rule
-# must spell the character it rejects.
-[[exclude]]
-pattern = "scripts/check_book.py"
-class = "dependency"
-cross_ref = "§12.2"

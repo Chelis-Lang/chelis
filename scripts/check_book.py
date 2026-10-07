@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 RULES: dict[str, re.Pattern[str]] = {
-    "em-dash": re.compile(r"—|&mdash;|&#8212;|&#x2014;", re.I),
+    "em-dash": re.compile(r"\u2014|&mdash;|&#8212;|&#x2014;", re.I),
     "load-bearing": re.compile(r"\bload[- ]bearing\b", re.I),
     "issue or PR reference": re.compile(
         r"(?<![\w&/])[A-Za-z][\w.-]*#\d+\b|(?<![\w&/#])#\d{2,}\b|/(?:issues|pull)/\d+", re.I),
