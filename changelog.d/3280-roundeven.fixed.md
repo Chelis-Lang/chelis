@@ -1,6 +1,7 @@
 The correctly rounded `sin`, `cos`, and `tan` kernels at f32 and `sin`, `exp`,
-and `erfc` at f64 no longer call the C library's `roundeven`: they round their
-reduced argument to an integer with arithmetic of their own. On baseline x86-64
-that call kept the compiler canary, and with it every native build, from linking
-on a C library without `roundeven`, such as musl or glibc before 2.25. Results
-are unchanged. See [#3280](https://github.com/Chelis-Lang/chelis/issues/3280).
+and `erfc` at f64 no longer call the C library's `roundeven`. On baseline x86-64
+and on aarch64 with GCC 10, that call stopped every native build at the compiler
+canary on musl and glibc before 2.25. The kernels now round their reduced
+argument to an integer with `rint`, which every C99 C library has. In the
+rounding mode that Chelis pins, `rint` gives the same value, so results are
+unchanged. See [#3280](https://github.com/Chelis-Lang/chelis/issues/3280).

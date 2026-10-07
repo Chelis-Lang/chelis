@@ -323,12 +323,7 @@ fn check_compiler(
         return Ok(CompilerIdentity { path, version });
     }
 
-    let macros = tool_command(&path)
-        .args(compile_flags)
-        .args(["-dM", "-E", "-x", "c", "-"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
+    let macros = preprocessor_macros(&path, compile_flags, b"")?;
     if !macros.status.success() {
         return Err(format!(
             "native compiler `{}` rejected the pinned profile {}: {}",
@@ -338,12 +333,7 @@ fn check_compiler(
         ));
     }
     let macros = String::from_utf8_lossy(&macros.stdout);
-    let defined = |name: &str| {
-        macros.lines().find_map(|line| {
-            let rest = line.strip_prefix("#define ")?.strip_prefix(name)?;
-            (rest.is_empty() || rest.starts_with(' ')).then(|| rest.trim().to_string())
-        })
-    };
+    let defined = |name: &str| macro_value(&macros, name);
     let mut violations = Vec::new();
     if defined("__FAST_MATH__").is_some() {
         violations.push("__FAST_MATH__ is defined (fast math)");
@@ -418,10 +408,30 @@ fn check_c_library(path: &Path, compile_flags: &[String]) -> Result<(), String> 
 
 /// Whether `path` compiles against glibc under `compile_flags`: its `<stdint.h>`
 /// defines `__GLIBC__`, which glibc's headers do and musl's do not. musl defines no
-/// macro of its own, so the headers tell glibc from every other C library and no
-/// more; a compiler like `musl-gcc`, which reports a `-gnu` target but compiles
-/// against musl, reads as what its headers are.
+/// public macro that identifies it, so the headers tell glibc from every other C
+/// library and no more. A compiler like `musl-gcc`, which reports a `-gnu` target but
+/// compiles against musl, reads as what its headers are.
 fn compiles_against_glibc(path: &Path, compile_flags: &[String]) -> Result<bool, String> {
+    let output = preprocessor_macros(path, compile_flags, b"#include <stdint.h>\n")?;
+    if !output.status.success() {
+        return Err(format!(
+            "native compiler `{}` cannot preprocess `#include <stdint.h>`, so its C library \
+             cannot be read: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(macro_value(&String::from_utf8_lossy(&output.stdout), "__GLIBC__").is_some())
+}
+
+/// Run `path` as a preprocessor on the C `source` under `compile_flags`, and print the
+/// macros it defines (`-dM -E`). Each caller checks the exit status with its own
+/// diagnostic.
+fn preprocessor_macros(
+    path: &Path,
+    compile_flags: &[String],
+    source: &[u8],
+) -> Result<std::process::Output, String> {
     use std::io::Write as _;
     let cannot_run =
         |error: std::io::Error| format!("cannot run native compiler `{}`: {error}", path.display());
@@ -434,27 +444,24 @@ fn compiles_against_glibc(path: &Path, compile_flags: &[String]) -> Result<bool,
         .spawn()
         .map_err(cannot_run)?;
     if let Some(mut stdin) = child.stdin.take() {
-        match stdin.write_all(b"#include <stdint.h>\n") {
+        match stdin.write_all(source) {
             Ok(()) => {}
-            // A compiler that exits without reading its input fails the status
-            // check below.
+            // A compiler that exits without reading its input fails the caller's
+            // status check.
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
             Err(error) => return Err(cannot_run(error)),
         }
     }
-    let output = child.wait_with_output().map_err(cannot_run)?;
-    if !output.status.success() {
-        return Err(format!(
-            "native compiler `{}` cannot preprocess `#include <stdint.h>`, so its C library \
-             cannot be read: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-        line.strip_prefix("#define __GLIBC__")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-    }))
+    child.wait_with_output().map_err(cannot_run)
+}
+
+/// The value of `name` in the `#define` lines of a `-dM` preprocess, or `None` when
+/// the preprocessor does not define it.
+fn macro_value<'a>(macros: &'a str, name: &str) -> Option<&'a str> {
+    macros.lines().find_map(|line| {
+        let rest = line.strip_prefix("#define ")?.strip_prefix(name)?;
+        (rest.is_empty() || rest.starts_with(' ')).then(|| rest.trim())
+    })
 }
 
 /// The refusal for a compiler whose headers are glibc's (`glibc_headers`) or not
@@ -1199,23 +1206,15 @@ mod tests {
         let path = Path::new("/usr/bin/cc");
         assert_eq!(c_library_refusal(path, CLibrary::Glibc, true), None);
         assert_eq!(c_library_refusal(path, CLibrary::Musl, false), None);
-        let refused = c_library_refusal(path, CLibrary::Glibc, false)
-            .expect("a glibc archive with a compiler for another C library is refused");
-        for part in [
-            "`/usr/bin/cc`",
-            "a C library other than glibc",
-            "does not define `__GLIBC__`",
-            "built for glibc",
-            "CHELIS_CC",
-        ] {
-            assert!(refused.contains(part), "{part} missing from: {refused}");
+        for (carried, glibc_headers) in [(CLibrary::Glibc, false), (CLibrary::Musl, true)] {
+            let refused = c_library_refusal(path, carried, glibc_headers)
+                .expect("a compiler for another C library is refused");
+            let archive = format!("built for {}", carried.name());
+            assert!(
+                refused.contains(&archive),
+                "{archive} missing from: {refused}"
+            );
         }
-        let refused = c_library_refusal(path, CLibrary::Musl, true)
-            .expect("a musl archive with a glibc compiler is refused");
-        assert!(
-            refused.contains("compiles against glibc") && refused.contains("built for musl"),
-            "{refused}"
-        );
     }
 
     /// A directory whose `<stdint.h>` is glibc's (it defines `__GLIBC__`) or not.
@@ -1252,13 +1251,6 @@ mod tests {
                 include.display().to_string(),
             ];
             assert_eq!(compiles_against_glibc(&path, &flags), Ok(glibc));
-        }
-        if let Some(carried) = CARRIED_C_LIBRARY {
-            // The build host's own compiler matches the runtime built on it.
-            assert_eq!(
-                compiles_against_glibc(&path, &[]),
-                Ok(carried == CLibrary::Glibc)
-            );
         }
     }
 

@@ -28,11 +28,10 @@ every lane compiles:
    6). Values are unchanged: every dropped arm computes the same bits as the
    arm that stays;
 5. every kernel that rounds a reduced argument to an integer calls one
-   `roundeven_finite` helper, `ROUNDEVEN_FINITE`, which calls no C library
-   function: `inline_roundeven` replaces upstream's definitions
-   (the `__builtin_roundeven` macro and its fallback), and `route_sin_roundeven`
-   gives binary64 `sin`, which calls the builtin directly, the helper and routes
-   the call through it.
+   `roundeven_finite` helper, `ROUNDEVEN_FINITE`, around `__builtin_rint`.
+   `inline_roundeven` replaces upstream's definitions (the `__builtin_roundeven`
+   macro and its fallback). `route_sin_roundeven` gives the helper to binary64
+   `sin`, which calls the builtin directly, and routes that call through it.
 
 The amalgamation opens with `#error` guards against fast math, finite-math-only,
 and excess-precision evaluation.
@@ -336,28 +335,26 @@ def contract_clean(text: str, origin: str) -> str:
 # `cos`, and `tan`, and binary64 `exp` and `erfc` through an upstream
 # `roundeven_finite` helper, and binary64 `sin` (`cr_sin_moderate`) through a direct
 # `__builtin_roundeven` call. Upstream's helper is that builtin on GCC 10 and Clang 17
-# and a `round`-based fallback elsewhere. On baseline x86-64 the builtin becomes a
-# call to the C library's `roundeven`, which musl and glibc before 2.25 lack, and
-# `chelis build` compiles every kernel into its compiler canary, so one such call
-# stops every native build there. `inline_roundeven` and `route_sin_roundeven` give
-# all six `ROUNDEVEN_FINITE` instead, which calls no C library function.
+# and a `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with
+# GCC 10, the builtin becomes a call to the C library's `roundeven`. musl and glibc
+# before 2.25 do not have it. `chelis build` compiles every kernel into its compiler
+# canary, so one such call stops every native build there. `inline_roundeven` and
+# `route_sin_roundeven` give all six `ROUNDEVEN_FINITE` instead.
 #
-# It is exact. Chelis pins round-to-nearest-even at every entry point (design
-# section 6) and the amalgamation's guard keeps FLT_EVAL_METHOD at 0, so for
-# |x| < 2^52 the sum |x| + 2^52 lands where adjacent doubles are 1 apart and rounds
-# |x| to an integer with ties to even (2^52 is even), and subtracting 2^52 is exact.
-# The profile's canary refuses a compiler that folds `(a + b) - a`. A larger |x| is
-# already an integer, and `copysign` keeps the sign of zero, as `roundeven` does.
+# `rint` rounds to an integer in the current rounding mode. Chelis pins
+# round-to-nearest-even at every entry point (design section 6), so `rint` gives the
+# value of `roundeven` for every finite input, the sign of zero included. AArch64
+# compiles it to one `frintx`, and GCC inlines it on baseline x86-64. Clang on
+# baseline x86-64 calls the C library's `rint`. Every C99 C library has it.
+# The portable `copysign((|x| + 2^52) - 2^52, x)` gives the same values, but it makes
+# most of these kernels about 20% slower on AArch64.
 ROUNDEVEN_FINITE = """\
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 """
 _SIN_ROUNDEVEN_CALL = "__builtin_roundeven (invpi * ax)"

@@ -319,14 +319,11 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_sinf__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 typedef union {float f; uint32_t u;} chelis_cr_sinf__b32u32_u;
@@ -506,14 +503,11 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_cosf__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 typedef union {float f; uint32_t u;} chelis_cr_cosf__b32u32_u;
@@ -687,14 +681,11 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_tanf__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 typedef union {float f; uint32_t u;} chelis_cr_tanf__b32u32_u;
@@ -1342,14 +1333,11 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_exp__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 typedef int64_t chelis_cr_exp__i64;
@@ -3331,14 +3319,11 @@ SOFTWARE.
 
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_sin__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 typedef unsigned __int128 chelis_cr_sin__u128;
@@ -9989,14 +9974,11 @@ SOFTWARE.
 /****************** code copied from cosf.c **********************************/
 
 /* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
-   mode Chelis pins at every entry; it calls no C library function */
+   mode Chelis pins at every entry */
 static double
 chelis_cr_erfc__roundeven_finite (double x)
 {
-  double ax = __builtin_fabs (x);
-  if (!(ax < 0x1p52))
-    return x;
-  return __builtin_copysign ((ax + 0x1p52) - 0x1p52, x);
+  return __builtin_rint (x);
 }
 
 /****************** code copied from erf.c ***********************************/

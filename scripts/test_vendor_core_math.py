@@ -15,11 +15,8 @@ from __future__ import annotations
 
 import contextlib
 import io
-import math
-import random
 import re
 import shutil
-import struct
 import sys
 import tempfile
 import unittest
@@ -226,31 +223,6 @@ class RoundevenTests(unittest.TestCase):
         for what, text in [("no call", "#pragma STDC FENV_ACCESS ON\n"), ("two calls", "#pragma STDC FENV_ACCESS ON\n" + body + body)]:
             with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, "binary64 sin"):
                 vcm.route_sin_roundeven(text)
-
-    def test_inline_helper_rounds_half_to_even(self):
-        # The helper's arithmetic in binary64 with round-to-nearest-even, the mode
-        # design section 6 pins, against Python's round(), which rounds a float's
-        # exact value half to even. Signed zeros and values from 2^52 up included.
-        two52 = 2.0**52
-
-        def helper(x: float) -> float:
-            ax = abs(x)
-            if not ax < two52:
-                return x
-            return math.copysign((ax + two52) - two52, x)
-
-        def roundeven(x: float) -> float:
-            return x if abs(x) >= two52 else math.copysign(float(round(x)), x)
-
-        rng = random.Random(3280)
-        values = [0.0, 0.3, 0.5, 1.5, 2.5, 0.49999999999999994, 2.0**51 + 0.5, two52 - 0.5, two52, two52 + 1,
-                  2.0**53, 1e300, 5e-324]
-        values += [k + 0.5 for k in range(-10_000, 10_000)]
-        values += [struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0] for _ in range(100_000)]
-        values += [rng.uniform(-(2.0**53), 2.0**53) / 2.0 ** rng.randrange(60) for _ in range(100_000)]
-        for x in values + [-v for v in values]:
-            if math.isfinite(x):
-                self.assertEqual(struct.pack("<d", helper(x)), struct.pack("<d", roundeven(x)), x.hex())
 
 
 class RepositoryTests(unittest.TestCase):
