@@ -4369,6 +4369,28 @@ fn build_prepared_file(
     // checked program still represents the exact emission input.
     let selected_len = full_deep_exprs.len();
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_seeds);
+    #[cfg(feature = "clarabel-provider")]
+    if target == BuildTarget::C
+        && entry_def_names(&pruned_deep_exprs)
+            .contains("pkg__chelis__clarabel__Clarabel__Qp__solve")
+        && let Some(root) = prepared.and_then(|program| program.package_root.as_ref())
+    {
+        // A registered evaluator provider is not a compiled-C provider. The
+        // linked declaration's fallback body is `fail`, so emitting a binary
+        // would misleadingly succeed and trap only when the call is reached.
+        // Confirm the same source-bound registration used by evaluation;
+        // a different package body remains ordinary Chelis code.
+        let graph =
+            chelis_reef::prepare_reef_graph(root, &EMBEDDED_RUNTIME).map_err(boxed_string_error)?;
+        let registered = chelis_compiler_api::registered_clarabel_solve_symbol(&graph)
+            .map_err(boxed_string_error)?;
+        if registered.is_some_and(|name| entry_def_names(&pruned_deep_exprs).contains(&name)) {
+            return Err(boxed_string_error(
+                "compiled C native provider binding is unavailable for Clarabel.Qp.solve"
+                    .to_owned(),
+            ));
+        }
+    }
     let pruning_fired = pruned_deep_exprs.len() != selected_len;
 
     // Loose C sources preserve authored host-library definitions when the

@@ -22,7 +22,7 @@ use frame::ResultProducer;
 #[cfg(feature = "clarabel-provider")]
 mod clarabel;
 #[cfg(feature = "clarabel-provider")]
-pub(crate) use clarabel::linked_package_owns_solve;
+pub use clarabel::linked_package_solve_symbol;
 mod host_ops;
 mod invariant;
 mod named_axis;

@@ -34,6 +34,8 @@ path dependency on this package. From that directory, run
 
 The package's compiled C binding and the
 `clarabel.qp.ideal_optimality` proof contract are not implemented. A C build
-of this package executes the unavailable-provider body if run, so it is not
-a supported solver path. The exact mathematical proof view must not be
-inferred from these runtime examples.
+with the optional provider feature rejects a reachable call to this exact
+registered solver declaration because the native C binding is unavailable.
+Without that feature, the declaration remains ordinary Chelis code whose
+body traps if called. The exact mathematical proof view must not be inferred
+from these runtime examples.

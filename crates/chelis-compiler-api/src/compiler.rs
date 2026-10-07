@@ -2778,8 +2778,9 @@ fn compile_rewritten_decls_in_context(
     )?;
     #[cfg(feature = "clarabel-provider")]
     let compiled = CompiledSource {
-        native_clarabel_solve: crate::runtime::linked_package_owns_solve(&context.reef_state)
-            .map_err(|error| stage_error("reef", error, GeneralKind::ReefError))?,
+        native_clarabel_solve: crate::runtime::linked_package_solve_symbol(&context.reef_state)
+            .map_err(|error| stage_error("reef", error, GeneralKind::ReefError))?
+            .is_some(),
         ..compiled
     };
     Ok(compiled)

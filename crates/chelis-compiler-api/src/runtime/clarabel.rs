@@ -10,9 +10,9 @@ pub(super) const SOLVE: &str = "pkg__chelis__clarabel__Clarabel__Qp__solve";
 const PACKAGE_SOURCE: &[u8] = include_bytes!("../../../../packages/chelis-clarabel/src/qp.ch");
 const CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__";
 
-pub(crate) fn linked_package_owns_solve(
+pub fn linked_package_solve_symbol(
     graph: &chelis_reef::PreparedReefGraph,
-) -> Result<bool, String> {
+) -> Result<Option<String>, String> {
     let source_sha256: [u8; 32] = Sha256::digest(PACKAGE_SOURCE).into();
     Ok(graph
         .linked_function_with_source_hash(
@@ -22,7 +22,7 @@ pub(crate) fn linked_package_owns_solve(
             "solve",
             source_sha256,
         )?
-        .is_some_and(|name| name == SOLVE))
+        .filter(|name| name == SOLVE))
 }
 
 fn constructor(name: &str, fields: Vec<RuntimeValue>, names: &[&str]) -> RuntimeValue {

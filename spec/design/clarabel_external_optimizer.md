@@ -124,8 +124,10 @@ match the provider registration. A different package body, even one with the
 same linked name, executes as ordinary Chelis code. This registration is
 compiled into the evaluator; it is not yet a Reef native binding or a
 separately verified provider artifact. The compiled C inliner sees the fail
-body, so the compiled call needs an explicit provider-call representation
-before it can execute. The property lowering must consume the resolved
+body. A feature-enabled C build rejects a reachable call to the exact
+registered declaration until an explicit provider-call representation and
+native link path can execute it; a changed source body retains ordinary
+Chelis behavior. The property lowering must consume the resolved
 binding; evaluator admission alone grants no proof assumption.
 
 1. Implement a standalone, non-SDP Rust adapter with validated dense inputs,
