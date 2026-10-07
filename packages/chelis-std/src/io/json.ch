@@ -203,28 +203,41 @@ def parse_object(text: string, idx: i64) -> Option[(Dict[string, Json], i64)] = 
   }
 }
 def parse_object_rest(text: string, idx: i64, entries: List[(string, Json)]) -> Option[(Dict[string, Json], i64)] = {
-  next = skip_ws(text, idx)
-  if gte(next, string_len(text)) then None else {
-    ch = char_at(text, next)
-    if eq(ch, "}") then Some((dict_of(entries), add(next, cast(1, i64)))) else if eq(ch, ",") then {
-      key_idx = skip_ws(text, add(next, cast(1, i64)))
-      match parse_string(text, key_idx) with {
-        | Some(key_pair) => {
-        (key, after_key) = key_pair
-        colon = skip_ws(text, after_key)
-        if gte(colon, string_len(text)) then None else if neq(char_at(text, colon), ":") then None else match parse_value(text, skip_ws(text, add(colon, cast(1, i64)))) with {
-          | Some(value_pair) => {
-          (value, after_value) = value_pair
-          parse_object_rest(text, after_value, append(entries, (key, value)))
+  limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
+  first = fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((idx, entries, false)), range(idx, limit))
+  state = match first with {
+    | Some((cursor, found, true)) => Some((cursor, found, true))
+    | Some((cursor, found, false)) => fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((cursor, found, false)), range(limit, string_len(text)))
+    | None => None
+  }
+  match state with {
+    | Some((cursor, found, true)) => Some((dict_of(found), cursor))
+    | _ => None
+  }
+}
+def object_scan_step(text: string, acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> Option[(i64, List[(string, Json)], bool)] =
+  match acc with {
+    | Some((cursor, found, done)) => if or(done, lt(position, cursor)) then Some((cursor, found, done)) else {
+    next = skip_ws(text, cursor)
+    if gte(next, string_len(text)) then None else {
+      ch = char_at(text, next)
+      if eq(ch, "}") then Some((add(next, 1i64), found, true)) else if eq(ch, ",") then {
+        key_idx = skip_ws(text, add(next, 1i64))
+        match parse_string(text, key_idx) with {
+          | Some((key, after_key)) => {
+          colon = skip_ws(text, after_key)
+          if gte(colon, string_len(text)) then None else if neq(char_at(text, colon), ":") then None else match parse_value(text, skip_ws(text, add(colon, 1i64))) with {
+            | Some((value, after_value)) => Some((after_value, append(found, (key, value)), false))
+            | None => None
+          }
         }
           | None => None
         }
-      }
-        | None => None
-      }
-    } else None
+      } else None
+    }
   }
-}
+    | None => None
+  }
 def parse_array(text: string, idx: i64) -> Option[(List[Json], i64)] = {
   next = skip_ws(text, idx)
   if gte(next, string_len(text)) then None else if eq(char_at(text, next), "]") then Some(([], add(next, cast(1, i64)))) else match parse_value(text, next) with {
@@ -236,32 +249,60 @@ def parse_array(text: string, idx: i64) -> Option[(List[Json], i64)] = {
   }
 }
 def parse_array_rest(text: string, idx: i64, items: List[Json]) -> Option[(List[Json], i64)] = {
-  next = skip_ws(text, idx)
-  if gte(next, string_len(text)) then None else {
-    ch = char_at(text, next)
-    if eq(ch, "]") then Some((items, add(next, cast(1, i64)))) else if eq(ch, ",") then match parse_value(text, skip_ws(text, add(next, cast(1, i64)))) with {
-      | Some(pair) => {
-      (value, after_value) = pair
-      parse_array_rest(text, after_value, append(items, value))
-    }
-      | None => None
-    } else None
+  limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
+  first = fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((idx, items, false)), range(idx, limit))
+  state = match first with {
+    | Some((cursor, found, true)) => Some((cursor, found, true))
+    | Some((cursor, found, false)) => fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((cursor, found, false)), range(limit, string_len(text)))
+    | None => None
+  }
+  match state with {
+    | Some((cursor, found, true)) => Some((found, cursor))
+    | _ => None
   }
 }
+def array_scan_step(text: string, acc: Option[(i64, List[Json], bool)], position: i64) -> Option[(i64, List[Json], bool)] =
+  match acc with {
+    | Some((cursor, found, done)) => if or(done, lt(position, cursor)) then Some((cursor, found, done)) else {
+    next = skip_ws(text, cursor)
+    if gte(next, string_len(text)) then None else {
+      ch = char_at(text, next)
+      if eq(ch, "]") then Some((add(next, 1i64), found, true)) else if eq(ch, ",") then match parse_value(text, skip_ws(text, add(next, 1i64))) with {
+        | Some((value, after_value)) => Some((after_value, append(found, value), false))
+        | None => None
+      } else None
+    }
+  }
+    | None => None
+  }
 def parse_string(text: string, idx: i64) -> Option[(string, i64)] = if gte(idx, string_len(text)) then None else if neq(char_at(text, idx), "\"") then None else parse_string_chars(text, add(idx, cast(1, i64)), "")
 def parse_string_chars(text: string, idx: i64, acc: string) -> Option[(string, i64)] =
-  if gte(idx, string_len(text)) then None else {
-    ch = char_at(text, idx)
-    if eq(ch, "\"") then Some((acc, add(idx, cast(1, i64)))) else if eq(ch, "\\") then {
-      esc_idx = add(idx, cast(1, i64))
+  if gte(idx, string_len(text)) then None else if eq(char_at(text, idx), "\"") then Some((acc, add(idx, 1i64))) else if and(lt(add(idx, 1i64), string_len(text)), and(neq(char_at(text, idx), "\\"), and(gte(char_code(char_at(text, idx)), 32i64), eq(char_at(text, add(idx, 1i64)), "\"")))) then Some((string_concat(acc, char_at(text, idx)), add(idx, 2i64))) else {
+    limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
+    first = fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((acc, idx, false)), range(idx, limit))
+    state = match first with {
+      | Some((found, cursor, true)) => Some((found, cursor, true))
+      | Some((found, cursor, false)) => fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((found, cursor, false)), range(limit, string_len(text)))
+      | None => None
+    }
+    match state with {
+      | Some((found, cursor, true)) => Some((found, cursor))
+      | _ => None
+    }
+  }
+def string_scan_step(text: string, step: Option[(string, i64, bool)], position: i64) -> Option[(string, i64, bool)] =
+  match step with {
+    | Some((found, cursor, done)) => if or(done, lt(position, cursor)) then Some((found, cursor, done)) else {
+    ch = char_at(text, cursor)
+    if eq(ch, "\"") then Some((found, add(cursor, 1i64), true)) else if eq(ch, "\\") then {
+      esc_idx = add(cursor, 1i64)
       if gte(esc_idx, string_len(text)) then None else match decode_escape(text, esc_idx) with {
-        | Some(pair) => {
-        (value, next) = pair
-        parse_string_chars(text, next, string_concat(acc, value))
-      }
+        | Some((value, next)) => Some((string_concat(found, value), next, false))
         | None => None
       }
-    } else if lt(char_code(ch), cast(32, i64)) then None else parse_string_chars(text, add(idx, cast(1, i64)), string_concat(acc, ch))
+    } else if lt(char_code(ch), 32i64) then None else Some((string_concat(found, ch), add(cursor, 1i64), false))
+  }
+    | None => None
   }
 def decode_escape(text: string, idx: i64) -> Option[(string, i64)] = {
   ch = char_at(text, idx)
@@ -348,24 +389,28 @@ def float_token_text(text: string) -> bool = {
 }
 -- The index of the first non-digit at or after `start`.
 def digit_run_end(chars: List[string], start: i64) -> i64 = fold(fn (acc: i64, pair: (i64, string)) -> if and(eq(acc, pair.0), is_digit(pair.1)) then add(acc, 1i64) else acc, start, enumerate(chars))
-def all_digits(text: string, idx: i64) -> bool = if gte(idx, string_len(text)) then true else and(is_digit(char_at(text, idx)), all_digits(text, add(idx, cast(1, i64))))
-def decimal_digits_greater(left: string, right: string, idx: i64) -> bool =
-  if gte(idx, string_len(left)) then false else {
-    lhs = digit_value(char_at(left, idx))
-    rhs = digit_value(char_at(right, idx))
-    if gt(lhs, rhs) then true else if lt(lhs, rhs) then false else decimal_digits_greater(left, right, add(idx, cast(1, i64)))
-  }
+def all_digits(text: string, idx: i64) -> bool = fold(fn (valid: bool, position: i64) -> and(valid, is_digit(char_at(text, position))), true, range(idx, string_len(text)))
+def decimal_digits_greater(left: string, right: string, idx: i64) -> bool = {
+  comparison = fold(fn (prior: i64, position: i64) -> if neq(prior, 0i64) then prior else {
+    lhs = digit_value(char_at(left, position))
+    rhs = digit_value(char_at(right, position))
+    if gt(lhs, rhs) then 1i64 else if lt(lhs, rhs) then -1i64 else 0i64
+  }, 0i64, range(idx, string_len(left)))
+  gt(comparison, 0i64)
+}
 def digit_value(ch: string) -> i64 = if eq(ch, "0") then cast(0, i64) else if eq(ch, "1") then cast(1, i64) else if eq(ch, "2") then cast(2, i64) else if eq(ch, "3") then cast(3, i64) else if eq(ch, "4") then cast(4, i64) else if eq(ch, "5") then cast(5, i64) else if eq(ch, "6") then cast(6, i64) else if eq(ch, "7") then cast(7, i64) else if eq(ch, "8") then cast(8, i64) else cast(9, i64)
 def scan_number_end(text: string, idx: i64) -> i64 =
-  if gte(idx, string_len(text)) then idx else {
-    ch = char_at(text, idx)
-    if is_number_char(ch) then scan_number_end(text, add(idx, cast(1, i64))) else idx
+  if gte(add(idx, 1i64), string_len(text)) then add(idx, 1i64) else if not(is_number_char(char_at(text, add(idx, 1i64)))) then add(idx, 1i64) else {
+    limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
+    first = fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_number_char(char_at(text, position))) then add(end, 1i64) else end, idx, range(idx, limit))
+    if lt(first, limit) then first else fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_number_char(char_at(text, position))) then add(end, 1i64) else end, first, range(limit, string_len(text)))
   }
 def is_number_char(ch: string) -> bool = or(is_digit(ch), or(eq(ch, "-"), or(eq(ch, "+"), or(eq(ch, "."), or(eq(ch, "e"), eq(ch, "E"))))))
 def skip_ws(text: string, idx: i64) -> i64 =
-  if gte(idx, string_len(text)) then idx else {
-    ch = char_at(text, idx)
-    if is_ws(ch) then skip_ws(text, add(idx, cast(1, i64))) else idx
+  if gte(idx, string_len(text)) then idx else if not(is_ws(char_at(text, idx))) then idx else {
+    limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
+    first = fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_ws(char_at(text, position))) then add(end, 1i64) else end, idx, range(idx, limit))
+    if lt(first, limit) then first else fold(fn (end: i64, position: i64) -> if and(eq(end, position), is_ws(char_at(text, position))) then add(end, 1i64) else end, first, range(limit, string_len(text)))
   }
 def starts_with_at(text: string, idx: i64, prefix: string) -> bool = eq(string_slice(text, idx, string_len(prefix)), prefix)
 def char_at(text: string, idx: i64) -> string = string_slice(text, idx, cast(1, i64))

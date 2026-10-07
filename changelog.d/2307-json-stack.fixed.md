@@ -1,0 +1,1 @@
+The standard JSON reader scans strings, numbers, whitespace, arrays, and objects without adding a call frame for each input character or container entry. Long valid JSON now parses in the evaluator and compiled C instead of exhausting the stack. See [#2307](https://github.com/Chelis-Lang/chelis/issues/2307).
