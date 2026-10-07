@@ -3659,7 +3659,9 @@ exact ADT identity by [05-OP-34].
 > `GeneralizedPowerCone(List[f64],i64)`. `Settings` carries an i64 iteration
 > limit and three f64 positive finite tolerances. The result is either
 > `Solved` with f64 primal, dual and slack tensors of extents `n,m,m`, an i64
-> iteration count, and f64 primal and dual residuals, or `Stopped` with one
+> iteration count, and f64 primal and dual residuals. Every `Solved` numeric
+> output is finite and has its declared extent. Otherwise the provider traps
+> before constructing the result. The alternative is `Stopped` with one
 > explicit `SolveStatus` variant. `Solved` and `Stopped` are disjoint; a
 > stopped result supplies no primal vector to a property.
 >

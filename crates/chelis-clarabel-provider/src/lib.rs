@@ -390,6 +390,42 @@ impl SolveResult {
     }
 }
 
+struct SolverOutput<'a> {
+    primal: &'a [f64],
+    dual: &'a [f64],
+    slack: &'a [f64],
+    primal_residual: f64,
+    dual_residual: f64,
+}
+
+fn validate_solved_output(
+    status: Status,
+    output: &SolverOutput<'_>,
+    dimensions: (usize, usize),
+) -> Result<(), InputError> {
+    if status != Status::Solved {
+        return Ok(());
+    }
+    let (n, m) = dimensions;
+    if output.primal.len() != n || output.dual.len() != m || output.slack.len() != m {
+        return Err(invalid(
+            "Clarabel returned solved vectors with incorrect extents",
+        ));
+    }
+    if output
+        .primal
+        .iter()
+        .chain(output.dual)
+        .chain(output.slack)
+        .any(|value| !value.is_finite())
+        || !output.primal_residual.is_finite()
+        || !output.dual_residual.is_finite()
+    {
+        return Err(invalid("Clarabel returned a non-finite solved value"));
+    }
+    Ok(())
+}
+
 /// Solve one validated QP. `Solved` remains an approximate numerical result;
 /// no exact-optimality proposition is implied by this Rust return value.
 pub fn solve(problem: &Problem, settings: &Settings) -> Result<SolveResult, InputError> {
@@ -412,16 +448,17 @@ pub fn solve(problem: &Problem, settings: &Settings) -> Result<SolveResult, Inpu
     solver.solve();
     let solution = &solver.solution;
     let status = Status::from(solution.status);
-    if status == Status::Solved
-        && solution
-            .x
-            .iter()
-            .chain(&solution.z)
-            .chain(&solution.s)
-            .any(|value| !value.is_finite())
-    {
-        return Err(invalid("Clarabel returned a non-finite solved vector"));
-    }
+    validate_solved_output(
+        status,
+        &SolverOutput {
+            primal: &solution.x,
+            dual: &solution.z,
+            slack: &solution.s,
+            primal_residual: solution.r_prim,
+            dual_residual: solution.r_dual,
+        },
+        (problem.q.len(), problem.b.len()),
+    )?;
     Ok(SolveResult {
         status,
         primal: DenseVector {
@@ -437,4 +474,78 @@ pub fn solve(problem: &Problem, settings: &Settings) -> Result<SolveResult, Inpu
         primal_residual: solution.r_prim,
         dual_residual: solution.r_dual,
     })
+}
+
+#[cfg(test)]
+mod output_validation_tests {
+    use super::*;
+
+    #[test]
+    fn solved_result_requires_declared_extents_and_finite_diagnostics() {
+        let valid = SolverOutput {
+            primal: &[1.0],
+            dual: &[],
+            slack: &[],
+            primal_residual: 0.0,
+            dual_residual: 0.0,
+        };
+        assert!(validate_solved_output(Status::Solved, &valid, (1, 0)).is_ok());
+        assert!(
+            validate_solved_output(
+                Status::Solved,
+                &SolverOutput {
+                    primal: &[],
+                    ..valid
+                },
+                (1, 0)
+            )
+            .is_err()
+        );
+        assert!(validate_solved_output(Status::Solved, &valid, (1, 1)).is_err());
+        assert!(
+            validate_solved_output(
+                Status::Solved,
+                &SolverOutput {
+                    primal_residual: f64::NAN,
+                    ..valid
+                },
+                (1, 0)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_solved_output(
+                Status::Solved,
+                &SolverOutput {
+                    dual_residual: f64::INFINITY,
+                    ..valid
+                },
+                (1, 0)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_solved_output(
+                Status::Solved,
+                &SolverOutput {
+                    primal: &[f64::NAN],
+                    ..valid
+                },
+                (1, 0)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_solved_output(
+                Status::MaxIterations,
+                &SolverOutput {
+                    primal: &[],
+                    primal_residual: f64::NAN,
+                    ..valid
+                },
+                (1, 0)
+            )
+            .is_ok()
+        );
+    }
 }
