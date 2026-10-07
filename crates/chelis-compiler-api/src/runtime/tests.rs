@@ -233,6 +233,8 @@ fn runtime_function_params_reject_nonparameter_carriers_without_filtering() {
 fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
         binding_types: UnordMap::new(),
@@ -278,6 +280,8 @@ fn issue_1125_eval_checked_root(
     let mut signatures = UnordMap::new();
     register_declared_signatures(exprs, &mut signatures);
     let mut ctx = EvalContext {
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
         binding_types: UnordMap::new(),
@@ -2003,6 +2007,8 @@ fn eval_deep_with_bindings(
 
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
         binding_types: UnordMap::new(),

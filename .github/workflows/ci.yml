@@ -82,6 +82,7 @@ jobs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
+      clarabel_changed: ${{ steps.detect.outputs.clarabel_changed }}
       ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
       candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
       preflight_reason: ${{ steps.candidate-preflight.outputs.preflight_reason }}
@@ -311,6 +312,7 @@ jobs:
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+            echo "clarabel_changed=false" >> "$GITHUB_OUTPUT"
             echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
@@ -1044,9 +1046,9 @@ jobs:
       # Clippy's `disallowed_types` ban on raw hash collections
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is
-      # the cheapest place to lint the `smt` feature's code. Registered in
-      # scripts/check_configuration_closure.py CLIPPY_MATRIX, which fails if
-      # this command drifts from it.
+      # an independent check of the `smt` feature's code. The Rust-policy
+      # gate runs a separate provider-plus-SMT row before its local dep-info
+      # closure guard; see scripts/check_configuration_closure.py.
       - name: Clippy over the cvc5 feature configuration
         run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
 
@@ -1485,12 +1487,69 @@ jobs:
           retention-days: 14
 
 
+  # The provider's two feature builds are selected by their source owners,
+  # including the shared native-call bridge. They run beside ci-fast so an
+  # unrelated PR never compiles the optional solver or waits for these tests.
+  clarabel-provider:
+    name: Clarabel Feature Checks (Linux)
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 55
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.clarabel_changed == 'true' }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        if: runner.environment == 'github-hosted'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Lint native Clarabel provider
+        run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider -- -D warnings
+
+      - name: Lint native Clarabel ideal proofs
+        run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+
+      - name: Check native Clarabel package calls
+        run: cargo nextest run -p chelis-cli --features clarabel-provider --test clarabel_native_eval
+
+      - name: Check Clarabel adapter cases
+        run: cargo nextest run -p chelis-clarabel-provider --features solver --test solver
+
+      - name: Check native Clarabel ideal QP proofs
+        run: cargo nextest run -p chelis-cli --features clarabel-provider,smt --test clarabel_native_eval
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
+
   integration:
     name: Integration Tests (Linux)
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
-    needs: [changes, ci-fast, change-owned-report]
+    needs: [changes, ci-fast, change-owned-report, clarabel-provider]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
@@ -1515,6 +1574,12 @@ jobs:
         run: >-
           python3 scripts/ci_require_success.py
           change-owned-report=${{ needs.change-owned-report.result }}
+
+      - name: Require selected Clarabel feature checks
+        if: needs.changes.outputs.clarabel_changed == 'true'
+        run: >-
+          python3 scripts/ci_require_success.py
+          clarabel-provider=${{ needs.clarabel-provider.result }}
 
       - name: Preserve integration context for an owner-only rebase
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'

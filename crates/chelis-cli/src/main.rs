@@ -58,6 +58,26 @@ const METAL_RUNTIME_H: &str = include_str!(concat!(
     "/../chelis-backend-metal/runtime/chelis_metal_runtime.h"
 ));
 
+#[cfg(feature = "clarabel-provider")]
+const NATIVE_QP_C_WRAPPER: &str = r#"
+static chelis_adt *__CHELIS_PROVIDER_SYMBOL__(
+    chelis_tensor *p, chelis_tensor *q, chelis_tensor *a, chelis_tensor *b,
+    chelis_list *cones, chelis_adt *settings) {
+    chelis_value args[6] = {
+        chelis_value_take_tensor(p), chelis_value_take_tensor(q),
+        chelis_value_take_tensor(a), chelis_value_take_tensor(b),
+        chelis_value_take_list(cones), chelis_value_take_adt(settings)
+    };
+    chelis_string operation = chelis_string_from_cstr("__CHELIS_PROVIDER_OPERATION__");
+    chelis_value result = chelis_native_provider_call_v1(
+        operation, args, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(6)));
+    chelis_string_release(operation);
+    chelis_value_release(args[4]);
+    chelis_value_release(args[5]);
+    return chelis_adt_take_value(result);
+}
+"#;
+
 #[derive(Clone, Copy, Default)]
 struct ExtraRuntimeArtifacts {
     hip: bool,
@@ -4369,6 +4389,25 @@ fn build_prepared_file(
     // checked program still represents the exact emission input.
     let selected_len = full_deep_exprs.len();
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_seeds);
+    #[cfg(feature = "clarabel-provider")]
+    let native_binding = if target == BuildTarget::C
+        && entry_def_names(&pruned_deep_exprs)
+            .contains("pkg__chelis__clarabel__Clarabel__Qp__solve")
+        && let Some(root) = prepared.and_then(|program| program.package_root.as_ref())
+    {
+        // Confirm the same source-bound registration used by evaluation;
+        // a different package body remains ordinary Chelis code. The
+        // registered host call is preserved through lowering for the
+        // versioned tagged-value runtime ABI.
+        let graph =
+            chelis_reef::prepare_reef_graph(root, &EMBEDDED_RUNTIME).map_err(boxed_string_error)?;
+        let registered = chelis_compiler_api::registered_clarabel_provider(&graph)
+            .map_err(boxed_string_error)?;
+        registered
+            .filter(|binding| entry_def_names(&pruned_deep_exprs).contains(&binding.solve_symbol))
+    } else {
+        None
+    };
     let pruning_fired = pruned_deep_exprs.len() != selected_len;
 
     // Loose C sources preserve authored host-library definitions when the
@@ -4398,6 +4437,16 @@ fn build_prepared_file(
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
+    #[cfg(feature = "clarabel-provider")]
+    let (mut dag, mut compiled_host, mut execution_host) = match native_binding.as_ref() {
+        Some(binding) => chelis_ir::host::with_native_provider_call(
+            &binding.solve_symbol,
+            binding.c_symbol,
+            || lower_build_program_for_cli(&checked_compilation, &root_manifest, target),
+        ),
+        None => lower_build_program_for_cli(&checked_compilation, &root_manifest, target),
+    }?;
+    #[cfg(not(feature = "clarabel-provider"))]
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
@@ -4484,17 +4533,50 @@ fn build_prepared_file(
                         BuildTarget::C,
                     ),
                 )?;
-                let verified = if let Some(plan) = execution_host.take() {
-                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?
-                } else {
-                    verified_host_codegen_program(
-                        checked,
-                        &root_manifest,
-                        BuildTarget::C,
-                        compiled_host.take().expect("ordinary C host selected"),
-                    )?
+                let mut verify = || {
+                    if let Some(plan) = execution_host.take() {
+                        verified_host_execution_codegen_program(checked, &root_manifest, plan)
+                    } else {
+                        verified_host_codegen_program(
+                            checked,
+                            &root_manifest,
+                            BuildTarget::C,
+                            compiled_host.take().expect("ordinary C host selected"),
+                        )
+                    }
                 };
+                #[cfg(feature = "clarabel-provider")]
+                let verified = match native_binding.as_ref() {
+                    Some(binding) => chelis_ir::host::with_native_provider_call(
+                        &binding.solve_symbol,
+                        binding.c_symbol,
+                        verify,
+                    ),
+                    None => verify(),
+                }?;
+                #[cfg(not(feature = "clarabel-provider"))]
+                let verified = verify()?;
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
+                #[cfg(feature = "clarabel-provider")]
+                let result = if let Some(binding) = native_binding.as_ref() {
+                    let mut result = result;
+                    let runtime_include = "#include \"chelis_runtime.h\"\n";
+                    if !result.c_source.contains(runtime_include) {
+                        return Err("generated C host source lacks its runtime header".into());
+                    }
+                    let wrapper = NATIVE_QP_C_WRAPPER
+                        .replace("__CHELIS_PROVIDER_SYMBOL__", binding.c_symbol)
+                        .replace("__CHELIS_PROVIDER_OPERATION__", binding.operation);
+                    result.c_source = result.c_source.replacen(
+                        runtime_include,
+                        &format!("{runtime_include}/* native provider archive sha256: {} */\n{wrapper}\n", binding.archive_sha256),
+                        1,
+                    );
+                    result.reseal_artifact(func_name)?;
+                    result
+                } else {
+                    result
+                };
                 cmd_build_c_result(
                     result,
                     &c_name,

@@ -3648,6 +3648,45 @@ exact ADT identity by [05-OP-34].
 
 ---
 
+### 3.7.1 External numerical operations
+
+> **[05-OP-77]** The external package operation
+> `chelis-clarabel::Clarabel.Qp.solve(P,q,A,b,cones,settings)` has the exact
+> signature `(&tensor[n,n,f64], &tensor[n,f64], &tensor[m,n,f64],
+> &tensor[m,f64], List[Cone], Settings) -> SolveResult[n,m]`.
+> `Cone` has exactly `ZeroCone(i64)`, `NonnegativeCone(i64)`,
+> `SecondOrderCone(i64)`, `ExponentialCone`, `PowerCone(f64)`, and
+> `GeneralizedPowerCone(List[f64],i64)`. `Settings` carries an i64 iteration
+> limit and three f64 positive finite tolerances. The result is either
+> `Solved` with f64 primal, dual and slack tensors of extents `n,m,m`, an i64
+> iteration count, and f64 primal and dual residuals. Every `Solved` numeric
+> output is finite and has its declared extent. Otherwise the provider traps
+> before constructing the result. The alternative is `Stopped` with one
+> explicit `SolveStatus` variant. `Solved` and `Stopped` are disjoint; a
+> stopped result supplies no primal vector to a property.
+>
+> The operation interprets the objective as `x^T P x / 2 + q^T x` and the
+> constraints as `A x + s = b, s in K`, with cones concatenated in list
+> order. `n` is positive; all matrix/vector entries are finite; `P` is
+> symmetric; its upper triangle is supplied to the solver; cone extents sum
+> exactly to `m`. The cone dimensions and parameters obey Clarabel's domain
+> restrictions. Invalid input fails before solver invocation. The runtime
+> accepts only the source-declared f64 dtype, with no widening or narrowing
+> at ingress. The result is approximate; neither `Solved` nor any tolerance
+> alone establishes exact feasibility, stationarity, or optimality. The
+> operation has no adjoint: `grad` rejects a path through it. The
+> PSD-triangle cone is not in this operation's `Cone` type; the mathematical
+> convex-QP premise that `P` is positive semidefinite remains separate.
+
+> **[05-OP-78]** `chelis_native_provider_call_v1(operation,args,arity)` is
+> the public C tagged-value transport for a registered inbound native
+> operation. `operation` identifies the admitted package, version, callable,
+> and provider ABI; `arity` is an exact tagged i64 equal to the number of
+> borrowed `chelis_value` arguments. The result is an owned tagged
+> `chelis_value`. Unknown operations, a malformed arity, or an input outside
+> the operation's declared type, dtype, shape, or numeric domain fail before
+> the provider executes. This transport confers no property assumption.
+
 ### 3.8 Named Lossy Cast Forms
 
 [04-NUM-14] makes the default `cast` a CHECKED cast: a fractional or

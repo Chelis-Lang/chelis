@@ -137,6 +137,45 @@ class DiagnosticKindChangeTests(unittest.TestCase):
         self.assertTrue(m.diagnostic_kind_changed([]))
 
 
+class ClarabelChangeTests(unittest.TestCase):
+    def test_provider_and_bridge_owners_select_feature_validation(self):
+        for path in (
+            "crates/chelis-clarabel-provider/src/lib.rs",
+            "packages/chelis-clarabel/src/qp.ch",
+            "examples/clarabel_qp/src/main.ch",
+            "crates/chelis-cli/tests/clarabel_native_eval.rs",
+            "crates/chelis-cli/src/main.rs",
+            "crates/chelis-compiler-api/src/runtime/clarabel.rs",
+            "crates/chelis-compiler-api/src/runtime/tests.rs",
+            "crates/chelis-ir/src/ownership/lower.rs",
+            "crates/chelis-backend-c/src/host_emit.rs",
+            "crates/chelis-prove/src/property_runner/qp_ideal.rs",
+            "crates/chelis-runtime/src/native_provider.rs",
+            "crates/chelis-runtime-bundle/src/lib.rs",
+            "crates/chelis-reef/src/lib.rs",
+            ".github/workflows/ci.yml",
+            ".github/workflows/smt-full-prove.yml",
+            "scripts/ci_detect_docs_only.py",
+            "scripts/check_configuration_closure.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(m.clarabel_changed([path]))
+
+    def test_unrelated_changes_do_not_select_feature_validation(self):
+        for path in (
+            "README.md",
+            "Cargo.lock",
+            "crates/chelis-types/src/infer.rs",
+            "crates/chelis-cli/tests/check.rs",
+            "scripts/ci_test_targets.py",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(m.clarabel_changed([path]))
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.clarabel_changed([]))
+
+
 class CiContractChangeTests(unittest.TestCase):
     def test_workflow_scripts_and_policy_docs_trigger_preflight(self):
         for path in (
@@ -182,13 +221,14 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True, False, True)
+                    m._emit(True, False, True, False)
                 self.assertEqual(
                     buf.getvalue().splitlines(),
                     [
                         "docs_only=true",
                         "diagnostic_kind_changed=false",
                         "ci_contract_changed=true",
+                        "clarabel_changed=false",
                     ],
                 )
                 with open(out_path, encoding="utf-8") as fh:
@@ -198,6 +238,7 @@ class EmitTests(unittest.TestCase):
                             "docs_only=true",
                             "diagnostic_kind_changed=false",
                             "ci_contract_changed=true",
+                            "clarabel_changed=false",
                         ],
                     )
             finally:
@@ -211,13 +252,14 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False, True, False)
+                m._emit(False, True, False, True)
             self.assertEqual(
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=false",
                     "diagnostic_kind_changed=true",
                     "ci_contract_changed=false",
+                    "clarabel_changed=true",
                 ],
             )
         finally:
@@ -241,6 +283,7 @@ class MainTests(unittest.TestCase):
                     "docs_only=true",
                     "diagnostic_kind_changed=false",
                     "ci_contract_changed=false",
+                    "clarabel_changed=false",
                 ],
             )
         finally:

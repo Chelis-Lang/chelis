@@ -531,6 +531,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-clarabel-provider"
+version = "0.19.1"
+dependencies = [
+ "clarabel",
+]
+
+[[package]]
 name = "chelis-cli"
 version = "0.19.1"
 dependencies = [
@@ -590,6 +597,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
+ "chelis-clarabel-provider",
  "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
@@ -909,6 +917,7 @@ name = "chelis-runtime"
 version = "0.19.1"
 dependencies = [
  "chelis-abi",
+ "chelis-clarabel-provider",
  "chelis-crmath",
  "chelis-types",
  "chelis-unord",

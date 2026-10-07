@@ -750,6 +750,13 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_value chelis_native_provider_call_v1 ( chelis_string operation , const chelis_value * args , chelis_scalar arity ) ;",
+        &[],
+        "[05-OP-78]",
+        "`chelis_native_provider_call_v1(operation,args,arity)` is"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
         &[],
         "[05-OP-38]",

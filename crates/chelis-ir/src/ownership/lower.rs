@@ -370,8 +370,10 @@ pub(super) fn lower(
 ) -> Result<OwnershipProgram, OwnershipError> {
     let signatures = build_signatures(checked, host)?;
     let ctx = Context {
+        checked,
         host,
         signatures,
+        native_provider: crate::host::active_native_provider_call(),
         global_names: host
             .globals
             .iter()
@@ -505,8 +507,10 @@ fn param_mode_of(param: &Expr) -> Option<(ParamMode, Option<Vec<ParamMode>>)> {
 }
 
 struct Context<'a> {
+    checked: &'a CheckedProgram,
     host: &'a ConcreteHostProgram,
     signatures: BTreeMap<String, Signature>,
+    native_provider: Option<(String, String)>,
     global_names: BTreeSet<String>,
     function_names: BTreeSet<String>,
     function_units: BTreeMap<String, UnitId>,
@@ -1156,15 +1160,41 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 arg_tys,
                 ty,
             } => {
+                let native_specs = if let Some((linked_name, symbol)) = &self.ctx.native_provider
+                    && function == symbol
+                {
+                    let declarations =
+                        declared_params(self.ctx.checked, linked_name, arg_tys.len()).ok_or_else(
+                            || OwnershipError::MissingSignature {
+                                function: linked_name.clone(),
+                            },
+                        )?;
+                    Some(
+                        arg_tys
+                            .iter()
+                            .zip(declarations)
+                            .map(|(ty, declared)| ParamSpec {
+                                mode: declared.mode,
+                                ty: ty.clone(),
+                                type_pattern: FormalTypePattern::nominal(ty),
+                                callback_modes: declared.callback_modes,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                };
                 let direct_specs = if crate::host::is_host_unresolved_marker(function)
                     || matches!(self.lookup(function), Some(Place::Callback(_)))
                 {
                     None
                 } else {
-                    self.ctx
-                        .signatures
-                        .get(function)
-                        .map(|signature| signature.params.clone())
+                    native_specs.clone().or_else(|| {
+                        self.ctx
+                            .signatures
+                            .get(function)
+                            .map(|signature| signature.params.clone())
+                    })
                 };
                 let values = if let Some(specs) = direct_specs {
                     if args.len() != specs.len() {
@@ -1219,7 +1249,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                self.lower_call(function, values, ty, tail)
+                self.lower_call(function, values, ty, tail, native_specs)
             }
             ConcreteHostExprKind::SignatureEntry {
                 plan, args, lists, ..
@@ -1672,6 +1702,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         values: Vec<Value>,
         ty: &ConcreteHostType,
         tail: Option<usize>,
+        native_specs: Option<Vec<ParamSpec>>,
     ) -> Result<Value, OwnershipError> {
         // These two unspellable placeholders are typed negative evidence for
         // the target capability boundary. Ownership still has to account for
@@ -1731,6 +1762,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     specs,
                 )
             }
+            Some(Place::Owner(_)) | None if native_specs.is_some() => (
+                format!("native_provider:{function}"),
+                ApplyKind::NativeProviderCall,
+                native_specs.expect("native provider specs present"),
+            ),
             Some(Place::Owner(_)) | None => match self.ctx.signatures.get(function) {
                 Some(signature) => {
                     let callee =
@@ -2123,7 +2159,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             ConcreteHostCallbackKind::Inline { body, .. } => self.lower_expr(body, Some(depth)),
             ConcreteHostCallbackKind::Named { function, .. } => {
                 let values = params.iter().map(|owner| Value::Named(*owner)).collect();
-                self.lower_call(function, values, &callback.ret_ty, Some(depth))
+                self.lower_call(function, values, &callback.ret_ty, Some(depth), None)
             }
         }
     }

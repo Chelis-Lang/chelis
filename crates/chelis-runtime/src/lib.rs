@@ -322,6 +322,19 @@ macro_rules! runtime_fail {
     }};
 }
 
+#[cfg(feature = "clarabel-provider")]
+mod native_provider;
+
+#[cfg(not(feature = "clarabel-provider"))]
+#[no_mangle]
+pub unsafe extern "C" fn chelis_native_provider_call_v1(
+    _operation: chelis_string,
+    _args: *const chelis_value,
+    _arity: chelis_scalar,
+) -> chelis_value {
+    runtime_fail!("native provider unavailable in this Chelis runtime")
+}
+
 /// Fail with an [04-NUM-9] trap line rendered by
 /// `chelis_abi::failure::NumericTrapLine`, the formatter every lane shares.
 /// The line carries no prefix or suffix; a failure with context renders

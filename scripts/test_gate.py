@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -575,6 +576,8 @@ GATE_WORKERS = {"lint-rust", "ci-fast"}
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
 # Other jobs are classified by name so new owners require a scope decision.
 NON_GATE_JOBS = {
+    # The optional provider feature matrix runs only for its owning paths.
+    "clarabel-provider",
     # CI-owned Python unit coverage; it runs no canonical gate stage.
     "script-unit",
     # chelis#1824 derives and executes package-qualified integration targets
@@ -781,6 +784,48 @@ class StageUnionTests(unittest.TestCase):
                             commands.index(gate.CONFIGURATION_CLOSURE))
         self.assertNotIn("--workspace", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
         self.assertIn("--no-default-features", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
+
+    def test_clarabel_feature_lint_is_outside_regular_rust_policy(self):
+        command = [
+            "cargo", "clippy", "--workspace", "--all-targets", "--features",
+            "chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
+            "--", "-D", "warnings",
+        ]
+        for stage in ("lint-and-unit", "lint-and-unit-nix"):
+            self.assertNotIn(command, gate.STAGES[stage])
+        self.assertNotIn("chelis-cli/clarabel-provider", " ".join(gate.CLIPPY_SOLVER_FREE_FEATURES))
+        worker = _ci_job_block("clarabel-provider")
+        self.assertIn(" ".join(command), worker)
+        nightly = (REPO_ROOT / ".github/workflows/smt-full-prove.yml").read_text()
+        self.assertIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", nightly)
+
+    def test_clarabel_feature_checks_do_not_extend_fast_tests(self):
+        fast = _ci_job_block("ci-fast")
+        worker = _ci_job_block("clarabel-provider")
+        aggregate = _ci_job_block("integration")
+        for command in (
+            "cargo nextest run -p chelis-cli --features clarabel-provider --test clarabel_native_eval",
+            "cargo nextest run -p chelis-cli --features clarabel-provider,smt --test clarabel_native_eval",
+        ):
+            self.assertNotIn(command, fast)
+            self.assertIn(command, worker)
+        self.assertIn("needs.changes.outputs.clarabel_changed == 'true'", worker)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", worker)
+        self.assertIn("clarabel-provider", aggregate)
+        self.assertIn("clarabel-provider=${{ needs.clarabel-provider.result }}", aggregate)
+        provider_test = "cargo nextest run -p chelis-clarabel-provider --features solver --test solver"
+        self.assertIn(provider_test, worker)
+        nightly = (REPO_ROOT / ".github/workflows/smt-full-prove.yml").read_text()
+        self.assertIn("cargo test -p chelis-clarabel-provider --features solver --test solver", nightly)
+
+    def test_default_workspace_does_not_select_native_clarabel_dependency(self):
+        manifest = tomllib.loads(
+            (REPO_ROOT / "crates/chelis-clarabel-provider/Cargo.toml").read_text()
+        )
+        self.assertEqual(manifest["features"]["default"], [])
+        self.assertEqual(manifest["features"]["solver"], ["dep:clarabel"])
+        self.assertTrue(manifest["dependencies"]["clarabel"]["optional"])
+        self.assertEqual(manifest["test"][0]["required-features"], ["solver"])
 
     def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
         arguments = dict(tests_only=False, support_only=False, partition=None)
@@ -2239,7 +2284,7 @@ class CiParityTests(unittest.TestCase):
             oracle_block.index(oracle_command),
         )
         self.assertIn(
-            "needs: [changes, ci-fast, change-owned-report]",
+            "needs: [changes, ci-fast, change-owned-report, clarabel-provider]",
             workspace_block,
         )
         self.assertIn(
@@ -2256,7 +2301,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
-            "needs: [changes, ci-fast, change-owned-report]",
+            "needs: [changes, ci-fast, change-owned-report, clarabel-provider]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -2434,7 +2479,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("ProfilePartitionTests", worker)
         _assert_support_slice_contract(_ci_job_block("integration-support"))
         self.assertIn(
-            "needs: [changes, ci-fast, change-owned-report]",
+            "needs: [changes, ci-fast, change-owned-report, clarabel-provider]",
             _ci_job_block("integration"),
         )
 
@@ -4080,6 +4125,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
         "diagnostic-kind-oracle",
+        "clarabel-provider",
     }
     # Jobs that run for every implementation event, including docs-only PRs.
     # Generic metadata edits never trigger ci.yml.
@@ -4197,7 +4243,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         integration = attrs["integration"]
         self.assertEqual(
             integration.get("needs"),
-            "[changes, ci-fast, change-owned-report]",
+            "[changes, ci-fast, change-owned-report, clarabel-provider]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)

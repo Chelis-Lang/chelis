@@ -75,6 +75,25 @@ Its `induction` field holds the base and step goals the solver discharged,
 each with `"status":"proved"`, and names the induction variable
 (`"variable":"n"`).
 
+## Prove a property about a Clarabel QP
+
+The optional `chelis-clarabel` package exposes `Clarabel.Qp.solve` to ordinary
+Chelis code. Build `chelis` with `clarabel-provider,smt`, declare the package as
+a Reef dependency, and match the result of `solve` or a typed helper that
+returns one direct `solve` call. A property may attach
+`with contract = "clarabel.qp.ideal_optimality"` to use the `Solved` primal as
+an ideal exact-real optimizer for that call's `P`, `q`, `A`, `b`, and cones. The
+non-`Solved` arm must establish its claim without that assumption. See the
+executable files in `examples/clarabel_qp/tests/` and the commands
+in `packages/chelis-clarabel/README.md`.
+
+The SMT lowering accepts fixed literal QP data with zero and nonnegative
+cones, and checks that `P` is exactly symmetric and positive semidefinite.
+Other cone families can still be used at runtime; properties that require
+their ideal contract report `unsupported`. A successful dependent result says
+`proven_modulo_asserted_axiom` and lists `real_arithmetic`. It is a conditional
+mathematical result, not a bound on the `f64` values returned by the solver.
+
 ## Read the result
 
 In a standard build, `--json` writes newline-delimited JSON property and obligation records,

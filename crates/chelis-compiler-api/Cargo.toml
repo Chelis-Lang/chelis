@@ -15,9 +15,12 @@ compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pi
 # The targets that use tests/ownership_support require it, stage the runtime
 # this build carries, and read the ledger it records.
 ownership-ledger = ["chelis-runtime/ownership-ledger"]
+clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle", "chelis-runtime-bundle/clarabel-provider"]
 
 [dependencies]
 chelis-abi.workspace = true
+chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }
+chelis-runtime-bundle = { workspace = true, optional = true }
 chelis-unord.workspace = true
 chelis-backend-c.workspace = true
 chelis-backend-hip.workspace = true

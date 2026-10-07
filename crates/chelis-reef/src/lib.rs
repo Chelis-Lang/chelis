@@ -1800,6 +1800,77 @@ impl PreparedReefGraph {
         linked_source_names(&self.internal_maps)
     }
 
+    /// Return the linker-owned name of a function only when its package,
+    /// module, version, and exact source bytes match a registered in-process
+    /// provider. A user-authored linker-shaped name cannot satisfy this
+    /// check, and a changed package source executes its own Chelis body.
+    pub fn linked_function_with_source_hash(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        module_name: &str,
+        function_name: &str,
+        expected_sha256: [u8; 32],
+    ) -> Result<Option<String>, String> {
+        let Some(package) = self.graph.packages.get(package_name) else {
+            return Ok(None);
+        };
+        if package.id.version != package_version {
+            return Ok(None);
+        }
+        let Some(module) = package.modules.get(module_name) else {
+            return Ok(None);
+        };
+        if !module
+            .decls
+            .iter()
+            .any(|decl| matches!(decl, Decl::FunDef { name, .. } if name == function_name))
+        {
+            return Ok(None);
+        }
+        let key = (package_name.to_owned(), module_name.to_owned());
+        let Some(linked) = self
+            .internal_maps
+            .get(&key)
+            .and_then(|names| names.get(function_name))
+        else {
+            return Ok(None);
+        };
+        // The linker encoding can collide for distinct authored names. A
+        // provider binds one declaration, never an ambiguous linked spelling.
+        let owners = self
+            .internal_maps
+            .to_sorted()
+            .into_iter()
+            .flat_map(|(_, names)| names.to_sorted())
+            .filter(|(_, candidate)| *candidate == linked)
+            .count();
+        if owners != 1 {
+            return Ok(None);
+        }
+        let Some(root) = package.source.filesystem_root() else {
+            return Ok(None);
+        };
+        let path = root.join(&module.source_root).join(&module.file_rel);
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read provider source `{}`: {error}", path.display()))?;
+        if <[u8; 32]>::from(Sha256::digest(&bytes)) != expected_sha256 {
+            return Ok(None);
+        }
+        let source = std::str::from_utf8(&bytes).map_err(|error| {
+            format!("provider source `{}` is not UTF-8: {error}", path.display())
+        })?;
+        let parsed = chelis_surf::parser::parse_str(source)
+            .map_err(|error| format!("parse provider source `{}`: {error}", path.display()))?;
+        let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
+            return Ok(None);
+        };
+        if name != module_name || decls != &module.decls {
+            return Ok(None);
+        }
+        Ok(Some(linked.clone()))
+    }
+
     /// The spellings diagnostics about a program linked from this graph
     /// name declarations by (chelis#3269), where `entry_modules` are the
     /// root-package modules the diagnosed files are, by their location.

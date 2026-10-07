@@ -390,6 +390,15 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/tests/clarabel_native_eval.rs",
+        "archive-name",
+        lines=(
+            'let archive = std::fs::read(directory.path().join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason="reads the archive `chelis build` staged in this test's output directory to verify its receipt digest",
+    ),
+    Row(
         "crates/chelis-cli/tests/cli.rs",
         "archive-name",
         lines=(

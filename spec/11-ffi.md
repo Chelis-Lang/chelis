@@ -215,3 +215,41 @@ name-mapping algorithm or using C substring heuristics.
 
 Rust library entry points and external integrations obey the same source,
 value, diagnostic and admission contracts as their CLI counterparts.
+
+## 4. Inbound native provider calls
+
+A native provider call is a package-owned, checked callable with a normal
+Chelis signature and effect row. The Reef linker resolves its dependency-owned
+declaration; a provider registration binds that declaration to a versioned ABI,
+artifact identity and digest, and symbol. A toolchain-carried provider obtains
+its artifact digest from the compiler build's carried archive, which compiled
+C staging verifies and records. A separately distributed provider pins its
+artifact digest in the package dependency binding. In both cases the binding
+is conditional on the linked dependency package;
+source spelling, an alias, or a root-package lookalike does not confer it.
+Before execution or C emission, the compiler validates the package, provider
+version, artifact digest, target, signature, and supported transport types.
+An unavailable or mismatched provider fails loudly. A device kernel cannot
+invoke a host provider.
+
+The provider borrows tagged scalar and tensor inputs after the normal type,
+dtype, shape, extent, ownership, and effect checks. It returns tagged owned
+values through the caller's runtime allocation and ownership protocol. No
+numeric payload is transported through a default f64, untagged JSON, or a
+raw integer dtype selector. The evaluator and compiled C call the same
+provider implementation and agree on result status and admitted values for
+the same declared inputs and target.
+
+A named property contract over a provider call is opt-in. Its assumptions
+attach to the resolved, dependency-owned call and the precise arguments of
+that call, and only to the status branch named by the contract. For
+`clarabel.qp.ideal_optimality`, a `Solved` branch may interpret the call's
+primal tensor as an exact real optimizer for that call's `P,q,A,b,K` after the
+property's convex-domain premises are established or themselves explicitly
+assumed. This is an axiom about the ideal proof model, not a claim that the
+returned f64 bits encode an exact minimizer. A dependent proof reports
+`proven_modulo_asserted_axiom` and `real_arithmetic`; a proof independent of
+the contract retains its own strength. Unsupported cone families, dynamic
+dimensions, or proof obligations yield an explicit unsupported result rather
+than an unqualified proof or sampling fallback. No such assumption is
+available for a non-`Solved` status.

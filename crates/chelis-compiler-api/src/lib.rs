@@ -69,10 +69,30 @@ pub use library_cache::{
     LibraryContext, build_library_context, library_cache_key, library_cache_key_input_bytes,
     load_or_build_library_context,
 };
+#[cfg(feature = "clarabel-provider")]
+pub use runtime::RegisteredClarabelProvider;
 /// The host-runtime value type returned by the decode chokepoint.
 /// Experimental: surfaced for the decode contract point; its shape is not
 /// yet a stable public commitment (V1 has no production decode caller).
 pub use runtime::RuntimeValue;
+/// The source-bound, artifact-bound Clarabel registration used by evaluation,
+/// C emission, and the ideal QP property lowerer.
+#[cfg(feature = "clarabel-provider")]
+pub fn registered_clarabel_provider(
+    graph: &chelis_reef::PreparedReefGraph,
+) -> Result<Option<RegisteredClarabelProvider>, String> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    runtime::linked_provider_binding(graph)
+}
+
+/// The admitted linked `solve` declaration for the evaluator's dispatch.
+#[cfg(feature = "clarabel-provider")]
+pub fn registered_clarabel_solve_symbol(
+    graph: &chelis_reef::PreparedReefGraph,
+) -> Result<Option<String>, String> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    runtime::linked_package_solve_symbol(graph)
+}
 pub use stdlib_cache::{
     StdLibContext, build_declaration_context, build_stdlib_context, cache_disabled,
     load_or_build_stdlib_context, stdlib_cache_key, stdlib_cache_key_input_bytes,

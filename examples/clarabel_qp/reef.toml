@@ -1,0 +1,13 @@
+schema = "3"
+[package]
+name = "clarabel-qp-example"
+version = "0.1.0"
+compiler = "=0.19.1"
+module_prefix = "ClarabelExample"
+resolver = "2"
+description = "Typed Clarabel QP example"
+license = "MIT"
+repository = "https://github.com/Chelis-Lang/chelis"
+
+[dependencies]
+chelis-clarabel = { path = "../../packages/chelis-clarabel" }
