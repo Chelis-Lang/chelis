@@ -80,14 +80,16 @@ unsafe fn tensor(
     if shape.iter().try_fold(1usize, |a, b| a.checked_mul(*b)) != Some(count) {
         return Err(invalid(format!("{field} has inconsistent extents")));
     }
-    let data = if count == 0 {
-        Vec::new()
-    } else {
-        if view.data.is_null() {
-            return Err(invalid(format!("{field} has a null data view")));
-        }
-        unsafe { std::slice::from_raw_parts(view.data.cast::<f64>(), count) }.to_vec()
-    };
+    let elements = unsafe { chelis_tensor_elements(ptr) };
+    let data = unsafe { (*elements).live() }
+        .iter()
+        .map(|value| unsafe { float(*value, field) })
+        .collect::<Result<Vec<_>, _>>();
+    unsafe { chelis_list_release(elements) };
+    let data = data?;
+    if data.len() != count {
+        return Err(invalid(format!("{field} has inconsistent elements")));
+    }
     Ok((shape, data))
 }
 
@@ -141,17 +143,17 @@ unsafe fn output_vector(values: &[f64]) -> Result<chelis_value, String> {
     let extent = i64::try_from(values.len()).map_err(|_| invalid("result extent overflows i64"))?;
     let tensor = unsafe { chelis_alloc(1, &extent, CHELIS_DTYPE_F64) };
     let guard = unsafe { chelis_tensor_begin_write(tensor) };
-    let view = unsafe { chelis_tensor_write_view(guard) };
-    if view.dtype != CHELIS_DTYPE_F64 || view.count != extent {
-        return Err(invalid(
-            "runtime result tensor has the wrong dtype or extent",
-        ));
-    }
-    if !values.is_empty() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(values.as_ptr(), view.data.cast::<f64>(), values.len())
-        };
-    }
+    let scalars = values
+        .iter()
+        .map(|value| chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
+        .collect::<Vec<_>>();
+    unsafe {
+        chelis_tensor_write_literal(
+            guard,
+            chelis_scalar_from_bits(CHELIS_DTYPE_I64, extent as u64),
+            scalars.as_ptr(),
+        )
+    };
     unsafe { chelis_tensor_end_write(guard) };
     Ok(unsafe { chelis_value_take_tensor(tensor) })
 }

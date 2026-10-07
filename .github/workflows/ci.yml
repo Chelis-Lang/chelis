@@ -1045,10 +1045,10 @@ jobs:
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is
       # an independent check of the `smt` feature's code. The Rust-policy
-      # gate runs the same registered command before its local dep-info
+      # gate runs a separate provider-plus-SMT row before its local dep-info
       # closure guard; see scripts/check_configuration_closure.py.
       - name: Clippy over the cvc5 feature configuration
-        run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+        run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
