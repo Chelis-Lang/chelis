@@ -534,6 +534,7 @@ pub enum VerifiedOwnershipUse {
 pub enum VerifiedApplyKind {
     Intrinsic,
     IndirectCall,
+    NativeProviderCall,
     /// The indirect callee owner was produced by this closed key operation.
     KeyBuiltinCall(crate::host_type_state::KeyBuiltinCallable),
     DirectCall {
@@ -938,6 +939,9 @@ fn verified_host_action<'a>(
                         kind: match kind {
                             ir::ApplyKind::Intrinsic => VerifiedApplyKind::Intrinsic,
                             ir::ApplyKind::IndirectCall => VerifiedApplyKind::IndirectCall,
+                            ir::ApplyKind::NativeProviderCall => {
+                                VerifiedApplyKind::NativeProviderCall
+                            }
                             ir::ApplyKind::KeyBuiltinCall(op) => {
                                 VerifiedApplyKind::KeyBuiltinCall(*op)
                             }

@@ -3678,6 +3678,15 @@ exact ADT identity by [05-OP-34].
 > PSD-triangle cone is not in this operation's `Cone` type; the mathematical
 > convex-QP premise that `P` is positive semidefinite remains separate.
 
+> **[05-OP-78]** `chelis_native_provider_call_v1(operation,args,arity)` is
+> the public C tagged-value transport for a registered inbound native
+> operation. `operation` identifies the admitted package, version, callable,
+> and provider ABI; `arity` is an exact tagged i64 equal to the number of
+> borrowed `chelis_value` arguments. The result is an owned tagged
+> `chelis_value`. Unknown operations, a malformed arity, or an input outside
+> the operation's declared type, dtype, shape, or numeric domain fail before
+> the provider executes. This transport confers no property assumption.
+
 ### 3.8 Named Lossy Cast Forms
 
 [04-NUM-14] makes the default `cast` a CHECKED cast: a fractional or

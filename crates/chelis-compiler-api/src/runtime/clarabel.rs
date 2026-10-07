@@ -10,11 +10,23 @@ pub(super) const SOLVE: &str = "pkg__chelis__clarabel__Clarabel__Qp__solve";
 const PACKAGE_SOURCE: &[u8] = include_bytes!("../../../../packages/chelis-clarabel/src/qp.ch");
 const CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__";
 
-pub fn linked_package_solve_symbol(
+/// One Reef-resolved declaration and the toolchain-carried provider artifact
+/// admitted for it. The archive digest is the same digest C staging verifies
+/// before linking; the evaluator links this provider into the compiler build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredClarabelProvider {
+    pub solve_symbol: String,
+    pub operation: &'static str,
+    pub c_symbol: &'static str,
+    pub abi_version: u32,
+    pub archive_sha256: String,
+}
+
+pub fn linked_provider_binding(
     graph: &chelis_reef::PreparedReefGraph,
-) -> Result<Option<String>, String> {
+) -> Result<Option<RegisteredClarabelProvider>, String> {
     let source_sha256: [u8; 32] = Sha256::digest(PACKAGE_SOURCE).into();
-    Ok(graph
+    let Some(solve_symbol) = graph
         .linked_function_with_source_hash(
             "chelis-clarabel",
             "0.1.0",
@@ -22,7 +34,25 @@ pub fn linked_package_solve_symbol(
             "solve",
             source_sha256,
         )?
-        .filter(|name| name == SOLVE))
+        .filter(|name| name == SOLVE)
+    else {
+        return Ok(None);
+    };
+    let archive_sha256 = chelis_runtime_bundle::carried_sha256()
+        .map_err(|error| format!("Clarabel provider archive unavailable: {error}"))?;
+    Ok(Some(RegisteredClarabelProvider {
+        solve_symbol,
+        operation: "chelis-clarabel/0.1.0/Clarabel.Qp.solve",
+        c_symbol: "__chelis_native_provider_qp_solve_v1",
+        abi_version: 1,
+        archive_sha256,
+    }))
+}
+
+pub fn linked_package_solve_symbol(
+    graph: &chelis_reef::PreparedReefGraph,
+) -> Result<Option<String>, String> {
+    linked_provider_binding(graph).map(|binding| binding.map(|binding| binding.solve_symbol))
 }
 
 fn constructor(name: &str, fields: Vec<RuntimeValue>, names: &[&str]) -> RuntimeValue {

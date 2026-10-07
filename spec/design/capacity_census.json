@@ -682,11 +682,6 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scan_stack ( const chelis_list * states , const chelis_tensor * shape_template ) ;",
       "flags": []
     },
@@ -773,6 +768,11 @@
       "flags": [
         "numeric-op"
       ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_native_provider_call_v1 ( chelis_string operation , const chelis_value * args , chelis_scalar arity ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -1395,6 +1395,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_scan_check_state ( const chelis_tensor * state , const chelis_tensor * shape_template ) ;",
       "flags": []
     },
     {

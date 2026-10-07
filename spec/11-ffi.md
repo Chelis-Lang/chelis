@@ -219,9 +219,13 @@ value, diagnostic and admission contracts as their CLI counterparts.
 ## 4. Inbound native provider calls
 
 A native provider call is a package-owned, checked callable with a normal
-Chelis signature and effect row. Reef
-binds that exact resolved declaration to a versioned provider ABI, artifact
-digest, and symbol. The binding comes from the linked dependency package;
+Chelis signature and effect row. The Reef linker resolves its dependency-owned
+declaration; a provider registration binds that declaration to a versioned ABI,
+artifact identity and digest, and symbol. A toolchain-carried provider obtains
+its artifact digest from the compiler build's carried archive, which compiled
+C staging verifies and records. A separately distributed provider pins its
+artifact digest in the package dependency binding. In both cases the binding
+is conditional on the linked dependency package;
 source spelling, an alias, or a root-package lookalike does not confer it.
 Before execution or C emission, the compiler validates the package, provider
 version, artifact digest, target, signature, and supported transport types.
@@ -239,10 +243,11 @@ the same declared inputs and target.
 A named property contract over a provider call is opt-in. Its assumptions
 attach to the resolved, dependency-owned call and the precise arguments of
 that call, and only to the status branch named by the contract. For
-`clarabel.qp.ideal_optimality`, a `Solved` branch may introduce a fresh exact
-real optimizer for the call's `P,q,A,b,K` after the property's convex-domain
-premises are established or themselves explicitly assumed. The model's
-optimizer is distinct from the returned f64 tensor. A dependent proof reports
+`clarabel.qp.ideal_optimality`, a `Solved` branch may interpret the call's
+primal tensor as an exact real optimizer for that call's `P,q,A,b,K` after the
+property's convex-domain premises are established or themselves explicitly
+assumed. This is an axiom about the ideal proof model, not a claim that the
+returned f64 bits encode an exact minimizer. A dependent proof reports
 `proven_modulo_asserted_axiom` and `real_arithmetic`; a proof independent of
 the contract retains its own strength. Unsupported cone families, dynamic
 dimensions, or proof obligations yield an explicit unsupported result rather

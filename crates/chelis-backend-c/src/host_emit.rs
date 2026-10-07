@@ -4487,7 +4487,9 @@ fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Uns
         if matches!(
             action,
             VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                kind: VerifiedApplyKind::DirectCall { .. } | VerifiedApplyKind::KeyBuiltinCall(_),
+                kind: VerifiedApplyKind::DirectCall { .. }
+                    | VerifiedApplyKind::KeyBuiltinCall(_)
+                    | VerifiedApplyKind::NativeProviderCall,
                 ..
             })
         ) && call.replace(index).is_some()

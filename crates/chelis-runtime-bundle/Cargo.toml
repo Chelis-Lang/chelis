@@ -11,6 +11,7 @@ description = "The runtime static archive and headers a Chelis compiler carries 
 # §2.1): they carry no checkout path and skip the development source-freshness
 # check. Staging receipts record the mode.
 sealed = []
+clarabel-provider = ["chelis-runtime/clarabel-provider"]
 
 [dependencies]
 chelis-runtime.workspace = true

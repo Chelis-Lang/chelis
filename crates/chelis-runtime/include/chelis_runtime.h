@@ -494,6 +494,8 @@ chelis_value chelis_value_take_option(chelis_option *option);
 chelis_value chelis_value_take_mapped_file(chelis_mapped_file *mapped);
 chelis_value chelis_value_clone(chelis_value value);
 void chelis_value_release(chelis_value value);
+/* Native provider ABI v1: borrowed tagged arguments, owned tagged result. */
+chelis_value chelis_native_provider_call_v1(chelis_string operation, const chelis_value *args, chelis_scalar arity);
 
 chelis_string chelis_string_take_value(chelis_value value);
 chelis_string chelis_string_borrow_value(chelis_value value);

@@ -59,8 +59,13 @@ pub(super) fn run_surf_properties_shared(
     render_all(path, &outcomes, "surf", options, totals)
 }
 
+pub(super) struct LinkedPropertySource<'a> {
+    pub path: &'a Path,
+    pub package_root: Option<&'a Path>,
+}
+
 pub(super) fn run_surf_linked_properties_shared(
-    path: &Path,
+    source: LinkedPropertySource<'_>,
     all_decls: &[Decl],
     entry_decls: &[Decl],
     trusted_contract_decls: &[Decl],
@@ -68,6 +73,7 @@ pub(super) fn run_surf_linked_properties_shared(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
+    let path = source.path;
     // The decls handed in here are the reef LINKER's output: every def, the
     // `@property` itself, and the imports carry the linker's internal
     // `pkg__<pkg>__<Module>__<def>` name format. The shared runner re-checks
@@ -81,13 +87,35 @@ pub(super) fn run_surf_linked_properties_shared(
     // external SMT subprocess's stdout drain, which never runs the in-process
     // type-check), so holding the guard across the call covers it.
     let _linked = chelis_types::install_linked_program_guard();
-    let mut outcomes = match run_surf_decls_properties_with_contract_decls(
-        all_decls,
-        entry_decls,
-        all_decls,
-        trusted_contract_decls,
-        &run_opts(options),
-    ) {
+    let run = || {
+        run_surf_decls_properties_with_contract_decls(
+            all_decls,
+            entry_decls,
+            all_decls,
+            trusted_contract_decls,
+            &run_opts(options),
+        )
+    };
+    #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
+    let run_result = if let Some(root) = source.package_root {
+        let graph =
+            match chelis_reef::prepare_reef_graph(root, &chelis_std_bundle::EMBEDDED_RUNTIME) {
+                Ok(graph) => graph,
+                Err(message) => return emit_discovery_error(path, &message, options, totals),
+            };
+        match chelis_prove::property_runner::with_registered_clarabel_contract(&graph, run) {
+            Ok(result) => result,
+            Err(message) => return emit_discovery_error(path, &message, options, totals),
+        }
+    } else {
+        run()
+    };
+    #[cfg(not(all(feature = "clarabel-provider", feature = "smt")))]
+    let run_result = {
+        let _ = source.package_root;
+        run()
+    };
+    let mut outcomes = match run_result {
         Ok(PropertyRunResult::Ran(o)) => o,
         Err(message) => return emit_discovery_error(path, &message, options, totals),
     };

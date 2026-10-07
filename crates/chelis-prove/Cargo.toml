@@ -8,6 +8,7 @@ description = "Three-tier property verification: type check → SMT (cvc5) → f
 
 [features]
 smt = ["cvc5-rs", "num-rational"]
+clarabel-provider = ["chelis-compiler-api/clarabel-provider"]
 # WI-12 Z3 NRA engine (WS-5): a second SMT DischargeEngine over the SAME
 # GoalShape::Smt the cvc5 engine fits, backed by Z3's nonlinear-real-arithmetic
 # decision procedure. It is the cvc5->Z3 capability-split consumer of the

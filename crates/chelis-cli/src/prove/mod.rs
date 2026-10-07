@@ -591,7 +591,10 @@ fn prove_surf_file(
                             return Ok(check_status);
                         }
                         property_run::run_surf_linked_properties_shared(
-                            path,
+                            property_run::LinkedPropertySource {
+                                path,
+                                package_root: package_root.as_deref(),
+                            },
                             &reachable_decls,
                             &prepared.entry_decls,
                             &prepared.dependency_decls,

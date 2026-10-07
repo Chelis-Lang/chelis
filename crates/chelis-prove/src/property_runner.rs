@@ -31,7 +31,11 @@ use chelis_surf::ast::{
 };
 use chelis_types::types::Prim;
 
+#[cfg(all(feature = "clarabel-provider", feature = "smt"))]
+mod qp_ideal;
 mod smt_lower;
+#[cfg(all(feature = "clarabel-provider", feature = "smt"))]
+pub use qp_ideal::with_registered_clarabel_contract;
 use smt_lower::{
     ContractAbstraction, ContractSymbols, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith,
     surf_expr_to_smt,
@@ -746,6 +750,28 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
+    if expanded_contracts(property)
+        .iter()
+        .any(|id| id == "clarabel.qp.ideal_optimality")
+    {
+        #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
+        return qp_ideal::prove(decls, trusted_contract_decls, property, options);
+        #[cfg(not(all(feature = "clarabel-provider", feature = "smt")))]
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::None,
+            0,
+            options.effective_seed(property.seed),
+            None,
+            Some(
+                "Clarabel ideal QP contract requires the clarabel-provider and smt features"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        );
+    }
     if options.tier == "beacon-only" {
         return beacon::prove(decls, property, options);
     }

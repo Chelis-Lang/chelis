@@ -256,6 +256,8 @@ pub(crate) fn container_consumer_operand(
 pub(crate) enum ApplyKind {
     Intrinsic,
     IndirectCall,
+    /// A source-bound provider admitted by the checker and host lowerer.
+    NativeProviderCall,
     /// The indirect callee owner was produced by this closed key operation.
     KeyBuiltinCall(crate::host_type_state::KeyBuiltinCallable),
     DirectCall {

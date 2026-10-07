@@ -917,6 +917,7 @@ name = "chelis-runtime"
 version = "0.19.1"
 dependencies = [
  "chelis-abi",
+ "chelis-clarabel-provider",
  "chelis-crmath",
  "chelis-types",
  "chelis-unord",

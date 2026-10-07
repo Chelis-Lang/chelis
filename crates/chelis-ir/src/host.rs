@@ -31,6 +31,9 @@ use crate::host_type_state::{
 use crate::lower::top_level_lowering_map;
 
 thread_local! {
+    // A checked Reef provider binding is installed only around one host
+    // lowering. The source spelling alone never selects an external call.
+    static NATIVE_PROVIDER_CALL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     // Tracks top-level callee names currently being inlined by
     // `inline_top_level_host_call`. Prevents infinite specialization for
     // recursive/mutually recursive definitions — the specialized body would
@@ -108,6 +111,37 @@ impl Drop for HostLowerStackFrame {
             HOST_LOWER_RED_ZONE.with(|zone| zone.set(0));
         }
     }
+
+/// Retain one Reef-admitted provider call as an external host call during
+/// lowering. The caller must validate the linked declaration and provider
+/// artifact before installing this binding.
+pub fn with_native_provider_call<R>(
+    linked_name: &str,
+    c_symbol: &str,
+    lower: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NATIVE_PROVIDER_CALL.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let old = NATIVE_PROVIDER_CALL
+        .with(|slot| slot.replace(Some((linked_name.to_owned(), c_symbol.to_owned()))));
+    let _restore = Restore(old);
+    lower()
+}
+
+fn native_provider_symbol(linked_name: &str) -> Option<String> {
+    NATIVE_PROVIDER_CALL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|(name, symbol)| (name == linked_name).then(|| symbol.clone()))
+    })
+}
+
+pub(crate) fn active_native_provider_call() -> Option<(String, String)> {
+    NATIVE_PROVIDER_CALL.with(|slot| slot.borrow().clone())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -12256,6 +12290,31 @@ fn lower_app_host_expr(
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
         .unwrap_or_else(fresh_host_inference);
+    if !callee_is_local_callable
+        && program.def_named(&name).is_some()
+        && let Some(symbol) = native_provider_symbol(&name)
+    {
+        let args = kids[1..]
+            .iter()
+            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let arg_tys = fn_sig
+            .as_ref()
+            .map(|(params, _)| params.clone())
+            .ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "native provider has no checked signature")
+            })?;
+        return Ok(HostExpr::new(HostExprKind::Call {
+            function: symbol,
+            args,
+            arg_tys,
+            ty: if explicit_ty.is_unresolved() {
+                inferred_ret_ty
+            } else {
+                explicit_ty
+            },
+        }));
+    }
     // chelis#935/#936: specialize these bounded generic forms before any
     // helper-summary probe attempts to lower their standalone generic body.
     // The checked application metadata is the authoritative applied result

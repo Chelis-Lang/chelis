@@ -1223,6 +1223,9 @@ jobs:
       - name: Check native Clarabel package calls
         run: cargo nextest run -p chelis-cli --features clarabel-provider --test clarabel_native_eval
 
+      - name: Check native Clarabel ideal QP proofs
+        run: cargo nextest run -p chelis-cli --features clarabel-provider,smt --test clarabel_native_eval
+
       - name: Upload fast JUnit
         if: always()
         uses: actions/upload-artifact@v7
