@@ -543,9 +543,9 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 
 ## Book
 
-The user-facing book for this shell is the mdBook whose `book.toml` is under
-`docs/`. If this shell is published on chelis.ch (https://chelis.ch/docs/),
-chelis.ch mirrors the book page for page at
+If this shell has a user-facing book (an mdBook under `docs/`): this section
+applies to it. If the shell is also published on chelis.ch
+(https://chelis.ch/docs/), chelis.ch mirrors the book page for page at
 `https://chelis.ch/docs/<package name>/` (chelis: https://chelis.ch/docs/chelis/),
 and the chelis.ch text is canonical: book pages are rendered from the site by
 the website's `scripts/sync_books.py`, so edit prose on the site and re-render,

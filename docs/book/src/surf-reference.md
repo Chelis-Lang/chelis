@@ -404,8 +404,8 @@ export (forward, Linear)
 ## Dimensions
 
 A module-level `dim` declares concrete named dimensions used across the file. Function-level
-`[...]` parameters declare dimension variables local to one function. In
-0.19.1, a file with a module-level `dim` checks but does not evaluate or build
+`[...]` parameters declare dimension variables local to one function. A
+file with a module-level `dim` checks but does not evaluate or build
 (see [Known issues](known-issues.md)).
 
 ```chelis-surf-fragment

@@ -56,8 +56,8 @@ The same program builds with `chelis build` and prints the same output.
 ## Module-level `dim` declarations
 
 A file with a top-level `dim` declaration passes `chelis check`, but
-`chelis eval` and `chelis build` stop with
-`lowered root count mismatch: expected 0 named roots, got 1`. A named axis
+`chelis eval` and `chelis build` stop with a
+`lowered root count mismatch` error. A named axis
 needs no declaration: write it in the signature, as in
 `def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32])`, and the
 checker treats `seq` as a named dimension.
