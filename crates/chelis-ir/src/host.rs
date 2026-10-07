@@ -50,6 +50,10 @@ thread_local! {
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// Reserve chosen from the stack available at the outermost host-lowering
+    /// call. A fixed reserve larger than a test or embedding thread's whole
+    /// stack would reject even a shallow expression.
+    static HOST_LOWER_RED_ZONE: Cell<usize> = const { Cell::new(0) };
     // chelis#1158: bounded memoized monomorphization of recursive generic
     // host calls. Keyed by the callee's canonical checked type application;
     // one specialized definition per key, with in-progress entries visible
@@ -63,20 +67,32 @@ thread_local! {
 
 // Host application lowering visits several Rust frames per Deep expression.
 // Keep enough room to construct a located diagnostic and unwind that path.
-const HOST_LOWER_STACK_RED_ZONE_BYTES: usize = 8 * 1024 * 1024;
+const HOST_LOWER_STACK_RED_ZONE_MIN_BYTES: usize = 128 * 1024;
+const HOST_LOWER_STACK_RED_ZONE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const HOST_LOWER_FALLBACK_MAX_DEPTH: usize = 8;
 
 struct HostLowerStackFrame;
 
 impl HostLowerStackFrame {
     fn enter() -> Self {
-        HOST_LOWER_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        let outermost = HOST_LOWER_DEPTH.with(|depth| {
+            let outermost = depth.get() == 0;
+            depth.set(depth.get() + 1);
+            outermost
+        });
+        if outermost && let Some(remaining) = stacker::remaining_stack() {
+            let red_zone = (remaining / 4).clamp(
+                HOST_LOWER_STACK_RED_ZONE_MIN_BYTES,
+                HOST_LOWER_STACK_RED_ZONE_MAX_BYTES,
+            );
+            HOST_LOWER_RED_ZONE.with(|zone| zone.set(red_zone));
+        }
         Self
     }
 
     fn budget_exhausted() -> bool {
         match stacker::remaining_stack() {
-            Some(remaining) => remaining < HOST_LOWER_STACK_RED_ZONE_BYTES,
+            Some(remaining) => HOST_LOWER_RED_ZONE.with(|zone| remaining < zone.get()),
             None => HOST_LOWER_DEPTH.with(|depth| depth.get() > HOST_LOWER_FALLBACK_MAX_DEPTH),
         }
     }
@@ -84,7 +100,13 @@ impl HostLowerStackFrame {
 
 impl Drop for HostLowerStackFrame {
     fn drop(&mut self) {
-        HOST_LOWER_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        let outermost = HOST_LOWER_DEPTH.with(|depth| {
+            depth.set(depth.get() - 1);
+            depth.get() == 0
+        });
+        if outermost {
+            HOST_LOWER_RED_ZONE.with(|zone| zone.set(0));
+        }
     }
 }
 
