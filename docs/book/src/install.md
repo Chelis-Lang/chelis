@@ -10,8 +10,10 @@ invocation.
 
 ## Install a release toolchain
 
-The commands below use the [GitHub CLI](https://cli.github.com) (`gh`). Run
-them outside a Chelis project:
+The commands below use the [GitHub CLI](https://cli.github.com) (`gh`),
+signed in with `gh auth login`; without it, download `chelisup.sh` from the
+[latest release](https://github.com/Chelis-Lang/chelis/releases/latest) page
+instead. Run them outside a Chelis project:
 
 ```sh
 # Download the installer script from the latest release and run it

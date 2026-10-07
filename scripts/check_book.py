@@ -100,8 +100,24 @@ def fence_defects(text: str) -> list[tuple[int, str, str]]:
     return found
 
 
+C_COMMENT = re.compile(r"(?:^|\s)//(?:\s|$)")
+
+
+def chelis_comment_defects(text: str) -> list[tuple[int, str, str]]:
+    """Chelis comments start with `--`; `//` in a chelis block is a parse error."""
+    found, fence = [], None
+    for number, line in enumerate(text.splitlines(), 1):
+        m = re.match(r"^\s*(```|~~~)(\S*)", line)
+        if m:
+            fence = None if fence else (m.group(2) or "plain")
+            continue
+        if fence and fence.startswith("chelis") and C_COMMENT.search(line):
+            found.append((number, "C-style comment in chelis code (use --)", line.strip()[:30]))
+    return found
+
+
 def lint_text(text: str) -> list[tuple[int, str, str]]:
-    found = fence_defects(text)
+    found = fence_defects(text) + chelis_comment_defects(text)
     previous = ""
     for number, line in prose_lines(text):
         if WRAPPED_MARKER.match(line) and previous.strip() and not LIST_LINE.match(previous) \
