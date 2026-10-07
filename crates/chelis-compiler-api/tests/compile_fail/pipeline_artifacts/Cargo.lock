@@ -379,6 +379,7 @@ dependencies = [
  "chelis-deep",
  "chelis-macros",
  "chelis-surf",
+ "chelis-types",
  "chelis-unord",
  "pest",
  "pest_derive",
