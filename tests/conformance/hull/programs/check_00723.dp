@@ -1,15 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {}
-      (ta
-        {type: (t-tensor {}
-                  (d-name {} hidden)
-                  (d-name {} hidden)
-                  (t-prim {} i64))
-        }))
-    (app {}
-      (var {} permute)
-      (var {} ta)
-      (lit {type: (t-prim {} i32)} 0)
-      (lit {type: (t-prim {} i32)} 1))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (lit {type: (t-prim {} i64)} 6)))

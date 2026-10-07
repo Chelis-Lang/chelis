@@ -193,6 +193,11 @@ class CorpusIntegrityTests(unittest.TestCase):
         for d in dropped:
             self.assertIn(d["lane"], ("check", "eval"))
             self.assertTrue(d["reason"], "each dropped divergence must carry a reason")
+            self.assertIn(
+                (d["lane"], d["rule_tag"]),
+                {("check", "RGather"), ("eval", "RDiv")},
+                "a new divergence class needs investigation before exclusion",
+            )
 
     def test_no_kept_program_is_a_known_divergence(self):
         # A kept program must not duplicate a dropped one (the filter must have

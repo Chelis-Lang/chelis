@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 0.0) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 6.0)) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 1.0))) 0)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} bool)} true) (arm {} (pat-var {} xa) () (if {} (var {} xa) (lit {type: (t-prim {} string)} "a") (lit {type: (t-prim {} string)} "bb"))))))

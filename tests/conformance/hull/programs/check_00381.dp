@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} neg) (var {} xa)))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (cast {} (if {} (lit {type: (t-prim {} bool)} false) (var {} xa) (if {} (let {} (bind {} xb (lit {type: (t-prim {} i64)} 5)) (lit {type: (t-prim {} bool)} true)) (var {} xa) (var {} xa))) (t-prim {} f32)))))

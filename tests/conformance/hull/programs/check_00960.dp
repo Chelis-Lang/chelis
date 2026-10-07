@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} log) (lit {type: (t-prim {} f32)} 5.0))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (cast {} (lit {type: (t-prim {} f32)} 2.0) (t-prim {} f32))))

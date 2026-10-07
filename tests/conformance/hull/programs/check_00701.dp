@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 2.0)) (var {} xa))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} mul) (app {} (fn {} (params {} (xa {type: (t-prim {} string)})) (app {} (var {} mul) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 6.0))) (lit {type: (t-prim {} string)} "a")) (app {} (var {} log) (lit {type: (t-prim {} f32)} 2.0)))))

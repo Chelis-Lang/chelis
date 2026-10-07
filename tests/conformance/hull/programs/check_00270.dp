@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (let {} (bind {} xb (if {} (lit {type: (t-prim {} bool)} false) (var {} xa) (app {} (var {} sin) (var {} xa)))) (var {} xb)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (lit {type: (t-prim {} string)} "ccc") (let {} (bind {} xa (lit {type: (t-prim {} f32)} 1.0)) (app {} (var {} neg) (let {} (bind {} xb (lit {type: (t-prim {} bool)} false)) (if {} (var {} xb) (var {} xa) (var {} xa))))))))

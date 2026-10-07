@@ -1,1 +1,0 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa))))

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (xa {type: (t-prim {} f32)})) (var {} xa)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (fn {} (params {} (xa {type: (t-prim {} bool)})) (app {} (var {} add) (if {} (if {} (var {} xa) (var {} xa) (var {} xa)) (lit {type: (t-prim {} i64)} 6) (lit {type: (t-prim {} i64)} 1)) (app {} (var {} mul) (lit {type: (t-prim {} i64)} 7) (cast {} (lit {type: (t-prim {} i64)} 5) (t-prim {} i64))))) (lit {type: (t-prim {} bool)} false))))

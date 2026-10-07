@@ -1,11 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (tb {type: (t-tensor {} (d-lit {} 3) (t-prim {} i64))}))
-    (fn {}
-      (params {} (ta {type: (t-tensor {} (d-lit {} 97) (t-prim {} bool))}))
-      (app {}
-        (var {} gather)
-        (var {} ta)
-        (var {} tb)
-        (lit {type: (t-prim {} i32)} 0)))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 3) (d-name {} hidden) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (lit {type: (t-prim {} i32)} 0))))

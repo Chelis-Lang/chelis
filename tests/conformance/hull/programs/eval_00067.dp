@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} sqrt) (lit {type: (t-prim {} f32)} 2.0)))
+(def {} answer (app {} (var {} sqrt) (lit {type: (t-prim {} f32)} 5.0)))

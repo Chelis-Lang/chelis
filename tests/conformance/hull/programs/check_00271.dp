@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (lit {type: (t-prim {} f32)} 7.0) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 8.0)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (lit {type: (t-prim {} string)} "d") (let {} (bind {} xa (lit {type: (t-prim {} i64)} 3)) (lit {type: (t-prim {} f32)} 1.0)) (lit {type: (t-prim {} i64)} 8)) 2)))

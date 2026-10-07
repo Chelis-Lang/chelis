@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (cast {} (lit {type: (t-prim {} f32)} 4.0) (t-prim {} f32))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (d-name {} seq) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (lit {type: (t-prim {} i32)} 2))))

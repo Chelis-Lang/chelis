@@ -59,7 +59,7 @@ the runner compares by PLAIN STRING EQUALITY. There is NO Python type lattice an
 NO re-implemented `types_equal`. `wire_to_canonical` is golden-tested against
 frozen Hull wire blobs (`golden_wire.json`) so a wire-schema drift fails LOUD.
 
-The eval reader consumes execution wire v3 under `spec/10-serialization.md`
+The eval reader consumes execution wire v4 under `spec/10-serialization.md`
 §3.2: floats are decoded from their exact dtype's bit strings, and integers
 remain exact integers. Legacy scalar tags, float number/null payloads, malformed
 carriers, and invalid tensor shapes fail as `compiler_crash`. The scalar view
@@ -107,11 +107,12 @@ deliberate compiler-semantics change:
        --export-jsonl <hull>/corpus/scratch/export_corpus.jsonl \
        --hull-known-conservative <hull>/corpus/known_conservative.json \
        --chelis-bin "$(pwd)/target/release/chelis" \
-       --hull-commit <hull-commit> --chelis-version 0.8.0
+       --hull-commit <hull-commit> --chelis-version 0.19.1
    ```
 3. Re-run the gate (step "the acceptance oracle" above) and the unit tests; the
    `git diff` on this directory is the reviewable corpus refresh.
 
-The nightly (`conformance-nightly.yml`) runs the FULL fresh >=10k campaign with a
-date-derived seed against the live Hull reference, catching regressions only a
-NEW program would expose and re-validating the freeze.
+The weekly nightly (`conformance-nightly.yml`) runs a fresh 2,000-check and
+200-eval campaign with a date-derived seed against the live Hull reference,
+catching regressions only a new program would expose and re-validating the
+freeze.

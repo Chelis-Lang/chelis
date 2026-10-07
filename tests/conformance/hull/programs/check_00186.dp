@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} add) (if {} (lit {type: (t-prim {} bool)} false) (app {} (var {} add) (var {} xa) (var {} xa)) (app {} (var {} neg) (var {} xa))) (var {} xa)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} string)} "a") (lit {type: (t-prim {} f32)} 0.0))))

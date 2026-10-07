@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} f32)} 8.0) (arm {} (pat-lit {} 6.0) () (lit {type: (t-prim {} f32)} 7.0)) (arm {} (pat-wild {}) () (lit {type: (t-prim {} f32)} 8.0)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (app {} (var {} sqrt) (lit {type: (t-prim {} f32)} 4.0)) (arm {} (pat-wild {}) () (lit {type: (t-prim {} i64)} 0)))))

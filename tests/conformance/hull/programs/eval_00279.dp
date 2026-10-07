@@ -1,1 +1,1 @@
-(def {} answer (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))
+(def {} answer (cast {} (lit {type: (t-prim {} f32)} 4.0) (t-prim {} f32)))

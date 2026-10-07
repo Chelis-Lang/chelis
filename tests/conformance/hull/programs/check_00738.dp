@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sqrt) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 0.0)) (app {} (var {} neg) (if {} (lit {type: (t-prim {} bool)} false) (var {} xa) (var {} xa)))))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (d-name {} hidden) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (lit {type: (t-prim {} i32)} 0))))

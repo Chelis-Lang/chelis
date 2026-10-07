@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sin) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 3.0)))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (lit {type: (t-prim {} i32)} 2))))

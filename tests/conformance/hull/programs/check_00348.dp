@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sqrt) (app {} (var {} neg) (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} f32)} 3.0) (lit {type: (t-prim {} f32)} 2.0))))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sin) (cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32)))))

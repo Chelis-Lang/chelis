@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (let {} (bind {} xa (lit {type: (t-prim {} f32)} 4.0)) (var {} xa)) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 8.0)) (var {} xa)) (lit {type: (t-prim {} f32)} 1.0)) 0)))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (app {} (var {} sub) (lit {type: (t-prim {} i64)} 4) (lit {type: (t-prim {} i64)} 8)) (arm {} (pat-wild {}) () (let {} (bind {} xa (lit {type: (t-prim {} f32)} 7.0)) (lit {type: (t-prim {} bool)} false))))))

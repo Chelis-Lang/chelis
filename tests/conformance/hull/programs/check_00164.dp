@@ -1,11 +1,1 @@
-(def {}
-  answer
-  (fn {}
-    (params {} (ta {type: (t-tensor {} (d-lit {} 1) (t-prim {} bool))}))
-    (app {}
-      (var {} reshape)
-      (var {} ta)
-      (app {}
-        (var {} Cons)
-        (cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64))
-        (var {} Nil)))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))})) (app {} (var {} permute) (var {} ta) (lit {type: (t-prim {} i32)} 0))))

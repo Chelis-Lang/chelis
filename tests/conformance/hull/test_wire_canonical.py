@@ -30,21 +30,37 @@ from wire_canonical import WireNormalizationError, wire_to_canonical  # noqa: E4
 GOLDEN_WIRE_PATH = Path(__file__).resolve().parent / "golden_wire.json"
 
 PRIM_F32 = {"kind": "prim", "name": "f32"}
-PRIM_INT32 = {"kind": "prim", "name": "int32"}
-PRIM_INT64 = {"kind": "prim", "name": "int64"}
+PRIM_I32 = {"kind": "prim", "name": "i32"}
+PRIM_I64 = {"kind": "prim", "name": "i64"}
 PRIM_BOOL = {"kind": "prim", "name": "bool"}
 
 
 class PrimTests(unittest.TestCase):
+    def test_canonical_integer_wire_names(self):
+        self.assertEqual(
+            wire_to_canonical({"kind": "prim", "name": "i32"}, []),
+            "(t-prim {} i64)",
+        )
+        self.assertEqual(
+            wire_to_canonical({"kind": "prim", "name": "i64"}, []),
+            "(t-prim {} i64)",
+        )
+
+    def test_retired_integer_wire_names_are_not_canonical(self):
+        for name in ("int32", "int64"):
+            with self.subTest(name=name):
+                with self.assertRaises(WireNormalizationError):
+                    wire_to_canonical({"kind": "prim", "name": name}, [])
+
     def test_f32(self):
         self.assertEqual(wire_to_canonical(PRIM_F32, []), "(t-prim {} f32)")
 
-    def test_int32_maps_to_int64(self):
-        # che_wire_prim: int32 maps to TInt64 (Hull models the int family as int64).
-        self.assertEqual(wire_to_canonical(PRIM_INT32, []), "(t-prim {} int64)")
+    def test_i32_maps_to_i64(self):
+        # Hull models the signed integer family as TInt64.
+        self.assertEqual(wire_to_canonical(PRIM_I32, []), "(t-prim {} i64)")
 
-    def test_int64(self):
-        self.assertEqual(wire_to_canonical(PRIM_INT64, []), "(t-prim {} int64)")
+    def test_i64(self):
+        self.assertEqual(wire_to_canonical(PRIM_I64, []), "(t-prim {} i64)")
 
     def test_bool(self):
         self.assertEqual(wire_to_canonical(PRIM_BOOL, []), "(t-prim {} bool)")
@@ -67,11 +83,11 @@ class FnTests(unittest.TestCase):
         )
 
     def test_multi_arg_fn_curries_right(self):
-        fn = {"kind": "fn", "args": [PRIM_F32, PRIM_INT32], "ret": PRIM_F32}
-        # (f32, int32) -> f32 curries to f32 -> (int64 -> f32). int32 -> int64.
+        fn = {"kind": "fn", "args": [PRIM_F32, PRIM_I32], "ret": PRIM_F32}
+        # (f32, i32) -> f32 curries to f32 -> (i64 -> f32). i32 -> i64.
         self.assertEqual(
             wire_to_canonical(fn, []),
-            "(t-fn {} (t-prim {} f32) (t-fn {} (t-prim {} int64) (t-prim {} f32)))",
+            "(t-fn {} (t-prim {} f32) (t-fn {} (t-prim {} i64) (t-prim {} f32)))",
         )
 
     def test_zero_arg_fn_is_none(self):
@@ -167,15 +183,20 @@ class TensorTests(unittest.TestCase):
         t = {"kind": "tensor", "precision": {"kind": "concrete", "name": "f32"}, "dims": []}
         self.assertEqual(wire_to_canonical(t, []), "(t-tensor {}  (t-prim {} f32))")
 
-    def test_tensor_int_precision_maps_to_int64(self):
+    def test_tensor_i32_precision_maps_to_i64(self):
         t = {
             "kind": "tensor",
-            "precision": {"kind": "concrete", "name": "int32"},
+            "precision": {"kind": "concrete", "name": "i32"},
             "dims": [{"kind": "lit", "size": 2}],
         }
         self.assertEqual(
-            wire_to_canonical(t, []), "(t-tensor {} (d-lit {} 2) (t-prim {} int64))"
+            wire_to_canonical(t, []), "(t-tensor {} (d-lit {} 2) (t-prim {} i64))"
         )
+
+    def test_retired_tensor_precision_is_rejected(self):
+        tensor = {"kind": "tensor", "precision": {"kind": "concrete", "name": "int32"}, "dims": []}
+        with self.assertRaises(WireNormalizationError):
+            wire_to_canonical(tensor, [])
 
     def test_tensor_bare_string_precision_fallback(self):
         # An older blob with a bare-string precision still transcribes.

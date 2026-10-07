@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} seq) (d-lit {} 3) (t-prim {} f32))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))})) (app {} (var {} matmul) (var {} ta) (var {} tb)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} f32)} 7.0) (lit {type: (t-prim {} string)} "d") (lit {type: (t-prim {} f32)} 0.0)) 1)))

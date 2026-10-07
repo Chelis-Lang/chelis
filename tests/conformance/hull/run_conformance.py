@@ -246,7 +246,7 @@ def _read_numeric_value(carrier: object) -> NumericScalar | None:
 
 
 def _read_root_scalar(root_value: object) -> NumericScalar | None:
-    """The first scalar element of a valid v3 scalar, bool or tensor root.
+    """The first scalar element of a valid v4 scalar, bool or tensor root.
 
     Other execution variants have no scalar projection. A tensor's entire
     storage and shape are admitted before reading its first element.
@@ -267,7 +267,7 @@ def _read_root_scalar(root_value: object) -> NumericScalar | None:
         shape, data = val["shape"], val["data"]
         if isinstance(data, list):
             raise ValueError("legacy v1 bare-array tensor payload is not supported: "
-                             "regenerate the output with execution wire v3")
+                             "regenerate the output with execution wire v4")
         if (not isinstance(shape, list) or len(shape) >= 1 << 31
                 or any(type(d) is not int or not 0 <= d < 1 << 63 for d in shape)
                 or not isinstance(data, dict)):
@@ -369,7 +369,7 @@ def derive_eval_outcome(
 
 
 def _parse_reference_scalar(value: object) -> NumericScalar | None:
-    """Decode Hull's frozen scalar without erasing exact integer spellings."""
+    """Decode Hull's frozen scalar at its f32 width, retaining exact integers."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -380,7 +380,11 @@ def _parse_reference_scalar(value: object) -> NumericScalar | None:
         return int(value)
     except ValueError:
         try:
-            return float(value)
+            decimal = float(value)
+            # Hull's reference evaluator computes floats in f32. Its shortest
+            # decimal spelling must be rounded back to that width before an
+            # exact-bit compiler observation is compared at large magnitudes.
+            return struct.unpack("!f", struct.pack("!f", decimal))[0]
         except ValueError:
             return None
 

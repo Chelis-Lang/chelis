@@ -1,32 +1,44 @@
 [
   {
     "lane": "check",
-    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} hidden) (d-lit {} 3) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-lit {} 3) (t-prim {} f32))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
-    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 3) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (d-lit {} 3) (t-prim {} f32))))' vs compiler '(t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 3) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))))'",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (d-name {} rdim) (t-prim {} bool))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 1)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 1) (d-name {} rdim) (t-prim {} bool)) (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} bool))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 1) (d-lit {} 1) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 1) (d-name {} rdim) (t-prim {} bool)) (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} bool))))'",
     "rule_tag": "RGather"
   },
   {
     "lane": "check",
-    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (d-name {} batch) (t-prim {} bool))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
-    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} bool))))' vs compiler '(t-fn {} (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-name {} batch) (d-name {} batch) (d-name {} batch) (t-prim {} bool))))'",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} bool))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 0)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} bool)) (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} bool))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} bool)) (t-tensor {} (d-lit {} 4) (d-lit {} 2) (d-lit {} 2) (t-prim {} bool))))'",
     "rule_tag": "RGather"
   },
   {
     "lane": "check",
-    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} bool))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
-    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} bool))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 1) (d-name {} batch) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-lit {} 1) (d-name {} batch) (d-name {} batch) (t-prim {} bool))))'",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} hidden) (d-name {} batch) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} i64))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 0)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-name {} hidden) (d-name {} batch) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} i64)) (t-tensor {} (d-name {} hidden) (d-name {} batch) (t-prim {} i64))))' vs compiler '(t-fn {} (t-tensor {} (d-name {} hidden) (d-name {} batch) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} batch) (t-prim {} i64)) (t-tensor {} (d-name {} hidden) (d-name {} batch) (d-name {} batch) (t-prim {} i64))))'",
     "rule_tag": "RGather"
   },
   {
     "lane": "check",
-    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} batch) (d-lit {} 2) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} f32))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
-    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-name {} batch) (d-lit {} 2) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} f32)) (t-tensor {} (d-name {} batch) (d-lit {} 2) (t-prim {} f32))))' vs compiler '(t-fn {} (t-tensor {} (d-name {} batch) (d-lit {} 2) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-lit {} 97) (d-lit {} 2) (t-prim {} f32)) (t-tensor {} (d-name {} batch) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))))'",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 4) (d-name {} hidden) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-name {} hidden) (t-prim {} bool))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 0)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 4) (d-name {} hidden) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} hidden) (t-prim {} bool)) (t-tensor {} (d-lit {} 4) (d-name {} hidden) (t-prim {} bool))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 4) (d-name {} hidden) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-name {} hidden) (t-prim {} bool)) (t-tensor {} (d-lit {} 4) (d-name {} hidden) (d-name {} hidden) (t-prim {} bool))))'",
     "rule_tag": "RGather"
   },
   {
     "lane": "check",
-    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
-    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64)) (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64)) (t-tensor {} (d-lit {} 3) (d-lit {} 1) (d-lit {} 1) (t-prim {} int64))))'",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-name {} hidden) (d-name {} hidden) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} hidden) (d-lit {} 97) (t-prim {} i64))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 1)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-name {} hidden) (d-name {} hidden) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 97) (t-prim {} i64)) (t-tensor {} (d-name {} hidden) (d-name {} hidden) (t-prim {} i64))))' vs compiler '(t-fn {} (t-tensor {} (d-name {} hidden) (d-name {} hidden) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 97) (t-prim {} i64)) (t-tensor {} (d-name {} hidden) (d-name {} hidden) (d-name {} hidden) (t-prim {} i64))))'",
+    "rule_tag": "RGather"
+  },
+  {
+    "lane": "check",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 2) (d-lit {} 97) (t-prim {} f32))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 1)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 2) (d-lit {} 97) (t-prim {} f32)) (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 2) (d-lit {} 97) (t-prim {} f32)) (t-tensor {} (d-lit {} 2) (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))))'",
+    "rule_tag": "RGather"
+  },
+  {
+    "lane": "check",
+    "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 4) (d-lit {} 1) (t-prim {} i64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 4) (d-lit {} 97) (t-prim {} i64))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} i32)} 1)))))",
+    "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 1) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 97) (t-prim {} i64)) (t-tensor {} (d-lit {} 4) (d-lit {} 1) (t-prim {} i64))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 1) (t-prim {} i64)) (t-fn {} (t-tensor {} (d-lit {} 4) (d-lit {} 97) (t-prim {} i64)) (t-tensor {} (d-lit {} 4) (d-lit {} 4) (d-lit {} 1) (t-prim {} i64))))'",
     "rule_tag": "RGather"
   }
 ]

@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} f32)} 0.0) (arm {} (pat-wild {}) () (lit {type: (t-prim {} f32)} 2.0)))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 1) (t-prim {} bool))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} i32)} 0) (var {} batch))))

@@ -11,7 +11,7 @@ lattice: equality is `==` over Hull's own canonical rendering.
 composition of two Hull functions, with NO semantic decisions:
 
   - `che_wire_type_to_type` (check.ch lines 248-373): the WireInferredType ->
-    Hull.Type normalization. int32 -> TInt64; `ref{inner}` -> inner; `unit` ->
+    Hull.Type normalization. i32 -> TInt64; `ref{inner}` -> inner; `unit` ->
     TTuple([]); a multi-arg `fn` curries right; `var`/`error`/`f64` -> None
     (an unresolved / un-representable type).
   - `inject_outer_effects` (check.ch lines 193-198): the def-level `effect_row`
@@ -62,15 +62,17 @@ class WireNormalizationError(Exception):
 
 
 def _prim_to_canonical(node: dict) -> str | None:
-    """`{kind:prim, name}` -> `(t-prim {} <name>)`. int32/int64 both map to
-    int64 (Hull models the int family as int64, che_wire_prim line 268); f64 has
+    """`{kind:prim, name}` -> `(t-prim {} <name>)`. i32/i64 both map to
+    i64 (Hull models the int family as TInt64, che_wire_prim line 268); f64 has
     no Hull scalar type so it returns None (a sound mismatch). bool/string map
     directly."""
     name = node.get("name")
     if name == "f32":
         return "(t-prim {} f32)"
+    if name in ("i64", "i32"):
+        return "(t-prim {} i64)"
     if name in ("int64", "int32"):
-        return "(t-prim {} int64)"
+        raise WireNormalizationError(f"retired integer wire name {name!r}")
     if name == "bool":
         return "(t-prim {} bool)"
     if name == "string":
@@ -81,11 +83,13 @@ def _prim_to_canonical(node: dict) -> str | None:
 
 def _elem_to_atom(name: str) -> str | None:
     """Tensor element precision -> the canonical elem atom (che_wire_elem line
-    313 + elem_to_atom). int32/int64 -> int64; f32 -> f32; bool -> bool."""
+    313 + elem_to_atom). i32/i64 -> i64; f32 -> f32; bool -> bool."""
     if name == "f32":
         return "f32"
+    if name in ("i64", "i32"):
+        return "i64"
     if name in ("int64", "int32"):
-        return "int64"
+        raise WireNormalizationError(f"retired integer wire precision {name!r}")
     if name == "bool":
         return "bool"
     return None

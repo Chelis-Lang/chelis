@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} batch) (d-lit {} 2) (t-prim {} f32))})) (app {} (var {} matmul) (var {} ta) (var {} tb)))))
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (cast {} (if {} (lit {type: (t-prim {} bool)} false) (var {} xa) (var {} xa)) (t-prim {} f32)))))

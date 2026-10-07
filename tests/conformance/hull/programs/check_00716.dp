@@ -1,1 +1,1 @@
-(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} sin) (var {} xa)))))
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} bool)} true) (arm {} (pat-var {} xa) () (if {} (var {} xa) (lit {type: (t-prim {} string)} "a") (lit {type: (t-prim {} string)} "bb"))))))
