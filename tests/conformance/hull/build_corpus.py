@@ -19,8 +19,8 @@ Deep), `hull_verdict`, `hull_type_canonical`, `hull_effects_canonical`,
 
 The whole `tests/conformance/hull/` directory is the frozen artifact. A chelis
 test (test_corpus_integrity) asserts manifest <-> files <-> verdicts are mutually
-consistent. This script is the ONLY thing that writes the tree; the corpus is
-never hand-edited (keeping it mechanically Hull-derived).
+consistent. The generated programs and verdicts remain mechanically Hull-derived;
+the committed exclusion evidence is reviewed before regeneration.
 """
 
 from __future__ import annotations
@@ -210,15 +210,18 @@ def build(
     #     (6/4 -> 1.5) where the compiler does INTEGER division (6/4 -> 1); the
     #     compiler's int-div is correct for int inputs.
     # These are Hull-reference imprecisions, NOT compiler bugs, so pinning Hull's
-    # verdict for them produces a FALSE expectation. The design's own precedent
-    # (excluding tuple-get + div-by-zero from the eval lane at pin time) is to
-    # EXCLUDE such programs from the agreement corpus. We do that here, validating
-    # each generated program against the LIVE compiler and DROPPING any that
-    # Disagrees -- recording the drop to dropped_divergences.json with the
-    # divergence detail. The conformance baseline is thus programs where Hull and
-    # the compiler GENUINELY agree; the teeth (reject sentinels + known
-    # conservative) are unaffected, and a NEW disagreement on a KEPT program is a
-    # real regression the gate still catches.
+    # verdict for them produces a false expectation. The recorded exclusions
+    # are reviewed evidence, not a rule-tag-wide exemption: any new mismatch,
+    # including a new RDiv mismatch, stops regeneration for investigation.
+    reviewed_drops = json.loads(DROPPED_PATH.read_text(encoding="utf-8"))
+    reviewed_drop_keys = {
+        (d["lane"], d["rule_tag"], d["program"], d["reason"])
+        for d in reviewed_drops
+    }
+    if len(reviewed_drop_keys) != len(reviewed_drops) or any(
+        (d["lane"], d["rule_tag"]) != ("check", "RGather") for d in reviewed_drops
+    ):
+        raise ValueError("unreviewed Hull reference exclusion in dropped_divergences.json")
     dropped: list[dict] = []
     for rec in raw:
         lane = rec["lane"]
@@ -238,16 +241,19 @@ def build(
         }
         probe_result = rc.run_program(chelis_bin, probe_record, timeout)
         (PROGRAMS_DIR / probe_rel).unlink(missing_ok=True)
-        disagree_bucket = "disagree" if lane == "check" else None
-        if probe_result.bucket in ("disagree",):
-            dropped.append(
-                {
-                    "lane": lane,
-                    "rule_tag": rec["rule_tag"],
-                    "program": rec["program"],
-                    "reason": probe_result.detail,
-                }
-            )
+        if probe_result.bucket == "disagree":
+            candidate = {
+                "lane": lane,
+                "rule_tag": rec["rule_tag"],
+                "program": rec["program"],
+                "reason": probe_result.detail,
+            }
+            key = (lane, rec["rule_tag"], rec["program"], probe_result.detail)
+            if key not in reviewed_drop_keys:
+                raise ValueError(
+                    f"unreviewed Hull/compiler disagreement in {lane} {rec['rule_tag']}: {probe_result.detail}"
+                )
+            dropped.append(candidate)
             continue
         if lane == "check":
             rid = f"check_{check_i:05d}"
@@ -272,7 +278,6 @@ def build(
             "expected_compiler_outcome": "Agree" if lane == "check" else "Agree",
         }
         verdicts.append(verdict)
-        _ = disagree_bucket
         # Capture a golden wire blob for a sampled subset of accepted check
         # functions (the wire_to_canonical drift guard).
         if (
@@ -366,10 +371,8 @@ def build(
         f.write("\n")
 
     # Persist dropped_divergences.json: the generated programs dropped from the
-    # agreement corpus because Hull's REFERENCE disagrees with the (authoritative,
-    # accepting) compiler -- the documented gather-shape + int-div Hull
-    # imprecisions. Kept as committed evidence so the drop is auditable and a
-    # corpus refresh shows whether the divergence set changed.
+    # agreement corpus because Hull's reference gather-shape rule disagrees
+    # with the compiler. New exclusion rows require a reviewed source update.
     with open(DROPPED_PATH, "w", encoding="utf-8") as f:
         json.dump(dropped, f, indent=2, sort_keys=True)
         f.write("\n")

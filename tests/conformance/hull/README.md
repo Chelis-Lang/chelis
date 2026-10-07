@@ -89,8 +89,10 @@ reference or change its verdicts.
 
 ## Refreshing the corpus
 
-The corpus is mechanically Hull-derived, never hand-edited. To refresh after a
-deliberate compiler-semantics change:
+The programs and verdicts are mechanically Hull-derived. The committed
+`dropped_divergences.json` is the reviewed exclusion input; a new disagreement
+stops regeneration until its cause is investigated and the evidence is updated.
+To refresh after a deliberate compiler-semantics change:
 
 1. In the Hull repo (at the commit recorded in `manifest.json::hull_commit`), run
    the producer driver to emit the export JSONL (a documented manual gate; the
@@ -100,8 +102,8 @@ deliberate compiler-semantics change:
        --filter test_export_corpus --timeout 600
    ```
    This writes `corpus/scratch/export_corpus.jsonl`.
-2. Assemble the chelis tree (runs the live binary to filter Hull-reference
-   divergences + capture golden wire blobs):
+2. Assemble the chelis tree (runs the live binary to check reviewed exclusions
+   and capture golden wire blobs):
    ```
    .venv/bin/python tests/conformance/hull/build_corpus.py \
        --export-jsonl <hull>/corpus/scratch/export_corpus.jsonl \
