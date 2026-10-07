@@ -538,7 +538,8 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 - `chelis build` invokes the native compiler for C, HIP, or Metal and produces an
   executable or static library, retaining sources and runtime artifacts. `--emit-c`
   stops after source emission. CPU is the acceptance priority; GPU targets remain
-  prerelease. See `docs/book/src/backends.md` and `docs/gpu_backends.md`.
+  prerelease. In the chelis repository, `docs/book/src/backends.md` covers C
+  builds and `docs/gpu_backends.md` covers HIP and Metal.
 
 ## Book
 
