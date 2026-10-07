@@ -156,25 +156,73 @@ class ContractCleanTests(unittest.TestCase):
         self.assertLessEqual(includes, vcm.CONTRACT_INCLUDES)
         self.assertNotRegex(text, r"#[ \t]*pragma[ \t]+STDC")
 
-    def test_checked_in_amalgamation_reaches_roundeven_only_through_its_guard(self):
-        # GCC 9 and Clang 16 lack `__builtin_roundeven`; one bare call in any kernel
-        # breaks every native build on them, because the compiler canary carries all.
-        text = vcm.AMALGAMATION.read_text(encoding="utf-8")
-        vcm.require_guarded_roundeven(text, "amalgamation")
-        self.assertIn("chelis_cr_sin__roundeven_finite (invpi * ax)", text)
 
-    def test_only_the_version_guarded_definition_may_name_roundeven(self):
-        define = "# define roundeven_finite(x) __builtin_roundeven (x)\n"
-        guarded = f"{vcm._ROUNDEVEN_GUARD}\n{define}#else\nstatic double roundeven_finite (double x);\n#endif\n"
-        vcm.require_guarded_roundeven("/* __builtin_roundeven was introduced in gcc 10 */\n" + guarded, "t")
-        for what, text in [
-            ("a bare call", guarded + "double k = __builtin_roundeven (y);\n"),
-            ("the float builtin", guarded + "float k = __builtin_roundevenf (y);\n"),
-            ("an unguarded definition", define),
-            ("a definition under another guard", f"#if 1\n{define}#else\n#endif\n"),
+class RoundevenTests(unittest.TestCase):
+    """Rounding a reduced argument to an integer (module docstring, item 5)."""
+
+    UPSTREAM = (
+        "/* __builtin_roundeven was introduced in gcc 10:\n"
+        "   https://gcc.gnu.org/gcc-10/changes.html,\n"
+        "   and in clang 17 */\n"
+        "#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17))"
+        " && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))\n"
+        "# define roundeven_finite(x) __builtin_roundeven (x)\n"
+        "#else\n"
+        "/* round x to nearest integer, breaking ties to even */\n"
+        "static double\n"
+        "roundeven_finite (double x)\n"
+        "{\n"
+        "  double ix = __builtin_round (x); /* nearest, away from 0 */\n"
+        "  return ix;\n"
+        "}\n"
+        "#endif\n"
+    )
+
+    def test_upstream_helper_becomes_the_inline_helper(self):
+        text = f"typedef int t;\n\n{self.UPSTREAM}\ndouble f(double x){{ return roundeven_finite (x); }}\n"
+        out = vcm.inline_roundeven(text, "t")
+        self.assertEqual(
+            out, f"typedef int t;\n\n{vcm.ROUNDEVEN_FINITE}\ndouble f(double x){{ return roundeven_finite (x); }}\n"
+        )
+        vcm.require_inline_roundeven(vcm.contract_clean(out, "t"), "t")
+
+    def test_upstream_helper_of_another_shape_is_rejected(self):
+        renamed = self.UPSTREAM.replace("define roundeven_finite(x)", "define roundeven_nearest(x)")
+        with self.assertRaisesRegex(vcm.VendorError, "upstream roundeven_finite helper"):
+            vcm.inline_roundeven(renamed, "t")
+
+    def test_rounding_outside_the_inline_helper_is_rejected(self):
+        vcm.require_inline_roundeven(vcm.ROUNDEVEN_FINITE + "double k = roundeven_finite (y);\n", "t")
+        prefixed = vcm.ROUNDEVEN_FINITE.replace("roundeven_finite", "p__roundeven_finite")
+        vcm.require_inline_roundeven(prefixed + "double k = p__roundeven_finite (y);\n", "t")
+        for what, text, reason in [
+            ("the builtin", vcm.ROUNDEVEN_FINITE + "double k = __builtin_roundeven (y);\n", "outside the inline"),
+            ("the float builtin", "float k = __builtin_roundevenf (y);\n", "outside the inline"),
+            ("the C library function", "double k = roundeven (y);\n", "outside the inline"),
+            ("the upstream macro", "# define roundeven_finite(x) __builtin_roundeven (x)\n", "outside the inline"),
+            ("another definition", "static double\nroundeven_finite (double x)\n{\n  return x;\n}\n", "not the inline helper"),
+            ("a second definition", vcm.ROUNDEVEN_FINITE + "static double\nroundeven_finite (double x)\n{\n}\n",
+             "not the inline helper"),
+            ("a definition spelled without spaces", "static double roundeven_finite(double x){ return __builtin_rint (x); }\n",
+             "not the inline helper"),
+            ("a definition with another parameter", "static double\np__roundeven_finite (const double v)\n{\n  return v;\n}\n",
+             "not the inline helper"),
+            ("a macro", "#define roundeven_finite(x) (x)\n", "as a macro"),
         ]:
-            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, "outside a guarded roundeven_finite"):
-                vcm.require_guarded_roundeven(text, "t")
+            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, reason):
+                vcm.require_inline_roundeven(text, "t")
+
+    def test_sin_routes_its_direct_call_through_the_inline_helper(self):
+        body = "\nstatic double s(double ax){\n  double k = __builtin_roundeven (invpi * ax);\n  return k;\n}\n"
+        out = vcm.route_sin_roundeven("#pragma STDC FENV_ACCESS ON\n" + body)
+        self.assertEqual(
+            out,
+            "#pragma STDC FENV_ACCESS ON\n\n" + vcm.ROUNDEVEN_FINITE
+            + body.replace("__builtin_roundeven (invpi * ax)", "roundeven_finite (invpi * ax)"),
+        )
+        for what, text in [("no call", "#pragma STDC FENV_ACCESS ON\n"), ("two calls", "#pragma STDC FENV_ACCESS ON\n" + body + body)]:
+            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, "binary64 sin"):
+                vcm.route_sin_roundeven(text)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -182,6 +230,13 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(vcm.generate(), vcm.AMALGAMATION.read_text(encoding="utf-8"))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(vcm.main(["--check"]), 0)
+
+    def test_checked_in_amalgamation_rounds_to_integers_only_through_the_inline_helper(self):
+        text = vcm.AMALGAMATION.read_text(encoding="utf-8")
+        vcm.require_inline_roundeven(text, "amalgamation")
+        kernels = {m.group(1) for m in vcm._ROUNDEVEN_DEFINITION.finditer(text)}
+        self.assertEqual(kernels, {f"chelis_cr_{name}__" for name in ("sinf", "cosf", "tanf", "exp", "sin", "erfc")})
+        self.assertIn("chelis_cr_sin__roundeven_finite (invpi * ax)", text)
 
     def test_manifest_round_trips(self):
         self.assertEqual(vcm.render_manifest(vcm.load_manifest()), vcm.MANIFEST.read_text(encoding="utf-8"))

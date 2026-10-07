@@ -85,11 +85,19 @@ Read from the upstream sources:
   (no `__int128`). Chelis's C lanes target GCC and Clang only, on 64-bit hosts, so this
   is within the supported set. A Windows/MSVC target would need its own decision.
 - **Architecture paths.** binary64 `exp` and `tanh` use SSE intrinsics under
-  `#if defined(__x86_64__)` with portable fallbacks; several files use inline
-  assembly for `roundeven` only when the builtin is unavailable. The amalgamation keeps
-  only the portable arm of each (§3.3), so every architecture compiles the same C; the
-  oracle still runs on each architecture (§8), because the compiler lowers that C
-  differently per target.
+  `#if defined(__x86_64__)` with portable fallbacks. The amalgamation keeps only the
+  portable arm of each (§3.3), so every architecture compiles the same C; the oracle
+  still runs on each architecture (§8), because the compiler lowers that C differently
+  per target.
+- **Integer rounding.** Six kernels round a reduced argument to an integer with ties to
+  even: binary32 `sin`, `cos`, `tan` and binary64 `exp`, `erfc` through a
+  `roundeven_finite` helper, binary64 `sin` through a direct `__builtin_roundeven` call.
+  Upstream's helper is that builtin on GCC 10 and Clang 17, inline assembly or a
+  `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with GCC 10 and
+  11, the builtin lowers to a call to the C library's `roundeven`. musl and glibc before
+  2.25 do not provide it. §3.3 therefore replaces all six with one helper around
+  `__builtin_rint`. The portable `copysign((|x| + 2^52) - 2^52, x)` gives the same
+  values, but it makes most of these kernels about 20% slower on AArch64.
 - **FMA.** The kernels call `__builtin_fma`. Where the target has no hardware FMA in its
   baseline (x86-64 without `-mfma`, which the strict profile forbids adding from the
   host CPU), the compiler emits a call to the C library's `fma`, which C17 7.12.13.1
@@ -135,13 +143,21 @@ not the oracle of §8.
      satisfy, since `chelis build` emits these bytes (§4.2). It drops what the contract
      forbids and Chelis never observes: `<fenv.h>`, the `FENV_ACCESS` pragma,
      floating-point exception raises, the `errno` blocks, the `noinline`/`cold`
-     attributes, the inline-assembly `roundeven` arms, and the x86-64 SSE intrinsic
-     arms, keeping the portable arm beside each. The `unsigned _BitInt(128)`
-     conditionals keep their `unsigned __int128` arm, the same arithmetic. Every
-     definition, the entries included, is written `static`. The script fails if a
-     forbidden token or an include outside the generated-C allowlist survives; that
-     allowlist admits the ISO C headers `<stdint.h>` and `<float.h>` for the kernels.
-     Values are unchanged: every dropped arm computes the bits of the arm that stays.
+     attributes, and the x86-64 SSE intrinsic arms, keeping the portable arm beside
+     each. The `unsigned _BitInt(128)` conditionals keep their `unsigned __int128` arm,
+     the same arithmetic. Every definition, the entries included, is written
+     `static`. The script fails if a forbidden token or an include outside the
+     generated-C allowlist survives; that allowlist admits the ISO C headers
+     `<stdint.h>` and `<float.h>` for the kernels. Values are unchanged: every dropped
+     arm computes the bits of the arm that stays;
+  5. replaces each upstream `roundeven_finite` definition, and binary64 `sin`'s direct
+     `__builtin_roundeven` call, with one helper that returns `__builtin_rint (x)`. In
+     the round-to-nearest-even mode that Chelis pins at every entry (§6), `rint`
+     (C17 7.12.9.4) gives `roundeven(x)` for every finite `x`, signed zero included.
+     On AArch64 the builtin is one `frintx` instruction, and GCC inlines it on baseline
+     x86-64. Clang on baseline x86-64 calls the C library's `rint`, which every C99 C
+     library has, musl included. The script fails if any `roundeven` builtin or call
+     survives, or if a `roundeven_finite` is not this helper.
   The amalgamation begins with guards: `#error` when `__FAST_MATH__`,
   `__FINITE_MATH_ONLY__`, or `FLT_EVAL_METHOD != 0` is in effect. `--check` regenerates
   in memory and fails on any byte difference, so the vendored inputs and the
@@ -281,10 +297,18 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   compiler, naming each broken obligation, its spec text, and its first broken row. A
   compiler that cannot build the canary at all is refused with its own diagnostic and
   without the claim that something added flags: the canary carries every kernel, so a
-  builtin a kernel calls unconditionally would make every native build fail on a
-  compiler without it. `scripts/vendor_core_math.py` therefore routes each
-  `__builtin_roundeven` through a `roundeven_finite` that uses the builtin only where
-  the compiler version has it.
+  builtin or C library function a kernel calls unconditionally would make every native
+  build fail where it is missing. The kernels therefore round to an integer through
+  §3.3's helper. Every supported GCC and Clang has its builtin, and every C99 C library
+  has `rint`, the one function that the helper can call.
+- A selected compiler whose C library is not the one the carried runtime archive was
+  built for fails the build before anything compiles (spec/08 §7). The archive comes
+  from the compiler's own build, so its C library is that build's Rust target
+  environment (`gnu` or `musl`). After the profile's macro check, `verify_compiler`
+  reads the compiler's C library from its `<stdio.h>`, which defines `__GLIBC__` under
+  glibc and not under musl. GCC and Clang supply no `<stdio.h>` of their own, so a
+  wrapper that adds `-ffreestanding` still shows the C library's header. C libraries
+  that also define `__GLIBC__` for compatibility, such as uClibc-ng, read as glibc.
 
 **The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
 holds a closed list of the profile's obligations, each tied to the text it enforces:
@@ -572,8 +596,8 @@ CORE-MATH provides all four at the commit already pinned in `VENDOR.toml`
 
 Each file includes only `<stdint.h>`, `<errno.h>`, and (binary64 `erfc`) `<fenv.h>`, and
 needs nothing outside what §3.3's reduction already handles: the `errno` blocks, the
-`FENV_ACCESS` pragma, and binary64 `erfc`'s inline-assembly `roundeven_finite` arms
-(the `__builtin_roundeven` arm stays). None uses `__int128`, `fegetround`, or an
+`FENV_ACCESS` pragma, and binary64 `erfc`'s `roundeven_finite` helper, which §3.3
+replaces. None uses `__int128`, `fegetround`, or an
 `FE_` constant. `scripts/vendor_core_math.py import` adds the four files, regenerates the
 amalgamation, and records their identifiers and hashes; the exhaustive binary32 gate and
 the binary64 worst-case corpora of §8 extend to both functions. The lanes gain `Erf` and

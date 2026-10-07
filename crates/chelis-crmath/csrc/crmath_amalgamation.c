@@ -318,32 +318,13 @@ SOFTWARE.
 #endif
 
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_sinf__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_sinf__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 typedef union {float f; uint32_t u;} chelis_cr_sinf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_sinf__b64u64_u;
@@ -521,32 +502,13 @@ SOFTWARE.
 #endif
 
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_cosf__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_cosf__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 typedef union {float f; uint32_t u;} chelis_cr_cosf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_cosf__b64u64_u;
@@ -718,32 +680,13 @@ SOFTWARE.
 #endif
 
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_tanf__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_tanf__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 typedef union {float f; uint32_t u;} chelis_cr_tanf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_tanf__b64u64_u;
@@ -1389,32 +1332,13 @@ SOFTWARE.
 #endif
 
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_exp__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_exp__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 typedef int64_t chelis_cr_exp__i64;
 typedef uint64_t chelis_cr_exp__u64;
@@ -3394,32 +3318,13 @@ SOFTWARE.
 #endif
 
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_sin__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_sin__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 typedef unsigned __int128 chelis_cr_sin__u128;
 
@@ -10068,32 +9973,13 @@ SOFTWARE.
 
 /****************** code copied from cosf.c **********************************/
 
-/* __builtin_roundeven was introduced in gcc 10:
-   https://gcc.gnu.org/gcc-10/changes.html,
-   and in clang 17 */
-#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
-# define chelis_cr_erfc__roundeven_finite(x) __builtin_roundeven (x)
-#else
-/* round x to nearest integer, breaking ties to even */
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
 static double
 chelis_cr_erfc__roundeven_finite (double x)
 {
-  double ix;
-  ix = __builtin_round (x); /* nearest, away from 0 */
-  if (__builtin_fabs (ix - x) == 0.5)
-  {
-    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
-    union { double f; uint64_t n; } u, v;
-    u.f = ix;
-    v.f = ix - __builtin_copysign (1.0, x);
-    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
-       is rounded away from zero. */
-    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
-      ix = v.f;
-  }
-  return ix;
+  return __builtin_rint (x);
 }
-#endif
 
 /****************** code copied from erf.c ***********************************/
 

@@ -252,12 +252,14 @@ pub fn link_args(
 }
 
 /// Resolve `compiler`'s identity and check that, given `compile_flags` and
-/// `link_flags`, it compiles with the profile's floating-point semantics. A wrapper script is
-/// opaque on the command line, so the check observes the compiler itself, in
-/// two steps. First it reads what the compiler predefines under those flags:
+/// `link_flags`, it compiles with the profile's floating-point semantics and
+/// against the carried runtime archive's C library. A wrapper script is opaque on
+/// the command line, so the check observes the compiler itself. First it reads what
+/// the compiler predefines under those flags:
 /// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
 /// dropped optimisation level (`__OPTIMIZE__` missing although the profile
-/// passes `-O2`). No macro reveals contraction, reassociation, or a NaN or
+/// passes `-O2`). Then it refuses a compiler for another C library
+/// ([`check_c_library`]). No macro reveals contraction, reassociation, or a NaN or
 /// infinity assumption, so it then compiles and runs the canary
 /// ([`canary_source`]) with the same flags, linked by [`link_args`], and compares the bits it prints with
 /// the profile's obligation table (`chelis_crmath::profile`): every kernel row of
@@ -321,12 +323,7 @@ fn check_compiler(
         return Ok(CompilerIdentity { path, version });
     }
 
-    let macros = tool_command(&path)
-        .args(compile_flags)
-        .args(["-dM", "-E", "-x", "c", "-"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
+    let macros = preprocessor_macros(&path, compile_flags, b"")?;
     if !macros.status.success() {
         return Err(format!(
             "native compiler `{}` rejected the pinned profile {}: {}",
@@ -336,12 +333,7 @@ fn check_compiler(
         ));
     }
     let macros = String::from_utf8_lossy(&macros.stdout);
-    let defined = |name: &str| {
-        macros.lines().find_map(|line| {
-            let rest = line.strip_prefix("#define ")?.strip_prefix(name)?;
-            (rest.is_empty() || rest.starts_with(' ')).then(|| rest.trim().to_string())
-        })
-    };
+    let defined = |name: &str| macro_value(&macros, name);
     let mut violations = Vec::new();
     if defined("__FAST_MATH__").is_some() {
         violations.push("__FAST_MATH__ is defined (fast math)");
@@ -362,12 +354,138 @@ fn check_compiler(
             violations.join("; ")
         ));
     }
+    check_c_library(&path, compile_flags)?;
     run_canary(&path, compile_flags, link_flags)?;
     ACCEPTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(accepted);
     Ok(CompilerIdentity { path, version })
+}
+
+/// The Linux C library a runtime archive was built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CLibrary {
+    Glibc,
+    Musl,
+}
+
+impl CLibrary {
+    fn name(self) -> &'static str {
+        match self {
+            CLibrary::Glibc => "glibc",
+            CLibrary::Musl => "musl",
+        }
+    }
+}
+
+/// The C library of the runtime archive this compiler carries. The archive comes
+/// from the compiler's own build (spec/08-backends.md section 2.1), so it is the
+/// Rust target environment the compiler was built for; off Linux there is no
+/// second C library to tell apart.
+const CARRIED_C_LIBRARY: Option<CLibrary> = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+    Some(CLibrary::Glibc)
+} else if cfg!(all(target_os = "linux", target_env = "musl")) {
+    Some(CLibrary::Musl)
+} else {
+    None
+};
+
+/// Refuse a compiler that compiles against another C library than the carried
+/// runtime archive's (spec/08-backends.md section 7). Every native build links
+/// that archive, and the link would fail on symbols only its own C library
+/// defines, so the check runs before anything compiles. It runs after the profile's
+/// macro check, which reports a compiler that rejects a profile flag as such.
+fn check_c_library(path: &Path, compile_flags: &[String]) -> Result<(), String> {
+    let Some(carried) = CARRIED_C_LIBRARY else {
+        return Ok(());
+    };
+    match c_library_refusal(path, carried, compiles_against_glibc(path, compile_flags)?) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// Whether `path` compiles against glibc under `compile_flags`: its `<stdio.h>`
+/// defines `__GLIBC__`, which glibc's headers do and musl's do not. The probe reads
+/// `<stdio.h>`, which GCC and Clang never supply themselves, so a wrapper that adds
+/// `-ffreestanding` still reads the C library's header. musl defines no public macro
+/// that identifies it, and uClibc-ng defines `__GLIBC__` for compatibility. So the
+/// headers tell glibc and glibc-compatible C libraries from the rest, and no more.
+/// A compiler like `musl-gcc`, which reports a `-gnu` target but compiles against
+/// musl, reads as what its headers are.
+fn compiles_against_glibc(path: &Path, compile_flags: &[String]) -> Result<bool, String> {
+    let output = preprocessor_macros(path, compile_flags, b"#include <stdio.h>\n")?;
+    if !output.status.success() {
+        return Err(format!(
+            "native compiler `{}` cannot preprocess `#include <stdio.h>`, so its C library \
+             cannot be read: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(macro_value(&String::from_utf8_lossy(&output.stdout), "__GLIBC__").is_some())
+}
+
+/// Run `path` as a preprocessor on the C `source` under `compile_flags`, and print the
+/// macros it defines (`-dM -E`). Each caller checks the exit status with its own
+/// diagnostic.
+fn preprocessor_macros(
+    path: &Path,
+    compile_flags: &[String],
+    source: &[u8],
+) -> Result<std::process::Output, String> {
+    use std::io::Write as _;
+    let cannot_run =
+        |error: std::io::Error| format!("cannot run native compiler `{}`: {error}", path.display());
+    let mut child = tool_command(path)
+        .args(compile_flags)
+        .args(["-dM", "-E", "-x", "c", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(cannot_run)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        match stdin.write_all(source) {
+            Ok(()) => {}
+            // A compiler that exits without reading its input fails the caller's
+            // status check.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(cannot_run(error)),
+        }
+    }
+    child.wait_with_output().map_err(cannot_run)
+}
+
+/// The value of `name` in the `#define` lines of a `-dM` preprocess, or `None` when
+/// the preprocessor does not define it.
+fn macro_value<'a>(macros: &'a str, name: &str) -> Option<&'a str> {
+    macros.lines().find_map(|line| {
+        let rest = line.strip_prefix("#define ")?.strip_prefix(name)?;
+        (rest.is_empty() || rest.starts_with(' ')).then(|| rest.trim())
+    })
+}
+
+/// The refusal for a compiler whose headers are glibc's (`glibc_headers`) or not
+/// while the carried runtime archive was built for `carried`, or nothing when they
+/// agree. A musl archive accepts any compiler whose headers are not glibc's, the
+/// most the headers tell.
+fn c_library_refusal(path: &Path, carried: CLibrary, glibc_headers: bool) -> Option<String> {
+    let found = match (carried, glibc_headers) {
+        (CLibrary::Glibc, true) | (CLibrary::Musl, false) => return None,
+        (CLibrary::Glibc, false) => {
+            "a C library other than glibc (its `<stdio.h>` does not define `__GLIBC__`)"
+        }
+        (CLibrary::Musl, true) => "glibc (its `<stdio.h>` defines `__GLIBC__`)",
+    };
+    Some(format!(
+        "native compiler `{}` compiles against {found}, but this chelis carries a runtime \
+         archive built for {carried}, which every native build links; name a C compiler for \
+         {carried}, for example with CHELIS_CC",
+        path.display(),
+        carried = carried.name()
+    ))
 }
 
 /// A compiler this process has already accepted for these flags. Compiling the
@@ -1019,6 +1137,9 @@ mod tests {
         // Trapping is not observable: [05-OP-46] makes status flags
         // unobservable and the profile installs no trap.
         verify_compiler_wrapper_no_trapping_math: "-fno-trapping-math" => Verdict::RowsDecide;
+        // Freestanding mode hides glibc's macros from `<stdint.h>` but not from
+        // `<stdio.h>`, which the C library check reads.
+        verify_compiler_wrapper_freestanding: "-ffreestanding" => Verdict::RowsDecide;
     }
 
     // With SSE2 or AArch64 floating point, FLT_EVAL_METHOD is 0 and there is no
@@ -1027,6 +1148,176 @@ mod tests {
     #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
     wrapper_verdicts! {
         verify_compiler_wrapper_excess_precision_fast: "-fexcess-precision=fast" => Verdict::Harmless;
+    }
+
+    /// The C library's integer rounding to even, which musl and glibc before 2.25
+    /// lack. Generated units must not reach it (spec/design/correctly_rounded_math.md
+    /// section 3.3), or no native build links on those C libraries.
+    #[cfg(unix)]
+    const ROUNDEVEN_FUNCTIONS: &[&str] = &["roundeven", "roundevenf", "roundevenl"];
+
+    /// The first symbol in `assembly` that names one of [`ROUNDEVEN_FUNCTIONS`]:
+    /// a whole token, with Mach-O's leading `_` and ELF's `@PLT` or `@GOTPCREL`
+    /// allowed.
+    #[cfg(unix)]
+    fn roundeven_reference(assembly: &str) -> Option<&str> {
+        assembly
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .find(|token| ROUNDEVEN_FUNCTIONS.contains(&token.trim_start_matches('_')))
+    }
+
+    /// The canary carries every kernel, so its code is every kernel's code: none
+    /// may call the C library's `roundeven` under the profile, on any target.
+    #[cfg(unix)]
+    #[test]
+    fn canary_calls_no_c_library_roundeven() {
+        let dir = tempfile::tempdir().unwrap();
+        let toolchain = test_toolchain(CodegenRequirements::default());
+        let assembly = canary_assembly(&toolchain.compiler, &toolchain.compile_flags, dir.path());
+        assert_eq!(roundeven_reference(&assembly), None);
+    }
+
+    /// Negative control: the scan finds a planted `roundeven` call.
+    #[cfg(unix)]
+    #[test]
+    fn roundeven_scan_reports_a_planted_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let toolchain = test_toolchain(CodegenRequirements::default());
+        let (source, output) = (dir.path().join("planted.c"), dir.path().join("planted.s"));
+        std::fs::write(
+            &source,
+            "double roundeven(double);\ndouble planted(double x) { return roundeven(x); }\n",
+        )
+        .unwrap();
+        // `-fno-builtin`: arm64 would otherwise inline the call as `frintn`.
+        let status = tool_command(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .args(["-fno-builtin", "-S", "-o"])
+            .arg(&output)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the planted call did not compile");
+        let assembly = std::fs::read_to_string(&output).unwrap();
+        assert_eq!(
+            roundeven_reference(&assembly).map(|token| token.trim_start_matches('_')),
+            Some("roundeven")
+        );
+    }
+
+    /// A compiler is refused exactly when its headers are not the carried runtime
+    /// archive's C library's (spec/08-backends.md section 7), naming the archive's.
+    #[test]
+    fn c_library_refusal_names_the_archive_library_on_a_mismatch() {
+        let path = Path::new("/usr/bin/cc");
+        assert_eq!(c_library_refusal(path, CLibrary::Glibc, true), None);
+        assert_eq!(c_library_refusal(path, CLibrary::Musl, false), None);
+        for (carried, glibc_headers) in [(CLibrary::Glibc, false), (CLibrary::Musl, true)] {
+            let refused = c_library_refusal(path, carried, glibc_headers)
+                .expect("a compiler for another C library is refused");
+            let archive = format!("built for {}", carried.name());
+            assert!(
+                refused.contains(&archive),
+                "{archive} missing from: {refused}"
+            );
+        }
+    }
+
+    /// A directory whose `<stdio.h>` is glibc's (it defines `__GLIBC__`) or not.
+    #[cfg(unix)]
+    fn fake_c_library_headers(dir: &Path, glibc: bool) -> PathBuf {
+        let include = dir.join(if glibc {
+            "glibc-include"
+        } else {
+            "other-include"
+        });
+        std::fs::create_dir_all(&include).unwrap();
+        let define = if glibc { "#define __GLIBC__ 2\n" } else { "" };
+        std::fs::write(
+            include.join("stdio.h"),
+            format!("{define}int puts(const char *s);\n"),
+        )
+        .unwrap();
+        include
+    }
+
+    /// The probe reads the headers the compiler includes, whatever the build
+    /// host's own C library is.
+    #[cfg(unix)]
+    #[test]
+    fn compiles_against_glibc_reads_the_headers_the_compiler_includes() {
+        let dir = tempfile::tempdir().unwrap();
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let path = resolve_executable(&compiler).expect("a C compiler on PATH");
+        for glibc in [true, false] {
+            let include = fake_c_library_headers(dir.path(), glibc);
+            let flags = [
+                "-nostdinc".to_string(),
+                "-isystem".to_string(),
+                include.display().to_string(),
+            ];
+            assert_eq!(compiles_against_glibc(&path, &flags), Ok(glibc));
+        }
+    }
+
+    /// Where the carried runtime names a C library, a compiler whose headers are
+    /// another library's is refused before anything compiles; elsewhere the check
+    /// does not apply.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_refuses_a_compiler_for_another_c_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        let include = fake_c_library_headers(dir.path(), CARRIED_C_LIBRARY == Some(CLibrary::Musl));
+        let foreign = wrapper(
+            dir.path(),
+            "foreign-cc",
+            &format!("-nostdinc -isystem '{}'", include.display()),
+        );
+        let result = verify_compiler(&foreign, &flags, &links);
+        match CARRIED_C_LIBRARY {
+            Some(carried) => assert!(
+                matches!(&result, Err(CompilerCheckError::Refused(reason))
+                    if reason.contains(&format!("built for {}", carried.name()))),
+                "{result:?}"
+            ),
+            None => assert!(
+                !matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("runtime archive built for")),
+                "{result:?}"
+            ),
+        }
+    }
+
+    /// A compiler that rejects a profile flag is refused as rejecting the pinned
+    /// profile, on every platform, not as one whose C library cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_reports_a_rejected_profile_flag_as_the_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let real = resolve_executable(&compiler).expect("a C compiler on PATH");
+        let path = dir.path().join("strict-cc");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = -fno-fast-math ]; then\n    \
+                 echo 'strict-cc: error: unsupported option -fno-fast-math' >&2\n    exit 1\n  fi\n\
+                 done\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = verify_compiler(path.to_str().unwrap(), &flags, &links);
+        assert!(
+            matches!(&result, Err(CompilerCheckError::Refused(reason))
+                if reason.contains("rejected the pinned profile") && reason.contains("-fno-fast-math")),
+            "{result:?}"
+        );
     }
 
     /// A profile that compiles with OpenMP also links with it, so an
@@ -1046,8 +1337,8 @@ mod tests {
     }
 
     /// The canary is linked as a real build is: the profile's compile flags,
-    /// then its link flags (`-lm` among them, which glibc needs for `fma`,
-    /// `roundeven`, and `sqrt`), for every requirement combination.
+    /// then its link flags (`-lm` among them, which glibc needs for `fma` and
+    /// `sqrt`), for every requirement combination.
     #[test]
     fn canary_links_with_the_profile_link_flags() {
         let (source, program) = (Path::new("canary.c"), Path::new("canary"));

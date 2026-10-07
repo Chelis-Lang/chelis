@@ -21,18 +21,17 @@ every lane compiles:
    that calls a kernel (design section 4.2). `contract_clean` drops what the
    contract forbids and what Chelis never observes: the `errno` blocks, the
    floating-point exception raises and status-flag save and clear, `<fenv.h>`, the `FENV_ACCESS` pragma, the
-   `noinline`/`cold` attributes, the inline-assembly `roundeven` arms (the
-   portable fallback beside them stays), and the x86-64 SSE intrinsic arms (the
+   `noinline`/`cold` attributes, and the x86-64 SSE intrinsic arms (the
    portable arm beside each stays), and a `#define` between an `if` arm and its
    `else` moves to the top of its kernel. The dynamic rounding-mode switch keeps only
    its round-to-nearest case, which Chelis pins at every entry (design section
    6). Values are unchanged: every dropped arm computes the same bits as the
    arm that stays;
-5. every `__builtin_roundeven` is reached through a `roundeven_finite` helper
-   that uses the builtin only on compilers that have it (GCC 10, Clang 17) and
-   otherwise rounds half to even with older builtins, to the same value. binary64
-   `sin` calls the builtin directly, so `guard_sin_roundeven` gives it binary64
-   `exp`'s helper verbatim and routes the call through it.
+5. every kernel that rounds a reduced argument to an integer calls one
+   `roundeven_finite` helper, `ROUNDEVEN_FINITE`, around `__builtin_rint`.
+   `inline_roundeven` replaces upstream's definitions (the `__builtin_roundeven`
+   macro and its fallback). `route_sin_roundeven` gives the helper to binary64
+   `sin`, which calls the builtin directly, and routes that call through it.
 
 The amalgamation opens with `#error` guards against fast math, finite-math-only,
 and excess-precision evaluation.
@@ -212,7 +211,6 @@ _PORTABLE_ARM_CONDITIONALS = (
     "#if defined(__x86_64__)",
     "#ifdef __x86_64__",
     "#ifdef CORE_MATH_SUPPORT_ERRNO",
-    "# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))",
 )
 
 _ROUNDING_SWITCH = re.compile(
@@ -333,58 +331,83 @@ def contract_clean(text: str, origin: str) -> str:
     return text
 
 
-# binary64 `sin` (`cr_sin_moderate`) calls `__builtin_roundeven` directly. GCC 9 and
-# older and Clang 16 and older (every Xcode 15) do not provide it, and `chelis build`
-# compiles every kernel into its compiler canary, so no native build worked on those
-# compilers. The other kernels that round to an integer call `roundeven_finite`,
-# which is the builtin where the compiler version provides it and a round-half-to-
-# even from older builtins otherwise; both give the same value for every finite input.
+# Six kernels round a reduced argument to an integer, ties to even: binary32 `sin`,
+# `cos`, and `tan`, and binary64 `exp` and `erfc` through an upstream
+# `roundeven_finite` helper, and binary64 `sin` (`cr_sin_moderate`) through a direct
+# `__builtin_roundeven` call. Upstream's helper is that builtin on GCC 10 and Clang 17
+# and a `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with
+# GCC 10 and 11, the builtin becomes a call to the C library's `roundeven`. musl
+# and glibc before 2.25 do not have it. `chelis build` compiles every kernel into
+# its compiler canary, so one such call stops every native build there.
+# `inline_roundeven` and `route_sin_roundeven` give all six `ROUNDEVEN_FINITE`
+# instead.
+#
+# `rint` rounds to an integer in the current rounding mode. Chelis pins
+# round-to-nearest-even at every entry point (design section 6), so `rint` gives the
+# value of `roundeven` for every finite input, the sign of zero included. AArch64
+# compiles it to one `frintx`, and GCC inlines it on baseline x86-64. Clang on
+# baseline x86-64 calls the C library's `rint`. Every C99 C library has it.
+# The portable `copysign((|x| + 2^52) - 2^52, x)` gives the same values, but it makes
+# most of these kernels about 20% slower on AArch64.
+ROUNDEVEN_FINITE = """\
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
+static double
+roundeven_finite (double x)
+{
+  return __builtin_rint (x);
+}
+"""
 _SIN_ROUNDEVEN_CALL = "__builtin_roundeven (invpi * ax)"
 _FENV_PRAGMA = "#pragma STDC FENV_ACCESS ON\n"
-ROUNDEVEN_HELPER_SOURCE = "src/binary64/exp/exp.c"
 _ROUNDEVEN_HELPER = re.compile(
     r"^/\* __builtin_roundeven was introduced in gcc 10:\n.*?^#endif\n", re.MULTILINE | re.DOTALL
 )
-_ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+\w*roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
-# The compiler versions that provide the builtin, as CORE-MATH spells the test.
-_ROUNDEVEN_GUARD = (
-    "#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17))"
-    " && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))"
-)
-_ROUNDEVEN_BUILTINS = {"__builtin_roundeven", "__builtin_roundevenf", "__builtin_roundevenl"}
+_ROUNDEVEN_DEFINE = re.compile(r"#[ \t]*define[ \t]+roundeven_finite\(x\)[ \t]+__builtin_roundeven \(x\)")
+# A `roundeven_finite` definition under any kernel prefix, however its signature is
+# spaced and whatever its parameter list.
+_ROUNDEVEN_DEFINITION = re.compile(r"(?<!\w)(\w*)roundeven_finite\s*\([^)]*\)\s*\{")
+_ROUNDEVEN_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+\w*roundeven_finite\b", re.MULTILINE)
+# Integer rounding a kernel must not reach except through `ROUNDEVEN_FINITE`: the
+# builtin and the C library function it lowers to.
+_ROUNDEVEN_CALLS = {"__builtin_roundeven", "__builtin_roundevenf", "__builtin_roundevenl",
+                    "roundeven", "roundevenf", "roundevenl"}
 
 
-def guard_sin_roundeven(text: str, read) -> str:
-    """binary64 `sin`'s text with binary64 `exp`'s `roundeven_finite` definition
-    after its `FENV_ACCESS` pragma and its `__builtin_roundeven` call replaced by a
-    call to that helper."""
-    helpers = _ROUNDEVEN_HELPER.findall(read(ROUNDEVEN_HELPER_SOURCE))
-    if len(helpers) != 1 or "roundeven_finite (double x)" not in helpers[0]:
-        raise VendorError(f"{ROUNDEVEN_HELPER_SOURCE} no longer defines one guarded roundeven_finite (double)")
+def inline_roundeven(text: str, origin: str) -> str:
+    """`text` with every upstream `roundeven_finite` helper (the builtin macro and its
+    fallback) replaced by `ROUNDEVEN_FINITE`."""
+    for helper in _ROUNDEVEN_HELPER.findall(text):
+        if not _ROUNDEVEN_DEFINE.search(helper) or not _ROUNDEVEN_DEFINITION.search(helper):
+            raise VendorError(f"{origin}: an upstream roundeven_finite helper no longer has the shape this replaces")
+    return _ROUNDEVEN_HELPER.sub(lambda _m: ROUNDEVEN_FINITE, text)
+
+
+def route_sin_roundeven(text: str) -> str:
+    """binary64 `sin`'s text with `ROUNDEVEN_FINITE` after its `FENV_ACCESS` pragma
+    and its `__builtin_roundeven` call replaced by a call to that helper."""
     if text.count(_SIN_ROUNDEVEN_CALL) != 1 or text.count(_FENV_PRAGMA) != 1:
-        raise VendorError("binary64 sin no longer has the one `__builtin_roundeven` call this guards")
+        raise VendorError("binary64 sin no longer has the one `__builtin_roundeven` call this routes")
     text = text.replace(_SIN_ROUNDEVEN_CALL, "roundeven_finite (invpi * ax)")
-    return text.replace(_FENV_PRAGMA, f"{_FENV_PRAGMA}\n{helpers[0]}")
+    return text.replace(_FENV_PRAGMA, f"{_FENV_PRAGMA}\n{ROUNDEVEN_FINITE}")
 
 
-def require_guarded_roundeven(text: str, origin: str) -> None:
-    """Fail unless every `__builtin_roundeven[fl]` in `text`'s code is the
-    `roundeven_finite` definition in the first arm of the compiler-version guard,
-    with the portable definition in its `#else` arm."""
-    lines = text.split("\n")
-    for m in _TOKEN.finditer(text):
-        if m.lastgroup != "ident" or m.group() not in _ROUNDEVEN_BUILTINS:
-            continue
-        index = text.count("\n", 0, m.start())
-        line = lines[index].strip()
-        guarded = (
-            _ROUNDEVEN_DEFINE.fullmatch(line) is not None
-            and 0 < index < len(lines) - 1
-            and lines[index - 1].strip() == _ROUNDEVEN_GUARD
-            and lines[index + 1].strip() == "#else"
-        )
-        if not guarded:
-            raise VendorError(f"{origin}: `{m.group()}` outside a guarded roundeven_finite: {line!r}")
+def require_inline_roundeven(text: str, origin: str) -> None:
+    """Fail unless `text` rounds to an integer only through `ROUNDEVEN_FINITE`, under
+    any kernel prefix: no `roundeven` builtin or C library function in its code, and
+    every `roundeven_finite` definition is that helper."""
+    found = sorted(_code_tokens(text) & _ROUNDEVEN_CALLS)
+    if found:
+        raise VendorError(f"{origin}: `{found[0]}` rounds to an integer outside the inline roundeven_finite")
+    macro = _ROUNDEVEN_MACRO.search(text)
+    if macro:
+        raise VendorError(f"{origin}: `{macro.group().strip()}` defines roundeven_finite as a macro, not the inline helper")
+    definitions: dict[str, int] = {}
+    for m in _ROUNDEVEN_DEFINITION.finditer(text):
+        definitions[m.group(1)] = definitions.get(m.group(1), 0) + 1
+    for prefix, count in sorted(definitions.items()):
+        if text.count(ROUNDEVEN_FINITE.replace("roundeven_finite", prefix + "roundeven_finite")) != count:
+            raise VendorError(f"{origin}: a {prefix}roundeven_finite definition is not the inline helper")
 
 
 def _reindent(body: str, indent: str) -> str:
@@ -504,10 +527,12 @@ def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     raw = read(kernel.path)
     rename = set(names)
     if kernel.path == "src/binary64/sin/sin.c":
-        raw = guard_sin_roundeven(raw, read)
+        raw = route_sin_roundeven(raw)
+    text = inline_roundeven(inline_local_includes(raw, kernel, read), kernel.path)
+    if _ROUNDEVEN_DEFINITION.search(text):
         rename.add("roundeven_finite")
-    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
-    require_guarded_roundeven(text, kernel.path)
+    text = contract_clean(text, kernel.path)
+    require_inline_roundeven(text, kernel.path)
     if kernel.upstream_entry not in rename:
         raise VendorError(f"{kernel.name}: entry {kernel.upstream_entry} missing from identifiers")
     body = rename_identifiers(text, rename, kernel.prefix)
