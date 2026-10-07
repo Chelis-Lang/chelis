@@ -249,7 +249,7 @@ class TargetSelectionTests(unittest.TestCase):
         self.assertNotIn("cargo nextest run --workspace", str(jobs))
         self.assertEqual(
             jobs["integration"]["needs"],
-            ["changes", "ci-fast", "change-owned-report"],
+            ["changes", "ci-fast", "change-owned-report", "clarabel-provider"],
         )
         self.assertIn("ci-fast=${{ needs.ci-fast.result }}", str(jobs["integration"]))
         self.assertIn(

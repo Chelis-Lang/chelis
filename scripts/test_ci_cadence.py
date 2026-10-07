@@ -231,7 +231,7 @@ def assert_extended(test, pr, nightly):
     test.assertIn("ProfilePartitionTests", str(full))
     test.assertEqual(
         pr["jobs"]["integration"]["needs"],
-        ["changes", "ci-fast", "change-owned-report"],
+        ["changes", "ci-fast", "change-owned-report", "clarabel-provider"],
     )
     # chelis#1742: the runtime-extent oracle runs in this workflow and
     # nowhere else, so the nightly is the only place its receipts are

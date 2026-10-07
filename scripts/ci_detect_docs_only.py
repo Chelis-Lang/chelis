@@ -22,10 +22,10 @@ would let a code change skip the heavy gate.
 Usage:
     git diff --name-only <base>..<head> | python3 scripts/ci_detect_docs_only.py
 
-Writes `docs_only=<bool>`, `diagnostic_kind_changed=<bool>`, and
-`ci_contract_changed=<bool>` to
+Writes `docs_only=<bool>`, `diagnostic_kind_changed=<bool>`,
+`ci_contract_changed=<bool>`, and `clarabel_changed=<bool>` to
 the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
-mechanism); if that env var is unset it prints both lines to stdout so the
+mechanism); if that env var is unset it prints the four lines to stdout so the
 script is runnable and testable off CI. Exit status is always 0. An empty or
 unreadable change set fails safe: it runs the full build and the
 diagnostic-kind mutation oracle.
@@ -110,6 +110,55 @@ DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
     }
 )
 
+# Feature builds and native-provider integration tests belong to this narrow
+# owner set. Shared bridge files are included because their edits can change
+# the provider call even when the Clarabel package itself is untouched.
+CLARABEL_PREFIXES: tuple[str, ...] = (
+    "crates/chelis-clarabel-provider/",
+    "crates/chelis-prove/src/property_runner/",
+    "crates/chelis-runtime-bundle/",
+    "examples/clarabel_qp/",
+    "packages/chelis-clarabel/",
+)
+CLARABEL_PATHS: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        ".github/workflows/smt-full-prove.yml",
+        "Cargo.toml",
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "crates/chelis-cli/Cargo.toml",
+        "crates/chelis-cli/src/main.rs",
+        "crates/chelis-cli/src/prove/mod.rs",
+        "crates/chelis-cli/src/prove/property_run.rs",
+        "crates/chelis-cli/tests/clarabel_native_eval.rs",
+        "crates/chelis-compiler-api/Cargo.toml",
+        "crates/chelis-compiler-api/src/compiler.rs",
+        "crates/chelis-compiler-api/src/lib.rs",
+        "crates/chelis-compiler-api/src/runtime/clarabel.rs",
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        "crates/chelis-compiler-api/src/runtime/invariant.rs",
+        "crates/chelis-compiler-api/src/runtime/mod.rs",
+        "crates/chelis-ir/src/host.rs",
+        "crates/chelis-ir/src/ownership/ir.rs",
+        "crates/chelis-ir/src/ownership/lower.rs",
+        "crates/chelis-ir/src/ownership/mod.rs",
+        "crates/chelis-prove/Cargo.toml",
+        "crates/chelis-prove/src/property_runner.rs",
+        "crates/chelis-reef/src/lib.rs",
+        "crates/chelis-runtime-bundle/Cargo.toml",
+        "crates/chelis-runtime/Cargo.toml",
+        "crates/chelis-runtime/include/chelis_runtime.h",
+        "crates/chelis-runtime/src/lib.rs",
+        "crates/chelis-runtime/src/native_provider.rs",
+        "scripts/check_configuration_closure.py",
+        "scripts/ci_detect_docs_only.py",
+        "scripts/gate.py",
+        "scripts/test_check_configuration_closure.py",
+        "scripts/test_ci_detect_docs_only.py",
+        "scripts/test_gate.py",
+    }
+)
+
 def is_doc_path(path: str) -> bool:
     """True if `path` is documentation/prose under the allowlist."""
     norm = path.strip().strip('"')
@@ -148,10 +197,23 @@ def diagnostic_kind_changed(paths: list[str]) -> bool:
     return any(path in DIAGNOSTIC_KIND_PATHS for path in cleaned)
 
 
+def clarabel_changed(paths: list[str]) -> bool:
+    """Select feature validation for provider or native-call bridge changes."""
+    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
+    if not cleaned:
+        return True
+    return any(
+        path in CLARABEL_PATHS
+        or any(path.startswith(prefix) for prefix in CLARABEL_PREFIXES)
+        for path in cleaned
+    )
+
+
 def _emit(
     docs_only: bool,
     diagnostic_changed: bool,
     contract_changed: bool,
+    clarabel_owner_changed: bool,
 ) -> None:
     lines = [
         f"docs_only={'true' if docs_only else 'false'}",
@@ -159,6 +221,8 @@ def _emit(
         f"{'true' if diagnostic_changed else 'false'}",
         "ci_contract_changed="
         f"{'true' if contract_changed else 'false'}",
+        "clarabel_changed="
+        f"{'true' if clarabel_owner_changed else 'false'}",
     ]
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -175,6 +239,7 @@ def main(argv: list[str]) -> int:
         is_docs_only(paths),
         diagnostic_kind_changed(paths),
         ci_contract_changed(paths),
+        clarabel_changed(paths),
     )
     return 0
 

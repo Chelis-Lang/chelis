@@ -206,7 +206,7 @@ def assert_change_owned_topology(
 
     stable = jobs["integration"]
     test.assertEqual(
-        stable["needs"], ["changes", "ci-fast", "change-owned-report"]
+        stable["needs"], ["changes", "ci-fast", "change-owned-report", "clarabel-provider"]
     )
     stable_commands = _run_steps(stable)
     test.assertIn("ci-fast=${{ needs.ci-fast.result }}", stable_commands)

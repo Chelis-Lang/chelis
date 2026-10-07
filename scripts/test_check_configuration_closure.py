@@ -296,7 +296,7 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertEqual(flags["default-features"], ())
         self.assertEqual(flags["no-default-features"], ("--no-default-features",))
         self.assertEqual(flags["all-features"], ("--all-features",))
-        self.assertEqual(flags["cvc5-features"][0], "--features")
+        self.assertEqual(flags["clarabel-provider"], ("--features", "chelis-cli/clarabel-provider"))
         for run in CLOSURE.CLIPPY_MATRIX:
             # `-D warnings` sits after `--`; it must never be read as a flag.
             self.assertNotIn("-D", run.cargo_feature_flags())
@@ -309,8 +309,8 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertIn(("chelis-cli", "chelis-prove"), default)
         self.assertNotIn(("chelis-cli", "chelis-prove"), none)
         # Named by no command either, but `smt` turns it on transitively.
-        cvc5 = CLOSURE.resolved_features(rows["cvc5-features"], REPO_ROOT)
-        self.assertIn(("chelis-prove", "cvc5-rs"), cvc5)
+        all_features = CLOSURE.resolved_features(rows["all-features"], REPO_ROOT)
+        self.assertIn(("chelis-prove", "cvc5-rs"), all_features)
 
     def test_migration_off_row_compiles_core_without_the_cli_feature(self) -> None:
         rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
@@ -363,8 +363,11 @@ class MatrixCoverageTests(unittest.TestCase):
             self.assertEqual(run.cadence, CLOSURE.NIGHTLY)
             self.assertIn(" ".join(run.command), commands)
         gate_rows = [run for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"]
-        self.assertEqual(len(gate_rows), 5)
-        self.assertIn("cvc5-features", {run.label for run in gate_rows})
+        self.assertEqual(len(gate_rows), 4)
+        self.assertNotIn("clarabel-provider", {run.label for run in gate_rows})
+        provider = next(run for run in CLOSURE.CLIPPY_MATRIX if run.label == "clarabel-provider")
+        self.assertEqual(provider.cadence, CLOSURE.NIGHTLY)
+        self.assertEqual(provider.owner, ".github/workflows/smt-full-prove.yml")
         for run in gate_rows:
             self.assertEqual(run.hosts, ("linux",))
             self.assertEqual(run.cadence, CLOSURE.PER_PULL_REQUEST)

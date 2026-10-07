@@ -110,6 +110,9 @@ jobs:
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
+      - name: Lint native Clarabel provider without SMT
+        run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider -- -D warnings
+
       # This runner is the only one that provisions every solver toolchain, so
       # it is the only place `--all-features` can compile. It closes Clippy's
       # `disallowed_types` coverage over the `z3`, `carcara`, and `arb`
@@ -145,6 +148,12 @@ jobs:
 
       - name: Run CLI prove tests with the release solver feature
         run: cargo test -p chelis-cli --features smt --test prove
+
+      - name: Check native Clarabel package calls
+        run: cargo test -p chelis-cli --features clarabel-provider --test clarabel_native_eval
+
+      - name: Check native Clarabel ideal QP proofs
+        run: cargo test -p chelis-cli --features clarabel-provider,smt --test clarabel_native_eval
 
       # Every test in these CLI targets is smt-gated, so default-feature PR
       # lanes list none; this job is their owner.

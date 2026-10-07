@@ -155,7 +155,6 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--workspace",
             "--all-targets",
             "--features",
-            "chelis-cli/clarabel-provider,"
             "chelis-cli/ownership-ledger,"
             "chelis-compiler-api/compilation-trace,"
             "chelis-compiler-api/ownership-ledger,"
@@ -202,21 +201,14 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
-        label="cvc5-features",
+        label="clarabel-provider",
         command=(
-            "cargo",
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--features",
-            "chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
-            "--",
-            "-D",
-            "warnings",
+            "cargo", "clippy", "--workspace", "--all-targets", "--features",
+            "chelis-cli/clarabel-provider", "--", "-D", "warnings",
         ),
-        owner="scripts/gate.py",
+        owner=".github/workflows/smt-full-prove.yml",
         hosts=("linux",),
-        cadence=PER_PULL_REQUEST,
+        cadence=NIGHTLY,
     ),
     ClippyRun(
         label="all-features",
@@ -271,6 +263,22 @@ class NightlyOnlySource:
 # source. `--require-complete` (run by the nightly job) drops the allowance
 # entirely, so a new uncovered file cannot hide behind it.
 NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
+    NightlyOnlySource(
+        path="crates/chelis-cli/tests/clarabel_native_eval.rs",
+        row="clarabel-provider",
+    ),
+    NightlyOnlySource(
+        path="crates/chelis-compiler-api/src/runtime/clarabel.rs",
+        row="clarabel-provider",
+    ),
+    NightlyOnlySource(
+        path="crates/chelis-prove/src/property_runner/qp_ideal.rs",
+        row="all-features",
+    ),
+    NightlyOnlySource(
+        path="crates/chelis-runtime/src/native_provider.rs",
+        row="clarabel-provider",
+    ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/z3_engine.rs",
         row="all-features",
