@@ -14,6 +14,7 @@ use std::process::{Command, Output};
 /// The crates the consumer builds from source.
 const CRATES: &[&str] = &[
     "chelis-abi",
+    "chelis-clarabel-provider",
     "chelis-runtime",
     "chelis-runtime-bundle",
     "chelis-runtime-bundle-macro",
