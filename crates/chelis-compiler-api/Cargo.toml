@@ -42,6 +42,7 @@ serde = { version = "1", features = ["derive"] }
 # Fixed binary64 source/report adapters must read back their emitted decimals exactly.
 serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 sha2 = "0.10"
+stacker.workspace = true
 
 [dev-dependencies]
 chelis-crmath.workspace = true

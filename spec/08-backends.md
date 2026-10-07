@@ -31,6 +31,10 @@ evaluation obey the same channel rules. Compiler API evaluation errors retain
 the preceding transcript separately from diagnostics so embedders can choose
 their own output sink without rerunning the program.
 
+Recursive user-function evaluation checks the available native stack before
+descending. If its stack budget is exhausted, it reports an evaluation error
+through these channels before another recursive call can abort the process.
+
 ### 1.2 Executable grammar validation
 
 `chelis validate` checks source against the executable grammars before any
