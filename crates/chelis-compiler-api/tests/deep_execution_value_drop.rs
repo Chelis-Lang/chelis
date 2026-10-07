@@ -76,9 +76,23 @@ fn every_result_container_releases_on_a_small_stack() {
 
 #[test]
 fn shallow_execution_value_keeps_its_wire_shape() {
-    let value = wrap("adt", ExecutionValue::Unit);
-    assert_eq!(
-        serde_json::to_string(&value).expect("serialize shallow value"),
-        r#"{"type":"adt","ctor":"Link","fields":[{"type":"unit"}]}"#
-    );
+    for (case, expected) in [
+        ("list", r#"{"type":"list","value":[{"type":"unit"}]}"#),
+        ("tuple", r#"{"type":"tuple","value":[{"type":"unit"}]}"#),
+        (
+            "adt",
+            r#"{"type":"adt","ctor":"Link","fields":[{"type":"unit"}]}"#,
+        ),
+        (
+            "dict",
+            r#"{"type":"dict","entries":[{"key":{"type":"string","value":"k"},"value":{"type":"unit"}}]}"#,
+        ),
+    ] {
+        let value = wrap(case, ExecutionValue::Unit);
+        assert_eq!(
+            serde_json::to_string(&value).expect("serialize shallow value"),
+            expected,
+            "{case} wire spelling changed"
+        );
+    }
 }
