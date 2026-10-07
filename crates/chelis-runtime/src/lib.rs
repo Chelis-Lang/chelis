@@ -7359,20 +7359,126 @@ unsafe fn write_stdout(text: &str) {
         .unwrap_or_else(|error| runtime_fail!("compiled stdout flush failed: {error}"));
 }
 
-unsafe fn value_to_string_inline(value: chelis_value) -> String {
-    validate_value(value, "recursive value observation");
-    match value.tag {
-        chelis_value_tag::CHELIS_VALUE_UNIT => "()".to_owned(),
-        chelis_value_tag::CHELIS_VALUE_SCALAR => render_scalar(value.payload.scalar),
-        chelis_value_tag::CHELIS_VALUE_STRING => string_value(value.payload.string).value.clone(),
-        chelis_value_tag::CHELIS_VALUE_TENSOR => tensor_to_string(value.payload.tensor),
-        chelis_value_tag::CHELIS_VALUE_LIST => list_to_string(value.payload.list),
-        chelis_value_tag::CHELIS_VALUE_TUPLE => tuple_to_string(value.payload.tuple),
-        chelis_value_tag::CHELIS_VALUE_DICT => dict_to_string(value.payload.dict),
-        chelis_value_tag::CHELIS_VALUE_ADT => adt_to_string(value.payload.adt),
-        chelis_value_tag::CHELIS_VALUE_OPTION => option_to_string(value.payload.option),
-        _ => unreachable!("validate_value rejects unknown tags"),
+/// Each pending value or container replaces one native recursive call in host
+/// observation. Container pointers remain live for the duration of printing;
+/// this worklist borrows them and never changes their ownership.
+enum ValueRenderStep {
+    Value(chelis_value),
+    List(*const chelis_list),
+    Tuple(*const chelis_tuple),
+    Dict(*const chelis_dict),
+    Adt(*const chelis_adt),
+    Option(*const chelis_option),
+    Text(&'static str),
+}
+
+unsafe fn render_value_steps(root: ValueRenderStep) -> String {
+    let mut out = String::new();
+    let mut steps = vec![root];
+    while let Some(step) = steps.pop() {
+        match step {
+            ValueRenderStep::Text(text) => out.push_str(text),
+            ValueRenderStep::Value(value) => {
+                validate_value(value, "recursive value observation");
+                match value.tag {
+                    chelis_value_tag::CHELIS_VALUE_UNIT => out.push_str("()"),
+                    chelis_value_tag::CHELIS_VALUE_SCALAR => {
+                        out.push_str(&render_scalar(value.payload.scalar));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_STRING => {
+                        out.push_str(&string_value(value.payload.string).value);
+                    }
+                    chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                        out.push_str(&tensor_to_string(value.payload.tensor));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_LIST => {
+                        steps.push(ValueRenderStep::List(value.payload.list));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_TUPLE => {
+                        steps.push(ValueRenderStep::Tuple(value.payload.tuple));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_DICT => {
+                        steps.push(ValueRenderStep::Dict(value.payload.dict));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_ADT => {
+                        steps.push(ValueRenderStep::Adt(value.payload.adt));
+                    }
+                    chelis_value_tag::CHELIS_VALUE_OPTION => {
+                        steps.push(ValueRenderStep::Option(value.payload.option));
+                    }
+                    _ => unreachable!("validate_value rejects unknown tags"),
+                }
+            }
+            ValueRenderStep::List(list) => {
+                out.push('[');
+                steps.push(ValueRenderStep::Text("]"));
+                if !list.is_null() {
+                    for (index, value) in (*list).live().iter().enumerate().rev() {
+                        steps.push(ValueRenderStep::Value(*value));
+                        if index > 0 {
+                            steps.push(ValueRenderStep::Text(", "));
+                        }
+                    }
+                }
+            }
+            ValueRenderStep::Tuple(tuple) => {
+                out.push('(');
+                steps.push(ValueRenderStep::Text(")"));
+                if !tuple.is_null() {
+                    for (index, value) in (*tuple).items.iter().enumerate().rev() {
+                        steps.push(ValueRenderStep::Value(*value));
+                        if index > 0 {
+                            steps.push(ValueRenderStep::Text(", "));
+                        }
+                    }
+                }
+            }
+            ValueRenderStep::Dict(dict) => {
+                out.push_str("dict(");
+                steps.push(ValueRenderStep::Text(")"));
+                if !dict.is_null() {
+                    for (index, entry) in (*dict).entries.iter().enumerate().rev() {
+                        steps.push(ValueRenderStep::Value(entry.value));
+                        steps.push(ValueRenderStep::Text(": "));
+                        steps.push(ValueRenderStep::Value(entry.key));
+                        if index > 0 {
+                            steps.push(ValueRenderStep::Text(", "));
+                        }
+                    }
+                }
+            }
+            ValueRenderStep::Adt(adt) => {
+                if adt.is_null() {
+                    out.push_str("<null-adt>");
+                    continue;
+                }
+                out.push_str(&string_value((*adt).ctor).value);
+                if !(*adt).fields.is_empty() {
+                    out.push('(');
+                    steps.push(ValueRenderStep::Text(")"));
+                    for (index, field) in (*adt).fields.iter().enumerate().rev() {
+                        steps.push(ValueRenderStep::Value(*field));
+                        if index > 0 {
+                            steps.push(ValueRenderStep::Text(", "));
+                        }
+                    }
+                }
+            }
+            ValueRenderStep::Option(option) => match (*option).value {
+                Some(value) => {
+                    out.push_str("Some(");
+                    steps.push(ValueRenderStep::Text(")"));
+                    steps.push(ValueRenderStep::Value(value));
+                }
+                None => out.push_str("None"),
+            },
+        }
     }
+    out
+}
+
+unsafe fn value_to_string_inline(value: chelis_value) -> String {
+    render_value_steps(ValueRenderStep::Value(value))
 }
 
 #[no_mangle]
@@ -8336,75 +8442,19 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
 // invariant 1 (the storage decision is all-layers-or-nothing).
 
 unsafe fn list_to_string(list: *const chelis_list) -> String {
-    let mut out = String::from("[");
-    if !list.is_null() {
-        for (i, value) in (*list).live().iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&value_to_string_inline(*value));
-        }
-    }
-    out.push(']');
-    out
+    render_value_steps(ValueRenderStep::List(list))
 }
 
 unsafe fn tuple_to_string(tuple: *const chelis_tuple) -> String {
-    let mut out = String::from("(");
-    if !tuple.is_null() {
-        for (i, value) in (*tuple).items.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&value_to_string_inline(*value));
-        }
-    }
-    out.push(')');
-    out
+    render_value_steps(ValueRenderStep::Tuple(tuple))
 }
 
 unsafe fn dict_to_string(dict: *const chelis_dict) -> String {
-    let mut out = String::from("dict(");
-    if !dict.is_null() {
-        for (i, entry) in (*dict).entries.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&value_to_string_inline(entry.key));
-            out.push_str(": ");
-            out.push_str(&value_to_string_inline(entry.value));
-        }
-    }
-    out.push(')');
-    out
+    render_value_steps(ValueRenderStep::Dict(dict))
 }
 
 unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
-    if adt.is_null() {
-        return "<null-adt>".to_string();
-    }
-    let ctor = string_value((*adt).ctor).value.clone();
-    if (*adt).fields.is_empty() {
-        return ctor;
-    }
-    let mut out = format!("{ctor}(");
-    for (index, field) in (*adt).fields.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&value_to_string_inline(*field));
-    }
-    out.push(')');
-    out
-}
-
-/// An option renders as the constructor it holds, exactly as `chelis eval`
-/// renders `Some` and `None` (chelis#2576).
-unsafe fn option_to_string(option: *const chelis_option) -> String {
-    match (*option).value {
-        Some(value) => format!("Some({})", value_to_string_inline(value)),
-        None => "None".to_owned(),
-    }
+    render_value_steps(ValueRenderStep::Adt(adt))
 }
 
 /// One tensor element's text per the frozen observation contract
