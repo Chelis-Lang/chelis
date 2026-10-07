@@ -112,10 +112,11 @@ fetched files with the lockfile hashes and reports mismatches.
   shell release tags. You can supply explicit `ORG/REPO@TAG` entries
   instead.
 
-`chelis reef install --from-github` and `chelis reef setup` with a lockfile
-download public releases without a token. A search for a dependency version
-by name needs a token, for example `chelis reef build` without a
-lockfile. Reef uses `GITHUB_TOKEN` if set, then `gh auth token`, for that
+`chelis reef install --from-github`, `chelis reef install --from-lockfile` and
+`chelis reef setup` with a lockfile download public releases without a token.
+A search for a dependency version by name needs a token, for example
+`chelis reef build` without a lockfile. Reef uses `GITHUB_TOKEN` if set, then
+`gh auth token`, for that
 search, for private repositories and for higher API rate limits. A private
 repository needs read access. Source
 packages install in the local Reef registry, normally `~/.chelis/reef`.
