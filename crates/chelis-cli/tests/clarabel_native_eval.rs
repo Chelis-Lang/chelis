@@ -10,7 +10,7 @@ fn package() -> PathBuf {
 }
 
 fn example() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/illustrative/clarabel_qp")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/clarabel_qp")
 }
 
 fn eval(file: &str) -> std::process::Output {
@@ -42,6 +42,27 @@ fn checked_unconstrained_and_inequality_calls_solve() {
 
 #[test]
 fn path_dependency_calls_the_native_solver() {
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args(["fmt", "src/main.ch", "--check"])
+        .assert()
+        .success();
+    let check = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args(["check", "src/main.ch"])
+        .output()
+        .expect("check example");
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).expect("check JSON");
+    assert_eq!(report["score"], 1.0);
+    assert_eq!(report["errors"].as_array().map(Vec::len), Some(0));
+    assert_eq!(report["unresolved_names"].as_array().map(Vec::len), Some(0));
     let result = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .current_dir(example())
@@ -492,9 +513,10 @@ fn changed_provider_source_cannot_grant_the_ideal_contract() {
         directory.path().join("provider/reef.toml"),
     )
     .expect("copy provider manifest");
-    let manifest = std::fs::read_to_string(example().join("reef.toml"))
-        .expect("example manifest")
-        .replace("../../../packages/chelis-clarabel", "provider");
+    let original_manifest =
+        std::fs::read_to_string(example().join("reef.toml")).expect("example manifest");
+    let manifest = original_manifest.replace("../../packages/chelis-clarabel", "provider");
+    assert_ne!(manifest, original_manifest);
     std::fs::write(directory.path().join("reef.toml"), manifest).expect("write example manifest");
     std::fs::copy(
         example().join("src/main.ch"),

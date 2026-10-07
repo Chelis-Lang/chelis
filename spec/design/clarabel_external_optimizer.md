@@ -120,7 +120,7 @@ unavailable-provider body. With the `clarabel-provider` Cargo feature, the
 evaluator intercepts the resolved package function and calls the Rust adapter.
 The `packages/chelis-clarabel/tests/` programs exercise a solve, an
 inequality, a stopped result, and an invalid cone partition. The separate
-`examples/illustrative/clarabel_qp` package exercises a path dependency.
+`examples/clarabel_qp` package exercises a path dependency.
 The package README gives the exact commands.
 
 The provider feature uses a pinned Rust dependency and dispatches only when

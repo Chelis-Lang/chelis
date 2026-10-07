@@ -31,9 +31,9 @@ solver runs. The optional provider feature is needed for execution. The
 provider call is admitted only for this package's registered version and exact
 `src/qp.ch` source; an edited package runs its own Chelis body instead.
 
-`examples/illustrative/clarabel_qp` is a separate Chelis package with a
+`examples/clarabel_qp` is a separate Chelis package with a
 path dependency on this package. From that directory, run
-`../../../target/debug/chelis eval --file src/main.ch` after the build above.
+`../../target/debug/chelis eval --file src/main.ch` after the build above.
 Its `optimize(target)` function constructs a typed QP from an argument and
 returns the solver's status-bearing result to `main`.
 
@@ -43,12 +43,12 @@ For the ideal mathematical proof view, build with both provider and SMT features
 cargo build -p chelis-cli --features clarabel-provider,smt
 ```
 
-From `examples/illustrative/clarabel_qp`, run:
+From `examples/clarabel_qp`, run:
 
 ```sh
-../../../target/debug/chelis prove tests/ideal_stationary.ch --tier smt-only --json
-../../../target/debug/chelis prove tests/ideal_baseline.ch --tier smt-only --json
-../../../target/debug/chelis prove tests/ideal_wrapper.ch --tier smt-only --json
+../../target/debug/chelis prove tests/ideal_stationary.ch --tier smt-only --json
+../../target/debug/chelis prove tests/ideal_baseline.ch --tier smt-only --json
+../../target/debug/chelis prove tests/ideal_wrapper.ch --tier smt-only --json
 ```
 
 These properties opt into `clarabel.qp.ideal_optimality` for the imported

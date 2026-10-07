@@ -10,4 +10,4 @@ license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
 [dependencies]
-chelis-clarabel = { path = "../../../packages/chelis-clarabel" }
+chelis-clarabel = { path = "../../packages/chelis-clarabel" }

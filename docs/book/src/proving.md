@@ -84,7 +84,7 @@ returns one direct `solve` call. A property may attach
 `with contract = "clarabel.qp.ideal_optimality"` to use the `Solved` primal as
 an ideal exact-real optimizer for that call's `P`, `q`, `A`, `b`, and cones. The
 non-`Solved` arm must establish its claim without that assumption. See the
-executable files in `examples/illustrative/clarabel_qp/tests/` and the commands
+executable files in `examples/clarabel_qp/tests/` and the commands
 in `packages/chelis-clarabel/README.md`.
 
 The SMT lowering accepts fixed literal QP data with zero and nonnegative

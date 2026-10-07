@@ -4375,7 +4375,7 @@ packages = [
 # The checked path dependency and solver call are exercised by the feature-gated
 # chelis-cli::clarabel_native_eval integration target.
 [[path_rule]]
-prefix = "examples/illustrative/clarabel_qp/"
+prefix = "examples/clarabel_qp/"
 disposition = "packages"
 packages = ["chelis-cli"]
 
