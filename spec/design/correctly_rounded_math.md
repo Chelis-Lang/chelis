@@ -93,9 +93,9 @@ Read from the upstream sources:
   even: binary32 `sin`, `cos`, `tan` and binary64 `exp`, `erfc` through a
   `roundeven_finite` helper, binary64 `sin` through a direct `__builtin_roundeven` call.
   Upstream's helper is that builtin on GCC 10 and Clang 17, inline assembly or a
-  `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with GCC 10, the
-  builtin lowers to a call to the C library's `roundeven`. musl and glibc before 2.25 do
-  not provide it. §3.3 therefore replaces all six with one helper around
+  `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with GCC 10 and
+  11, the builtin lowers to a call to the C library's `roundeven`. musl and glibc before
+  2.25 do not provide it. §3.3 therefore replaces all six with one helper around
   `__builtin_rint`. The portable `copysign((|x| + 2^52) - 2^52, x)` gives the same
   values, but it makes most of these kernels about 20% slower on AArch64.
 - **FMA.** The kernels call `__builtin_fma`. Where the target has no hardware FMA in its
@@ -305,9 +305,10 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   built for fails the build before anything compiles (spec/08 §7). The archive comes
   from the compiler's own build, so its C library is that build's Rust target
   environment (`gnu` or `musl`). After the profile's macro check, `verify_compiler`
-  reads the compiler's C library from its `<stdint.h>`, which defines `__GLIBC__`
-  under glibc and not under musl; C libraries that also define it for compatibility,
-  such as uClibc-ng, read as glibc.
+  reads the compiler's C library from its `<stdio.h>`, which defines `__GLIBC__` under
+  glibc and not under musl. GCC and Clang supply no `<stdio.h>` of their own, so a
+  wrapper that adds `-ffreestanding` still shows the C library's header. C libraries
+  that also define `__GLIBC__` for compatibility, such as uClibc-ng, read as glibc.
 
 **The obligation table.** The canary is generated, not hand-written. `chelis_crmath::profile`
 holds a closed list of the profile's obligations, each tied to the text it enforces:

@@ -336,10 +336,11 @@ def contract_clean(text: str, origin: str) -> str:
 # `roundeven_finite` helper, and binary64 `sin` (`cr_sin_moderate`) through a direct
 # `__builtin_roundeven` call. Upstream's helper is that builtin on GCC 10 and Clang 17
 # and a `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with
-# GCC 10, the builtin becomes a call to the C library's `roundeven`. musl and glibc
-# before 2.25 do not have it. `chelis build` compiles every kernel into its compiler
-# canary, so one such call stops every native build there. `inline_roundeven` and
-# `route_sin_roundeven` give all six `ROUNDEVEN_FINITE` instead.
+# GCC 10 and 11, the builtin becomes a call to the C library's `roundeven`. musl
+# and glibc before 2.25 do not have it. `chelis build` compiles every kernel into
+# its compiler canary, so one such call stops every native build there.
+# `inline_roundeven` and `route_sin_roundeven` give all six `ROUNDEVEN_FINITE`
+# instead.
 #
 # `rint` rounds to an integer in the current rounding mode. Chelis pins
 # round-to-nearest-even at every entry point (design section 6), so `rint` gives the

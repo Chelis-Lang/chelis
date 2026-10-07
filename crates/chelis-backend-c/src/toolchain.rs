@@ -406,16 +406,19 @@ fn check_c_library(path: &Path, compile_flags: &[String]) -> Result<(), String> 
     }
 }
 
-/// Whether `path` compiles against glibc under `compile_flags`: its `<stdint.h>`
-/// defines `__GLIBC__`, which glibc's headers do and musl's do not. musl defines no
-/// public macro that identifies it, so the headers tell glibc from every other C
-/// library and no more. A compiler like `musl-gcc`, which reports a `-gnu` target but
-/// compiles against musl, reads as what its headers are.
+/// Whether `path` compiles against glibc under `compile_flags`: its `<stdio.h>`
+/// defines `__GLIBC__`, which glibc's headers do and musl's do not. The probe reads
+/// `<stdio.h>`, which GCC and Clang never supply themselves, so a wrapper that adds
+/// `-ffreestanding` still reads the C library's header. musl defines no public macro
+/// that identifies it, and uClibc-ng defines `__GLIBC__` for compatibility. So the
+/// headers tell glibc and glibc-compatible C libraries from the rest, and no more.
+/// A compiler like `musl-gcc`, which reports a `-gnu` target but compiles against
+/// musl, reads as what its headers are.
 fn compiles_against_glibc(path: &Path, compile_flags: &[String]) -> Result<bool, String> {
-    let output = preprocessor_macros(path, compile_flags, b"#include <stdint.h>\n")?;
+    let output = preprocessor_macros(path, compile_flags, b"#include <stdio.h>\n")?;
     if !output.status.success() {
         return Err(format!(
-            "native compiler `{}` cannot preprocess `#include <stdint.h>`, so its C library \
+            "native compiler `{}` cannot preprocess `#include <stdio.h>`, so its C library \
              cannot be read: {}",
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
@@ -472,9 +475,9 @@ fn c_library_refusal(path: &Path, carried: CLibrary, glibc_headers: bool) -> Opt
     let found = match (carried, glibc_headers) {
         (CLibrary::Glibc, true) | (CLibrary::Musl, false) => return None,
         (CLibrary::Glibc, false) => {
-            "a C library other than glibc (its `<stdint.h>` does not define `__GLIBC__`)"
+            "a C library other than glibc (its `<stdio.h>` does not define `__GLIBC__`)"
         }
-        (CLibrary::Musl, true) => "glibc (its `<stdint.h>` defines `__GLIBC__`)",
+        (CLibrary::Musl, true) => "glibc (its `<stdio.h>` defines `__GLIBC__`)",
     };
     Some(format!(
         "native compiler `{}` compiles against {found}, but this chelis carries a runtime \
@@ -1134,6 +1137,9 @@ mod tests {
         // Trapping is not observable: [05-OP-46] makes status flags
         // unobservable and the profile installs no trap.
         verify_compiler_wrapper_no_trapping_math: "-fno-trapping-math" => Verdict::RowsDecide;
+        // Freestanding mode hides glibc's macros from `<stdint.h>` but not from
+        // `<stdio.h>`, which the C library check reads.
+        verify_compiler_wrapper_freestanding: "-ffreestanding" => Verdict::RowsDecide;
     }
 
     // With SSE2 or AArch64 floating point, FLT_EVAL_METHOD is 0 and there is no
@@ -1217,7 +1223,7 @@ mod tests {
         }
     }
 
-    /// A directory whose `<stdint.h>` is glibc's (it defines `__GLIBC__`) or not.
+    /// A directory whose `<stdio.h>` is glibc's (it defines `__GLIBC__`) or not.
     #[cfg(unix)]
     fn fake_c_library_headers(dir: &Path, glibc: bool) -> PathBuf {
         let include = dir.join(if glibc {
@@ -1228,8 +1234,8 @@ mod tests {
         std::fs::create_dir_all(&include).unwrap();
         let define = if glibc { "#define __GLIBC__ 2\n" } else { "" };
         std::fs::write(
-            include.join("stdint.h"),
-            format!("{define}typedef unsigned long uint64_t;\n"),
+            include.join("stdio.h"),
+            format!("{define}int puts(const char *s);\n"),
         )
         .unwrap();
         include
