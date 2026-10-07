@@ -58,6 +58,86 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
+/// chelis#906 and chelis#1630: a flat list literal is one logical sequence,
+/// even though Surf writes it as a right-nested Cons/Nil chain. Building it
+/// must copy at most linearly many existing elements.
+#[test]
+fn flat_list_literal_evaluation_has_linear_element_copy_cost() {
+    std::thread::Builder::new()
+        .name("flat-list-copy-cost".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            for length in [128usize, 256] {
+                let source = format!(
+                    "result = [{}]\n",
+                    (0..length)
+                        .map(|index| format!("{index}i64"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let checked = checked_surf(&source);
+                let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+                let inputs = HostEvaluationInputs {
+                    roots: &empty_tensors,
+                    bindings: None,
+                };
+                super::shared_values::reset_element_copies();
+                let outcome = evaluate_host_program_with_library_and_types(
+                    &checked, None, None, inputs, None, None,
+                )
+                .expect("flat literal evaluates");
+                let copies = super::shared_values::element_copies();
+                let RuntimeValue::List(items) =
+                    outcome.host_bindings.get("result").expect("result")
+                else {
+                    panic!("result must be a list");
+                };
+                assert_eq!(items.len(), length);
+                assert!(
+                    copies <= 4 * length as u64,
+                    "{length} literal elements caused {copies} element copies"
+                );
+            }
+        })
+        .expect("list test thread starts")
+        .join()
+        .expect("list test thread completes");
+}
+
+#[test]
+fn cons_with_a_non_list_tail_is_a_type_error() {
+    let decls = chelis_surf::parser::parse_str("result = Cons(1i64, 2i64)\n").expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+    assert!(chelis_types::check_ir_program(&exprs).is_err());
+}
+
+#[test]
+fn cons_spine_evaluates_heads_before_an_authored_list_tail() {
+    let checked = checked_surf(
+        "result = Cons({ _ = print(\"first\")\n 1i64 }, \
+         Cons({ _ = print(\"second\")\n 2i64 }, \
+         { _ = print(\"tail\")\n [3i64] }))\n",
+    );
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let outcome = evaluate_host_program_with_library_and_types(
+        &checked,
+        None,
+        None,
+        HostEvaluationInputs {
+            roots: &empty_tensors,
+            bindings: None,
+        },
+        None,
+        None,
+    )
+    .expect("authored Cons tail evaluates");
+    assert_eq!(outcome.transcript, ["first", "second", "tail"]);
+    assert_eq!(
+        outcome.host_bindings.get("result").map(render_value),
+        Some("[1, 2, 3]".to_string())
+    );
+}
+
 /// chelis#1125: authoring normalization preserves legal structural parameter
 /// lists, so both runtime readers must accept an annotated `Expr::BareList`
 /// without admitting malformed name or metadata layouts.
