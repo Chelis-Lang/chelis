@@ -1702,6 +1702,46 @@ impl<'a> EvalContext<'a> {
         self.eval_app_under_result_claim(node, &[])
     }
 
+    /// Fold consecutive `Cons(head, tail)` applications without recursing
+    /// through their right spine. An authored tail expression may itself
+    /// evaluate to a list, so evaluate it once after every head and retain
+    /// the usual typed improper-tail error.
+    fn eval_cons_spine(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+        let mut heads = Vec::new();
+        let mut tail = expr;
+        while let ExprCarrier::DecodedNode(DeepTag::App, _, [func, head, rest]) = tail.carrier() {
+            if var_name(func) != Some("Cons") {
+                break;
+            }
+            heads.push(head);
+            tail = rest;
+        }
+
+        let mut values = Vec::with_capacity(heads.len());
+        let mut producers = Vec::with_capacity(heads.len());
+        for head in heads {
+            values.push(self.eval_expr(head)?);
+            producers.push(self.result_producer.take());
+        }
+        let tail_value = self.eval_expr(tail)?;
+        let tail_producer = self.result_producer.take();
+        let RuntimeValue::List(items) = tail_value else {
+            return Err(format!("Cons tail must be a List, got {tail_value:?}"));
+        };
+        let tail_len = items.len();
+        values.reserve(tail_len);
+        values.extend(items.into_vec());
+        match tail_producer {
+            Some(ResultProducer::Aggregate(children)) => producers.extend(children),
+            Some(uniform @ ResultProducer::Uniform(_)) => {
+                producers.extend(vec![Some(uniform); tail_len]);
+            }
+            _ => producers.extend((0..tail_len).map(|_| None)),
+        }
+        self.result_producer = ResultProducer::aggregate(producers);
+        Ok(RuntimeValue::List(values.into()))
+    }
+
     fn eval_app_under_result_claim(
         &mut self,
         node: EvalNode<'_>,
@@ -1711,6 +1751,14 @@ impl<'a> EvalContext<'a> {
         let func = kids
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
+
+        // A bracket literal is a right-nested Cons/Nil chain. Evaluate its
+        // heads in source order, then construct one list. Evaluating each
+        // tail as another call consumes one native frame per element and
+        // copy-on-write prepending copies every tail built so far.
+        if kids.len() == 3 && var_name(func) == Some("Cons") {
+            return self.eval_cons_spine(node.expr);
+        }
 
         // A `dropout` application draws here, ahead of the generic builtin
         // route, so its declared-result claims are checked against the draw.
@@ -1804,26 +1852,7 @@ impl<'a> EvalContext<'a> {
             && name.chars().next().is_some_and(|ch| ch.is_uppercase())
         {
             if name == "Cons" {
-                if args.len() != 2 {
-                    return Err(format!("Cons expects 2 arguments, got {}", args.len()));
-                }
-                let mut items = match &args[1] {
-                    RuntimeValue::List(items) => items.clone(),
-                    other => {
-                        return Err(format!("Cons tail must be a List, got {other:?}"));
-                    }
-                };
-                items.insert(0, args[0].clone());
-                let mut producers = match arg_producers.get(1).and_then(Option::as_ref) {
-                    Some(ResultProducer::Aggregate(children)) => children.clone(),
-                    Some(uniform @ ResultProducer::Uniform(_)) => {
-                        vec![Some(uniform.clone()); items.len().saturating_sub(1)]
-                    }
-                    _ => vec![None; items.len().saturating_sub(1)],
-                };
-                producers.insert(0, arg_producers.first().cloned().flatten());
-                self.result_producer = ResultProducer::aggregate(producers);
-                return Ok(RuntimeValue::List(items));
+                return Err(format!("Cons expects 2 arguments, got {}", args.len()));
             }
             self.result_producer = ResultProducer::aggregate(arg_producers);
             return Ok(self.adt_value(name, args.into(), None));
