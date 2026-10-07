@@ -16,7 +16,8 @@ aborts) over per-thread suppression flags read by the process-global panic hook.
   panics still unwind natively; public panicking entries continue with
   `LoweringFailure::resume_at_boundary` (`resume_unwind`: no second hook).
 
-Trusted-base assumptions (native semantics taken as a model, not proved):
+Trusted-base assumptions RA-b, RA-c, RA-e, RA-f (verification/trusted_base.json,
+runtime_assumptions). This module takes these native semantics as a model and does not prove them:
 
 * Rust calls the panic hook exactly once per `panic_any`, before any destructor of the panicking
   frame, on the panicking thread; `resume_unwind` does not call the hook.
@@ -273,7 +274,13 @@ def old (t : ThreadId) : Prog → State → State × List Ev × NRes
   | .entry body, s => old t body s
 
 /-- New scope exit: the explicit exit (or the guard's drop on a normal return) runs on `Ok` and
-`Err`; only a genuine native unwind still runs it as a destructor during unwinding. -/
+`Err`.
+
+A native unwind out of the body reaches the production `scoped`. It catches the unwind with
+`catch_unwind`, runs the exit as an ordinary call and then resumes the unwind (LR:194-210). Thus
+an exit that panics during a body unwind does not abort. It starts an ordinary unwind with its own
+payload `q`. The hook observes `q` once. The caught first payload `p` is a local of the frame of
+the exit. Its destructor runs during the unwind of `q`, after the hook of `q`. -/
 def newScopeExit (t : ThreadId) (g : Guard) (saved : Nat → Int) (fid : Nat)
     (fp : Option Payload) (s1 : State) (tr1 : List Ev) : XRes → State × List Ev × XRes
   | .abort => (s1, tr1, .abort)
@@ -291,7 +298,8 @@ def newScopeExit (t : ThreadId) (g : Guard) (saved : Nat → Int) (fid : Nat)
       match fp with
       | none => (g.exit t saved s1, tr1 ++ [.fin t fid], .unwind p)
       | some q => (g.exit t saved s1,
-          tr1 ++ [.fin t fid, hookEv t (g.exit t saved s1) q], .abort)
+          tr1 ++ [.fin t fid, hookEv t (g.exit t saved s1) q] ++
+            dropEvs t ((g.exit t saved s1).flags t) p, .unwind q)
 
 /-- `resume_at_boundary` at a public entry: `Err(f)` continues as a native unwind with the
 failure's payload and no hook call. -/
@@ -730,7 +738,7 @@ private theorem newScopeExit_agree {t : ThreadId} {a b : State} (h : Agree t a b
     (newScopeExit t g saved fid fp a tr r).2 = (newScopeExit t g saved fid fp b tr r).2 ∧
     Agree t (newScopeExit t g saved fid fp a tr r).1 (newScopeExit t g saved fid fp b tr r).1 := by
   have he := agree_exit h g saved
-  cases r <;> cases fp <;> simp [newScopeExit, hookEv_agree he, he, h]
+  cases r <;> cases fp <;> simp [newScopeExit, hookEv_agree he, he, he.1, h]
 
 /-- The panic hook reads only the CURRENT thread's flags: what thread `t` observes (trace and
 outcome) depends only on its own flags, the hook installation and the session cells, never on
@@ -889,6 +897,220 @@ theorem replay_payload_drop :
     let p := Prog.catchL (.panic (.other 9 true)) .pure (fun _ => .pure 0)
     (new 0 p s0).2.1 = [.hook 0 ⟨false, true⟩ true (.other 9 true), .payloadDrop 0 9 ⟨false, true⟩] ∧
     observed (old 0 p s0).2.1 = [.payloadDrop 9] := by
+  exact ⟨rfl, rfl⟩
+
+
+/-! ## O9 and O10: scope exits on a native unwind -/
+
+/-- **O10. Scope exit on a native unwind.** When the body of a scope without a finalizer panic
+unwinds with `p`, the scope unwinds with `p`. Its final state is the exit of the guard applied to
+the final state of the body. Its trace ends with the finalizer event. Thus nested scopes apply
+their exits innermost first before a catch sees the unwind. -/
+theorem new_scope_unwind (t : ThreadId) (g : Guard) (fid : Nat) (body : Prog) (s s1 : State)
+    (tr1 : List Ev) (p : Payload) (h : new t body (g.enter t s) = (s1, tr1, .unwind p)) :
+    new t (.scope g fid none body) s = (g.exit t s.cells s1, tr1 ++ [.fin t fid], .unwind p) := by
+  simp only [new, h, newScopeExit]
+
+/-- **O10. A catch after a scope unwind.** The body of a catch is a scope, and the body of that
+scope unwinds with `p`. Then the error continuation of the catch starts from the exit state of
+the scope with quiet output cleared. It receives the diagnostic of `p`. The destructor events of
+`p` follow the finalizer event of the scope. -/
+theorem catch_after_scope_unwind (t : ThreadId) (g : Guard) (fid : Nat) (body : Prog)
+    (onOk : Nat → Prog) (onErr : Diag → Prog) (s s1 : State) (tr1 : List Ev) (p : Payload)
+    (h : new t body (g.enter t ({ s with installed := true }.setOut t true)) = (s1, tr1, .unwind p)) :
+    new t (.catchL (.scope g fid none body) onOk onErr) s =
+      (match new t (onErr (convert p))
+          ((g.exit t ({ s with installed := true }.setOut t true).cells s1).setOut t false) with
+        | (s3, tr3, r) =>
+          (s3, tr1 ++ [.fin t fid] ++
+            dropEvs t ((g.exit t ({ s with installed := true }.setOut t true).cells s1).flags t) p ++
+            tr3, r)) := by
+  simp only [new, h, newScopeExit]
+
+/-- **O9. An exit panic during a body unwind.** Production `scoped` catches the body unwind, runs
+the exit and resumes. An exit that panics there starts an ordinary unwind with the exit payload.
+Inside `catch_lowering` the catch returns the diagnostic of the exit payload. The hook observes
+each payload once, and the first payload drops after the hook of the exit payload. The old drop
+guard aborted the process at this point. -/
+theorem exit_panic_during_unwind :
+    let p := Prog.catchL (.scope .noop 1 (some (.str "exit")) (.panic (.other 9 true))) .pure
+      (fun d => .pure (if d = convert (.str "exit") then 1 else 0))
+    let s : State := { s0 with installed := true }
+    (new 0 p s).2.1 =
+      [.hook 0 ⟨false, true⟩ true (.other 9 true), .fin 0 1,
+        .hook 0 ⟨false, true⟩ true (.str "exit"), .payloadDrop 0 9 ⟨false, true⟩] ∧
+    (new 0 p s).2.2 = .ok 1 ∧ (old 0 p s).2.2 = .abort := by
+  exact ⟨rfl, rfl, rfl⟩
+
+/-! ## O8: replay of every segment of the native observation test
+
+The native oracle `verification/unwind_replay_oracle.rs` runs the twelve segments of
+`lowering_runtime::tests::native_hook_and_unwind_observations` and three payload conversions in
+one process. It prints the observed events and the returned values of each segment.
+`verification/UnwindReplayChecks.lean` prints the same lines from the replays below. A guard
+scope of the test has no recorder of its own. The oracle declares a `RecordDrop(fid)` as the first
+local of the body of each guard. That local drops immediately before the exit, at the position of
+the finalizer event of the model. -/
+
+/-- What one statement of the native test returns. -/
+inductive Returned where
+  | ok (v : Nat)
+  | err (d : Diag)
+  | unwind (p : Payload)
+  | abort
+  deriving DecidableEq, Repr
+
+/-- One statement of the native test. -/
+inductive Stmt where
+  /-- `catch_lowering(body)` on thread `t`. -/
+  | catchL (t : ThreadId) (body : Prog)
+  /-- The entry of a `catch_lowering` on thread `t` whose body contains statements. -/
+  | catchOpen (t : ThreadId)
+  /-- The last part of the body of that catch, then its conversion and its exit. -/
+  | catchClose (t : ThreadId) (body : Prog)
+  /-- `std::panic::catch_unwind` around a public entry on thread `t`. -/
+  | caught (t : ThreadId) (body : Prog)
+  /-- A plain call on thread `t` that returns normally. -/
+  | call (t : ThreadId) (body : Prog)
+  /-- The entry of the guard `g` of a combinator call around the next statements. -/
+  | enter (t : ThreadId) (g : Guard)
+  /-- The exit of that guard, with finalizer `fid`. Only guards that ignore the entry snapshot
+  of the cells occur (`noop`, `speculate`). -/
+  | exit (t : ThreadId) (g : Guard) (fid : Nat)
+
+/-- A semantics with the old outcomes: `old`, or `new` read through `embedObs`. -/
+abbrev Sem := ThreadId → Prog → State → State × List Ev × NRes
+
+/-- The new semantics as a `Sem`. An `Err` in flight reads as the unwind of its payload. Its
+conversion and destructor events agree (`convert_payload`, `dropEvs_payload`). -/
+def newSem : Sem := fun t p s => embedObs (new t p s)
+
+/-- The entry of a catch: install the hook, set quiet output. -/
+def catchEntry (t : ThreadId) (s : State) : State := { s with installed := true }.setOut t true
+
+/-- The rest of a catch after its body part `body`. -/
+def catchRest (sem : Sem) (t : ThreadId) (body : Prog) (s : State) :
+    State × List Ev × Option Returned :=
+  match sem t body s with
+  | (s1, tr1, .ok v) => (s1.setOut t false, tr1, some (.ok v))
+  | (s1, tr1, .unwind p) =>
+      (s1.setOut t false, tr1 ++ dropEvs t (s1.flags t) p, some (.err (convert p)))
+  | (s1, tr1, .abort) => (s1, tr1, some .abort)
+
+/-- Run one statement. -/
+def runStmt (sem : Sem) : Stmt → State → State × List Ev × Option Returned
+  | .catchL t body, s => catchRest sem t body (catchEntry t s)
+  | .catchOpen t, s => (catchEntry t s, [], none)
+  | .catchClose t body, s => catchRest sem t body s
+  | .caught t body, s =>
+      match sem t (.entry body) s with
+      | (s1, tr1, .ok v) => (s1, tr1, some (.ok v))
+      | (s1, tr1, .unwind p) => (s1, tr1, some (.unwind p))
+      | (s1, tr1, .abort) => (s1, tr1, some .abort)
+  | .call t body, s =>
+      match sem t body s with
+      | (s1, tr1, _) => (s1, tr1, none)
+  | .enter t g, s => (g.enter t s, [], none)
+  | .exit t g fid, s => (g.exit t s.cells s, [.fin t fid], none)
+
+/-- Run statements in order. -/
+def runStmts (sem : Sem) : List Stmt → State → State × List Ev × List Returned
+  | [], s => (s, [], [])
+  | st :: rest, s =>
+      match runStmt sem st s with
+      | (s1, tr1, r1) =>
+        match runStmts sem rest s1 with
+        | (s2, tr2, rs) => (s2, tr1 ++ tr2, r1.toList ++ rs)
+
+/-- Run named segments in order on one process state. Each gives its observed events and its
+returned values. -/
+def replay (sem : Sem) : List (String × List Stmt) → State → List (String × List Observed × List Returned)
+  | [], _ => []
+  | (name, stmts) :: rest, s =>
+      match runStmts sem stmts s with
+      | (s1, tr, rs) => (name, observed tr, rs) :: replay sem rest s1
+
+/-- A `catch_lowering` statement is the `catchL` program of this module: the same final state and
+the same trace. -/
+theorem catch_statement_new (t : ThreadId) (body : Prog) (s : State) :
+    ((runStmt newSem (.catchL t body) s).1, (runStmt newSem (.catchL t body) s).2.1) =
+      ((new t (.catchL body .pure (fun _ => .pure 0)) s).1,
+        (new t (.catchL body .pure (fun _ => .pure 0)) s).2.1) := by
+  simp only [runStmt, catchRest, catchEntry, newSem, embedObs]
+  rcases hN : new t body ({ s with installed := true }.setOut t true) with ⟨s1, tr1, r⟩
+  cases r <;> simp [hN, new, XRes.embed, convert_payload, dropEvs_payload]
+
+/-- The same for the old semantics. -/
+theorem catch_statement_old (t : ThreadId) (body : Prog) (s : State) :
+    ((runStmt old (.catchL t body) s).1, (runStmt old (.catchL t body) s).2.1) =
+      ((old t (.catchL body .pure (fun _ => .pure 0)) s).1,
+        (old t (.catchL body .pure (fun _ => .pure 0)) s).2.1) := by
+  simp only [runStmt, catchRest, catchEntry]
+  rcases hO : old t body ({ s with installed := true }.setOut t true) with ⟨s1, tr1, r⟩
+  cases r <;> simp [hO, old]
+
+/-- The typed rejection of the native test. -/
+def typedDiag : Diag := ⟨"typed-rejection", some 7, false⟩
+
+/-- The twelve segments in native order. The first nine are LR:712-846. The last three convert a
+`LowerDiagnostic`, an `UnrepresentableDag` and a `String` payload that unwind into a catch
+(LR:413-421). -/
+def nativeSegments : List (String × List Stmt) :=
+  [ ("typed", [.catchL 0 (.scope .noop 1 none (.raise typedDiag))]),
+    ("after-inner-return", [.catchL 0 (.scope .noop 2 none
+      (.bind (.catchL (.pure 17) .pure (fun _ => .pure 0))
+        (fun _ => .panic (.str "after-inner-return"))))]),
+    ("after-inner-unwind", [.catchL 0 (.scope .noop 3 none
+      (.bind (.catchL (.scope .noop 4 none (.panic (.str "quiet-inner"))) .pure (fun _ => .pure 0))
+        (fun _ => .panic (.str "after-inner-unwind"))))]),
+    ("fatal-reraise", [.catchL 0 (.scope .speculate 5 none
+      (.catchL (.raise typedDiag.makeFatal) .pure (fun caught => .raiseFatal caught)))]),
+    ("speculative-boundary", [.caught 0 (.scope .speculate 6 none (.entry (.raise typedDiag))),
+      .caught 0 (.raise typedDiag)]),
+    ("nested-acquisition", [.enter 0 .speculate, .caught 0 (.raise typedDiag),
+      .call 0 (.scope .speculate 7 none (.pure 0)), .caught 0 (.raise typedDiag),
+      .exit 0 .speculate 8]),
+    ("speculative-unwind", [.enter 0 .speculate,
+      .caught 0 (.scope .speculate 9 none (.panic (.str "speculative"))),
+      .caught 0 (.raise typedDiag), .exit 0 .speculate 10]),
+    ("payload-drop", [.catchL 0 (.panic (.other 11 true)),
+      .caught 0 (.panic (.str "after-payload"))]),
+    ("other-thread", [.catchOpen 0, .caught 1 (.panic (.str "other-thread")),
+      .catchL 1 (.panic (.str "other-quiet")), .catchClose 0 (.panic (.str "this-thread-quiet"))]),
+    ("convert-diagnostic", [.catchL 0 (.panic (.diag ⟨"converted", some 3, true⟩))]),
+    ("convert-unrepresentable", [.catchL 0 (.panic .unrep)]),
+    ("convert-string", [.catchL 0 (.panic (.str "owned"))]) ]
+
+/-- The observations of the native test, segment by segment. -/
+def nativeObservations : List (String × List Observed × List Returned) :=
+  [ ("typed", [.drop 1], [.err typedDiag]),
+    ("after-inner-return", [.hook (.str "after-inner-return"), .drop 2],
+      [.err (convert (.str "after-inner-return"))]),
+    ("after-inner-unwind", [.drop 4, .hook (.str "after-inner-unwind"), .drop 3],
+      [.err (convert (.str "after-inner-unwind"))]),
+    ("fatal-reraise", [.drop 5], [.err typedDiag.makeFatal]),
+    ("speculative-boundary", [.drop 6, .hook (.diag typedDiag)],
+      [.unwind .unrep, .unwind (.diag typedDiag)]),
+    ("nested-acquisition", [.drop 7, .hook (.diag typedDiag), .drop 8],
+      [.unwind .unrep, .unwind (.diag typedDiag)]),
+    ("speculative-unwind", [.drop 9, .hook (.diag typedDiag), .drop 10],
+      [.unwind (.str "speculative"), .unwind (.diag typedDiag)]),
+    ("payload-drop", [.payloadDrop 11, .hook (.str "after-payload")],
+      [.err (convert (.other 11 true)), .unwind (.str "after-payload")]),
+    ("other-thread", [.hook (.str "other-thread")],
+      [.unwind (.str "other-thread"), .err (convert (.str "other-quiet")),
+        .err (convert (.str "this-thread-quiet"))]),
+    ("convert-diagnostic", [], [.err ⟨"converted", some 3, true⟩]),
+    ("convert-unrepresentable", [], [.err unrepDiag]),
+    ("convert-string", [], [.err (convert (.str "owned"))]) ]
+
+/-- **O8. All segments of the native test.** From a fresh process, the old native semantics and
+the new explicit-`Result` semantics give the native observations of all twelve segments: the
+events of the previous hook, the finalizer and payload destructor events, and the values that
+each statement returns. -/
+theorem replay_native_observations :
+    replay newSem nativeSegments s0 = nativeObservations ∧
+    replay old nativeSegments s0 = nativeObservations := by
   exact ⟨rfl, rfl⟩
 
 end ChelisBridge.Runtime.Unwind

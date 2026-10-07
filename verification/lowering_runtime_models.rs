@@ -447,6 +447,23 @@ pub fn uncaught_rejection(runtime: &mut LoweringRuntime, code: u32) -> LoweringF
     runtime.raise_lowering_diagnostic(LowerDiagnostic::new(code))
 }
 
+/// A fatal raise before the first catch of the process, a rejection in the
+/// first catch, then an ordinary and a fatal raise after it. Only the catch
+/// installs the Chelis hook, so the first fatal raise is visible although it
+/// sets `o`. A fatal raise outside a catch leaves `o` set.
+pub fn fatal_before_first_catch(
+    runtime: &mut LoweringRuntime,
+    code: u32,
+) -> (LoweringFailure, Result<u32, LowerDiagnostic>, LoweringFailure, LoweringFailure) {
+    let first = runtime.raise_fatal_lowering_diagnostic(LowerDiagnostic::new(code));
+    let caught = runtime.catch_lowering(move |runtime| {
+        Err(runtime.raise_lowering_diagnostic(LowerDiagnostic::new(code + 1)))
+    });
+    let after = runtime.raise_lowering_diagnostic(LowerDiagnostic::new(code + 2));
+    let fatal = runtime.raise_fatal_lowering_diagnostic(LowerDiagnostic::new(code + 3));
+    (first, caught, after, fatal)
+}
+
 /// A counter threaded through `catch_lowering_with`, as `lower.rs` threads `native`.
 pub fn caught_with_state(
     runtime: &mut LoweringRuntime,
@@ -620,30 +637,56 @@ pub fn reject_nested_borrow_state(x: &mut u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lowering_runtime::{install_chelis_panic_hook, observe, with_native_lowering_runtime};
+    use crate::lowering_runtime::{
+        UnrepresentableDag, install_chelis_panic_hook, observe, with_native_lowering_runtime,
+    };
+    use std::any::Any;
     use std::cell::RefCell;
     use std::sync::Once;
 
-    thread_local! {
-        /// `(u, o)` at every raise on this thread, as the process hook sees them.
-        static RAISES: RefCell<Vec<(bool, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The payload kind of a raise: the payload of the returned failure.
+    /// `Other` is any other panic payload, for example of a failing assertion.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Unrepresentable,
+        Diagnostic(u32, bool),
+        Other,
     }
 
-    /// Record the flags of every raise in front of the Chelis hook.
+    fn kind(payload: &(dyn Any + Send)) -> Kind {
+        if payload.is::<UnrepresentableDag>() {
+            Kind::Unrepresentable
+        } else if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
+            Kind::Diagnostic(diagnostic.code, diagnostic.fatal)
+        } else {
+            Kind::Other
+        }
+    }
+
+    thread_local! {
+        /// `(u, o)` and the payload kind of every raise on this thread, as the
+        /// process hook sees them. `record_raises` installs the Chelis hook
+        /// before the recorder, so the hook is installed at each recorded raise.
+        static RAISES: RefCell<Vec<(bool, bool, Kind)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Record the flags and the payload kind of every raise in front of the
+    /// Chelis hook.
     fn record_raises() {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
             install_chelis_panic_hook();
             let chelis = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
-                RAISES.with(|raises| raises.borrow_mut().push(observe::flags()));
+                let (u, o) = observe::flags();
+                RAISES.with(|raises| raises.borrow_mut().push((u, o, kind(info.payload()))));
                 chelis(info);
             }));
         });
         RAISES.with(|raises| raises.borrow_mut().clear());
     }
 
-    fn raises() -> Vec<(bool, bool)> {
+    fn raises() -> Vec<(bool, bool, Kind)> {
         RAISES.with(|raises| raises.borrow_mut().drain(..).collect())
     }
 
@@ -667,18 +710,21 @@ mod tests {
         record_raises();
         with_native_lowering_runtime(|runtime| {
             assert_eq!(speculative_rejection(runtime, 9), Err(diagnostic(1)));
-            assert_eq!(raises(), [(true, true)]);
+            assert_eq!(raises(), [(true, true, Kind::Unrepresentable)]);
             assert_eq!(rejection_after_inner_catch(runtime, 9), Err(diagnostic(9)));
-            assert_eq!(raises(), [(false, false)]);
+            assert_eq!(raises(), [(false, false, Kind::Diagnostic(9, false))]);
             assert_eq!(rejection_after_inner_catch(runtime, 17), Ok(17));
             assert_eq!(raises(), []);
             assert_eq!(fatal_reraise(runtime, 4), Err(diagnostic(4).fatal()));
-            assert_eq!(raises(), [(true, true), (true, true)]);
+            assert_eq!(
+                raises(),
+                [(true, true, Kind::Diagnostic(4, true)), (true, true, Kind::Diagnostic(4, true))]
+            );
             assert_eq!(
                 uncaught_rejection(runtime, 5),
                 LoweringFailure::Diagnostic(diagnostic(5))
             );
-            assert_eq!(raises(), [(false, false)]);
+            assert_eq!(raises(), [(false, false, Kind::Diagnostic(5, false))]);
             assert_eq!(observe::flags(), (false, false));
         });
     }
@@ -691,7 +737,7 @@ mod tests {
             assert_eq!(caught_with_state(runtime, &mut count, false), Ok(4));
             assert_eq!(caught_with_state(runtime, &mut count, true), Err(diagnostic(1)));
             assert_eq!(count, 5);
-            assert_eq!(raises(), [(false, true)]);
+            assert_eq!(raises(), [(false, true, Kind::Unrepresentable)]);
         });
     }
 
@@ -700,7 +746,7 @@ mod tests {
         record_raises();
         with_native_lowering_runtime(|runtime| {
             let failure = uncaught_rejection(runtime, 6);
-            assert_eq!(raises(), [(false, false)]);
+            assert_eq!(raises(), [(false, false, Kind::Diagnostic(6, false))]);
             let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 failure.resume_at_boundary();
             }))
@@ -708,6 +754,58 @@ mod tests {
             assert_eq!(*payload.downcast::<LowerDiagnostic>().unwrap(), diagnostic(6));
             assert_eq!(raises(), []);
         });
+    }
+
+    const HOOK_CHILD: &str = "CHELIS_LOWERING_RUNTIME_MODELS_HOOK_CHILD";
+    const HOOK_CHILD_DONE: &str = "hook installation observations passed";
+
+    thread_local! {
+        /// `(u, o)` and the payload kind of every raise that reaches the
+        /// previous hook of the child process.
+        static VISIBLE: RefCell<Vec<(bool, bool, Kind)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[test]
+    fn fatal_raise_before_first_catch_is_visible() {
+        if std::env::var_os(HOOK_CHILD).is_some() {
+            // No test of this process installs the Chelis hook before the
+            // first catch below. This hook is the previous hook of the Chelis hook.
+            std::panic::set_hook(Box::new(|info| {
+                let (u, o) = observe::flags();
+                VISIBLE.with(|visible| visible.borrow_mut().push((u, o, kind(info.payload()))));
+            }));
+            with_native_lowering_runtime(|runtime| {
+                assert_eq!(
+                    fatal_before_first_catch(runtime, 7),
+                    (
+                        LoweringFailure::Diagnostic(diagnostic(7).fatal()),
+                        Err(diagnostic(8)),
+                        LoweringFailure::Diagnostic(diagnostic(9)),
+                        LoweringFailure::Diagnostic(diagnostic(10).fatal()),
+                    )
+                );
+                assert_eq!(observe::flags(), (false, true));
+            });
+            assert_eq!(
+                VISIBLE.with(|visible| visible.borrow().clone()),
+                [(false, true, Kind::Diagnostic(7, true)), (false, false, Kind::Diagnostic(9, false))]
+            );
+            println!("{HOOK_CHILD_DONE}");
+            return;
+        }
+        // A child process isolates the process-global hook installation.
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::fatal_raise_before_first_catch_is_visible", "--nocapture"])
+            .env(HOOK_CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && stdout.lines().any(|line| line == HOOK_CHILD_DONE),
+            "hook child failed: {}\n{stdout}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr),
+        );
     }
 
     #[test]
@@ -770,7 +868,7 @@ mod tests {
             assert_eq!(raises(), []);
             assert_eq!(host_scopes(&9, &mut scope, runtime, &mut native, true), Err(diagnostic(1)));
             assert_eq!((scope.items.clone(), scope.exits, native), (vec![1, 7, 9], 5, 6));
-            assert_eq!(raises(), [(false, true)]);
+            assert_eq!(raises(), [(false, true, Kind::Unrepresentable)]);
             assert_eq!(observe::flags(), (false, false));
         });
     }

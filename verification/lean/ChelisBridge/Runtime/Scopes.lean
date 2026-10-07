@@ -374,4 +374,53 @@ theorem model_rollback_restores (t : ThreadId) (fid : Nat) (body : Prog) (s : St
   | unwind p => simp only [newScopeExit] at h; exact absurd rfl (h p)
   | abort => simp only [newScopeExit] at ha; exact absurd rfl ha
 
+/-! ## O10: the guards on a native unwind
+
+The theorems above cover the `Ok` and `Err` exits. A native unwind out of the body (an unexpected
+panic) also runs the exit: production `scoped` catches the unwind, exits and resumes. The three
+theorems below are the `.unwind` forms. With `Unwind.catch_after_scope_unwind`, a
+`catch_lowering_with` that catches the unwind sees the exited state. -/
+
+open ChelisBridge.Runtime.Unwind in
+/-- A native unwind out of the body of a speculative scope leaves the scope as the same unwind.
+The exit clears `suppress_unrepresentable` first. -/
+theorem model_speculate_clears_unwind (t : ThreadId) (fid : Nat) (body : Prog) (s : State)
+    (p : Payload) (h : (new t body (Guard.enter t .speculate s)).2.2 = .unwind p) :
+    (new t (.scope .speculate fid none body) s).2.2 = .unwind p ∧
+    ((new t (.scope .speculate fid none body) s).1.flags t).unrep = false := by
+  rcases hN : new t body (Guard.enter t .speculate s) with ⟨s1, tr1, r⟩
+  rw [hN] at h
+  dsimp only at h
+  subst h
+  rw [new_scope_unwind t .speculate fid body s s1 tr1 p hN]
+  simp [Guard.exit, State.setUnrep, State.modFlags]
+
+open ChelisBridge.Runtime.Unwind in
+/-- A native unwind out of the body of a restore scope leaves the scope as the same unwind. The
+exit gives back the entry value of the cell first. -/
+theorem model_restore_restores_unwind (t : ThreadId) (fid k : Nat) (v : Int) (body : Prog)
+    (s : State) (p : Payload) (h : (new t body (Guard.enter t (.restore k v) s)).2.2 = .unwind p) :
+    (new t (.scope (.restore k v) fid none body) s).2.2 = .unwind p ∧
+    (new t (.scope (.restore k v) fid none body) s).1.cells k = s.cells k := by
+  rcases hN : new t body (Guard.enter t (.restore k v) s) with ⟨s1, tr1, r⟩
+  rw [hN] at h
+  dsimp only at h
+  subst h
+  rw [new_scope_unwind t (.restore k v) fid body s s1 tr1 p hN]
+  simp [Guard.exit, State.setCell]
+
+open ChelisBridge.Runtime.Unwind in
+/-- A native unwind out of the body of a rollback scope leaves the scope as the same unwind. The
+exit restores all cells first. -/
+theorem model_rollback_restores_unwind (t : ThreadId) (fid : Nat) (body : Prog) (s : State)
+    (p : Payload) (h : (new t body (Guard.enter t .rollback s)).2.2 = .unwind p) :
+    (new t (.scope .rollback fid none body) s).2.2 = .unwind p ∧
+    (new t (.scope .rollback fid none body) s).1.cells = s.cells := by
+  rcases hN : new t body (Guard.enter t .rollback s) with ⟨s1, tr1, r⟩
+  rw [hN] at h
+  dsimp only at h
+  subst h
+  rw [new_scope_unwind t .rollback fid body s s1 tr1 p hN]
+  simp [Guard.exit]
+
 end ChelisBridge.Runtime.Scopes

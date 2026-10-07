@@ -20,10 +20,13 @@ by their `Aeneas/Std/ChelisNative.lean` models, which are part of the trusted ba
     exactly the diagnostic `LoweringFailure::into_diagnostic` gives (`catchLoweringWith_spec`,
     `catchLoweringWith_clears`); `catch_lowering` is the stateless instance
     (`catchLowering_spec`);
-  - `raise_lowering_diagnostic` records exactly one hook observation of the current flags and
+  - `raise_lowering_diagnostic` records exactly one hook observation `(u, o, installed)` and
     turns a nonfatal rejection under speculation into `Unrepresentable`
     (`raiseLowering_spec`); `raise_fatal_lowering_diagnostic` explicitly RE-ENABLES quiet
-    output and always raises the structured fatal diagnostic (`raiseFatal_spec`);
+    output and always raises the structured fatal diagnostic (`raiseFatal_spec`). The hook entry
+    of each raise is the observation of the payload of the returned failure, the payload that
+    `resume_at_boundary` unwinds with (`raise_hook_payload`, `raiseFatal_hook_payload`,
+    `resumeAtBoundary_payload`);
   - `LoweringFailure::resume_at_boundary` never returns (`resumeAtBoundary_never_ok`): a
     boundary re-raise is an unwind, never a success or an ordinary rejection;
 * checking (`chelis_types::session::DiagnosticSink`):
@@ -147,8 +150,9 @@ theorem intoDiagnostic_diagnostic (d : chelis_ir.lower.LowerDiagnostic) :
     chelis_ir.lowering_runtime.LoweringFailure.into_diagnostic (.Diagnostic d) = .ok d := rfl
 
 /-- **Output guard of a catch.** On every successful exit (`Ok` or mapped `Err`), the quiet
-output flag is `false`; the body ran with it set and with the caller's explicit state; an `Ok`
-result is the body's and an `Err` is the diagnostic of the body's failure. -/
+output flag is `false`; the body ran with it set, with the hook installed and with the caller's
+explicit state; an `Ok` result is the body's and an `Err` is the diagnostic of the body's
+failure. -/
 theorem catchLoweringWith_spec {S R T2 : Type}
     (inst : core.ops.function.FnOnceMutArgMutArg T2 RT S
       (core.result.Result R chelis_ir.lowering_runtime.LoweringFailure))
@@ -156,7 +160,7 @@ theorem catchLoweringWith_spec {S R T2 : Type}
     (r' : core.result.Result R chelis_ir.lower.LowerDiagnostic)
     (h : chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with inst rt st f =
       .ok (r', rt', st')) :
-    ∃ r rt₁, inst.call_once f ({ rt with o := true }, st) = .ok (r, rt₁, st') ∧
+    ∃ r rt₁, inst.call_once f ({ rt with o := true, installed := true }, st) = .ok (r, rt₁, st') ∧
       rt' = { rt₁ with o := false } ∧ rt'.o = false ∧
       (∀ x, r' = .Ok x ↔ r = .Ok x) ∧
       (∀ d, r' = .Err d ↔
@@ -166,7 +170,8 @@ theorem catchLoweringWith_spec {S R T2 : Type}
   simp only [Result.ok.injEq, Prod.mk.injEq] at h2'
   obtain ⟨rfl, rfl, rfl⟩ := h2'
   obtain ⟨⟨r, rt₂, st₂⟩, hb, h3⟩ := bind_ok_inv h1
-  have hb' : inst.call_once f ({ rt with o := true }, st) = .ok (r, rt₂, st₂) := hb
+  have hb' : inst.call_once f ({ rt with o := true, installed := true }, st) = .ok (r, rt₂, st₂) :=
+    hb
   cases r with
   | Ok x =>
     have h3' : Result.ok (core.result.Result.Ok x, rt₂, st₂) = Result.ok (r₁, rt₁, st₁) := h3
@@ -214,7 +219,7 @@ theorem catchLowering_spec {R T1 : Type}
       (core.result.Result R chelis_ir.lowering_runtime.LoweringFailure))
     (rt rt' : RT) (f : T1) (r' : core.result.Result R chelis_ir.lower.LowerDiagnostic)
     (h : chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering inst rt f = .ok (r', rt')) :
-    ∃ r rt₁, inst.call_once f { rt with o := true } = .ok (r, rt₁) ∧
+    ∃ r rt₁, inst.call_once f { rt with o := true, installed := true } = .ok (r, rt₁) ∧
       rt' = { rt₁ with o := false } ∧ rt'.o = false ∧
       (∀ x, r' = .Ok x ↔ r = .Ok x) ∧
       (∀ d, r' = .Err d ↔
@@ -229,13 +234,13 @@ theorem catchLowering_spec {R T1 : Type}
   obtain ⟨rfl, rfl, -⟩ := hc'
   exact ⟨r₀, rt₀, hb, h1, h2, h3, h4⟩
 
-/-- **Raising.** Every raise records exactly one hook observation of the current flags before
-anything else; a nonfatal rejection under speculation becomes `Unrepresentable`, any other
-rejection stays the structured diagnostic. -/
+/-- **Raising.** Every raise records exactly one hook observation of the current flags and of
+the hook installation before anything else; a nonfatal rejection under speculation becomes
+`Unrepresentable`, any other rejection stays the structured diagnostic. -/
 theorem raiseLowering_spec (s : RT) (d : chelis_ir.lower.LowerDiagnostic) :
     chelis_ir.lowering_runtime.LoweringRuntime.raise_lowering_diagnostic s d =
       .ok ((if !d.fatal && s.u then .Unrepresentable else .Diagnostic d),
-        { s with hook := s.hook ++ [(s.u, s.o)] }) := by
+        { s with hook := s.hook ++ [(s.u, s.o, s.installed)] }) := by
   unfold chelis_ir.lowering_runtime.LoweringRuntime.raise_lowering_diagnostic
   cases hf : d.fatal <;> cases hu : s.u <;> simp [hu,
     chelis_ir.lowering_runtime.LoweringRuntime.raise_unrepresentable,
@@ -249,7 +254,7 @@ theorem raiseLowering_spec (s : RT) (d : chelis_ir.lower.LowerDiagnostic) :
 theorem raiseFatal_spec (s : RT) (d : chelis_ir.lower.LowerDiagnostic) :
     chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal_lowering_diagnostic s d =
       .ok (.Diagnostic { d with fatal := true },
-        { s with o := true, hook := s.hook ++ [(s.u, true)] }) := by
+        { s with o := true, hook := s.hook ++ [(s.u, true, s.installed)] }) := by
   unfold chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal_lowering_diagnostic
   cases hf : d.fatal <;>
     simp [raiseLowering_spec, chelis_ir.lower.LowerDiagnostic.impl.fatal,
@@ -260,6 +265,64 @@ unwind (the model's failure outside the modeled domain), never a success. -/
 theorem resumeAtBoundary_never_ok (e : chelis_ir.lowering_runtime.LoweringFailure) :
     chelis_ir.lowering_runtime.LoweringFailure.resume_at_boundary e = .fail .panic := by
   cases e <;> rfl
+
+/-- The payload with which a failure unwinds at a public boundary, with its `Any` instance:
+`UnrepresentableDag` for `Unrepresentable`, the diagnostic for `Diagnostic`. -/
+def failurePayload :
+    chelis_ir.lowering_runtime.LoweringFailure → (P : Type) × core.any.Any P × P
+  | .Unrepresentable =>
+      ⟨chelis_ir.lowering_runtime.UnrepresentableDag, core.any.AnyBlanket _, ()⟩
+  | .Diagnostic d => ⟨chelis_ir.lower.LowerDiagnostic, core.any.AnyBlanket _, d⟩
+
+/-- `resume_at_boundary` unwinds with the payload of its failure. -/
+theorem resumeAtBoundary_payload (e : chelis_ir.lowering_runtime.LoweringFailure) :
+    chelis_ir.lowering_runtime.LoweringFailure.resume_at_boundary e =
+      (do
+        let x ← Aeneas.Std.chelis_ir.lowering_runtime.resume_native_unwind
+          (failurePayload e).2.1 (failurePayload e).2.2
+        nomatch x) := by
+  cases e <;> rfl
+
+/-- **O6. Each raise observes the payload of its failure.** A raise appends exactly one hook
+entry. That entry is the observation (`observe_raise`) of the payload of the returned failure,
+the payload that `resume_at_boundary` unwinds with. -/
+theorem raise_hook_payload (s : RT) (d : chelis_ir.lower.LowerDiagnostic)
+    (e : chelis_ir.lowering_runtime.LoweringFailure) (s' : RT)
+    (h : chelis_ir.lowering_runtime.LoweringRuntime.raise_lowering_diagnostic s d = .ok (e, s')) :
+    Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise
+        (failurePayload e).2.1 s (failurePayload e).2.2 = .ok ((failurePayload e).2.2, s') ∧
+      s'.hook = s.hook ++ [(s.u, s.o, s.installed)] := by
+  rw [raiseLowering_spec] at h
+  simp only [Result.ok.injEq, Prod.mk.injEq] at h
+  obtain ⟨he, rfl⟩ := h
+  split at he <;> subst he <;> exact ⟨rfl, rfl⟩
+
+/-- **O6 for the fatal re-raise.** `raise_fatal_lowering_diagnostic` appends exactly one hook
+entry. That entry is the observation, with quiet output set, of the payload of the returned
+failure. -/
+theorem raiseFatal_hook_payload (s : RT) (d : chelis_ir.lower.LowerDiagnostic)
+    (e : chelis_ir.lowering_runtime.LoweringFailure) (s' : RT)
+    (h : chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal_lowering_diagnostic s d =
+      .ok (e, s')) :
+    Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise
+        (failurePayload e).2.1 { s with o := true } (failurePayload e).2.2 =
+        .ok ((failurePayload e).2.2, s') ∧
+      s'.hook = s.hook ++ [(s.u, true, s.installed)] := by
+  rw [raiseFatal_spec] at h
+  simp only [Result.ok.injEq, Prod.mk.injEq] at h
+  obtain ⟨rfl, rfl⟩ := h
+  exact ⟨rfl, rfl⟩
+
+/-- **O6 for the marker raise.** `raise_unrepresentable` appends exactly one hook entry, the
+observation of the `UnrepresentableDag` payload of `Unrepresentable`. -/
+theorem raiseUnrepresentable_hook_payload (s : RT) :
+    chelis_ir.lowering_runtime.LoweringRuntime.raise_unrepresentable s =
+      .ok (.Unrepresentable, { s with hook := s.hook ++ [(s.u, s.o, s.installed)] }) ∧
+    Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise
+        (failurePayload .Unrepresentable).2.1 s (failurePayload .Unrepresentable).2.2 =
+      .ok ((failurePayload .Unrepresentable).2.2,
+        { s with hook := s.hook ++ [(s.u, s.o, s.installed)] }) :=
+  ⟨rfl, rfl⟩
 
 /-! ## Checker diagnostic sink -/
 

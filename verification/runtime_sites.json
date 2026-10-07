@@ -1,0 +1,20 @@
+{
+  "description": "Pinned core call sites of native primitives. accept.py compares the core_dependents of each listed primitive in every chunk plan (default and lowering-trace) with this list; a new or removed site rejects the run until the list and the proofs about these sites are reviewed (NATIVE_SHELL_SCOPE O14(b)).",
+  "sites": {
+    "chelis_types::native::{impl chelis_types::native::NativeServices}::cancellation_observed": {
+      "justification": "The cancellation polling sites. Runtime/Cancellation.lean proves the polling outcome for every monotone Lean-model oracle (polling_outcome, matched_cancel_oracle_mono); a proof over the extracted pollers (O14(c)) must cover exactly these sites.",
+      "sites": [
+        "chelis_ir::eval::eval_tensor_internal_with_result_claims",
+        "chelis_types::infer::declarations::scc_vertex_components",
+        "chelis_types::infer::declarations::{chelis_types::infer::declarations::FunctionInferencePlan}::build_from_reference_graph",
+        "chelis_types::infer::declarations::{chelis_types::infer::declarations::TopLevelReferenceGraph}::build",
+        "chelis_types::infer::declarations::{chelis_types::infer::declarations::TopLevelReferenceGraph}::cycle_path",
+        "chelis_types::infer::declarations::{chelis_types::infer::declarations::TopLevelReferenceGraph}::initialization_analysis",
+        "chelis_types::infer::declarations::{chelis_types::infer::declarations::TopLevelReferenceGraph}::later_eager_value_dependencies",
+        "chelis_types::linearity::check_linearity",
+        "chelis_types::linearity::check_linearity_with_context",
+        "chelis_types::session::{chelis_types::session::DiagnosticSink<'session>}::cancellation_observed"
+      ]
+    }
+  }
+}

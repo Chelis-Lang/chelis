@@ -73,5 +73,842 @@
       "assumption": "An Ord impl that carries #[automatically_derived] is rustc's #[derive(Ord)] expansion.",
       "justification": "The sort_unstable/sort_unstable_by models are exact only where Equal holds exactly for indistinguishable values. SortContracts admits a crate element type only if its Ord impl carries #[automatically_derived], which rustc puts on derive expansions and Charon (since 5fd1554) keeps as an unknown attribute, and every field type is admitted: the derived cmp compares the variants, then the fields in order. Rust also accepts the attribute on a hand-written impl, which is where this assumption lies; no retained production crate writes it (`automatically_derived` does not occur in crates/). Reached by chelis-types linearity.rs:311 (`ids.sort_unstable()` on Vec<BindingId>; BindingId derives Ord over u32 at linearity.rs:161)."
     }
+  ],
+  "native_models": [
+    {
+      "item": "chelis_types::native::NativeServices",
+      "kind": "shell_type",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices",
+      "model": "Structure with the oracle schedules cancel and stack and their clocks cancelTaken and stackTaken, the guarded-frame depth (Usize), and the profiling-mark oracle profileMark with clock profileTaken. The native cancel token, stack segment size and clocks are abstracted by the oracles.",
+      "evidence": [
+        "E-model-native-services",
+        "E-lean-stack-schedule",
+        "E-lean-cancel-mono"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::cancellation_observed",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.cancellation_observed",
+      "model": "Return cancel cancelTaken and advance cancelTaken. A matching oracle is monotone (RA-g).",
+      "evidence": [
+        "E-ns-cancel",
+        "E-ns-cancel-thread",
+        "E-cancel-threads",
+        "E-model-native-services",
+        "E-lean-cancel-mono",
+        "E-lean-cancel-permitted"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::stack_exhausted",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.stack_exhausted",
+      "model": "Return stack stackTaken and advance stackTaken. Natively exceeded(remaining_stack(), depth); every run maps to a schedule (RA-g).",
+      "evidence": [
+        "E-model-native-services",
+        "E-infer-stack",
+        "E-lean-stack-schedule",
+        "E-lean-stack-steps"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::enter_frame",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.enter_frame",
+      "model": "depth := depth + 1, failing with integerOverflow at usize::MAX (release builds wrap, RA-h).",
+      "evidence": [
+        "E-model-native-services",
+        "E-lean-stack-steps",
+        "E-lean-stack-overflow"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::exit_frame",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.exit_frame",
+      "model": "depth := depth.saturating_sub(1).",
+      "evidence": [
+        "E-model-native-services",
+        "E-lean-stack-exit"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::reset_frames",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.reset_frames",
+      "model": "depth := 0.",
+      "evidence": [
+        "E-ns-reset",
+        "E-model-native-services",
+        "E-lean-stack-reset",
+        "E-lean-stack-reuse"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::with_grown_stack",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.with_grown_stack",
+      "model": "Plain application f self through the FnOnce instance; the fresh stacker segment is not observable (RA-d).",
+      "evidence": [
+        "E-ns-grown",
+        "E-model-native-services",
+        "E-infer-depth-guard"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::profile_start",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.profile_start",
+      "model": "Return profileMark profileTaken and advance profileTaken; no other field changes.",
+      "evidence": [
+        "E-ns-profiling",
+        "E-model-native-services",
+        "E-lean-profile-services"
+      ]
+    },
+    {
+      "item": "chelis_types::native::{impl chelis_types::native::NativeServices}::profile_phase",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.NativeServices.profile_phase",
+      "model": "No-op: the stderr timing line is not modeled state.",
+      "evidence": [
+        "E-ns-profiling",
+        "E-model-native-services",
+        "E-lean-profile-services"
+      ]
+    },
+    {
+      "item": "chelis_types::native::sha256_concat",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_types.native.sha256_concat",
+      "model": "FIPS 180-4 SHA-256 (ChelisModels.Sha256.digest) of the concatenated parts.",
+      "evidence": [
+        "E-model-sha256"
+      ]
+    },
+    {
+      "item": "chelis_ir::capacity_key::CapacityScopeSupply",
+      "kind": "shell_type",
+      "lean": "Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply",
+      "model": "Structure with the draw oracle (Nat to Option U64) and its clock taken: the identities that the process-global counter hands to this invocation.",
+      "evidence": [
+        "E-capacity-fresh-id",
+        "E-lean-capacity",
+        "E-lean-fresh-id"
+      ]
+    },
+    {
+      "item": "chelis_ir::capacity_key::{impl chelis_ir::capacity_key::CapacityScopeSupply}::fresh_id",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply.fresh_id",
+      "model": "Return draw taken and advance taken; none is the exhaustion panic (.fail .panic). The oracle is the projection of the checked global schedule from 1 (RA-g).",
+      "evidence": [
+        "E-capacity-fresh-id",
+        "E-capacity-scope",
+        "E-lean-capacity",
+        "E-lean-capacity-exhaustion",
+        "E-lean-fresh-id"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::LoweringRuntime",
+      "kind": "shell_type",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime",
+      "model": "Structure alpha_t of the native state of the current thread (RA-tls): flags u and o, the hook trace of (u, o) per raise, the summary-probe count builds, nextPreflightFrame, the host inference variable oracle hostVar with clock hostVarsTaken, the environment oracle profileEnv with clock profileEnvReads, and the clock count profileMarks.",
+      "evidence": [
+        "E-lr-observations",
+        "E-lr-not-send",
+        "E-model-lowering-runtime",
+        "E-lean-extracted-scopes",
+        "E-accept-plan-shell"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::resume_native_unwind",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.resume_native_unwind",
+      "model": ".fail .panic: the unwind leaves the enclosing native entry, outside the modeled domain; resume_unwind runs no hook (RA-b).",
+      "evidence": [
+        "E-lr-observations",
+        "E-model-lowering-runtime",
+        "E-lean-unwind"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::scoped",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.«scoped»",
+      "model": "enter, then body, then exit on the explicit state; a failure of body propagates (the native exit on unwind is outside the modeled domain, RA-c).",
+      "evidence": [
+        "E-lr-observations",
+        "E-host-type-subst-unwind",
+        "E-host-inlining-unwind",
+        "E-model-lowering-runtime",
+        "E-lean-extracted-scopes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::grow_stack_if_needed",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.grow_stack_if_needed",
+      "model": "Plain application f state through the FnOnce instance; red_zone and stack_size are ignored (RA-d).",
+      "evidence": [
+        "E-lr-grow",
+        "E-model-lowering-runtime"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::unrepresentable_panic_suppressed",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.unrepresentable_panic_suppressed",
+      "model": "Return u; the state is unchanged.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-extracted-scopes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::set_unrepresentable_panic_suppressed",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_unrepresentable_panic_suppressed",
+      "model": "u := value.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lr-observations",
+        "E-lean-extracted-scopes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::set_output_suppressed",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_output_suppressed",
+      "model": "o := value.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lr-observations",
+        "E-lean-extracted-scopes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise",
+      "model": "Append (u, o) to hook and return the payload unchanged (one hook run per raise on the current thread, RA-b, RA-e).",
+      "evidence": [
+        "E-lr-observations",
+        "E-model-lowering-runtime",
+        "E-lean-extracted-scopes",
+        "E-lean-hook-thread"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind",
+      "model": "o := true, then f on (runtime, state), then o := false; the marker and message conversions of an unexpected native unwind are outside the modeled domain (RA-d, RA-f).",
+      "evidence": [
+        "E-lr-observations",
+        "E-model-lowering-runtime",
+        "E-lean-extracted-scopes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::fresh_host_inference_var",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_host_inference_var",
+      "model": "Return hostVar hostVarsTaken and advance hostVarsTaken. The oracle is the projection of the global fetch_add schedule from 0 (RA-g).",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-host-vars"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::record_summary_probe_build",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.record_summary_probe_build",
+      "model": "builds := builds.saturating_add(1).",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-host-summary-probes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::summary_probe_builds",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.summary_probe_builds",
+      "model": "Return builds; the state is unchanged.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-host-summary-probes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::reset_summary_probe_builds",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.reset_summary_probe_builds",
+      "model": "builds := 0.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-host-summary-probes"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::fresh_preflight_frame",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_preflight_frame",
+      "model": "Return nextPreflightFrame and set it to nextPreflightFrame.wrapping_add(1).",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-host-preflight",
+        "E-lean-preflight"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_start",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_start",
+      "model": "Read profileEnv profileEnvReads and advance the clock; when enabled push a clock (profileMarks + 1, failing past usize::MAX) and return it, otherwise return 0.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-profile"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_phase",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_phase",
+      "model": "No-op: the clock restart and the stderr line are not modeled state.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-profile"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration_start",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration_start",
+      "model": "Return 0 for mark 0; otherwise push a clock and return the new clock count.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-profile"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration",
+      "model": "Return dagTotal as the new last_dag_size when start names a clock (start != 0 and start <= profileMarks), otherwise lastDagSize; the state is unchanged.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-profile-declaration"
+      ]
+    },
+    {
+      "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::report_internal",
+      "kind": "primitive",
+      "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.report_internal",
+      "model": "No-op: the stderr line is not modeled state.",
+      "evidence": [
+        "E-model-lowering-runtime",
+        "E-lean-profile"
+      ]
+    }
+  ],
+  "runtime_assumptions": [
+    {
+      "id": "RA-a",
+      "assumption": "Every binary that links chelis-ir uses panic = unwind.",
+      "justification": "The Lean models give a native unwind the failure of the enclosing native entry, and catch_lowering, scoped exits and the child-process observations rely on catch_unwind. Under panic = abort every raise would abort the process and no catch, exit or hook suppression would run. accept.py rejects any Cargo profile or rustflags that select panic = abort; a downstream binary outside this workspace is outside the check.",
+      "static_check": "panic-unwind",
+      "evidence": [
+        "E-accept-panic-unwind",
+        "E-lr-observations"
+      ],
+      "cited_by": []
+    },
+    {
+      "id": "RA-b",
+      "assumption": "The process panic hook runs exactly once for each panic_any raise, before any destructor, on the raising thread. std::panic::resume_unwind runs no hook.",
+      "justification": "Rust std semantics of panic_any and resume_unwind (std::panic documentation). The Lean model records one hook entry per observe_raise and none for resume_native_unwind; the native child-process test records the hook and drop order of every segment.",
+      "evidence": [
+        "E-lr-observations",
+        "E-lean-unwind"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Unwind.lean"
+      ]
+    },
+    {
+      "id": "RA-c",
+      "assumption": "An unwind runs destructors innermost first; a destructor that panics during an unwind aborts the process.",
+      "justification": "Rust drop order and the double-panic abort of the std runtime. The scoped exits and the quiet-output guard of catch_native_unwind rely on the order; the hand model Unwind.lean states the abort case.",
+      "evidence": [
+        "E-lr-observations",
+        "E-host-type-subst-unwind",
+        "E-host-inlining-unwind",
+        "E-lean-unwind"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Unwind.lean"
+      ]
+    },
+    {
+      "id": "RA-d",
+      "assumption": "catch_unwind returns the panic payload. stacker::grow and stacker::maybe_grow run their closure on the same thread and return its value.",
+      "justification": "std::panic::catch_unwind contract and the stacker 0.1 contract (psm switches stacks, not threads). The Lean models with_grown_stack and grow_stack_if_needed are plain application; the differential fixture and the native tests exercise the real stacker on both branches (growth and no growth).",
+      "evidence": [
+        "E-ns-grown",
+        "E-lr-grow",
+        "E-model-native-services",
+        "E-lr-observations"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Stack.lean"
+      ]
+    },
+    {
+      "id": "RA-e",
+      "assumption": "No code replaces the process panic hook after install_chelis_panic_hook (lowering_runtime.rs CHELIS_PANIC_HOOK_INSTALLED).",
+      "justification": "The hook suppression that the Lean model records as (u, o) per raise exists only while the Chelis hook is installed. The retained crates call set_hook only in that installer and in test code; an embedding binary that replaces the hook changes stderr only, not results.",
+      "evidence": [
+        "E-lr-observations",
+        "E-lean-hook-thread"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Unwind.lean"
+      ]
+    },
+    {
+      "id": "RA-f",
+      "assumption": "Destructors of typed panic payloads (LowerDiagnostic, UnrepresentableDag) have no observable effect. An abort runs no destructor, and a native stack overflow is an abort.",
+      "justification": "The payload types own plain data. The Lean models treat an abort as outside the modeled domain; the stack guards (Stack.lean) bail before an overflow, and the child-process test checks payload destruction under quiet output.",
+      "evidence": [
+        "E-lr-observations",
+        "E-lean-unwind"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Unwind.lean"
+      ]
+    },
+    {
+      "id": "RA-g",
+      "assumption": "Relaxed atomics behave as Cancellation.lean and Ids.lean state: a polling thread reads the cancellation flag in modification order with read-read coherence, and each read-modify-write reads the value of the preceding one in its modification order. stacker::remaining_stack is an arbitrary oracle, one answer per guard check.",
+      "justification": "The C++20 memory model that Rust atomics follow (coherence and RMW atomicity). No bound on visibility is assumed. The Lean oracles of cancellation_observed, stack_exhausted, fresh_host_inference_var and fresh_id are related to these native schedules by Cancellation.matched_cancel_oracle_mono, Stack.oracle_run_schedule and IdsLink.",
+      "evidence": [
+        "E-lean-cancel-permitted",
+        "E-lean-cancel-mono",
+        "E-lean-stack-schedule",
+        "E-lean-host-vars",
+        "E-lean-capacity",
+        "E-ns-cancel-thread",
+        "E-capacity-fresh-id"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Cancellation.lean",
+        "verification/lean/ChelisBridge/Runtime/Ids.lean",
+        "verification/lean/ChelisBridge/Runtime/Stack.lean"
+      ]
+    },
+    {
+      "id": "RA-h",
+      "assumption": "Release builds wrap depth += 1 in NativeServices::enter_frame (no overflow-checks), while the Lean model fails at usize::MAX; no walk nests usize::MAX guarded frames.",
+      "justification": "Each guarded frame occupies native stack, and a thread stack holds far fewer than usize::MAX frames before the guards bail; so the wrap and the model failure are both unreachable. Stack.cn_enter_frame_overflow states the model side.",
+      "evidence": [
+        "E-lean-stack-overflow",
+        "E-lean-stack-steps"
+      ],
+      "cited_by": [
+        "verification/lean/ChelisBridge/Runtime/Stack.lean"
+      ]
+    },
+    {
+      "id": "RA-i",
+      "assumption": "No native primitive runs inside a thread-local destructor (for example during the destruction of PROFILE_MARKS or NATIVE_LOWERING_STATE).",
+      "justification": "Accessing a thread local during its destruction panics or reinitializes it, which the Lean models do not describe. No Drop impl of the retained crates calls a lowering primitive; the primitives run only inside extracted calls that the native adapters make.",
+      "evidence": [
+        "E-profile-marks-tls",
+        "E-model-lowering-runtime"
+      ],
+      "cited_by": []
+    },
+    {
+      "id": "RA-j",
+      "assumption": "No DiagnosticSink is visible after an unwind: chelis-types has no non-test catch_unwind, so an unwinding checker entry drops its sink with its skipped scope exits.",
+      "justification": "session.rs sink scopes run their exit only on return. A sink is opened by a session.rs checker entry and owned by it, and no other crate can construct or hold a sink; so a catch outside the checker only sees the entry return by unwinding. accept.py rejects any catch_unwind in non-test chelis-types code.",
+      "static_check": "no-catch-unwind",
+      "evidence": [
+        "E-accept-no-catch-unwind",
+        "E-session-no-catch",
+        "E-session-unwind",
+        "E-session-opacity-unwind"
+      ],
+      "cited_by": []
+    },
+    {
+      "id": "RA-tls",
+      "assumption": "alpha_t: the native state of thread t (NATIVE_LOWERING_STATE, PROFILE_MARKS, this thread's draws from NEXT_HOST_INFERENCE_VAR, the environment reads) maps to one Lean LoweringRuntime value. Every primitive call sequence on t, through any number of nested with_native_lowering_runtime handles, moves alpha_t as the Lean models specify, in program order.",
+      "justification": "LoweringRuntime is a field-less handle that is neither Send nor Sync (compile_fail doc-tests), so every primitive call through it runs on the thread that acquired it, and nested handles name the same thread-local state. The hook reads only the flags of the raising thread. The internal shell items (state, entries, helpers) have zero core dependents in both strict plans (accept.py), so extracted code reaches the state only through the primitives. The coverage check on a whole-core extraction is the remaining structural check.",
+      "evidence": [
+        "E-lr-not-send",
+        "E-lr-observations",
+        "E-accept-plan-shell",
+        "E-lean-hook-thread",
+        "E-lean-threads"
+      ],
+      "cited_by": []
+    }
+  ],
+  "native_evidence": [
+    {
+      "id": "E-ns-cancel",
+      "kind": "test",
+      "path": "crates/chelis-types/src/native.rs",
+      "item": "cancellation_observed_distinguishes_absent_armed_and_tripped",
+      "description": "No token, an armed token and a tripped token give false, false, true."
+    },
+    {
+      "id": "E-ns-cancel-thread",
+      "kind": "test",
+      "path": "crates/chelis-types/src/native.rs",
+      "item": "cancellation_from_another_thread_is_observed_at_the_next_poll",
+      "description": "A cancel() on another thread is observed at the next poll, never cached at construction."
+    },
+    {
+      "id": "E-ns-grown",
+      "kind": "test",
+      "path": "crates/chelis-types/src/native.rs",
+      "item": "grown_stack_returns_the_closure_value_and_threads_state",
+      "description": "with_grown_stack returns the closure value on the real stacker segment."
+    },
+    {
+      "id": "E-ns-reset",
+      "kind": "test",
+      "path": "crates/chelis-types/src/native.rs",
+      "item": "check_after_a_caught_unwind_starts_like_fresh_services",
+      "description": "After a caught unwind out of guarded walkers, the next outermost scope starts at the depth of fresh services (reset_frames)."
+    },
+    {
+      "id": "E-ns-profiling",
+      "kind": "test",
+      "path": "crates/chelis-types/src/native.rs",
+      "item": "enabled_profiling_issues_consecutive_marks_and_changes_nothing_else",
+      "description": "The enabled profiling path issues consecutive marks and leaves cancellation, depth and stack probes unchanged."
+    },
+    {
+      "id": "E-infer-stack",
+      "kind": "test",
+      "path": "crates/chelis-types/src/infer/tests/mod.rs",
+      "item": "stack_exhaustion_drains_into_a_located_error",
+      "description": "A stack bail of a guarded walker drains into the located check error."
+    },
+    {
+      "id": "E-infer-depth-guard",
+      "kind": "test",
+      "path": "crates/chelis-types/tests/infer_recursion_depth_guard.rs",
+      "item": "moderate_depth_chain_does_not_trip_stack_guard",
+      "description": "Guarded walkers on a test-sized grown segment (with_grow_segment_bytes_for_test) do not bail on moderate depth."
+    },
+    {
+      "id": "E-cancel-threads",
+      "kind": "test",
+      "path": "crates/chelis-types/src/cancel.rs",
+      "item": "clones_share_one_flag_across_threads",
+      "description": "Token clones share one relaxed flag across threads."
+    },
+    {
+      "id": "E-capacity-fresh-id",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/capacity_key.rs",
+      "item": "fresh_id_draws_strictly_increasing_process_unique_identities",
+      "description": "Native fresh_id: strictly increasing on each thread and handle, unique across threads, never 0."
+    },
+    {
+      "id": "E-capacity-scope",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/capacity_key.rs",
+      "item": "exact_source_identity_is_scoped_to_one_verified_program",
+      "description": "Capacity scopes from the native supply separate verified programs."
+    },
+    {
+      "id": "E-lr-observations",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/lowering_runtime.rs",
+      "item": "native_hook_and_unwind_observations",
+      "description": "Child-process observation of the native hook, finalizer order, payload destruction, nested scopes, flag clearing and thread isolation."
+    },
+    {
+      "id": "E-lr-grow",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/lowering_runtime.rs",
+      "item": "grow_stack_if_needed_applies_the_closure_on_both_branches",
+      "description": "grow_stack_if_needed with the real stacker::maybe_grow: red_zone usize::MAX grows a fresh segment and red_zone 0 does not, and both return f(state)."
+    },
+    {
+      "id": "E-lr-not-send",
+      "kind": "text",
+      "path": "crates/chelis-ir/src/lowering_runtime.rs",
+      "item": "require_send::<chelis_ir::lowering_runtime::LoweringRuntime>();",
+      "description": "compile_fail doc-tests: LoweringRuntime is neither Send nor Sync, so a handle cannot leave its thread."
+    },
+    {
+      "id": "E-host-type-subst-unwind",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/host.rs",
+      "item": "host_type_substitution_is_nested_session_local_and_unwind_safe",
+      "description": "scoped exits run on unwind for the type-substitution scope."
+    },
+    {
+      "id": "E-host-inlining-unwind",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/host.rs",
+      "item": "host_inlining_scope_retains_outer_owner_and_recovers_after_unwind",
+      "description": "scoped exits run on unwind for the inlining scope."
+    },
+    {
+      "id": "E-host-preflight",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/host.rs",
+      "item": "host_preflight_scopes_do_not_share_pointer_facts_between_sessions",
+      "description": "fresh_preflight_frame ids separate preflight scopes."
+    },
+    {
+      "id": "E-host-summary-probes",
+      "kind": "test",
+      "path": "crates/chelis-ir/src/host.rs",
+      "item": "issue_1829_interpreter_session_bounds_kernel_decision_probes",
+      "description": "The summary-probe counter (record, read, reset) through host_summary_probe_builds."
+    },
+    {
+      "id": "E-session-unwind",
+      "kind": "test",
+      "path": "crates/chelis-types/src/session.rs",
+      "item": "recursive_invocations_restore_pending_evidence_on_return_and_unwind",
+      "description": "A sink scope that unwinds is dropped with its sink; only the returning path restores."
+    },
+    {
+      "id": "E-session-opacity-unwind",
+      "kind": "test",
+      "path": "crates/chelis-types/src/session.rs",
+      "item": "opacity_scopes_restore_policy_on_return_and_unwind_without_losing_errors",
+      "description": "Opacity scopes on return and on unwind."
+    },
+    {
+      "id": "E-session-no-catch",
+      "kind": "text",
+      "path": "crates/chelis-types/src/session.rs",
+      "item": "chelis-types has no production `catch_unwind`",
+      "description": "The sink scopes skip their exit on unwind because no production code of chelis-types catches an unwind."
+    },
+    {
+      "id": "E-profile-marks-tls",
+      "kind": "text",
+      "path": "crates/chelis-ir/src/lowering_runtime.rs",
+      "item": "static PROFILE_MARKS",
+      "description": "The thread-local profiling clocks that RA-i covers."
+    },
+    {
+      "id": "E-wire-codec-schema",
+      "kind": "test",
+      "path": "crates/chelis-types/tests/exact_wire_codec.rs",
+      "item": "published_schema_has_fixed_width_bits_and_closed_payload_shapes",
+      "description": "The only user of the wire-codec JSON Schema shell helpers."
+    },
+    {
+      "id": "E-model-native-services",
+      "kind": "model",
+      "path": "verification/native_services_models.rs",
+      "item": "native_services_models",
+      "description": "Differential fixture: enter_frame, exit_frame, reset_frames, stack_exhausted (real stacker, both answers), with_grown_stack (real stacker), cancellation_observed, profile_start and profile_phase against their Lean models; the copy of NativeServices is guarded against drift."
+    },
+    {
+      "id": "E-model-lowering-runtime",
+      "kind": "model",
+      "path": "verification/lowering_runtime_models.rs",
+      "item": "lowering_runtime_models",
+      "description": "Differential fixture of the lowering-runtime primitives against their Lean models; the copy of lowering_runtime.rs is guarded against drift (three recorded differences)."
+    },
+    {
+      "id": "E-model-sha256",
+      "kind": "model",
+      "path": "verification/crate_model_oracle/src/bin/sha256_model_oracle.rs",
+      "item": "sha256_model",
+      "description": "sha2 against the FIPS 180-4 Lean model; the copy of sha256_concat is guarded against drift."
+    },
+    {
+      "id": "E-accept-plan-shell",
+      "kind": "accept",
+      "path": "verification/accept.py",
+      "item": "check_shell_plan",
+      "description": "Both strict plans list exactly native_shell.json, with zero core dependents for every internal item and the pinned poll sites of runtime_sites.json."
+    },
+    {
+      "id": "E-accept-native-models",
+      "kind": "accept",
+      "path": "verification/accept.py",
+      "item": "check_native_models",
+      "description": "Each boundary item has exactly one Lean model declaration, named as in native_models."
+    },
+    {
+      "id": "E-accept-panic-unwind",
+      "kind": "accept",
+      "path": "verification/accept.py",
+      "item": "check_panic_strategy",
+      "description": "No Cargo profile or rustflags select panic = abort."
+    },
+    {
+      "id": "E-accept-no-catch-unwind",
+      "kind": "accept",
+      "path": "verification/accept.py",
+      "item": "check_no_catch_unwind",
+      "description": "No non-test chelis-types code calls catch_unwind."
+    },
+    {
+      "id": "E-lean-stack-schedule",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.oracle_run_schedule",
+      "description": "Every run over a native stack oracle is a run over a Lean-model stack schedule."
+    },
+    {
+      "id": "E-lean-stack-steps",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.cn_enter_probe",
+      "description": "enter_frame then stack_exhausted of the Lean model move the explicit state as the hand model."
+    },
+    {
+      "id": "E-lean-stack-exit",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.cn_exit_frame",
+      "description": "exit_frame of the Lean model is the saturating hand-model exit."
+    },
+    {
+      "id": "E-lean-stack-reset",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.cn_reset_frames",
+      "description": "reset_frames of the Lean model sets the depth to 0."
+    },
+    {
+      "id": "E-lean-stack-overflow",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.cn_enter_frame_overflow",
+      "description": "The Lean model of enter_frame fails at usize::MAX."
+    },
+    {
+      "id": "E-lean-stack-reuse",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.reuse_after_unwind",
+      "description": "Services reused after an unwound check behave like fresh services at the next outermost scope."
+    },
+    {
+      "id": "E-lean-stack-equivalence",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Stack.lean",
+      "item": "ChelisBridge.Runtime.Stack.first_bail_equivalence",
+      "description": "Old TLS guards and the explicit state give the same first bail for every oracle."
+    },
+    {
+      "id": "E-lean-cancel-mono",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Cancellation.lean",
+      "item": "ChelisBridge.Runtime.Cancellation.matched_cancel_oracle_mono",
+      "description": "A Lean-model cancellation oracle that matches a permitted native stream is monotone."
+    },
+    {
+      "id": "E-lean-cancel-permitted",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Cancellation.lean",
+      "item": "ChelisBridge.Runtime.Cancellation.permitted_iff_monotone",
+      "description": "Relaxed-atomic observation streams are exactly the monotone ones."
+    },
+    {
+      "id": "E-lean-host-vars",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/IdsLink.lean",
+      "item": "ChelisBridge.Runtime.IdsLink.host_var_draws_distinct",
+      "description": "The hostVar oracle is the projection of the global schedule; draws are distinct below 2^32 allocations."
+    },
+    {
+      "id": "E-lean-capacity",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/IdsLink.lean",
+      "item": "ChelisBridge.Runtime.IdsLink.capacity_projection_increasing",
+      "description": "The draw oracle is the projection of the global checked schedule from 1: strictly increasing."
+    },
+    {
+      "id": "E-lean-capacity-exhaustion",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/IdsLink.lean",
+      "item": "ChelisBridge.Runtime.IdsLink.capacity_none_only_at_exhaustion",
+      "description": "The exhaustion panic occurs only after every identity was handed out."
+    },
+    {
+      "id": "E-lean-fresh-id",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/IdsLink.lean",
+      "item": "ChelisBridge.Runtime.IdsLink.fresh_id_projection",
+      "description": "One step of the Lean model of fresh_id on the projected oracle."
+    },
+    {
+      "id": "E-lean-preflight",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/IdsLink.lean",
+      "item": "ChelisBridge.Runtime.IdsLink.preflight_frames_distinct",
+      "description": "Preflight frame ids of one thread are distinct below 2^64 draws."
+    },
+    {
+      "id": "E-lean-profile",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/ProfileModels.lean",
+      "item": "ChelisBridge.Runtime.ProfileModels.detail_profile_start_core",
+      "description": "The profiling models change only profiling fields."
+    },
+    {
+      "id": "E-lean-profile-services",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/ProfileModels.lean",
+      "item": "ChelisBridge.Runtime.ProfileModels.profile_start_core",
+      "description": "profile_start changes only profiling fields of NativeServices."
+    },
+    {
+      "id": "E-lean-profile-declaration",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/ProfileModels.lean",
+      "item": "ChelisBridge.Runtime.ProfileModels.detail_profile_declaration_core",
+      "description": "detail_profile_declaration keeps the state and returns dagTotal or lastDagSize."
+    },
+    {
+      "id": "E-lean-extracted-scopes",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/ExtractedScopes.lean",
+      "item": "ChelisBridge.Runtime.ExtractedScopes.catchLoweringWith_spec",
+      "description": "The extracted catch_lowering_with over the Lean models of the lowering primitives."
+    },
+    {
+      "id": "E-lean-unwind",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Unwind.lean",
+      "item": "ChelisBridge.Runtime.Unwind.unwind_equivalence",
+      "description": "Hand model of the native hook and unwind order versus the explicit-state runtime."
+    },
+    {
+      "id": "E-lean-hook-thread",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Unwind.lean",
+      "item": "ChelisBridge.Runtime.Unwind.hook_reads_current_thread",
+      "description": "The hook reads only the flags of the raising thread."
+    },
+    {
+      "id": "E-lean-threads",
+      "kind": "lean",
+      "path": "verification/lean/ChelisBridge/Runtime/Unwind.lean",
+      "item": "ChelisBridge.Runtime.Unwind.other_threads_unchanged",
+      "description": "Primitive steps of one thread leave other threads unchanged."
+    }
   ]
 }

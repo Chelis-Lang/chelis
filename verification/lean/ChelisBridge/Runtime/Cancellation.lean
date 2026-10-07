@@ -1,3 +1,5 @@
+import Aeneas
+
 /-!
 # Cancellation: relaxed-atomic token versus the explicit polling core
 
@@ -20,13 +22,18 @@ pub fn cancellation_observed(&mut self) -> bool {
 }
 ```
 
-Trusted-base assumptions made explicit here (see `modOrder`, `Permitted`):
+Trusted-base assumptions made explicit here (see `modOrder`, `Permitted`), recorded as RA-g in
+`verification/trusted_base.json` (section `runtime_assumptions`):
 
 * the only writer of the flag is `cancel()`, which stores `true`; the initial value is `false`
   (`AtomicBool::new(false)` via `Default`), so the modification order is `[false]` or
   `[false, true]` (repeated `true` stores are indistinguishable for loads);
 * relaxed loads by one polling thread obey read-read coherence and read from the modification
   order, and nothing else is guaranteed (no bound on when `true` becomes visible).
+
+Section A.5 links these native streams to the Lean model of `cancellation_observed`
+(`chelis_types.native.NativeServices`, oracle `cancel`, clock `cancelTaken`): every permitted
+stream is monotone, so a Lean-model oracle that matches a native run satisfies `Mono`.
 -/
 
 namespace ChelisBridge.Runtime.Cancellation
@@ -235,6 +242,62 @@ theorem frozen_entry_not_equivalent :
   rw [permitted_true_iff]
   unfold Mono lateCancel
   decide
+
+/-! ## A.5 The Lean model of `cancellation_observed` -/
+
+/-- **O14(a).** Every permitted observation sequence is monotone, with or without a `cancel()`
+store. -/
+theorem permitted_mono (written : Bool) (obs : List Bool) (h : Permitted written obs) :
+    Mono obs := by
+  cases written with
+  | true => exact (permitted_true_iff obs).mp h
+  | false =>
+    have hall := (permitted_false_iff obs).mp h
+    unfold Mono
+    refine List.pairwise_of_forall_mem_list fun a ha _ _ hat => ?_
+    rw [hall a ha] at hat
+    exact absurd hat Bool.false_ne_true
+
+open Aeneas.Std in
+/-- The next `n` answers of the Lean-model cancellation oracle. -/
+def cnPolls (c : chelis_types.native.NativeServices) (n : Nat) : List Bool :=
+  (List.range n).map fun i => c.cancel (c.cancelTaken + i)
+
+open Aeneas.Std in
+/-- `n` successive calls of the Lean model of `cancellation_observed`. -/
+def pollN : chelis_types.native.NativeServices → Nat →
+    Result (List Bool × chelis_types.native.NativeServices)
+  | c, 0 => .ok ([], c)
+  | c, n + 1 => do
+      let r ← chelis_types.native.NativeServices.cancellation_observed c
+      let rs ← pollN r.2 n
+      .ok (r.1 :: rs.1, rs.2)
+
+open Aeneas.Std in
+/-- `n` polls of the Lean model return the next `n` oracle answers and advance the clock by `n`;
+the oracle itself never changes. -/
+theorem pollN_eq (c : chelis_types.native.NativeServices) (n : Nat) :
+    pollN c n = .ok (cnPolls c n, { c with cancelTaken := c.cancelTaken + n }) := by
+  induction n generalizing c with
+  | zero => simp [pollN, cnPolls]
+  | succ n ih =>
+    simp only [pollN, chelis_types.native.NativeServices.cancellation_observed, bind_tc_ok, ih]
+    simp only [cnPolls, List.range_succ_eq_map, List.map_cons, List.map_map, Nat.add_zero,
+      Result.ok.injEq, Prod.mk.injEq, List.cons.injEq, true_and]
+    refine ⟨List.map_congr_left fun i _ => ?_, ?_⟩
+    · simp only [Function.comp, Nat.add_assoc, Nat.add_comm 1 i]
+    · simp only [Nat.add_assoc, Nat.add_comm 1 n]
+
+open Aeneas.Std in
+/-- **O14(a).** A Lean-model cancellation oracle that matches a native run (its next answers
+are the observations of a permitted native stream) answers the polls of that run with a
+monotone sequence. -/
+theorem matched_cancel_oracle_mono (written : Bool) (obs : List Bool)
+    (hp : Permitted written obs) (c : chelis_types.native.NativeServices)
+    (hmatch : cnPolls c obs.length = obs) :
+    ∃ c', pollN c obs.length = .ok (obs, c') ∧ Mono obs ∧ c'.cancel = c.cancel :=
+  ⟨{ c with cancelTaken := c.cancelTaken + obs.length }, by rw [pollN_eq, hmatch],
+    permitted_mono written obs hp, rfl⟩
 
 /-! ## A.4 Scoped token installation versus the TLS `CancelTokenGuard` -/
 

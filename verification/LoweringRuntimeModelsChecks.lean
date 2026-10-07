@@ -19,13 +19,17 @@ def value {α : Type} : Result α → Except String α
   | .fail _ => .error "failure"
   | .div => .error "divergence"
 
-/-- A fresh thread of a fresh process: both flags clear, no raise, counters at
-    zero, the process supply unshared, no profiling clock, and the environment's
-    `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL` reads given by `env`. -/
+/-- A fresh thread of a fresh process: both flags clear, the hook not installed, no
+    raise, counters at zero, the process supply unshared, no profiling clock, and the
+    environment's `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL` reads given by `env`. -/
 def fresh (env : Nat → Bool := fun _ => false) : Runtime := {
-  u := false, o := false, hook := [], builds := 0#u64, nextPreflightFrame := 0#u64,
-  hostVar := fun n => ⟨BitVec.ofNat _ n⟩, hostVarsTaken := 0,
+  u := false, o := false, installed := false, hook := [], builds := 0#u64,
+  nextPreflightFrame := 0#u64, hostVar := fun n => ⟨BitVec.ofNat _ n⟩, hostVarsTaken := 0,
   profileEnv := env, profileEnvReads := 0, profileMarks := 0#usize }
+
+/-- A fresh thread after `record_raises`: that function installs the Chelis hook before the
+    recorder, so the lower bound `installed` holds. -/
+def hooked : Runtime := { fresh with installed := true }
 
 def run {α : Type} (step : Runtime → Result (α × Runtime)) (s : Runtime) :
     Except String (α × Runtime) :=
@@ -120,7 +124,11 @@ def contents (s : chelis_ir.Scope) : List Nat × Nat := (s.items.val.map (·.val
 
 The native observations of `raises_record_their_flags`, `catch_threads_state`
 and `boundary_resume_skips_the_hook`, with a diagnostic reduced to its code and
-`fatal` flag. -/
+`fatal` flag. Each recorded raise is `(u, o, installed, kind)`. The model hook entry gives
+`(u, o, installed)`. The payload kind of a raise is the payload of the failure that the raise
+returns (`ExtractedScopes.raise_hook_payload`). A caught failure converts to a diagnostic. The
+fixture's `unrepresentable_diagnostic` has code `1`, and no scenario raises code `1`. Thus a
+caught `Err` with code `1` comes from an `Unrepresentable` failure. -/
 
 section RaiseCatch
 open chelis_ir.lowering_runtime
@@ -135,9 +143,30 @@ def failure : LoweringFailure → Option (Nat × Bool)
   | .Unrepresentable => none
   | .Diagnostic d => some (d.code.val, d.fatal)
 
+/-- The payload kind of a raise, as the native recorder reads it. -/
+inductive Kind where
+  | unrep
+  | diag (code : Nat) (fatal : Bool)
+  deriving DecidableEq, Repr
+
+/-- The kind of the payload of a failure. -/
+def failureKind : LoweringFailure → Kind
+  | .Unrepresentable => .unrep
+  | .Diagnostic d => .diag d.code.val d.fatal
+
+/-- The kind of the payload of the raise behind a caught `Err`. -/
+def caughtKind {α : Type} : core.result.Result α chelis_ir.lower.LowerDiagnostic → Kind
+  | .Ok _ => .unrep
+  | .Err d => if d.code.val = 1 then .unrep else .diag d.code.val d.fatal
+
+/-- Hook entries with the payload kinds of their raises. -/
+def withKinds (raises : List (Bool × Bool × Bool)) (kinds : List Kind) :
+    List (Bool × Bool × Bool × Kind) :=
+  (raises.zip kinds).map fun ((u, o, i), k) => (u, o, i, k)
+
 /-- The raises of one step, with its result. -/
 def observe {α : Type} (step : Runtime → Result (α × Runtime)) (s : Runtime) :
-    Except String (α × List (Bool × Bool) × Runtime) :=
+    Except String (α × List (Bool × Bool × Bool) × Runtime) :=
   match step { s with hook := [] } with
   | .ok (a, s) => .ok (a, s.hook, s)
   | .fail _ => .error "failure"
@@ -150,14 +179,15 @@ def caughtWithState (count : U32) (reject : Bool) (s : Runtime) :
 
 #eval do
   -- raises_record_their_flags
-  let .ok (r, raises, s) := observe (chelis_ir.speculative_rejection · 9#u32) (fresh)
+  let .ok (r, raises, s) := observe (chelis_ir.speculative_rejection · 9#u32) hooked
     | throw (IO.userError "speculative rejection")
   expect "speculative rejection" (plain r) (.inr (1, false))
-  expect "speculative raise flags" raises [(true, true)]
+  expect "speculative raise" (withKinds raises [caughtKind r]) [(true, true, true, .unrep)]
   let .ok (r, raises, s) := observe (chelis_ir.rejection_after_inner_catch · 9#u32) s
     | throw (IO.userError "rejection after an inner catch")
   expect "rejection after an inner catch" (plain r) (.inr (9, false))
-  expect "an inner catch clears o" raises [(false, false)]
+  expect "an inner catch clears o" (withKinds raises [caughtKind r])
+    [(false, false, true, .diag 9 false)]
   let .ok (r, raises, s) := observe (chelis_ir.rejection_after_inner_catch · 17#u32) s
     | throw (IO.userError "inner catch result")
   expect "inner catch result" (plain r) (.inl 17)
@@ -165,29 +195,58 @@ def caughtWithState (count : U32) (reject : Bool) (s : Runtime) :
   let .ok (r, raises, s) := observe (chelis_ir.fatal_reraise · 4#u32) s
     | throw (IO.userError "fatal re-raise")
   expect "fatal re-raise" (plain r) (.inr (4, true))
-  expect "fatal re-raise flags" raises [(true, true), (true, true)]
+  -- The re-raise raises the caught diagnostic again (`raiseFatal_spec`).
+  expect "fatal re-raise" (withKinds raises [caughtKind r, caughtKind r])
+    [(true, true, true, .diag 4 true), (true, true, true, .diag 4 true)]
   let .ok (f, raises, s) := observe (chelis_ir.uncaught_rejection · 5#u32) s
     | throw (IO.userError "uncaught rejection")
   expect "uncaught rejection" (failure f) (some (5, false))
-  expect "uncaught raise flags" raises [(false, false)]
+  expect "uncaught raise" (withKinds raises [failureKind f]) [(false, false, true, .diag 5 false)]
   expect "no flag left set" (flags s) (false, false)
   -- catch_threads_state
-  let .ok ((r, count), raises, s) := observe (caughtWithState 3#u32 false) (fresh)
+  let .ok ((r, count), raises, s) := observe (caughtWithState 3#u32 false) hooked
     | throw (IO.userError "caught state")
   expect "caught state" (plain r, count.val) (.inl 4, 4)
   expect "no raise" raises []
   let .ok ((r, count), raises, _) := observe (caughtWithState count true) s
     | throw (IO.userError "caught rejection")
   expect "caught rejection" (plain r, count.val) (.inr (1, false), 5)
-  expect "caught raise flags" raises [(false, true)]
+  expect "caught raise" (withKinds raises [caughtKind r]) [(false, true, true, .unrep)]
   -- boundary_resume_skips_the_hook
-  let .ok (f, raises, _) := observe (chelis_ir.uncaught_rejection · 6#u32) (fresh)
+  let .ok (f, raises, _) := observe (chelis_ir.uncaught_rejection · 6#u32) hooked
     | throw (IO.userError "boundary raise")
-  expect "boundary raise flags" raises [(false, false)]
+  expect "boundary raise" (withKinds raises [failureKind f]) [(false, false, true, .diag 6 false)]
   expect "boundary diagnostic" (failure f) (some (6, false))
   expect "resuming leaves the modeled domain"
     (match LoweringFailure.resume_at_boundary f with | .fail _ => true | _ => false) true
   IO.println "lowering_runtime_models: raise and catch scenarios agree"
+
+/-! The native observations of `fatal_raise_before_first_catch_is_visible`. A child process
+runs it before any installation of the Chelis hook, so it starts from `fresh`. The previous hook
+observes a raise iff the hook is not installed or both flags are clear. The lower bound
+`installed` of the model is exact here: only the first catch installs the hook. -/
+
+/-- The raises that the previous hook observes, as `(u, o, kind)`. -/
+def visible (raises : List (Bool × Bool × Bool × Kind)) : List (Bool × Bool × Kind) :=
+  (raises.filter fun (u, o, i, _) => !(i && (u || o))).map fun (u, o, _, k) => (u, o, k)
+
+#eval do
+  let .ok ((first, caught, after, fatal), raises, s) :=
+      observe (chelis_ir.fatal_before_first_catch · 7#u32) (fresh)
+    | throw (IO.userError "fatal raise before the first catch")
+  expect "first fatal raise" (failure first) (some (7, true))
+  expect "caught rejection" (plain caught) (.inr (8, false))
+  expect "raise after the catch" (failure after) (some (9, false))
+  expect "fatal raise after the catch" (failure fatal) (some (10, true))
+  let raises := withKinds raises
+    [failureKind first, caughtKind caught, failureKind after, failureKind fatal]
+  expect "hook entries" raises
+    [(false, true, false, .diag 7 true), (false, true, true, .diag 8 false),
+      (false, false, true, .diag 9 false), (false, true, true, .diag 10 true)]
+  expect "visible raises" (visible raises) [(false, true, .diag 7 true), (false, false, .diag 9 false)]
+  expect "a fatal raise outside a catch leaves o set" (flags s) (false, true)
+  expect "the catch installed the hook" s.installed true
+  IO.println "lowering_runtime_models: hook installation scenario agrees"
 
 /-! The native observations of `host_scopes_thread_the_context`: `scoped` on a
 context holding mutable borrows, with a grown stack on a tuple of them. -/
@@ -207,7 +266,7 @@ def plainUsize : core.result.Result Usize chelis_ir.lower.LowerDiagnostic → Su
 
 #eval do
   -- host_scopes_thread_the_context
-  let .ok ((r, s, native), raises, rt) := observe (hostScopes 7 (scope [1] 0) 4 false) (fresh)
+  let .ok ((r, s, native), raises, rt) := observe (hostScopes 7 (scope [1] 0) 4 false) hooked
     | throw (IO.userError "host scope")
   expect "host scope" (plainUsize r) (.inl 3)
   expect "host scope state" (contents s, native.val) (([1, 7], 2), 5)
@@ -216,7 +275,7 @@ def plainUsize : core.result.Result Usize chelis_ir.lower.LowerDiagnostic → Su
     | throw (IO.userError "host scope rejection")
   expect "host scope rejection" (plainUsize r) (.inr (1, false))
   expect "host scope state after the rejection" (contents s, native.val) (([1, 7, 9], 5), 6)
-  expect "host scope raise flags" raises [(false, true)]
+  expect "host scope raise" (withKinds raises [caughtKind r]) [(false, true, true, .unrep)]
   expect "no flag left set" (flags rt) (false, false)
   IO.println "lowering_runtime_models: borrowing context scenarios agree"
 

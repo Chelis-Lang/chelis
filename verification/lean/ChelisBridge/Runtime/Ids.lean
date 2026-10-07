@@ -19,12 +19,13 @@ NEXT_CAPACITY_SCOPE
     .expect("capacity-scope identity space exhausted");
 ```
 
-Trusted-base assumption (`allocU32`, `allocU64`): every read-modify-write on one atomic
-location reads the value written by the immediately preceding RMW in that location's
-modification order, even with `Relaxed` (C++/Rust atomics: RMW atomicity). An arbitrary
+Trusted-base assumption RA-g (`verification/trusted_base.json`, section `runtime_assumptions`;
+models `allocU32`, `allocU64`): every read-modify-write on one atomic location reads the
+value written by the immediately preceding RMW in that location's modification order, even with `Relaxed` (C++/Rust atomics: RMW atomicity). An arbitrary
 interleaving of threads and invocations is therefore a schedule `List α` of RMW events in
 modification order, each labelled by its issuer; a failed `fetch_update` (closure returned
-`None`) performs no store.
+`None`) performs no store. `Runtime/IdsLink.lean` relates these schedules to the Lean models
+of the primitives.
 -/
 
 namespace ChelisBridge.Runtime.Ids

@@ -5,6 +5,7 @@ from difflib import unified_diff
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -86,16 +87,30 @@ MODELS = {
     "btree_from_array_models": "BtreeFromArrayModels",
     "assert_unwind_safe_models": "AssertUnwindSafeModels",
     "hash_slice_models": "HashSliceModels",
+    "native_services_models": "NativeServicesModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
 # name, so that the models keyed on production paths replace their primitives.
-MODEL_CRATES = {"lowering_runtime_models": "chelis_ir", "thiserror_models": "thiserror"}
+MODEL_CRATES = {
+    "lowering_runtime_models": "chelis_ir",
+    "native_services_models": "chelis_types",
+    "thiserror_models": "thiserror",
+}
 
 # The native shell of a primitives fixture: the items of
 # verification/native_shell.json under this prefix, hard-opaque as in the
 # production extraction.
-MODEL_SHELLS = {"lowering_runtime_models": "chelis_ir::lowering_runtime::"}
+MODEL_SHELLS = {
+    "lowering_runtime_models": "chelis_ir::lowering_runtime::",
+    "native_services_models": "chelis_types::native::",
+}
+
+# Crates of the workspace that a fixture's native test links (`--extern`), as its production
+# crate does. Cargo builds them from the workspace lock file, so that native test compiles with
+# the workspace compiler (rust-toolchain.toml) instead of model-rustc. Charon compiles the
+# library without them: only hard-opaque shell items may use them.
+MODEL_NATIVE_CRATES = {"native_services_models": ("stacker",)}
 
 # Fixtures of a dependency crate's items (compiled under the dependency's crate name, see
 # MODEL_CRATES) copy those items verbatim; they are hard-opaque, as the items of a
@@ -173,8 +188,12 @@ MODEL_ROOTS = {
         "speculation_flags", "summary_probes", "preflight_frames", "host_inference_vars",
         "profile_declarations", "profile_unissued_mark", "scoped_push", "grown_push",
         "speculative_rejection", "rejection_after_inner_catch", "fatal_reraise",
-        "uncaught_rejection", "caught_with_state", "host_scopes",
+        "uncaught_rejection", "caught_with_state", "host_scopes", "fatal_before_first_catch",
         "lowering_runtime::{chelis_ir::lowering_runtime::LoweringFailure}::resume_at_boundary",
+    )),
+    "native_services_models": tuple(f"chelis_types::scenarios::{entry}" for entry in (
+        "frame_exhausted", "descend", "ascend", "enter_outermost_scope", "grown_entry", "polls",
+        "profiled",
     )),
     "sort_std_models": tuple(f"sort_std_models::{entry}" for entry in (
         "sort_usizes", "sort_pairs", "sort_strings", "sort_strs", "sort_flags", "sort_ids",
@@ -241,6 +260,148 @@ REJECTED_DIAGNOSTICS = {
 }
 
 
+# Fixtures that repeat production code verbatim, up to recorded differences. A region starts
+# at `start` and ends with the block of the item that starts at `end` (both texts occur in
+# both files). The guard compares token sequences without comments, blank space, trailing
+# commas and visibility (`pub`, `pub(crate)`, ...), so formatting does not matter. Each recorded difference (production text, fixture text) must
+# occur exactly once in the production region; after these substitutions the regions must be
+# equal. So a change of a production primitive without the same fixture change fails the check.
+FIXTURE_COPIES = {
+    "lowering_runtime_models": [{
+        "production": "crates/chelis-ir/src/lowering_runtime.rs",
+        "fixture": "verification/lowering_runtime_models.rs",
+        "start": "fn resume_native_unwind",
+        "end": "fn unrepresentable_diagnostic",
+        "differences": (
+            # `stacker` is not linkable into the single-file fixture.
+            ("stacker::maybe_grow(red_zone, stack_size, || f(state))",
+             "let _ = (red_zone, stack_size); f(state)"),
+            ("stacker::grow(LOWERING_GROW_SEGMENT_BYTES, move || f(runtime, state))",
+             "f(runtime, state)"),
+            ("const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;", ""),
+            # The fixture's `LowerDiagnostic` is reduced to a code and the `fatal` flag.
+            ("|message| { LowerDiagnostic::new("
+             "message.unwrap_or_else(|| \"internal lowering error\".to_string()), None, None, ) }",
+             "|message| LowerDiagnostic::new(if message.is_some() { 2 } else { 3 })"),
+            ("LowerDiagnostic::new(\"program uses a form that is not supported by IR evaluation "
+             "yet; use `chelis build --target c` instead\", None, None, )",
+             "LowerDiagnostic::new(1)"),
+        ),
+    }],
+    "native_services_models": [{
+        "production": "crates/chelis-types/src/native.rs",
+        "fixture": "verification/native_services_models.rs",
+        "start": "pub struct NativeServices",
+        "end": "impl NativeServices {",
+        "differences": (),
+    }],
+    "sha256_model": [{
+        "production": "crates/chelis-types/src/native.rs",
+        "fixture": "verification/crate_model_oracle/src/bin/sha256_model_oracle.rs",
+        "start": "fn sha256_concat",
+        "end": "fn sha256_concat",
+        "differences": (),
+    }],
+}
+
+RUST_TOKEN = re.compile(
+    r'"(?:[^"\\]|\\.)*"'  # string literal
+    r"|'(?:[^'\\]|\\.)'"  # char literal
+    r"|[A-Za-z_][A-Za-z0-9_]*|\d[\w.]*|::|->|=>|&&|\|\||\S")
+VISIBILITY = re.compile(r"\bpub(\((crate|super|self)\))?\s+")
+
+
+def rust_tokens(text: str) -> list[str]:
+    """Tokens of Rust source without comments, blank space, trailing commas and visibility."""
+    kept, index = [], 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        elif text.startswith("/*", index):
+            index = text.index("*/", index) + 2
+        else:
+            # A string or char literal is kept whole, so `//` or `"` inside it is not syntax.
+            match = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)\'|.', re.S).match(text, index)
+            kept.append(match.group(0))
+            index = match.end()
+    tokens = RUST_TOKEN.findall(VISIBILITY.sub("", "".join(kept)))
+    return [token for token, following in zip(tokens, [*tokens[1:], ""])
+            if not (token == "," and following in (")", "]", "}"))]
+
+
+def copy_region(text: str, start: str, end: str, path: str) -> str:
+    """From `start` to the end of the block of the item that starts at `end`."""
+    first = text.find(start)
+    last = text.find(end, first) if first >= 0 else -1
+    if first < 0 or last < 0:
+        raise RuntimeError(f"{path}: no copied region from {start!r} to {end!r}")
+    depth = 0
+    for index in range(text.index("{", last), len(text)):
+        depth += {"{": 1, "}": -1}.get(text[index], 0)
+        if depth == 0:
+            return text[first:index + 1]
+    raise RuntimeError(f"{path}: unbalanced block at {end!r}")
+
+
+def check_fixture_copies(name: str, root: Path) -> None:
+    for copy in FIXTURE_COPIES.get(name, ()):
+        regions = {
+            side: rust_tokens(copy_region(
+                (root / copy[side]).read_text(), copy["start"], copy["end"], copy[side]))
+            for side in ("production", "fixture")
+        }
+        expected = regions["production"]
+        for production, fixture in copy["differences"]:
+            old, new = rust_tokens(production), rust_tokens(fixture)
+            found = [index for index in range(len(expected) - len(old) + 1)
+                     if expected[index:index + len(old)] == old]
+            if len(found) != 1:
+                raise RuntimeError(
+                    f"{name}: recorded difference {production!r} occurs {len(found)} times in "
+                    f"{copy['production']}")
+            expected = expected[:found[0]] + new + expected[found[0] + len(old):]
+        if expected != regions["fixture"]:
+            lines = {side: " ".join(tokens).replace("; ", ";\n").replace("{ ", "{\n").replace(
+                "} ", "}\n").splitlines(keepends=True)
+                for side, tokens in (("production", expected), ("fixture", regions["fixture"]))}
+            sys.stderr.writelines(unified_diff(
+                lines["production"], lines["fixture"],
+                fromfile=f"{copy['production']} (recorded differences applied)",
+                tofile=copy["fixture"]))
+            raise RuntimeError(
+                f"{name}: {copy['fixture']} no longer repeats {copy['production']} "
+                f"(from {copy['start']!r} to the end of {copy['end']!r})")
+        print(f"{name}: {copy['fixture']} repeats {copy['production']} "
+              f"with {len(copy['differences'])} recorded differences")
+
+
+def native_crate_arguments(name: str, directory: Path, root: Path) -> tuple[str, list[str]]:
+    """The compiler and `--extern` arguments of a fixture's native test (MODEL_NATIVE_CRATES)."""
+    crates = MODEL_NATIVE_CRATES.get(name, ())
+    if not crates:
+        return "model-rustc", []
+    target = directory / "native-crates"
+    output = run([
+        "cargo", "build", "--offline", "--locked", "--quiet", "--message-format=json",
+        "--manifest-path", str(root / "Cargo.toml"), "--target-dir", str(target),
+        *[argument for crate in crates for argument in ("-p", crate)],
+    ], root, capture=True)
+    libraries = {}
+    for line in output.splitlines():
+        message = json.loads(line)
+        if message.get("reason") == "compiler-artifact" and message["target"]["name"] in crates:
+            libraries[message["target"]["name"]] = next(
+                path for path in message["filenames"] if path.endswith(".rlib"))
+    missing = sorted(set(crates) - set(libraries))
+    if missing:
+        raise RuntimeError(f"{name}: cargo built no library for {missing}")
+    return "rustc", [
+        "-L", f"dependency={target / 'debug' / 'deps'}",
+        *[f"--extern={crate}={library}" for crate, library in sorted(libraries.items())],
+    ]
+
+
 def check_float_model(lean_library: Path, root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="chelis-float-model-") as directory:
         native = Path(directory) / "native"
@@ -261,6 +422,37 @@ def check_float_model(lean_library: Path, root: Path) -> None:
         print(f"Floating model smoke: {len(expected.splitlines())} native/Lean observations agree")
 
 
+def check_unwind_replay(lean_library: Path, root: Path) -> None:
+    """The native unwind segments against their Lean replays (Runtime/Unwind.lean)."""
+    with tempfile.TemporaryDirectory(prefix="chelis-unwind-replay-") as directory:
+        output = Path(directory)
+        native = output / "native"
+        run([
+            "model-rustc", "--edition=2021", str(root / "verification" / "unwind_replay_oracle.rs"),
+            "-o", str(native),
+        ], root)
+        expected = run([str(native)], root, capture=True)
+        bridge = root / "verification" / "lean"
+        olean = output / "ChelisBridge" / "Runtime" / "Unwind.olean"
+        olean.parent.mkdir(parents=True)
+        lean_path = os.pathsep.join(filter(None, [str(output), os.environ.get("LEAN_PATH")]))
+        lean = ["env", f"LEAN_PATH={lean_path}", "lake", "env", "lean"]
+        run([
+            *lean, f"--root={bridge}", "-o", str(olean),
+            str(bridge / "ChelisBridge" / "Runtime" / "Unwind.lean"),
+        ], lean_library)
+        actual = run([
+            *lean, str(root / "verification" / "UnwindReplayChecks.lean"),
+        ], lean_library, capture=True)
+    if actual != expected:
+        sys.stderr.writelines(unified_diff(
+            expected.splitlines(keepends=True), actual.splitlines(keepends=True),
+            fromfile="native Rust", tofile="Lean replay",
+        ))
+        raise RuntimeError("The Lean unwind replays disagree with the native unwind oracle")
+    print(f"unwind_replay: {len(expected.splitlines())} native/Lean segments agree")
+
+
 # Models of external crates: native oracle binaries of the standalone
 # `crate_model_oracle` package (pinned crate versions) against Lean check files.
 CRATE_MODELS = {
@@ -279,6 +471,7 @@ def crate_oracle_command(binary: str, target: Path, root: Path) -> list[str]:
 
 
 def check_crate_model(name: str, lean_library: Path, root: Path) -> None:
+    check_fixture_copies(name, root)
     binary, checks = CRATE_MODELS[name]
     with tempfile.TemporaryDirectory(prefix=f"chelis-{name}-") as directory:
         target = Path(directory)
@@ -402,11 +595,14 @@ def check_model(name: str, lean_library: Path, root: Path) -> None:
     edition = f"--edition={MODEL_EDITIONS.get(name, '2021')}"
     source = root / "verification" / f"{name}.rs"
     checks = root / "verification" / f"{module}Checks.lean"
+    check_fixture_copies(name, root)
     with tempfile.TemporaryDirectory(prefix=f"chelis-{name}-") as directory:
         output = Path(directory)
         native = output / "native"
+        compiler, externs = native_crate_arguments(name, output, root)
         run([
-            "model-rustc", edition, *crate_arguments(name), "--test", str(source), "-o", str(native),
+            compiler, edition, *crate_arguments(name), *externs, "--test", str(source),
+            "-o", str(native),
         ], root)
         run([str(native)], root)
         llbc = output / f"{name}.llbc"
@@ -432,16 +628,21 @@ def main() -> None:
         help="Built backends/lean directory from the pinned patched Aeneas source",
     )
     parser.add_argument(
-        "--model", choices=(*MODELS, "float_model", *CRATE_MODELS, "collection_contracts"),
+        "--model",
+        choices=(*MODELS, "float_model", "unwind_replay", *CRATE_MODELS, "collection_contracts"),
         action="append",
         help="Check this model (repeatable); by default check every model",
     )
     args = parser.parse_args()
     lean_library = args.aeneas_lean_dir.resolve()
     root = Path(__file__).resolve().parent.parent
-    for name in args.model or ["float_model", *CRATE_MODELS, *MODELS, "collection_contracts"]:
+    for name in args.model or [
+        "float_model", "unwind_replay", *CRATE_MODELS, *MODELS, "collection_contracts",
+    ]:
         if name == "float_model":
             check_float_model(lean_library, root)
+        elif name == "unwind_replay":
+            check_unwind_replay(lean_library, root)
         elif name in CRATE_MODELS:
             check_crate_model(name, lean_library, root)
         elif name == "collection_contracts":

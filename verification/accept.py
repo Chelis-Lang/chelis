@@ -6,6 +6,13 @@ Run from the repository root inside the pinned environment:
 
 Every stage either succeeds or aborts the run with a nonzero status. There is no
 skip, reuse or warning-only mode: a stage whose prerequisites are missing fails.
+
+The static native-boundary checks (stage 3 and the shell checks of stage 7) also run alone,
+without extraction, on a built or unbuilt Aeneas Lean library and existing plans:
+
+    python verification/accept.py --static --aeneas-lean-dir <backends/lean> \
+        [--plan default=<plan.json> --plan lowering-trace=<plan.json>]
+
 All artifacts of one run live in a fresh directory under .work/acceptance/, and
 each stage checks that its outputs were produced by this run.
 
@@ -17,19 +24,29 @@ Stages, in order:
                      source; `charon`/`aeneas` on PATH must be exactly those outputs.
                      The Aeneas Lean library is prepared from that source (content
                      checked file by file) and built.
-3. native            `cargo fmt --check`, strict Clippy and the workspace tests.
-4. model matrix      native versus generated Lean behavior of every library model,
+3. native boundary   trusted_base.json `native_models`: exactly the boundary items of
+                     native_shell.json, each with exactly one Lean model of the recorded
+                     name in the library; `runtime_assumptions` RA-a to RA-j and RA-tls,
+                     cited by the Runtime proof headers; every `native_evidence` entry
+                     resolves; static checks: no Cargo profile or rustflags select
+                     panic = abort (RA-a), no non-test chelis-types code calls
+                     catch_unwind (RA-j).
+4. native            `cargo fmt --check`, strict Clippy and the workspace tests.
+5. model matrix      native versus generated Lean behavior of every library model,
                      float observations, rejected roots and collection contracts.
-5. production AD     fresh `grad_dag_checked` extraction and Lean compilation.
-6. whole-core plan   fresh call graphs and chunk plans (default and lowering-trace).
-7. whole-core        separately compiled extraction of both chains and compilation
+6. production AD     fresh `grad_dag_checked` extraction and Lean compilation.
+7. whole-core plan   fresh call graphs and chunk plans (default and lowering-trace); each
+                     plan lists exactly native_shell.json, no core item depends on an
+                     internal shell item, and the core dependents of each pinned primitive
+                     equal verification/runtime_sites.json.
+8. whole-core        separately compiled extraction of both chains and compilation
                      of the unmodified generated Lean.
-8. coverage          independent re-validation of each chain's coverage report:
+9. coverage          independent re-validation of each chain's coverage report:
                      every owned and adopted plan item has exactly one accepted
                      status, each emitted one names an entry of its own chunk's
                      manifest (outside the External_Template axioms), and the
                      per-crate counts are recomputed from the items.
-9. correspondence    the Lean bridge (ChelisBridge + Audit) built against each
+10. correspondence   the Lean bridge (ChelisBridge + Audit) built against each
                      chain's whole-core model; Audit fails on disallowed axioms.
                      Model-generated bridge modules (Runtime/CloneId.lean) must be
                      exactly what verification/lean/gen_clone_id.py generates from
@@ -37,7 +54,7 @@ Stages, in order:
                      verification/lean/ClosureAudit.lean then inventories the
                      transitive closure of every accepted theorem (axioms, opaque
                      constants, extern/implemented_by, witness paths).
-10. assumptions      each inventory against the justified trusted base in
+11. assumptions      each inventory against the justified trusted base in
                      verification/trusted_base.json; any unmatched name rejects.
                      Every collection obligation Aeneas emitted for the chain
                      (e.g. the totality of a crate iterator's own size_hint) must be
@@ -51,6 +68,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -244,6 +262,246 @@ def stage_toolchain(context: Run):
     }
 
 
+# The ids of trusted_base.json `runtime_assumptions`: RA-a to RA-j (NATIVE_SHELL_SCOPE O2) and
+# RA-tls (the thread-local abstraction alpha_t, O4).
+RUNTIME_ASSUMPTIONS = frozenset({*(f"RA-{letter}" for letter in "abcdefghij"), "RA-tls"})
+# The Runtime proof modules whose headers state the native semantics they assume.
+RUNTIME_HEADERS = tuple(
+    f"verification/lean/ChelisBridge/Runtime/{name}.lean"
+    for name in ("Unwind", "Stack", "Cancellation", "Ids"))
+EVIDENCE_KINDS = frozenset({"test", "text", "model", "accept", "lean"})
+
+
+def lean_model_declarations(aeneas_lean: Path) -> tuple[dict[str, str], collections.Counter]:
+    """The Lean declaration of each model pattern (extract_whole.lean_models) and the number
+    of model attributes per normalized pattern in the library (attributes may span lines)."""
+    from extract_whole import MODEL_ATTRIBUTE, lean_models, normalize_pattern
+
+    counts = collections.Counter(
+        normalize_pattern(match.group(1))
+        for path in sorted((aeneas_lean / "Aeneas").rglob("*.lean"))
+        for match in MODEL_ATTRIBUTE.finditer(path.read_text(errors="replace")))
+    return lean_models(aeneas_lean), counts
+
+
+def check_native_models(trusted: dict, aeneas_lean: Path) -> int:
+    """`native_models` lists exactly the boundary items of native_shell.json, and each has
+    exactly one model declaration in the library, with the recorded Lean name."""
+    from extract_whole import normalize_pattern
+
+    declared = {item["pattern"]: item["kind"]
+                for item in json.loads((VERIFICATION / "native_shell.json").read_text())["items"]
+                if item["kind"] in SHELL_BOUNDARY}
+    entries = trusted.get("native_models", [])
+    recorded = collections.Counter(entry["item"] for entry in entries)
+    duplicated = sorted(item for item, count in recorded.items() if count > 1)
+    missing = sorted(set(declared) - set(recorded))
+    extra = sorted(set(recorded) - set(declared))
+    if duplicated or missing or extra:
+        raise AcceptanceFailure(
+            f"trusted_base.json native_models differs from the boundary of native_shell.json: "
+            f"missing {missing}, extra {extra}, duplicated {duplicated}")
+    models, counts = lean_model_declarations(aeneas_lean)
+    for entry in entries:
+        key = normalize_pattern(entry["item"])
+        if entry.get("kind") != declared[entry["item"]] or not entry.get("model"):
+            raise AcceptanceFailure(f"native_models entry {entry['item']}: wrong kind or no model text")
+        if counts[key] != 1:
+            raise AcceptanceFailure(
+                f"native boundary item {entry['item']} has {counts[key]} Lean model declarations "
+                f"in {aeneas_lean}, not exactly one")
+        if models.get(key) != entry.get("lean"):
+            raise AcceptanceFailure(
+                f"native boundary item {entry['item']}: the library models it as {models.get(key)}, "
+                f"trusted_base.json records {entry.get('lean')}")
+    return len(entries)
+
+
+def lean_header(path: Path) -> str:
+    """The module docstring (the first `/-! ... -/` block) of a Lean file."""
+    text = path.read_text()
+    start = text.find("/-!")
+    return text[start:text.index("-/", start)] if start >= 0 else ""
+
+
+def check_runtime_assumptions(trusted: dict) -> int:
+    entries = trusted.get("runtime_assumptions", [])
+    ids = collections.Counter(entry.get("id") for entry in entries)
+    if set(ids) != RUNTIME_ASSUMPTIONS or any(count > 1 for count in ids.values()):
+        raise AcceptanceFailure(
+            f"trusted_base.json runtime_assumptions must list each of {sorted(RUNTIME_ASSUMPTIONS)} "
+            f"once, found {sorted(ids.elements(), key=str)}")
+    cited = collections.defaultdict(set)
+    for entry in entries:
+        if not entry.get("assumption") or not entry.get("justification") or not entry.get("evidence"):
+            raise AcceptanceFailure(f"runtime assumption {entry['id']} lacks text or evidence")
+        for header in entry.get("cited_by", []):
+            if header not in RUNTIME_HEADERS:
+                raise AcceptanceFailure(f"runtime assumption {entry['id']}: unknown header {header}")
+            if entry["id"] not in re.findall(r"RA-[a-z]+", lean_header(ROOT / header)):
+                raise AcceptanceFailure(f"{header}: its header does not cite {entry['id']}")
+            cited[header].add(entry["id"])
+    uncited = [header for header in RUNTIME_HEADERS if not cited[header]]
+    if uncited:
+        raise AcceptanceFailure(f"Runtime headers that cite no runtime assumption: {uncited}")
+    return len(entries)
+
+
+def check_evidence(trusted: dict) -> int:
+    """Every evidence id cited by native_models and runtime_assumptions exists and resolves to
+    a test function, a text, a model check, an accept.py check or an audited Lean theorem."""
+    from check_models import CRATE_MODELS, MODELS
+
+    evidence = {entry["id"]: entry for entry in trusted.get("native_evidence", [])}
+    if len(evidence) != len(trusted.get("native_evidence", [])):
+        raise AcceptanceFailure("trusted_base.json native_evidence has duplicate ids")
+    audit = (VERIFICATION / "lean" / "ChelisBridge" / "Audit.lean").read_text()
+    for entry in evidence.values():
+        path, item, kind = ROOT / entry["path"], entry["item"], entry["kind"]
+        if kind not in EVIDENCE_KINDS or not path.is_file() or not entry.get("description"):
+            raise AcceptanceFailure(f"native evidence {entry['id']}: bad kind, path or description")
+        text = path.read_text()
+        found = {
+            "test": re.search(rf"#\[test\]\s*(?:#\[[^\]]*\]\s*)*fn {re.escape(item)}\(", text),
+            "text": item in text,
+            "model": item in MODELS or item in CRATE_MODELS,
+            "accept": re.search(rf"^def {re.escape(item)}\(", text, re.M),
+            "lean": re.search(rf"\btheorem {re.escape(item.rsplit('.', 1)[-1])}\b", text)
+                    and f"``{item}," in audit,
+        }[kind]
+        if not found:
+            raise AcceptanceFailure(f"native evidence {entry['id']}: {kind} {item} not found in {entry['path']}")
+    for section in ("native_models", "runtime_assumptions"):
+        for entry in trusted.get(section, []):
+            unknown = [ident for ident in entry.get("evidence", []) if ident not in evidence]
+            if unknown:
+                name = entry.get("item", entry.get("id"))
+                raise AcceptanceFailure(f"{section} {name} cites unknown evidence {unknown}")
+    return len(evidence)
+
+
+def check_panic_strategy() -> list[str]:
+    """RA-a: no Cargo profile or rustflags of the workspace select panic = abort."""
+    import tomllib
+
+    manifests = [ROOT / "Cargo.toml", *sorted((ROOT / "crates").glob("*/Cargo.toml"))]
+    configs = [path for path in (ROOT / ".cargo" / "config.toml", ROOT / ".cargo" / "config")
+               if path.is_file()]
+    for path in manifests + configs:
+        data = tomllib.loads(path.read_text())
+        for profile, settings in data.get("profile", {}).items():
+            for scope in [settings, *settings.get("package", {}).values()]:
+                if scope.get("panic", "unwind") != "unwind":
+                    raise AcceptanceFailure(
+                        f"{path.relative_to(ROOT)}: profile {profile} sets panic = {scope['panic']!r}; "
+                        f"the native shell requires unwinding (RA-a)")
+        flags = [data.get("build", {}).get("rustflags", [])]
+        flags += [target.get("rustflags", []) for target in data.get("target", {}).values()
+                  if isinstance(target, dict)]
+        for value in flags:
+            joined = " ".join(value) if isinstance(value, list) else str(value)
+            if re.search(r"panic\s*=\s*abort", joined):
+                raise AcceptanceFailure(
+                    f"{path.relative_to(ROOT)}: rustflags select panic=abort (RA-a)")
+    return [str(path.relative_to(ROOT)) for path in manifests + configs]
+
+
+LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)\'|.', re.S)
+
+
+def non_test_rust(text: str) -> str:
+    """Rust source without comments and without `#[cfg(test)]` items."""
+    kept, index = [], 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        elif text.startswith("/*", index):
+            index = text.index("*/", index) + 2
+        else:
+            # A string or char literal is kept whole, so `//` or `"` inside it is not syntax.
+            match = LITERAL.match(text, index)
+            kept.append(match.group(0))
+            index = match.end()
+    source = "".join(kept)
+    while (start := source.find("#[cfg(test)]")) >= 0:
+        body = re.compile(r"[{;]").search(source, start + len("#[cfg(test)]"))
+        end = body.end()
+        if body.group(0) == "{":
+            depth = 1
+            while depth:
+                depth += {"{": 1, "}": -1}.get(source[end], 0)
+                end += 1
+        source = source[:start] + source[end:]
+    return source
+
+
+def check_no_catch_unwind(crate: str = "chelis-types") -> int:
+    """RA-j: no non-test code of the crate calls catch_unwind. Test modules declared by
+    `#[cfg(test)] mod name;` (and their submodules) and `#[cfg(test)]` items are skipped."""
+    source = ROOT / "crates" / crate / "src"
+    files = sorted(source.rglob("*.rs"))
+    test_roots = []
+    for path in files:
+        for name in re.findall(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;",
+                               path.read_text()):
+            directory = path.parent if path.name in ("mod.rs", "lib.rs", "main.rs") else path.with_suffix("")
+            test_roots += [directory / f"{name}.rs", directory / name]
+    scanned = 0
+    for path in files:
+        if any(path == root or root in path.parents for root in test_roots):
+            continue
+        scanned += 1
+        if re.search(r"\bcatch_unwind\b", non_test_rust(path.read_text())):
+            raise AcceptanceFailure(
+                f"{path.relative_to(ROOT)}: non-test code calls catch_unwind; a caught unwind "
+                f"would expose a DiagnosticSink after skipped scope exits (RA-j)")
+    return scanned
+
+
+def check_shell_plan(chain: str, plan: dict) -> dict:
+    """The plan lists exactly native_shell.json, no core item depends on an internal shell item
+    (the structural part of RA-tls), and the core dependents of each primitive pinned in
+    verification/runtime_sites.json are exactly the pinned sites."""
+    declared = {item["pattern"]: item["kind"]
+                for item in json.loads((VERIFICATION / "native_shell.json").read_text())["items"]}
+    shell = plan.get("native_shell", {})
+    if set(shell) != set(declared):
+        raise AcceptanceFailure(f"{chain} plan: native shell differs from native_shell.json: "
+                                f"{sorted(set(shell) ^ set(declared))[:5]}")
+    internal = [pattern for pattern, kind in declared.items() if kind in SHELL_INTERNAL]
+    reached = {pattern: shell[pattern]["core_dependents"] for pattern in internal
+               if shell[pattern].get("core_dependents")}
+    if reached:
+        raise AcceptanceFailure(f"{chain} plan: core items depend on internal shell items: {reached}")
+    sites = json.loads((VERIFICATION / "runtime_sites.json").read_text())["sites"]
+    for pattern, pinned in sites.items():
+        if pattern not in shell:
+            raise AcceptanceFailure(f"runtime_sites.json pins {pattern}, which is not a shell item")
+        actual = set(shell[pattern].get("core_dependents", []))
+        if actual != set(pinned["sites"]):
+            raise AcceptanceFailure(
+                f"{chain} plan: the core sites of {pattern} differ from runtime_sites.json: "
+                f"new {sorted(actual - set(pinned['sites']))}, gone {sorted(set(pinned['sites']) - actual)}")
+    return {"internal": len(internal), "pinned": {pattern: len(pinned["sites"])
+                                                    for pattern, pinned in sites.items()}}
+
+
+def static_checks(aeneas_lean: Path) -> dict:
+    trusted = json.loads((VERIFICATION / "trusted_base.json").read_text())
+    return {
+        "native_models": check_native_models(trusted, aeneas_lean),
+        "runtime_assumptions": check_runtime_assumptions(trusted),
+        "evidence": check_evidence(trusted),
+        "panic_strategy": check_panic_strategy(),
+        "catch_unwind_free_files": check_no_catch_unwind(),
+    }
+
+
+def stage_native_boundary(context: Run):
+    return static_checks(context.require_library())
+
+
 def stage_native(context: Run):
     logs = context.directory / "native"
     logs.mkdir()
@@ -307,8 +565,12 @@ def stage_plan(context: Run):
         ], env=context.env, log=context.directory / f"plan-{chain}.log")
         plans[chain] = fresh(plan, begun)
     context.whole_core = {f"plan:{chain}": path for chain, path in plans.items()}
-    return {chain: {"plan": str(path), "chunks": len(json.loads(path.read_text())["chunks"])}
-            for chain, path in plans.items()}
+    results = {}
+    for chain, path in plans.items():
+        plan = json.loads(path.read_text())
+        results[chain] = {"plan": str(path), "chunks": len(plan["chunks"]),
+                          "native_shell": check_shell_plan(chain, plan)}
+    return results
 
 
 def stage_whole_core(context: Run):
@@ -583,6 +845,7 @@ def stage_assumptions(context: Run):
 STAGES = [
     ("environment", stage_environment),
     ("toolchain", stage_toolchain),
+    ("native boundary", stage_native_boundary),
     ("native", stage_native),
     ("model matrix", stage_models),
     ("production AD", stage_production_ad),
@@ -596,11 +859,28 @@ STAGES = [
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--lacadile", type=Path, required=True,
+    parser.add_argument("--lacadile", type=Path,
                         help="Local LaCaDiLE checkout at the pinned revision (not publicly clonable)")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="Development only: accept modified tracked files (recorded in the report)")
+    parser.add_argument("--static", action="store_true",
+                        help="Run only the static native-boundary checks (no extraction, no report)")
+    parser.add_argument("--aeneas-lean-dir", type=Path,
+                        help="--static: the Aeneas backends/lean directory whose models are checked")
+    parser.add_argument("--plan", action="append", default=[], metavar="CHAIN=PATH",
+                        help="--static: also check this existing chunk plan (repeatable)")
     args = parser.parse_args()
+    if args.static:
+        if args.aeneas_lean_dir is None:
+            parser.error("--static requires --aeneas-lean-dir")
+        print(json.dumps(static_checks(args.aeneas_lean_dir.resolve()), indent=2))
+        for argument in args.plan:
+            chain, _, path = argument.partition("=")
+            print(f"{chain}: {json.dumps(check_shell_plan(chain, json.loads(Path(path).read_text())))}")
+        print("\nSTATIC CHECKS PASSED")
+        return
+    if args.lacadile is None:
+        parser.error("--lacadile is required")
     context = Run(args)
     print(f"Acceptance run: {context.directory}", flush=True)
     for name, function in STAGES:
