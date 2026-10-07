@@ -100,7 +100,9 @@ fn copy_checkout(checkout: &Path) {
         if from.join("build.rs").is_file() {
             fs::copy(from.join("build.rs"), to.join("build.rs")).expect("build script");
         }
-        for directory in ["src", "include"] {
+        // Cargo validates declared test targets for every copied workspace
+        // member, even when the consumer build does not compile those tests.
+        for directory in ["src", "include", "tests"] {
             if from.join(directory).is_dir() {
                 copy_tree(&from.join(directory), &to.join(directory));
             }
