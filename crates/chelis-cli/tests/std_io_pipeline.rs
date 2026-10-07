@@ -662,8 +662,8 @@ v4 = print(ok_quote)
 }
 
 /// A malformed first data row followed by a large later line returns None.
-/// The row-validation fold must preserve the failure verdict without reading
-/// later rows. The 4 MiB line also exercises the compiled package path.
+/// The 4 MiB line exercises the compiled package path. The CLI regression
+/// separately checks skipped work with a controlled evaluation budget.
 #[test]
 #[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_compiled_lane_short_circuits_before_long_line() {
