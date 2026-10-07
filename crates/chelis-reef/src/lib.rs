@@ -8719,9 +8719,12 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
 ///
 /// ### Source resolution
 ///
-/// The fetch source URL is, in priority order:
-/// 1. The lockfile entry's `remote_origin` field (today: always `None`
-///    via [`lockfile_remote_origin`]; Item 9 wires this in).
+/// The fetch source is, in priority order:
+/// 1. The lockfile entry's `remote_origin` (see [`lockfile_remote_origin`]).
+///    A lockfile stores `github://<org>/<repo>@<tag>`, so
+///    [`parse_remote_origin`] turns it into the `<org>/<repo>@<tag>`
+///    coordinate that [`install_from_github`] takes. `install_from_lockfile`
+///    uses the same conversion.
 /// 2. The canonical-org default from [`canonical_origin_for`].
 ///
 /// Callers without a lockfile entry pass `lockfile_dep = None`.
@@ -8766,11 +8769,11 @@ fn load_registry_package_or_autofetch(
         ));
     }
 
-    // Resolve the source URL: lockfile remote_origin (Item 9) wins, then
-    // canonical-org default. Recorded for error messages even if we
-    // skip the fetch attempt.
-    let source_origin = lockfile_dep
-        .and_then(lockfile_remote_origin)
+    // Resolve the source: the lockfile `remote_origin` wins, then the
+    // canonical-org default. Messages name `source_origin` as written.
+    let locked_origin = lockfile_dep.and_then(lockfile_remote_origin);
+    let source_origin = locked_origin
+        .clone()
         .unwrap_or_else(|| canonical_origin_for(name, version));
 
     if !options.auto_fetch {
@@ -8785,6 +8788,26 @@ fn load_registry_package_or_autofetch(
             false,
         ));
     }
+
+    // `install_from_github` takes `<org>/<repo>@<tag>`. A lockfile origin
+    // keeps its `github://` scheme, so parse it first (chelis#3314).
+    let fetch_coordinate = match locked_origin.as_deref().map(parse_remote_origin) {
+        None => source_origin.clone(),
+        Some(Ok(spec)) => format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+        Some(Err(error)) => {
+            let fetch_err = GitHubFetchError::Parse {
+                input: source_origin.clone(),
+                reason: error.to_string(),
+            };
+            return Err(format_missing_dep_error(
+                name,
+                version,
+                &source_origin,
+                Some(&fetch_err),
+                true,
+            ));
+        }
+    };
 
     // Acquire the process-level lock for the duration of the fetch +
     // install + index update. The same registry root is shared across
@@ -8809,7 +8832,7 @@ fn load_registry_package_or_autofetch(
     // Run the fetch. Auto-fetch event becomes observable here via the
     // emitted log message; tests assert against this signal.
     eprintln!("chelis reef: auto-fetching `{name}` `{version}` from {source_origin}",);
-    let fetch_err = match install_from_github(&source_origin, &registry_root_path) {
+    let fetch_err = match install_from_github(&fetch_coordinate, &registry_root_path) {
         Ok(_artifact) => {
             // Retry the registry lookup. If retry still fails, the
             // surprise is on us — surface as Other since it's a
@@ -8836,21 +8859,11 @@ fn load_registry_package_or_autofetch(
     ))
 }
 
-/// Phase A Item 8 — Item 9 coordination shim.
-///
-/// Returns the lockfile entry's recorded `remote_origin` URL, if any.
-/// Today the [`LockSource`] enum has no `remote_origin` field, so this
-/// helper unconditionally returns `None`. After Item 9 lands and adds
-/// `remote_origin: Option<String>` to `LockSource::LocalRegistry`, the
-/// body of this function flips to `match &dep.source {
-/// LockSource::LocalRegistry { remote_origin } => remote_origin.clone(),
-/// _ => None }`.
-///
-/// Keeping the resolution logic behind this single shim means the Item 9
-/// merge is a one-line change to a single function — everything else in
-/// the auto-fetch path keeps working unchanged.
+/// Returns the lockfile entry's recorded `remote_origin`, if any, in its
+/// stored `github://<org>/<repo>@<tag>` form. Parse it with
+/// [`parse_remote_origin`] before a fetch.
 fn lockfile_remote_origin(dep: &LockedDependency) -> Option<String> {
-    // Item 9 has merged: read the field on `LockSource::LocalRegistry`.
+    // Only a `LocalRegistry` entry records a remote origin.
     // `Bundled` entries (the language runtime) intentionally have no
     // remote origin — there is nothing to fetch.
     match &dep.source {

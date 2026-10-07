@@ -1026,14 +1026,10 @@ remote_origin = "github://other-org/nautilus@v0.2.0"
     );
     fs::write(app.join("reef.lock"), lockfile_text).expect("write reef.lock");
 
-    // Use `chelis reef install --from-lockfile` because that's the
-    // CLI surface that reads each lockfile entry's `remote_origin`
-    // field and routes the fetch accordingly. The fresh-resolver
-    // path used by `chelis reef build` always passes
-    // `lockfile_dep = None` to the auto-fetch helper and so falls
-    // back to the canonical-org default; the lockfile-replay path
-    // instead consults `LockSource::LocalRegistry::remote_origin`
-    // verbatim. Item 9 wired this exact contract.
+    // `chelis reef install --from-lockfile` reads each lockfile entry's
+    // `remote_origin` and fetches from it.
+    // `locked_github_origin_autofetches_into_cold_registry` covers the
+    // same origin during `chelis reef build` and `chelis test`.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -1045,6 +1041,115 @@ remote_origin = "github://other-org/nautilus@v0.2.0"
         .args(["reef", "install", "--from-lockfile"])
         .assert()
         .success();
+    assert_nautilus_installed(&reef_home);
+}
+
+/// `chelis reef build` (chelis#3314) and `chelis test` (chelis#1393)
+/// with a valid `reef.lock` fetch a locked dependency into a cold
+/// registry from the lockfile's `remote_origin`. The lockfile keeps the
+/// `github://` scheme, so both commands must parse it before they call
+/// the `<org>/<repo>@<tag>` fetch.
+///
+/// The mocks serve `nautilus@v0.2.0` only under `other-org`. A command
+/// that ignored the lockfile origin would ask the canonical org and
+/// get a 404.
+#[test]
+fn locked_github_origin_autofetches_into_cold_registry() {
+    let _g = file_lock();
+
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
+    let metadata_body = metadata_json(
+        "v0.2.0",
+        &[
+            (ARCHIVE_ASSET_ID, "nautilus-0.2.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.2.0.chb"),
+        ],
+    );
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.2.0")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found here")),
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path("other-org", "nautilus", "v0.2.0")))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "other-org",
+                "nautilus",
+                ARCHIVE_ASSET_ID,
+            )))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
+                "other-org",
+                "nautilus",
+                SHELL_ASSET_ID,
+            )))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes)),
+    ]);
+
+    let outer = tempdir().expect("tempdir");
+    let reef_home = outer.path().join("reef-home");
+    let app = stage_downstream_project(outer.path());
+    let api_base = harness.uri();
+    let chelis = |args: &[&str]| {
+        let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+        command
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env("CHELIS_REEF_HOME", &reef_home)
+            .env("CHELIS_REEF_GITHUB_BASE_API", &api_base)
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("PATH", "")
+            .current_dir(&app)
+            .args(args);
+        command
+    };
+
+    // Warm registry: install from `other-org`, then build. The build
+    // writes a lockfile that records that origin.
+    chelis(&[
+        "reef",
+        "install",
+        "--from-github",
+        "other-org/nautilus@v0.2.0",
+    ])
+    .assert()
+    .success();
+    chelis(&["reef", "build"]).assert().success();
+    let lockfile = fs::read_to_string(app.join("reef.lock")).expect("read reef.lock");
+    assert!(
+        lockfile.contains(r#"remote_origin = "github://other-org/nautilus@v0.2.0""#),
+        "reef build must record the github:// origin in reef.lock:\n{lockfile}"
+    );
+
+    // Cold registry: only the lockfile names the source of nautilus.
+    fs::remove_dir_all(&reef_home).expect("remove reef home");
+    chelis(&["reef", "build"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built downstream-item8"));
+    assert_nautilus_installed(&reef_home);
+
+    // `chelis test` loads the same locked graph before it runs a test.
+    fs::remove_dir_all(&reef_home).expect("remove reef home");
+    fs::create_dir_all(app.join("tests")).expect("mkdir tests");
+    fs::write(
+        app.join("tests/lock_graph.ch"),
+        "module Demo.Tests.LockGraph\n\
+         import Std.Test (assert_true)\n\
+         def test_lock_graph_loads() -> unit ! { Test } = \
+         assert_true(true, \"lock graph loads\")\n",
+    )
+    .expect("write tests/lock_graph.ch");
+    chelis(&["test", "tests/"]).assert().success();
     assert_nautilus_installed(&reef_home);
 }
 
