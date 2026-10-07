@@ -111,6 +111,7 @@ impl Drop for HostLowerStackFrame {
             HOST_LOWER_RED_ZONE.with(|zone| zone.set(0));
         }
     }
+}
 
 /// Retain one Reef-admitted provider call as an external host call during
 /// lowering. The caller must validate the linked declaration and provider
