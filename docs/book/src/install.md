@@ -7,11 +7,11 @@ Packages](reef.md) covers package creation and dependencies.
 
 ## Install a release toolchain
 
-The published 0.19.0 installer uses an authenticated GitHub download. Sign in
-with the [GitHub CLI](https://cli.github.com) for the commands below. The
-source-built installer can also download public releases without a token;
-private releases require `GITHUB_TOKEN` or a working `gh auth token` with read
-access. Prebuilt release assets are available for macOS arm64 and Linux x86-64.
+`chelisup` downloads public releases without a GitHub token. The commands below
+use the [GitHub CLI](https://cli.github.com) to find and fetch the latest
+release. Private releases need `GITHUB_TOKEN` or a working `gh auth token` with
+read access. Prebuilt release assets are available for macOS arm64 and Linux
+x86-64.
 On Linux, `chelisup` and the toolchain it installs are static executables that
 need no system libraries, so they start on any x86-64 distribution, including
 NixOS without nix-ld. They resolve host names through `/etc/hosts` and the name

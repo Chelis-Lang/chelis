@@ -112,10 +112,13 @@ fetched files with the lockfile hashes and reports mismatches.
   shell release tags. You can supply explicit `ORG/REPO@TAG` entries
   instead.
 
-The published 0.19.0 compiler requires a token for remote GitHub fetches,
-including public releases. Source-built Reef fetches public releases without a
-token when none is available. It uses `GITHUB_TOKEN` if set, then `gh auth token`,
-for private repositories and higher API rate limits. A private repository needs read access. Source
+`chelis reef install --from-github`, `chelis reef install --from-lockfile` and
+`chelis reef setup` with a lockfile download public releases without a token.
+A search for a dependency version by name needs a token, for example
+`chelis reef build` without a lockfile. Reef uses `GITHUB_TOKEN` if set, then
+`gh auth token`, for that
+search, for private repositories and for higher API rate limits. A private
+repository needs read access. Source
 packages install in the local Reef registry, normally `~/.chelis/reef`.
 `CHELIS_REEF_HOME` selects a different registry; setting `CHELIS_HOME` alone
 does not move it.
