@@ -9651,68 +9651,99 @@ fn lower_match_host_expr(
             ty: result_ty.clone(),
         })
     };
-    let mut decision = no_arm_selected();
-    for arm in arms.into_iter().rev() {
-        decision = match arm.test {
-            // The rest of the match sits at the one failure exit of the
-            // pattern or at a `false` guard, so it is emitted at most once.
-            None => {
-                let success = match arm.guard {
-                    Some(guard) => HostExpr::new(HostExprKind::If {
-                        cond: Box::new(guard),
-                        then_expr: Box::new(arm.body),
-                        else_expr: Box::new(decision.clone()),
-                        ty: result_ty.clone(),
-                    }),
-                    None => arm.body,
+    // A constructor with only wildcard or binder fields has one failure
+    // exit: its tag. Put such guard-free arms in one tag dispatch instead of
+    // nesting one MatchAdt per arm. The ordered planner below remains the
+    // path for guards and nested tests, whose fallthrough depends on order.
+    let flat_adt = !arms.is_empty()
+        && arms.iter().all(|arm| {
+            arm.test.is_none()
+                && arm.guard.is_none()
+                && matches!(&arm.plan, HostPatternPlan::Adt { fields, .. }
+                    if fields.iter().all(|(_, field, _)| matches!(field, HostPatternPlan::Wild | HostPatternPlan::Bind { .. })))
+        });
+    let decision = if flat_adt {
+        let failure = no_arm_selected();
+        let flat_arms = arms
+            .into_iter()
+            .map(|arm| {
+                let HostPatternPlan::Adt { ctor, fields } = &arm.plan else {
+                    unreachable!("flat ADT dispatch contains a non-constructor arm");
                 };
-                compile_host_pattern(
-                    &arm.plan,
-                    scrutinee_var.clone(),
-                    success,
-                    decision,
-                    &result_ty,
-                    &mut names,
-                )
-            }
-            // Otherwise a `bool` test decides the arm, so the rest of the
-            // match is still emitted once rather than once per exit. Emitting
-            // it once per exit would compound: the rest can hold further
-            // arms, or a body that is itself a match. The two passes over the
-            // scrutinee each carry only what they need. The test carries the
-            // pattern's tests and the names its guard reads. The selected
-            // pass carries the pattern's constructor and, below it, only its
-            // bindings: the test has already matched everything else, so no
-            // sub-pattern that binds nothing is read or tested again there.
-            // An unused owned field, and an owned ADT scrutinee consumed by a
-            // branching arm, are never released (chelis#2458).
-            Some(test_plan) => {
-                let test = compile_host_pattern(
-                    &test_plan,
-                    scrutinee_var.clone(),
-                    arm.guard
-                        .unwrap_or_else(|| HostExpr::new(HostExprKind::Bool(true))),
-                    HostExpr::new(HostExprKind::Bool(false)),
-                    &HostTypeTerm::Bool,
-                    &mut names,
-                );
-                let selected = compile_host_pattern(
-                    &arm.plan.binding_pass(),
-                    scrutinee_var.clone(),
-                    arm.body,
-                    no_arm_selected(),
-                    &result_ty,
-                    &mut names,
-                );
-                HostExpr::new(HostExprKind::If {
-                    cond: Box::new(test),
-                    then_expr: Box::new(selected),
-                    else_expr: Box::new(decision),
-                    ty: result_ty.clone(),
-                })
-            }
-        };
-    }
+                compile_host_adt_arm(ctor, fields, arm.body, &failure, &result_ty, &mut names)
+            })
+            .collect();
+        HostExpr::new(HostExprKind::MatchAdt {
+            scrutinee: Box::new(scrutinee_var.clone()),
+            arms: flat_arms,
+            default_expr: Some(Box::new(failure)),
+            ty: result_ty.clone(),
+        })
+    } else {
+        let mut decision = no_arm_selected();
+        for arm in arms.into_iter().rev() {
+            decision = match arm.test {
+                // The rest of the match sits at the one failure exit of the
+                // pattern or at a `false` guard, so it is emitted at most once.
+                None => {
+                    let success = match arm.guard {
+                        Some(guard) => HostExpr::new(HostExprKind::If {
+                            cond: Box::new(guard),
+                            then_expr: Box::new(arm.body),
+                            else_expr: Box::new(decision.clone()),
+                            ty: result_ty.clone(),
+                        }),
+                        None => arm.body,
+                    };
+                    compile_host_pattern(
+                        &arm.plan,
+                        scrutinee_var.clone(),
+                        success,
+                        decision,
+                        &result_ty,
+                        &mut names,
+                    )
+                }
+                // Otherwise a `bool` test decides the arm, so the rest of the
+                // match is still emitted once rather than once per exit. Emitting
+                // it once per exit would compound: the rest can hold further
+                // arms, or a body that is itself a match. The two passes over the
+                // scrutinee each carry only what they need. The test carries the
+                // pattern's tests and the names its guard reads. The selected
+                // pass carries the pattern's constructor and, below it, only its
+                // bindings: the test has already matched everything else, so no
+                // sub-pattern that binds nothing is read or tested again there.
+                // An unused owned field, and an owned ADT scrutinee consumed by a
+                // branching arm, are never released (chelis#2458).
+                Some(test_plan) => {
+                    let test = compile_host_pattern(
+                        &test_plan,
+                        scrutinee_var.clone(),
+                        arm.guard
+                            .unwrap_or_else(|| HostExpr::new(HostExprKind::Bool(true))),
+                        HostExpr::new(HostExprKind::Bool(false)),
+                        &HostTypeTerm::Bool,
+                        &mut names,
+                    );
+                    let selected = compile_host_pattern(
+                        &arm.plan.binding_pass(),
+                        scrutinee_var.clone(),
+                        arm.body,
+                        no_arm_selected(),
+                        &result_ty,
+                        &mut names,
+                    );
+                    HostExpr::new(HostExprKind::If {
+                        cond: Box::new(test),
+                        then_expr: Box::new(selected),
+                        else_expr: Box::new(decision),
+                        ty: result_ty.clone(),
+                    })
+                }
+            };
+        }
+        decision
+    };
     Ok(HostExpr::new(HostExprKind::Let {
         bindings: vec![HostBinding {
             name: scrutinee_name,
@@ -10577,6 +10608,45 @@ fn plan_host_pattern(
     }
 }
 
+fn compile_host_adt_arm(
+    ctor: &str,
+    fields: &[(usize, HostPatternPlan, HostTypeTerm)],
+    success: HostExpr,
+    failure: &HostExpr,
+    result_ty: &HostTypeTerm,
+    names: &mut HostMatchNameSupply,
+) -> HostMatchArm {
+    let mut bindings = Vec::with_capacity(fields.len());
+    let mut body = success;
+    for (field_index, field, field_ty) in fields.iter().rev() {
+        // A wildcard field is neither tested nor bound, so it is not read
+        // out of the value either.
+        if matches!(field, HostPatternPlan::Wild) {
+            continue;
+        }
+        let name = names.fresh("__chelis_adt_field");
+        body = compile_host_pattern(
+            field,
+            HostExpr::new(HostExprKind::Var(name.clone(), field_ty.clone())),
+            body,
+            failure.clone(),
+            result_ty,
+            names,
+        );
+        bindings.push(HostPatternBinding {
+            name,
+            ty: field_ty.clone(),
+            field_index: *field_index,
+        });
+    }
+    bindings.reverse();
+    HostMatchArm {
+        ctor: ctor.to_string(),
+        bindings,
+        expr: body,
+    }
+}
+
 fn compile_host_pattern(
     plan: &HostPatternPlan,
     value: HostExpr,
@@ -10771,37 +10841,10 @@ fn compile_host_pattern(
             ty: result_ty.clone(),
         }),
         HostPatternPlan::Adt { ctor, fields } => {
-            let mut bindings = Vec::with_capacity(fields.len());
-            let mut body = success;
-            for (field_index, field, field_ty) in fields.iter().rev() {
-                // A wildcard field is neither tested nor bound, so it is not
-                // read out of the value either.
-                if matches!(field, HostPatternPlan::Wild) {
-                    continue;
-                }
-                let name = names.fresh("__chelis_adt_field");
-                body = compile_host_pattern(
-                    field,
-                    HostExpr::new(HostExprKind::Var(name.clone(), field_ty.clone())),
-                    body,
-                    failure.clone(),
-                    result_ty,
-                    names,
-                );
-                bindings.push(HostPatternBinding {
-                    name,
-                    ty: field_ty.clone(),
-                    field_index: *field_index,
-                });
-            }
-            bindings.reverse();
+            let arm = compile_host_adt_arm(ctor, fields, success, &failure, result_ty, names);
             HostExpr::new(HostExprKind::MatchAdt {
                 scrutinee: Box::new(value),
-                arms: vec![HostMatchArm {
-                    ctor: ctor.clone(),
-                    bindings,
-                    expr: body,
-                }],
+                arms: vec![arm],
                 default_expr: Some(Box::new(failure)),
                 ty: result_ty.clone(),
             })
