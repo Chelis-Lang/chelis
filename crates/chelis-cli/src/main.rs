@@ -2407,7 +2407,7 @@ fn prepare_eval_in_context(
         // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
         // JSON); the stderr breadcrumb is suppressed so scripted
         // consumers get a single parseable document on stdout.
-        let rendered = serde_json::to_string(&result)
+        let rendered = eval_output::serialize_eval_json(&result)
             .map_err(|err| EvalInContextError::Compile(format!("eval JSON serialize: {err}")))?;
         return Ok(eval_output::EvalOutput::json(rendered));
     }
@@ -2427,7 +2427,7 @@ fn prepare_eval_json(
     outcome: Result<chelis_compiler_api::schema::EvalResult, CompilerError>,
 ) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
     Ok(match outcome {
-        Ok(result) => eval_output::EvalOutput::json(serde_json::to_string(&result)?),
+        Ok(result) => eval_output::EvalOutput::json(eval_output::serialize_eval_json(&result)?),
         Err(error) => prepare_eval_failure(error, true),
     })
 }

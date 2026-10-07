@@ -853,7 +853,7 @@ pub struct DictEntryValue {
 
 /// Machine-facing execution value. Numeric descendants retain their sealed
 /// dtype and stored bits; booleans have one separate execution spelling.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionValue {
     Tensor {
@@ -887,64 +887,6 @@ pub enum ExecutionValue {
         fields: Vec<ExecutionValue>,
     },
     Unit,
-}
-
-/// Borrowed view of the existing execution-value JSON grammar. Keeping Serde's
-/// tagged-enum derivation here preserves field order and leaf codecs while the
-/// public enum controls where recursive child serialization grows its stack.
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ExecutionValueWire<'a> {
-    Tensor {
-        value: &'a TensorValue,
-    },
-    Scalar {
-        value: &'a NumericScalar,
-    },
-    Bool {
-        value: &'a bool,
-    },
-    Key {
-        bits: &'a chelis_types::KeyBits,
-    },
-    String {
-        value: &'a str,
-    },
-    List {
-        value: &'a [ExecutionValue],
-    },
-    Dict {
-        entries: &'a [DictEntryValue],
-    },
-    Tuple {
-        value: &'a [ExecutionValue],
-    },
-    Adt {
-        ctor: &'a str,
-        fields: &'a [ExecutionValue],
-    },
-    Unit,
-}
-
-impl Serialize for ExecutionValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let wire = match self {
-            Self::Tensor { value } => ExecutionValueWire::Tensor { value },
-            Self::Scalar { value } => ExecutionValueWire::Scalar { value },
-            Self::Bool { value } => ExecutionValueWire::Bool { value },
-            Self::Key { bits } => ExecutionValueWire::Key { bits },
-            Self::String { value } => ExecutionValueWire::String { value },
-            Self::List { value } => ExecutionValueWire::List { value },
-            Self::Dict { entries } => ExecutionValueWire::Dict { entries },
-            Self::Tuple { value } => ExecutionValueWire::Tuple { value },
-            Self::Adt { ctor, fields } => ExecutionValueWire::Adt { ctor, fields },
-            Self::Unit => ExecutionValueWire::Unit,
-        };
-        stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || wire.serialize(serializer))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
