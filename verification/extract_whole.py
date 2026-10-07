@@ -1178,6 +1178,29 @@ LEAN_DECLARATION = re.compile(
     r"(?:def|abbrev|structure|inductive|opaque|axiom|class|instance|theorem)\s+([^\s:({\[]+)")
 
 
+def attribute_unclosed(text: str) -> bool:
+    """Whether the `@[` attribute that starts `text` is still open at the end of `text`.
+    Brackets inside string literals (for example `{[@T]}` in a Rust pattern) do not count."""
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return False
+    return depth > 0
+
+
 def lean_models(aeneas_lean: Path) -> dict[str, str]:
     """Normalized Rust pattern -> Lean declaration of every rust_fun/rust_type/
     rust_global/rust_trait/rust_trait_impl model in the Aeneas Lean library."""
@@ -1185,7 +1208,18 @@ def lean_models(aeneas_lean: Path) -> dict[str, str]:
     for path in sorted((aeneas_lean / "Aeneas").rglob("*.lean")):
         namespaces: list[str] = []
         pending: list[str] = []
+        attribute = ""
         for line in path.read_text(errors="replace").splitlines():
+            if attribute:
+                # A multi-line attribute, for example `@[rust_fun` with its pattern string on
+                # the next line: scan it as one line once it is closed.
+                attribute = f"{attribute} {line.strip()}"
+                if attribute_unclosed(attribute):
+                    continue
+                line, attribute = attribute, ""
+            elif line.strip().startswith("@[") and attribute_unclosed(line.strip()):
+                attribute = line.strip()
+                continue
             stripped = line.strip()
             opened = re.match(r"namespace\s+(\S+)", stripped)
             if opened:
