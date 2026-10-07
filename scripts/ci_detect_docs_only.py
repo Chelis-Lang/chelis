@@ -138,6 +138,7 @@ CLARABEL_PATHS: frozenset[str] = frozenset(
         "crates/chelis-compiler-api/src/runtime/eval.rs",
         "crates/chelis-compiler-api/src/runtime/invariant.rs",
         "crates/chelis-compiler-api/src/runtime/mod.rs",
+        "crates/chelis-compiler-api/src/runtime/tests.rs",
         "crates/chelis-ir/src/host.rs",
         "crates/chelis-ir/src/ownership/ir.rs",
         "crates/chelis-ir/src/ownership/lower.rs",

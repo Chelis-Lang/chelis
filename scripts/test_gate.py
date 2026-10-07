@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -812,6 +813,19 @@ class StageUnionTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.docs_only != 'true'", worker)
         self.assertIn("clarabel-provider", aggregate)
         self.assertIn("clarabel-provider=${{ needs.clarabel-provider.result }}", aggregate)
+        provider_test = "cargo nextest run -p chelis-clarabel-provider --features solver --test solver"
+        self.assertIn(provider_test, worker)
+        nightly = (REPO_ROOT / ".github/workflows/smt-full-prove.yml").read_text()
+        self.assertIn("cargo test -p chelis-clarabel-provider --features solver --test solver", nightly)
+
+    def test_default_workspace_does_not_select_native_clarabel_dependency(self):
+        manifest = tomllib.loads(
+            (REPO_ROOT / "crates/chelis-clarabel-provider/Cargo.toml").read_text()
+        )
+        self.assertEqual(manifest["features"]["default"], [])
+        self.assertEqual(manifest["features"]["solver"], ["dep:clarabel"])
+        self.assertTrue(manifest["dependencies"]["clarabel"]["optional"])
+        self.assertEqual(manifest["test"][0]["required-features"], ["solver"])
 
     def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
         arguments = dict(tests_only=False, support_only=False, partition=None)

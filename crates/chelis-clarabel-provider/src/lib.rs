@@ -1,3 +1,5 @@
+#![cfg(feature = "solver")]
+
 //! Validated, non-SDP Clarabel QP adapter.
 //!
 //! This crate is the solver portion of the planned optional native provider.

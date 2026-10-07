@@ -146,6 +146,7 @@ class ClarabelChangeTests(unittest.TestCase):
             "crates/chelis-cli/tests/clarabel_native_eval.rs",
             "crates/chelis-cli/src/main.rs",
             "crates/chelis-compiler-api/src/runtime/clarabel.rs",
+            "crates/chelis-compiler-api/src/runtime/tests.rs",
             "crates/chelis-ir/src/ownership/lower.rs",
             "crates/chelis-backend-c/src/host_emit.rs",
             "crates/chelis-prove/src/property_runner/qp_ideal.rs",

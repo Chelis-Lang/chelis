@@ -6,8 +6,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+solver = ["dep:clarabel"]
+
 [dependencies]
-clarabel = { version = "=0.11.1" }
+clarabel = { version = "=0.11.1", optional = true }
+
+[[test]]
+name = "solver"
+required-features = ["solver"]
 
 [lints]
 workspace = true

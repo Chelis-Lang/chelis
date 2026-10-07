@@ -19,7 +19,7 @@ clarabel-provider = ["dep:chelis-clarabel-provider", "dep:chelis-runtime-bundle"
 
 [dependencies]
 chelis-abi.workspace = true
-chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true }
+chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }
 chelis-runtime-bundle = { workspace = true, optional = true }
 chelis-unord.workspace = true
 chelis-backend-c.workspace = true

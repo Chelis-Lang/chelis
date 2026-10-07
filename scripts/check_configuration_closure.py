@@ -264,6 +264,10 @@ class NightlyOnlySource:
 # entirely, so a new uncovered file cannot hide behind it.
 NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
     NightlyOnlySource(
+        path="crates/chelis-clarabel-provider/tests/solver.rs",
+        row="clarabel-provider",
+    ),
+    NightlyOnlySource(
         path="crates/chelis-cli/tests/clarabel_native_eval.rs",
         row="clarabel-provider",
     ),

@@ -1532,6 +1532,9 @@ jobs:
       - name: Check native Clarabel package calls
         run: cargo nextest run -p chelis-cli --features clarabel-provider --test clarabel_native_eval
 
+      - name: Check Clarabel adapter cases
+        run: cargo nextest run -p chelis-clarabel-provider --features solver --test solver
+
       - name: Check native Clarabel ideal QP proofs
         run: cargo nextest run -p chelis-cli --features clarabel-provider,smt --test clarabel_native_eval
 

@@ -18,7 +18,7 @@ clarabel-provider = ["dep:chelis-clarabel-provider"]
 chelis-abi.workspace = true
 chelis-unord = { workspace = true, optional = true }
 chelis-vocab.workspace = true
-chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true }
+chelis-clarabel-provider = { path = "../chelis-clarabel-provider", optional = true, features = ["solver"] }
 # chelis#732 Phase 2: exact f16/bf16 widening and correctly rounded
 # narrowing for the shortest-round-trip formatter and the per-dtype
 # to_list / tensor-render reads. Same crate the checker-side reference
