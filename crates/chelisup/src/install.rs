@@ -76,24 +76,83 @@ pub fn detect_slug() -> Result<&'static str, String> {
 const FIRST_GLIBC_231_RELEASE: &str = "0.7.24";
 
 /// The release builds `install` accepts for `version` on the platform `slug`,
-/// in preference order. From [`FIRST_GLIBC_231_RELEASE`] on, Linux prefers the
+/// in preference order, on a host whose programs use musl when `musl` is set
+/// (see [`host_is_musl`]). From [`FIRST_GLIBC_231_RELEASE`] on, Linux prefers the
 /// static build (`chelis-vX.Y.Z-linux-x86_64-static.tar.gz`), whose `chelis`
-/// names no program interpreter and so starts on any x86-64 Linux, including
-/// musl systems and a stock NixOS. A release that publishes no static
-/// build installs its glibc-2.31 build. `version` is a validated `X.Y.Z`.
-pub fn release_builds(version: &str, slug: &str) -> Result<Vec<String>, String> {
+/// names no program interpreter and so starts on any x86-64 Linux, including a
+/// stock NixOS. A release that publishes no static build installs its
+/// glibc-2.31 build. A musl host first takes the musl build
+/// (`chelis-vX.Y.Z-linux-x86_64-musl.tar.gz`): the static build carries a glibc
+/// runtime archive, which the host's C compiler cannot link
+/// (`spec/08-backends.md` §2.1). `version` is a validated `X.Y.Z`.
+pub fn release_builds(version: &str, slug: &str, musl: bool) -> Result<Vec<String>, String> {
     if slug == "linux-x86_64"
         && release_triple(version)? >= release_triple(FIRST_GLIBC_231_RELEASE)?
     {
-        return Ok(vec![format!("{slug}-static"), format!("{slug}-glibc2.31")]);
+        let musl = musl.then(|| format!("{slug}-musl"));
+        return Ok(musl
+            .into_iter()
+            .chain([format!("{slug}-static"), format!("{slug}-glibc2.31")])
+            .collect());
     }
     Ok(vec![slug.to_owned()])
 }
 
 /// The build `install` prefers for `version` on `slug`: the first of
 /// [`release_builds`].
-pub fn release_build(version: &str, slug: &str) -> Result<String, String> {
-    Ok(release_builds(version, slug)?.remove(0))
+pub fn release_build(version: &str, slug: &str, musl: bool) -> Result<String, String> {
+    Ok(release_builds(version, slug, musl)?.remove(0))
+}
+
+/// Whether this host's programs use musl as their C library: whether `/bin/sh`
+/// names musl's dynamic loader (`ld-musl-<arch>.so.1`) as its program
+/// interpreter. chelisup is a static executable, so it cannot ask its own C
+/// library, and a glibc system can hold musl's loader too, for `musl-gcc`
+/// (Debian's `musl` package installs it), so the loader's presence does not
+/// tell. A static or unreadable `/bin/sh` counts as not musl.
+pub fn host_is_musl() -> bool {
+    cfg!(target_os = "linux")
+        && fs::read("/bin/sh")
+            .ok()
+            .as_deref()
+            .and_then(elf_interpreter)
+            .is_some_and(names_musl_loader)
+}
+
+/// Whether the program interpreter `path` is musl's dynamic loader.
+fn names_musl_loader(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ld-musl-"))
+}
+
+/// The program interpreter (`PT_INTERP`) a 64-bit little-endian ELF file names.
+fn elf_interpreter(elf: &[u8]) -> Option<&str> {
+    const PT_INTERP: u32 = 3;
+    fn field<const N: usize>(elf: &[u8], at: usize) -> Option<[u8; N]> {
+        elf.get(at..at.checked_add(N)?)?.try_into().ok()
+    }
+    let word = |at: usize| {
+        field::<8>(elf, at)
+            .map(u64::from_le_bytes)
+            .and_then(|value| usize::try_from(value).ok())
+    };
+    let half = |at: usize| field::<2>(elf, at).map(u16::from_le_bytes).map(usize::from);
+    if elf.get(..6)? != b"\x7fELF\x02\x01" {
+        return None;
+    }
+    let (table, entry_size, entries) = (word(0x20)?, half(0x36)?, half(0x38)?);
+    (0..entries).find_map(|index| {
+        let header = table.checked_add(index.checked_mul(entry_size)?)?;
+        if field::<4>(elf, header).map(u32::from_le_bytes)? != PT_INTERP {
+            return None;
+        }
+        let offset = word(header.checked_add(8)?)?;
+        let size = word(header.checked_add(32)?)?;
+        let path = elf.get(offset..offset.checked_add(size)?)?;
+        std::str::from_utf8(path.split(|&byte| byte == 0).next()?).ok()
+    })
 }
 
 /// The release-asset file name for a version + release build.
@@ -124,7 +183,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
         });
     }
 
-    let builds = release_builds(version, detect_slug()?)?;
+    let builds = release_builds(version, detect_slug()?, host_is_musl())?;
 
     // Stage under the store root so the final rename is same-filesystem.
     fs::create_dir_all(store.home())
@@ -789,21 +848,77 @@ mod tests {
     #[test]
     fn linux_prefers_the_static_build_from_the_first_glibc_2_31_release() {
         let both = ["linux-x86_64-static", "linux-x86_64-glibc2.31"];
-        for (version, slug, builds) in [
-            ("0.7.23", "linux-x86_64", &["linux-x86_64"][..]),
-            ("0.7.24", "linux-x86_64", &both[..]),
+        let musl_first = [
+            "linux-x86_64-musl",
+            "linux-x86_64-static",
+            "linux-x86_64-glibc2.31",
+        ];
+        for (version, slug, musl, builds) in [
+            ("0.7.23", "linux-x86_64", false, &["linux-x86_64"][..]),
+            ("0.7.24", "linux-x86_64", false, &both[..]),
             // Ordered as numbers: 0.10.0 is after 0.7.24.
-            ("0.10.0", "linux-x86_64", &both[..]),
-            ("0.19.0", "linux-x86_64", &both[..]),
-            ("0.19.0", "darwin-arm64", &["darwin-arm64"][..]),
+            ("0.10.0", "linux-x86_64", false, &both[..]),
+            ("0.19.0", "linux-x86_64", false, &both[..]),
+            ("0.19.0", "darwin-arm64", false, &["darwin-arm64"][..]),
+            // A musl host takes the musl build, then what a glibc host takes.
+            ("0.7.23", "linux-x86_64", true, &["linux-x86_64"][..]),
+            ("0.19.0", "linux-x86_64", true, &musl_first[..]),
         ] {
             assert_eq!(
-                release_builds(version, slug).unwrap(),
+                release_builds(version, slug, musl).unwrap(),
                 builds,
-                "{version} {slug}"
+                "{version} {slug} musl={musl}"
             );
-            assert_eq!(release_build(version, slug).unwrap(), builds[0]);
+            assert_eq!(release_build(version, slug, musl).unwrap(), builds[0]);
         }
+    }
+
+    /// A 64-bit little-endian ELF header and program header table: a `PT_LOAD`
+    /// entry, then a `PT_INTERP` entry naming `interpreter` when one is given.
+    fn elf_naming(interpreter: Option<&str>) -> Vec<u8> {
+        const ENTRY: usize = 56;
+        let entries = if interpreter.is_some() { 2 } else { 1 };
+        let mut elf = vec![0u8; 64 + ENTRY * entries];
+        elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        elf[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+        elf[0x36..0x38].copy_from_slice(&(ENTRY as u16).to_le_bytes());
+        elf[0x38..0x3a].copy_from_slice(&(entries as u16).to_le_bytes());
+        elf[64..68].copy_from_slice(&1u32.to_le_bytes());
+        if let Some(path) = interpreter {
+            let header = 64 + ENTRY;
+            let offset = elf.len() as u64;
+            elf[header..header + 4].copy_from_slice(&3u32.to_le_bytes());
+            elf[header + 8..header + 16].copy_from_slice(&offset.to_le_bytes());
+            elf[header + 32..header + 40].copy_from_slice(&(path.len() as u64 + 1).to_le_bytes());
+            elf.extend_from_slice(path.as_bytes());
+            elf.push(0);
+        }
+        elf
+    }
+
+    #[test]
+    fn a_musl_host_is_one_whose_shell_names_the_musl_loader() {
+        for (interpreter, musl) in [
+            (Some("/lib/ld-musl-x86_64.so.1"), true),
+            (Some("/lib64/ld-linux-x86-64.so.2"), false),
+            (
+                Some("/gnu/store/0-glibc-2.39/lib/ld-linux-x86-64.so.2"),
+                false,
+            ),
+            // A static shell.
+            (None, false),
+        ] {
+            let elf = elf_naming(interpreter);
+            assert_eq!(elf_interpreter(&elf), interpreter);
+            assert_eq!(
+                elf_interpreter(&elf).is_some_and(names_musl_loader),
+                musl,
+                "{interpreter:?}"
+            );
+        }
+        assert_eq!(elf_interpreter(b"#!/bin/sh\n"), None);
+        let truncated = elf_naming(Some("/lib/ld-musl-x86_64.so.1"));
+        assert_eq!(elf_interpreter(&truncated[..100]), None);
     }
 
     #[test]

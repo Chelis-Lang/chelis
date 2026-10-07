@@ -301,11 +301,22 @@ from the static build job, a static-pie executable with no program interpreter
 and no shared library, so the first binary a bare machine runs starts on any
 x86-64 distribution) and `chelisup.sh` itself, making the canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
-On Linux `chelisup install` takes the first build a release publishes, in
-preference order: the static `chelis-v<ver>-linux-x86_64-static.tar.gz`, then,
-for every release from 0.7.24 on, `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
-(chelis#2686); the `linux-x86_64` tarball needs the glibc of the runner that built
-it, and a glibc older than 2.31 runs neither dynamic build.
+On a glibc Linux host `chelisup install` takes the first build a release
+publishes, in preference order: the static
+`chelis-v<ver>-linux-x86_64-static.tar.gz`, then, for every release from 0.7.24
+on, `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz` (chelis#2686); the
+`linux-x86_64` tarball needs the glibc of the runner that built it, and a glibc
+older than 2.31 runs neither dynamic build. On a musl host, for every release
+from 0.7.24 on, `chelis-v<ver>-linux-x86_64-musl.tar.gz` comes first, then the
+same two (chelis#3280): the musl build carries a musl runtime archive, so its
+`chelis build` links with the system `cc`, while a release without one still
+installs the static build, whose glibc runtime makes `chelis build` refuse the
+musl compiler. chelisup is static and cannot ask its own C library, and
+Debian's `musl` package installs musl's loader on glibc systems, so a host is
+musl when `/bin/sh`'s ELF program interpreter is musl's loader (a file name
+starting `ld-musl-`, such as `/lib/ld-musl-x86_64.so.1`), not when that loader
+merely exists. The installer stays the static glibc `chelisup-linux-x86_64`,
+which runs on musl.
 The public bootstrap URL serves `chelisup.sh` without a token. The script uses
 an authenticated `gh` when available, or `curl` for public releases. The
 `chelisup install` GitHub REST path likewise sends a token when available and

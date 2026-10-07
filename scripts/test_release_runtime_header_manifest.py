@@ -59,8 +59,8 @@ class ReleaseRuntimeHeaderManifestTests(unittest.TestCase):
         manifests = release_header_manifests()
         self.assertEqual(
             len(manifests),
-            4,
-            "release.yml must expose all four platform tarball manifests to this test",
+            5,
+            "release.yml must expose all five platform tarball manifests to this test",
         )
         for index, manifest in enumerate(manifests):
             self.assertIn(

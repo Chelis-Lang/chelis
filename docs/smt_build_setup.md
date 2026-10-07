@@ -216,18 +216,30 @@ validation still builds and checks its own Darwin shipping artifact in `release.
 
 ## Release builds
 
-`release.yml` builds all four release artifacts (linux-x86_64,
-linux-x86_64-glibc2.31, linux-x86_64-static, darwin-arm64) with `cargo build
---release -p chelis-cli --features smt,sealed-runtime`, so the shipped `chelis`
-binary discharges property obligations through cvc5 instead of degrading to the
-solver-free fuzz path, and carries a sealed runtime whose export the tarball
-ships (`spec/08-backends.md` §2.1). The static job adds `--target
-x86_64-unknown-linux-gnu` with `RUSTFLAGS=-C target-feature=+crt-static`, which
+`release.yml` builds all five release artifacts (linux-x86_64,
+linux-x86_64-glibc2.31, linux-x86_64-static, linux-x86_64-musl, darwin-arm64)
+with `cargo build --release -p chelis-cli --features smt,sealed-runtime`, so the
+shipped `chelis` binary discharges property obligations through cvc5 instead of
+degrading to the solver-free fuzz path, and carries a sealed runtime whose
+export the tarball ships (`spec/08-backends.md` §2.1). The static job adds
+`--target x86_64-unknown-linux-gnu` with `RUSTFLAGS=-C target-feature=+crt-static`, which
 links glibc, libstdc++, and cvc5 into a static-pie executable. It refuses a
 `chelis` or `chelisup` that names a program interpreter or a shared library, and
 `scripts/verify_static_nss.py` runs each binary's first GitHub request in pinned
 Fedora and Arch images whose `hosts` lines name NSS plugins: the lookup must fail
-as an ordinary error, not end the process with a signal. Each release job:
+as an ordinary error, not end the process with a signal. The musl job
+(`build-linux-x86_64-musl`) builds inside a digest-pinned `alpine:3.24` image
+(musl 1.2.6, gcc 15.2) through `docker run` from an `ubuntu-latest` job. Build
+scripts and proc macros compile with `-C target-feature=-crt-static`, because
+bindgen loads libclang at run time and proc macros are shared objects; the final
+`chelis` links with `+crt-static`, so it is a static-pie executable with no
+program interpreter and no shared libraries, and the runtime archive it carries
+is a musl archive. Alpine needs `py3-pip` for cvc5's CMake and `bison` for the
+`yacc` GMP's build runs. musl's own malloc made that `chelis` check, test and
+prove 1.4 to 1.6 times slower than the glibc builds, so under musl it allocates
+through jemalloc (`tikv-jemallocator` with an unprefixed `malloc`, which also
+serves cvc5 and GMP), and the job requires that malloc to answer `MALLOC_CONF`.
+Each release job:
 
 - installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
   uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot
@@ -260,7 +272,7 @@ even when the per-PR SMT lanes are green off the asset.
 Building cvc5 cold begins by pulling the cvc5 source and its dependencies
 over the network, so the release jobs are the only lanes exposed to a
 transient GitHub refusal there. Because `publish-release` has `needs:` on all
-four build jobs, one such failure skips the publish and leaves a pushed tag
+five build jobs, one such failure skips the publish and leaves a pushed tag
 with no GitHub Release. Such failures occur at `cvc5-sys` `build.rs` dependency
 downloads (HTTP 403) and at the source clone, with no change to the tree.
 

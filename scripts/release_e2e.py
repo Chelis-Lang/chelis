@@ -20,8 +20,8 @@ its release name, and the two online steps skip.
 - smt: the release's cvc5 discharge gate against the installed compiler.
 - canary: the release's installed-artifact canary, which installs, builds,
   links, and runs the shipped C callable.
-- linkage: the installed binaries' loader and libraries; a static Linux build
-  names neither.
+- linkage: the installed binaries' loader and libraries; a static or musl
+  Linux build names neither.
 
 The gates come from the source that produced the release, so a run checks what
 the release claimed when it shipped. The evidence directory keeps `report.json`,
@@ -60,14 +60,19 @@ SCHEMA = "chelis-release-e2e/v1"
 TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 # The installer slug and the toolchain builds chelisup installs on each host,
-# in preference order: a Linux release without a static build installs its
-# glibc-2.31 build.
+# in preference order, keyed by system, machine and whether the host is musl:
+# a Linux release without a static build installs its glibc-2.31 build, and a
+# musl host prefers the musl build, then falls back as a glibc host does.
 PLATFORMS = {
-    ("Linux", "x86_64"): (
+    ("Linux", "x86_64", False): (
         "linux-x86_64",
         ("linux-x86_64-static", "linux-x86_64-glibc2.31"),
     ),
-    ("Darwin", "arm64"): ("darwin-arm64", ("darwin-arm64",)),
+    ("Linux", "x86_64", True): (
+        "linux-x86_64",
+        ("linux-x86_64-musl", "linux-x86_64-static", "linux-x86_64-glibc2.31"),
+    ),
+    ("Darwin", "arm64", False): ("darwin-arm64", ("darwin-arm64",)),
 }
 FIRST_PROGRAM_PAGE = Path("docs/book/src/first-program.md")
 FENCE = re.compile(r"```([A-Za-z0-9_-]*)")
@@ -308,13 +313,13 @@ class Proof:
         self.steps: dict[str, Step] = {}
         self.current = Step("setup")
         self.version = args.version
+        self.glibc_host = platform.system() != "Linux" or glibc_version() is not None
         self.slug, self.builds = PLATFORMS.get(
-            (platform.system(), platform.machine()), (None, ())
+            (platform.system(), platform.machine(), not self.glibc_host), (None, ())
         )
         self.build: str | None = None
         self.candidate = args.archive_label != args.tag
         self.install_assets: Path = args.assets
-        self.glibc_host = platform.system() != "Linux" or glibc_version() is not None
         self.offline_home: Path | None = None
 
     def env(self, **extra: str | Path) -> dict[str, str]:
@@ -407,10 +412,13 @@ class Proof:
             raise StepFailed("install-offline did not complete")
         return self.offline_home
 
-    def require_glibc_host(self) -> None:
-        if not self.glibc_host:
+    def require_matching_libc(self) -> None:
+        """The runtime archive links only with a C compiler of the same C library."""
+        musl_build = self.build is not None and self.build.endswith("-musl")
+        if not musl_build and not self.glibc_host:
             raise StepSkipped(
-                "the runtime archive is a glibc library and this host's C library is not glibc"
+                f"the {self.build} runtime archive is a glibc library and this "
+                "host's C library is not glibc"
             )
 
     def assets(self) -> str:
@@ -495,32 +503,43 @@ class Proof:
             env=self.env(CHELIS_HOME=home),
             timeout=900,
         )
-        installed = next(
-            (
-                line
-                for line in stdout.splitlines()
-                if line.startswith("installed chelis")
-            ),
-            "chelisup printed no install line",
-        )
+        installed = self.require_installed_build(stdout)
         return f"from the GitHub API: {installed}; {self.require_version(home)}"
+
+    def require_installed_build(self, stdout: str) -> str:
+        """chelisup's install line, which names the build it installed.
+
+        chelisup tells musl from glibc by `/bin/sh`'s loader and this script by
+        its Python's C library, so a host where the two disagree fails here
+        rather than judging the steps below on a build it did not install.
+        """
+        line = next(
+            (line for line in stdout.splitlines() if line.startswith("installed chelis")),
+            None,
+        )
+        if line is None:
+            raise StepFailed("chelisup printed no install line")
+        if f"({self.build})" not in line:
+            raise StepFailed(f"this host expects the {self.build} build, but {line}")
+        return line
 
     def install_offline(self) -> str:
         home = self.work / "offline-home"
         installer = self.copy_installer(self.work / "offline-installer")
-        self.run(
+        _, stdout, _ = self.run(
             "install",
             [installer, "install", self.version],
             env=self.env(CHELIS_HOME=home, CHELISUP_RELEASE_BASE=self.install_assets),
             timeout=600,
         )
-        detail = "from local assets; " + self.require_version(home)
+        installed = self.require_installed_build(stdout)
+        detail = f"from local assets: {installed}; " + self.require_version(home)
         self.offline_home = home
         return detail
 
     def first_program(self) -> str:
         home = self.require_offline_home()
-        self.require_glibc_host()
+        self.require_matching_libc()
         page = self.args.gates / FIRST_PROGRAM_PAGE
         program, commands = walkthrough(page.read_text(encoding="utf-8"))
         if program is None or not commands:
@@ -556,7 +575,7 @@ class Proof:
 
     def native(self) -> str:
         home = self.require_offline_home()
-        self.require_glibc_host()
+        self.require_matching_libc()
         work = self.work / "native"
         work.mkdir()
         (work / "app.ch").write_text(NATIVE_PROBE, encoding="utf-8")
@@ -605,7 +624,7 @@ class Proof:
         return tail(stdout or stderr, 1)
 
     def canary(self) -> str:
-        self.require_glibc_host()
+        self.require_matching_libc()
         if shutil.which("cc") is None:
             raise StepFailed("no `cc` on PATH; the canary links generated C")
         gate = self.args.gates / "scripts" / "installed_artifact_canary.py"
@@ -672,7 +691,7 @@ class Proof:
         self.current.processes.append(
             {"label": f"elf-{name}", "facts": asdict(linkage)}
         )
-        static = self.build is not None and self.build.endswith("-static")
+        static = self.build is not None and self.build.endswith(("-static", "-musl"))
         return elf_verdict(name, linkage, static=static)
 
 

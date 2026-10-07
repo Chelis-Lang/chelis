@@ -155,7 +155,8 @@ fn setup_syncs_source_crates_when_chelis_src_present() {
 /// The release build `chelisup install <ver>` downloads on this host.
 fn host_build(ver: &str) -> String {
     let slug = chelisup::install::detect_slug().expect("host platform supported");
-    chelisup::install::release_build(ver, slug).expect("validated version")
+    chelisup::install::release_build(ver, slug, chelisup::install::host_is_musl())
+        .expect("validated version")
 }
 
 /// Write a gzip toolchain release tarball `chelis-v<ver>-<build>.tar.gz` into

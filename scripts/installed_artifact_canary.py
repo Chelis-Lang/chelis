@@ -59,9 +59,27 @@ def verify_sidecar(path: Path) -> str:
 
 
 # The installer slug and the release build `chelisup install` downloads on each
-# canary host. On Linux that is the static build.
-PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-static"),
-             ("Darwin", "arm64"): ("darwin-arm64", "darwin-arm64")}
+# canary host, keyed by system, machine and C library. Linux installs the musl
+# build on a musl host and the static build on a glibc host; the installer is
+# the static glibc chelisup on both, which runs on musl too.
+PLATFORMS = {("Linux", "x86_64", "glibc"): ("linux-x86_64", "linux-x86_64-static"),
+             ("Linux", "x86_64", "musl"): ("linux-x86_64", "linux-x86_64-musl"),
+             ("Darwin", "arm64", ""): ("darwin-arm64", "darwin-arm64")}
+
+
+def host_libc() -> str:
+    """glibc or musl for this Python's C library on Linux; empty elsewhere."""
+    if platform.system() != "Linux":
+        return ""
+    try:
+        return "glibc" if os.confstr("CS_GNU_LIBC_VERSION") else "musl"
+    except (OSError, ValueError):
+        return "musl"
+
+
+def host_platform() -> tuple[str, str]:
+    return PLATFORMS.get((platform.system(), platform.machine(), host_libc()),
+                         ("unsupported", "unsupported"))
 
 
 def archive_name(version: str, label: str, source: str, build: str) -> str:
@@ -272,8 +290,7 @@ def reported_link_flags(build_stdout: str) -> list[str]:
 
 def execute(args: argparse.Namespace, report: dict) -> None:
     root = args.evidence
-    slug, build = PLATFORMS.get((platform.system(), platform.machine()),
-                                ("unsupported", "unsupported"))
+    slug, build = host_platform()
     name = archive_name(args.version, args.build_label, args.source_sha, build)
     archive = args.artifacts / name
     installer = args.installer_assets / f"chelisup-{slug}"

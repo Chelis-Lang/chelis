@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -205,19 +206,41 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(canary.archive_name("0.18.6", "v0.18.6", sha,
                                              "linux-x86_64-static"),
                          "chelis-v0.18.6-linux-x86_64-static.tar.gz")
+        self.assertEqual(canary.archive_name("0.18.6", "v0.18.6", sha,
+                                             "linux-x86_64-musl"),
+                         "chelis-v0.18.6-linux-x86_64-musl.tar.gz")
         for version, label, source, build in [
             ("0.18.6", "dev-ffffffff", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.5", sha, "darwin-arm64"),
             ("../bad", "v0.18.6", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.6", "unknown", "darwin-arm64"),
             ("0.18.6", "v0.18.6", sha, "other"),
-            # chelisup installs the static Linux build, never the dynamic ones.
+            # chelisup installs the static or musl Linux build, never the dynamic ones.
             ("0.18.6", "v0.18.6", sha, "linux-x86_64"),
             ("0.18.6", "v0.18.6", sha, "linux-x86_64-glibc2.31"),
         ]:
             with self.subTest(label=label, version=version, source=source, build=build):
                 with self.assertRaises(ValueError):
                     canary.archive_name(version, label, source, build)
+
+    def test_linux_host_build_follows_the_pythons_c_library(self) -> None:
+        # A musl host given the static build would install a toolchain whose
+        # glibc runtime archive its musl compiler refuses.
+        def probe(result):
+            def confstr(name):
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            return confstr
+        for result, build in [("glibc 2.39", "linux-x86_64-static"),
+                              (None, "linux-x86_64-musl"),
+                              (ValueError("unknown"), "linux-x86_64-musl"),
+                              (OSError(22, "invalid"), "linux-x86_64-musl")]:
+            with self.subTest(result=result), \
+                    mock.patch.object(canary.platform, "system", return_value="Linux"), \
+                    mock.patch.object(canary.platform, "machine", return_value="x86_64"), \
+                    mock.patch.object(canary.os, "confstr", probe(result), create=True):
+                self.assertEqual(canary.host_platform(), ("linux-x86_64", build))
 
 
 class ProcessTests(unittest.TestCase):
@@ -291,7 +314,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("installed-artifact-canary]", publish)
         self.assertIn("github.event_name == 'push'", publish)
         self.assertIn("pattern: chelis-*", publish)
-        for slug in ("linux-x86_64", "darwin-arm64"):
+        for slug in ("linux-x86_64", "linux-x86_64-musl", "darwin-arm64"):
             self.assertIn(f"slug: {slug}", gate)
         self.assertEqual(gate.count("uses: actions/download-artifact@v7"), 2)
         self.assertIn("scripts/installed_artifact_canary.py", gate)
@@ -299,15 +322,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", gate)
 
     def test_each_canary_downloads_the_build_chelisup_installs(self) -> None:
-        # A canary given another build fails only once a release runs it.
+        # A canary given another build, or an artifact without the installer it
+        # runs, fails only once a release runs it.
         workflow = yaml.safe_load((canary.ROOT / ".github/workflows/release.yml").read_text())
         job = workflow["jobs"]["installed-artifact-canary"]
-        artifacts = {row["slug"]: row["artifact"] for row in job["strategy"]["matrix"]["include"]}
-        self.assertEqual(artifacts, {slug: f"chelis-{build}"
-                                     for slug, build in canary.PLATFORMS.values()})
+        rows = job["strategy"]["matrix"]["include"]
+        installer_slugs = {f"chelis-{build}": slug for slug, build in canary.PLATFORMS.values()}
+        self.assertEqual({row["artifact"] for row in rows}, set(installer_slugs))
+        uploads = [step["with"] for other in workflow["jobs"].values()
+                   for step in other.get("steps", [])
+                   if step.get("uses", "").startswith("actions/upload-artifact@")]
+        for row in rows:
+            with self.subTest(slug=row["slug"]):
+                installer = next(upload["path"] for upload in uploads
+                                 if upload["name"] == row["installer-artifact"])
+                self.assertIn(f"chelisup-{installer_slugs[row['artifact']]}",
+                              installer.splitlines())
         downloads = [step["with"]["name"] for step in job["steps"]
                      if step.get("uses", "").startswith("actions/download-artifact@")]
-        self.assertEqual(downloads, ["${{ matrix.artifact }}"] * 2)
+        self.assertEqual(downloads, ["${{ matrix.artifact }}", "${{ matrix.installer-artifact }}"])
 
 
 if __name__ == "__main__":

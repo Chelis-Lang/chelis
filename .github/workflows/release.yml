@@ -432,6 +432,128 @@ jobs:
             chelisup.sh
           retention-days: 7
 
+  build-linux-x86_64-musl:
+    name: Build chelis (linux-x86_64, musl)
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    # A musl system's C compiler links native builds against musl, so it needs
+    # a chelis whose carried runtime archive is a musl library: one compiler,
+    # one carried archive (spec/08-backends.md §2.1, chelis#3280). This job
+    # builds inside the pinned Alpine image the release E2E checks, so cvc5,
+    # GMP and the runtime archive compile against musl. The image runs as a
+    # container this job starts, not as a job container, so the runner's own
+    # actions keep running on the host. Proc macros are shared objects and
+    # cvc5-sys's bindgen loads libclang at run time, which a static musl
+    # executable cannot, so every crate compiles with -crt-static and only the
+    # final chelis links +crt-static: a static-pie that names no program
+    # interpreter and needs no shared library.
+    # chelis#1004: see the linux-x86_64 job for the wall-clock ceiling.
+    timeout-minutes: 75
+    env:
+      ALPINE_IMAGE: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Start the Alpine build container
+        run: docker run --detach --name musl --volume "$PWD:/work" --workdir /work --env PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin --env CARGO_TERM_COLOR=always "$ALPINE_IMAGE" tail -f /dev/null
+
+      # The glibc jobs' cvc5 prerequisites (chelis#422), plus bash for cvc5's
+      # configure.sh, py3-pip because cvc5's CMake creates a Python venv and
+      # refuses a Python without pip, which Alpine's python3 ships without, and
+      # bison for the yacc that GMP's build runs when it regenerates its calc
+      # demo's parser, which the image lacks.
+      - name: Install build prerequisites
+        run: docker exec musl apk add --no-cache bash bison build-base cmake m4 clang-dev git python3 py3-pip linux-headers openblas-dev gmp-dev mpfr-dev rustup
+
+      # rust-toolchain.toml names the toolchain, as for the other jobs.
+      - name: Install Rust toolchain
+        run: docker exec musl sh -euc 'rustup-init -y --profile minimal --default-toolchain none && rustup toolchain install && rustc --version --verbose'
+
+      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
+      # chelis#1004 fetch-retry rationale. `cargo rustc` passes +crt-static to
+      # the final chelis only.
+      - name: Build chelis-cli (release, smt, static musl)
+        run: docker exec --env 'RUSTFLAGS=-C target-feature=-crt-static' musl python3 scripts/ci_cvc5_build.py -- cargo rustc --release -p chelis-cli --features smt,sealed-runtime --bin chelis -- -C target-feature=+crt-static
+
+      - name: Require a static executable
+        run: |
+          set -euo pipefail
+          binary=target/release/chelis
+          if readelf -lW "$binary" | grep -q 'INTERP'; then
+            echo "::error::$binary names a program interpreter"
+            exit 1
+          fi
+          if readelf -dW "$binary" | grep -q '(NEEDED)'; then
+            echo "::error::$binary needs shared libraries"
+            exit 1
+          fi
+
+      # musl's own malloc made this build 1.4 to 1.6 times slower than the
+      # glibc builds, so chelis allocates through jemalloc here, and jemalloc's
+      # unprefixed malloc serves cvc5 and GMP too (chelis#3280). Only that
+      # malloc reads MALLOC_CONF, so a build without it prints no statistics.
+      - name: Require jemalloc as the allocator
+        run: docker exec --env MALLOC_CONF=stats_print:true musl sh -c './target/release/chelis --version 2>&1 | grep -F "Begin jemalloc statistics"'
+
+      # Run before strip so the prove path exercises a functional
+      # binary; the strip below only removes symbols.
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: docker exec musl python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+
+      - name: Release binary test fixture
+        run: docker exec --workdir /work/crates/chelis-cli/tests/fixtures/release_pipe_stage musl ../../../../../target/release/chelis test tests
+
+      - name: Strip binary
+        run: docker exec musl strip target/release/chelis
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The binary is static, so staging runs on the host like the other jobs.
+      - name: Stage tarball contents
+        run: |
+          set -euo pipefail
+          staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-musl"
+          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
+          cp target/release/chelis "$staging/bin/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
+          python3 scripts/verify_runtime_package.py "$runtime_export" "$staging"
+          cp README.md "$staging/"
+          cp LICENSE "$staging/"
+          tar czf "${staging}.tar.gz" "$staging"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          ls -la "${staging}.tar.gz"*
+
+      # Verify the SHIPPED artifact on musl: the stripped binary inside the
+      # tarball still discharges via cvc5 (chelis#422).
+      - name: Verify shipped tarball discharges via cvc5
+        run: docker exec musl python3 .github/scripts/verify_release_smt.py --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-musl.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chelis-linux-x86_64-musl
+          path: |
+            chelis-*-linux-x86_64-musl.tar.gz
+            chelis-*-linux-x86_64-musl.tar.gz.sha256
+          retention-days: 7
+
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
     needs: [preflight]
@@ -559,19 +681,29 @@ jobs:
 
   installed-artifact-canary:
     name: Installed C callable (${{ matrix.slug }})
-    needs: [preflight, build-linux-x86_64-static, build-darwin-arm64]
+    needs: [preflight, build-linux-x86_64-static, build-linux-x86_64-musl, build-darwin-arm64]
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Each artifact holds the toolchain build chelisup installs and the
-          # chelisup built beside it. On Linux that is the static build.
+          # `artifact` holds the toolchain build chelisup installs on the
+          # canary host, `installer-artifact` the chelisup it installs with.
+          # On glibc Linux that is the static build and the chelisup built
+          # beside it. The musl leg runs in the musl build's Alpine image with
+          # that same static chelisup, which installs the musl build there.
           - runner: ubuntu-latest
             slug: linux-x86_64
             artifact: chelis-linux-x86_64-static
+            installer-artifact: chelis-linux-x86_64-static
+          - runner: ubuntu-latest
+            slug: linux-x86_64-musl
+            artifact: chelis-linux-x86_64-musl
+            installer-artifact: chelis-linux-x86_64-static
+            image: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           - runner: macos-latest
             slug: darwin-arm64
             artifact: chelis-darwin-arm64
+            installer-artifact: chelis-darwin-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     permissions:
@@ -582,8 +714,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv
+        if: matrix.image == ''
         uses: astral-sh/setup-uv@v8.1.0
       - name: Create uv-managed venv
+        if: matrix.image == ''
         run: uv venv --python 3.11
       - name: Download staged toolchain
         uses: actions/download-artifact@v7
@@ -593,10 +727,25 @@ jobs:
       - name: Download staged installer
         uses: actions/download-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ matrix.installer-artifact }}
           path: installed-canary-assets/installer
       - name: Install verified archive and run shipped callable
+        if: matrix.image == ''
         run: .venv/bin/python scripts/installed_artifact_canary.py --artifacts installed-canary-assets/toolchain --installer-assets installed-canary-assets/installer --source-sha "${{ github.sha }}" --evidence installed-canary-evidence
+      # The image's own Python runs the canary: the runner's uv is a glibc
+      # build. The canary reads the workflow identity from the environment.
+      - name: Install verified archive and run shipped callable in ${{ matrix.slug }}
+        if: matrix.image != ''
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: >-
+          docker run --rm --volume "$PWD:/work" --workdir /work
+          --env GITHUB_SHA --env GITHUB_REF_TYPE --env GITHUB_REF_NAME
+          --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT "$IMAGE"
+          sh -euc 'apk add --no-cache --quiet python3 gcc musl-dev &&
+          python3 scripts/installed_artifact_canary.py --artifacts installed-canary-assets/toolchain
+          --installer-assets installed-canary-assets/installer --source-sha "$GITHUB_SHA"
+          --evidence installed-canary-evidence'
       - name: Retain installed-artifact evidence, including failures
         if: always()
         uses: actions/upload-artifact@v7
@@ -609,7 +758,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-linux-x86_64-static, build-darwin-arm64, installed-artifact-canary]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-linux-x86_64-static, build-linux-x86_64-musl, build-darwin-arm64, installed-artifact-canary]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tagged release notes
