@@ -37,6 +37,38 @@ thread_local! {
     /// program applies its helpers many times; each non-drawing helper is
     /// planned once however often it is applied.
     static DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A fallback only for targets where the native remaining stack cannot be measured.
+    static EVAL_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// One interpreted call traverses several frames before reaching this guard
+// again. Leave room for that path, its error construction, and unwinding.
+const EVAL_STACK_RED_ZONE_BYTES: usize = 512 * 1024;
+const EVAL_FALLBACK_MAX_CALL_DEPTH: usize = 8;
+
+/// Tracks calls rather than expression visits: each recursive user function
+/// crosses the callable boundary, while ordinary expression evaluation stays
+/// off this hot-path budget check.
+struct EvalCallStackFrame;
+
+impl EvalCallStackFrame {
+    fn enter() -> Self {
+        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+
+    fn budget_exhausted() -> bool {
+        match stacker::remaining_stack() {
+            Some(remaining) => remaining < EVAL_STACK_RED_ZONE_BYTES,
+            None => EVAL_CALL_DEPTH.with(|depth| depth.get() > EVAL_FALLBACK_MAX_CALL_DEPTH),
+        }
+    }
+}
+
+impl Drop for EvalCallStackFrame {
+    fn drop(&mut self) {
+        EVAL_CALL_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
 }
 
 fn record_def_kernel_planning() {
@@ -1134,6 +1166,13 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+        // A user call can spend substantial stack evaluating its body before
+        // it reaches the next callable boundary. Check each expression visit
+        // within that call so body width cannot consume the whole red zone.
+        if EVAL_CALL_DEPTH.with(|depth| depth.get() != 0) && EvalCallStackFrame::budget_exhausted()
+        {
+            return Err("evaluation stack budget exhausted during a function call".to_owned());
+        }
         // Provenance describes this expression's result, never whichever
         // tensor an argument, selector, or preceding effect happened to
         // evaluate last. Recursive calls establish their own result and the
@@ -2781,6 +2820,10 @@ impl<'a> EvalContext<'a> {
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
+        let _stack_frame = EvalCallStackFrame::enter();
+        if EvalCallStackFrame::budget_exhausted() {
+            return Err("evaluation stack budget exhausted during a function call".to_owned());
+        }
         let mut formal_claims = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
