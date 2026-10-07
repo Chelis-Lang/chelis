@@ -566,6 +566,35 @@ fn unsupported_cone_does_not_grant_an_ideal_contract() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn zero_dimension_cones_do_not_grant_an_ideal_contract() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_zero_dimension_cones.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove zero-dimension-cone properties");
+    let rows = result
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("JSON property row"))
+        .filter(|row| row["kind"] == "property")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in rows {
+        assert_eq!(row["status"], "unsupported", "{row}");
+        assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn stopped_branch_and_indefinite_p_do_not_grant_ideal_optimality() {
     for file in ["ideal_stopped_branch.ch", "ideal_indefinite.ch"] {
         let result = Command::cargo_bin("chelis")

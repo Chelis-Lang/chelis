@@ -136,6 +136,11 @@ fn parse_cones(expr: &Expr, rows: usize) -> Result<Vec<Cone>, String> {
         let count = int_literal(dimension)
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| unsupported("cone dimension must be a nonnegative literal"))?;
+        if count == 0 {
+            return Err(unsupported(
+                "zero and nonnegative cone dimensions must be positive",
+            ));
+        }
         total = total
             .checked_add(count)
             .ok_or_else(|| unsupported("cone dimensions overflow"))?;
