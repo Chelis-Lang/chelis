@@ -138,7 +138,6 @@ Spreads can surround named axes, letting a definition reduce or insert an axis
 while preserving the others. To reduce a named `seq` axis:
 
 ```chelis-surf
-dim seq
 def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 

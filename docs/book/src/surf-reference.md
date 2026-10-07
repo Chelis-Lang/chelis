@@ -188,7 +188,7 @@ tightest binding:
 | `==` `!=` | equality, non-associative |
 | `<` `>` `<=` `>=` | comparison, non-associative |
 | `+` `-` | additive |
-| `*` `/` `%` | multiplicative, `%` is integer modulo |
+| `*` `/` `%` | multiplicative, `%` is `mod` (integers and floats) |
 | unary `-` `!` | prefix |
 | function application | |
 | `.` | field and tuple access |
@@ -404,7 +404,9 @@ export (forward, Linear)
 ## Dimensions
 
 A module-level `dim` declares concrete named dimensions used across the file. Function-level
-`[...]` parameters declare dimension variables local to one function.
+`[...]` parameters declare dimension variables local to one function. In
+0.19.1, a file with a module-level `dim` checks but does not evaluate or build
+(see [Known issues](known-issues.md)).
 
 ```chelis-surf-fragment
 dim batch, vocab_size

@@ -544,7 +544,8 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 ## Book
 
 The user-facing book for this shell is the mdBook whose `book.toml` is under
-`docs/`. chelis.ch mirrors it page for page at
+`docs/`. If this shell is published on chelis.ch (https://chelis.ch/docs/),
+chelis.ch mirrors the book page for page at
 `https://chelis.ch/docs/<package name>/` (chelis: https://chelis.ch/docs/chelis/),
 and the chelis.ch text is canonical: book pages are rendered from the site by
 the website's `scripts/sync_books.py`, so edit prose on the site and re-render,
@@ -560,12 +561,13 @@ Never in the book: issue or PR numbers, repo-internal paths (`spec/`, `src/`
 internals, `scripts/`, `tests/`, maintainer docs), maintainer or CI commands,
 contributor history, process talk (gates, red teams, agent instructions),
 status words (planned, not yet, stub, phase, milestone), "see the source" in
-place of documentation, em-dashes, and the word "load-bearing".
-`scripts/check_book.py` enforces the mechanical part in CI.
+place of documentation, em-dashes, and the word "load-bearing". In a shell
+published on chelis.ch, `scripts/check_book.py` enforces the mechanical part
+in CI.
 
 A change that alters user-visible behavior says so in its changelog entry.
-The book documents the latest release: the chelis.ch page and this book take
-the change when that release is documented.
+The book documents the latest release: the book, and its chelis.ch page when
+published, take the change when that release is documented.
 
 ## The Chelis-Lang Repositories
 

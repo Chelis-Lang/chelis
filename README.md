@@ -51,9 +51,9 @@ steps and the native C compiler `chelis build` needs on each platform.
 ## Documentation
 
 The [Chelis guide](https://chelis.ch/docs/chelis/) covers the first program,
-the CLI, types, effects, properties, and Reef packages. Its source is the
-mdBook in [`docs/book`](docs/book/); build it locally with
-`mdbook build docs/book`. The [examples](examples/) directory holds executable
+the CLI, types, effects, properties, and Reef packages. The same guide is the
+mdBook in [`docs/book`](docs/book/), rendered from chelis.ch; build it locally
+with `mdbook build docs/book`. The [examples](examples/) directory holds executable
 Chelis programs.
 
 ## License

@@ -133,6 +133,8 @@ def main() -> int:
     if not paths:
         import json
         app = Path(__file__).resolve().parents[2] / "apps/chelis-site/src"
+        if not (app / "data/books.json").exists():
+            parser.error("give the book's src directory (and README.md) to lint")
         books = json.loads((app / "data/books.json").read_text())["shells"].values()
         paths = [app / "content/docs" / b["siteDir"] for b in books]
     errors = lint_paths(paths)

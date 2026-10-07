@@ -52,3 +52,12 @@ stacked = tensor(shape=[3, 2], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
 The result's first extent is `*` because it depends on the list's length.
 The same program builds with `chelis build` and prints the same output.
+
+## Module-level `dim` declarations
+
+A file with a top-level `dim` declaration passes `chelis check`, but
+`chelis eval` and `chelis build` stop with
+`lowered root count mismatch: expected 0 named roots, got 1`. A named axis
+needs no declaration: write it in the signature, as in
+`def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32])`, and the
+checker treats `seq` as a named dimension.

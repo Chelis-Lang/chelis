@@ -65,7 +65,8 @@ one dtype, and returns that shape.
 Unary operations keep the operand's shape and dtype:
 
 - `neg` and `abs` accept signed integers and floats; integer `neg` and `abs` trap
-  on the minimum value, such as `-128i8`.
+  on the minimum value, such as the `i8` value -128: `neg(sub(-127i8, 1i8))`
+  stops with `numeric trap: overflow in neg at i8`.
 - `recip`, `exp`, `log`, `sqrt`, `sin`, `cos`, `tan`, `atan`, `erf`, and `erfc`
   accept floats only; `sqrt(4i32)` is a type error. Results follow IEEE:
   `recip(0.0)` is `inf` and `log` of a negative number is NaN.

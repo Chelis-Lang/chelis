@@ -122,7 +122,8 @@ dtype maps to one C type:
 
 For example, `def b(x: i8, y: i16, z: i32, w: i64) -> i64` is declared as
 `int64_t chelis_fn_62(int8_t x, int16_t y, int32_t z, int64_t w);`. A source-level `main` is
-exported as `<module>__main`, which leaves the name `main` free for your C
+exported as `<name>__main`, where `<name>` is the output stem (as in
+`out/<name>.h`), which leaves the name `main` free for your C
 driver. With GCC, add `-fopenmp` to the caller's link line as well.
 
 ## Passing tensors and tuples
