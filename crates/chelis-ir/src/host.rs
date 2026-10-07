@@ -48,6 +48,8 @@ thread_local! {
     // compiled: it lets a counted receipt in `chelis-compiler-api` bound the
     // interpreter's probe work without a wall clock.
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
+    /// Fallback for platforms where native stack headroom cannot be measured.
+    static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     // chelis#1158: bounded memoized monomorphization of recursive generic
     // host calls. Keyed by the callee's canonical checked type application;
     // one specialized definition per key, with in-progress entries visible
@@ -57,6 +59,33 @@ thread_local! {
     // its exit).
     static MONO_SPECIALIZATIONS: RefCell<MonoSpecializationState> =
         RefCell::new(MonoSpecializationState::default());
+}
+
+// Host application lowering visits several Rust frames per Deep expression.
+// Keep enough room to construct a located diagnostic and unwind that path.
+const HOST_LOWER_STACK_RED_ZONE_BYTES: usize = 8 * 1024 * 1024;
+const HOST_LOWER_FALLBACK_MAX_DEPTH: usize = 8;
+
+struct HostLowerStackFrame;
+
+impl HostLowerStackFrame {
+    fn enter() -> Self {
+        HOST_LOWER_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+
+    fn budget_exhausted() -> bool {
+        match stacker::remaining_stack() {
+            Some(remaining) => remaining < HOST_LOWER_STACK_RED_ZONE_BYTES,
+            None => HOST_LOWER_DEPTH.with(|depth| depth.get() > HOST_LOWER_FALLBACK_MAX_DEPTH),
+        }
+    }
+}
+
+impl Drop for HostLowerStackFrame {
+    fn drop(&mut self) {
+        HOST_LOWER_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -7740,6 +7769,15 @@ fn lower_host_expr_with_expected(
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let _stack_frame = HostLowerStackFrame::enter();
+    if HostLowerStackFrame::budget_exhausted() {
+        return Err(crate::lower::LowerDiagnostic::new(
+            "host lowering stack budget exhausted",
+            Some(expr.span()),
+            expr.span_id().map(str::to_owned),
+        )
+        .fatal());
+    }
     let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
     let _profile_guard = enter_host_expr_profile();
     let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?;
@@ -16418,40 +16456,58 @@ fn subterm_holds_adt(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> bool {
-    if let Expr::MetaExpr(meta, _) = expr {
-        return subterm_holds_adt(&meta.expr, program, scope);
-    }
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    match tag {
-        DeepTag::Var => kids
-            .first()
-            .and_then(symbol_name)
-            .and_then(|name| scope.get(name))
-            .is_some_and(holds_adt_value),
-        DeepTag::Fn => false,
-        _ => {
-            checked_type_expr(expr)
-                .and_then(|ty| decode_expanded_host_type_expr(program, ty))
-                .is_some_and(|ty| holds_adt_value(&ty))
-                || kids
-                    .iter()
-                    .any(|kid| subterm_holds_adt(kid, program, scope))
+    let mut pending = vec![expr];
+    while let Some(mut expr) = pending.pop() {
+        while let Expr::MetaExpr(meta, _) = expr {
+            expr = &meta.expr;
+        }
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        match tag {
+            DeepTag::Var => {
+                if kids
+                    .first()
+                    .and_then(symbol_name)
+                    .and_then(|name| scope.get(name))
+                    .is_some_and(holds_adt_value)
+                {
+                    return true;
+                }
+            }
+            // A callable's binders are outside the operand's scope.
+            DeepTag::Fn => {}
+            _ => {
+                if checked_type_expr(expr)
+                    .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+                    .is_some_and(|ty| holds_adt_value(&ty))
+                {
+                    return true;
+                }
+                pending.extend(kids.iter().rev());
+            }
         }
     }
+    false
 }
 
 /// Whether a value of `ty` holds an ADT value, directly or inside a tuple,
 /// list, option or dictionary.
 fn holds_adt_value(ty: &HostTypeTerm) -> bool {
-    match ty {
-        HostTypeTerm::Adt(..) => true,
-        HostTypeTerm::Tuple(items) => items.iter().any(holds_adt_value),
-        HostTypeTerm::List(item) | HostTypeTerm::Option(item) => holds_adt_value(item),
-        HostTypeTerm::Dict(key, value) => holds_adt_value(key) || holds_adt_value(value),
-        _ => false,
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match ty {
+            HostTypeTerm::Adt(..) => return true,
+            HostTypeTerm::Tuple(items) => pending.extend(items.iter().rev()),
+            HostTypeTerm::List(item) | HostTypeTerm::Option(item) => pending.push(item),
+            HostTypeTerm::Dict(key, value) => {
+                pending.push(value);
+                pending.push(key);
+            }
+            _ => {}
+        }
     }
+    false
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
