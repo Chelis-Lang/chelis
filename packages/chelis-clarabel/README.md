@@ -24,7 +24,9 @@ Run the examples from this package directory:
 
 The examples cover an unconstrained problem, a nonnegative cone, and a
 non-solved termination status. Invalid cone dimensions fail before the
-solver runs. The optional provider feature is needed for `eval`.
+solver runs. The optional provider feature is needed for `eval`. The evaluator
+calls the native provider only for this package's registered version and exact
+`src/qp.ch` source; an edited package runs its own Chelis body instead.
 
 `examples/illustrative/clarabel_qp` is a separate Chelis package with a
 path dependency on this package. From that directory, run

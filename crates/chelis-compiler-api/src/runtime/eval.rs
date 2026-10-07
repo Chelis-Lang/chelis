@@ -2916,7 +2916,8 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 #[cfg(feature = "clarabel-provider")]
-                if def_name.as_deref() == Some(super::clarabel::SOLVE) {
+                if self.native_clarabel_solve && def_name.as_deref() == Some(super::clarabel::SOLVE)
+                {
                     let value = super::clarabel::invoke(&args)?;
                     for claim in inherited_claims {
                         self.check_declared_result_claim(claim, &value, "Clarabel.solve")?;
@@ -5963,6 +5964,8 @@ mod legacy_capture_order_tests {
         let mut signatures = UnordMap::new();
         register_declared_signatures(checked.exprs(), &mut signatures);
         EvalContext {
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve: false,
             bindings: Frame::new(),
             result_producer: None,
             binding_types: UnordMap::new(),

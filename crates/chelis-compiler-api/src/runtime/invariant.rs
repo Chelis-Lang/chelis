@@ -810,6 +810,8 @@ pub(crate) fn revalidate_adt_value(
     // resolves it to its value instead of dying on "unknown runtime name".
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         bindings: Frame::new(),
         result_producer: None,
         binding_types: UnordMap::new(),

@@ -21,6 +21,8 @@ pub use frame::Frame;
 use frame::ResultProducer;
 #[cfg(feature = "clarabel-provider")]
 mod clarabel;
+#[cfg(feature = "clarabel-provider")]
+pub(crate) use clarabel::linked_package_owns_solve;
 mod host_ops;
 mod invariant;
 mod named_axis;
@@ -568,6 +570,8 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
 /// every evaluation of the program reads and none changes.
 pub(crate) struct PreparedHostEvaluation {
     host: chelis_ir::host::PreparedHostProgram,
+    #[cfg(feature = "clarabel-provider")]
+    native_clarabel_solve: bool,
     lowering_map: std::sync::OnceLock<BTreeMap<String, bool>>,
     scope_maps: std::sync::OnceLock<ScopeMaps>,
 }
@@ -601,9 +605,14 @@ fn scope_maps(
 }
 
 impl PreparedHostEvaluation {
-    pub(crate) fn new(host: chelis_ir::host::PreparedHostProgram) -> Self {
+    pub(crate) fn new(
+        host: chelis_ir::host::PreparedHostProgram,
+        #[cfg(feature = "clarabel-provider")] native_clarabel_solve: bool,
+    ) -> Self {
         Self {
             host,
+            #[cfg(feature = "clarabel-provider")]
+            native_clarabel_solve,
             lowering_map: std::sync::OnceLock::new(),
             scope_maps: std::sync::OnceLock::new(),
         }
@@ -788,6 +797,8 @@ fn evaluate_host_program_core(
     );
 
     let mut ctx = EvalContext {
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: prepared.is_some_and(|prepared| prepared.native_clarabel_solve),
         bindings: Frame::new(),
         result_producer: None,
         binding_types: UnordMap::new(),
@@ -1284,6 +1295,8 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
+    #[cfg(feature = "clarabel-provider")]
+    native_clarabel_solve: bool,
     /// Only lexical values; successful declarations never enter this frame.
     bindings: Frame,
     /// Canonical producer of the tensor returned by the expression currently

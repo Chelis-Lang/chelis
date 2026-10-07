@@ -118,11 +118,15 @@ inequality, a stopped result, and an invalid cone partition. The separate
 The package README gives the exact commands.
 
 The evaluator feature is an integration slice. It uses a pinned Rust
-dependency but does not read a Reef native binding or verify a separate
-provider artifact. The compiled C inliner sees the fail body, so the compiled
-call needs an explicit provider-call representation before it can execute.
-The property lowering must consume that same resolved binding; the evaluator's
-name match alone grants no proof assumption.
+dependency and dispatches only when the Reef linker assigns the expected
+function to a package of the registered version whose module source bytes
+match the provider registration. A different package body, even one with the
+same linked name, executes as ordinary Chelis code. This registration is
+compiled into the evaluator; it is not yet a Reef native binding or a
+separately verified provider artifact. The compiled C inliner sees the fail
+body, so the compiled call needs an explicit provider-call representation
+before it can execute. The property lowering must consume the resolved
+binding; evaluator admission alone grants no proof assumption.
 
 1. Implement a standalone, non-SDP Rust adapter with validated dense inputs,
    CSC conversion, cone validation, explicit statuses, and tests. This module

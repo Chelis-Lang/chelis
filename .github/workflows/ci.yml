@@ -1220,6 +1220,9 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: chelis-gate ci-fast
 
+      - name: Check native Clarabel package calls
+        run: cargo nextest run -p chelis-cli --features clarabel-provider --test clarabel_native_eval
+
       - name: Upload fast JUnit
         if: always()
         uses: actions/upload-artifact@v7

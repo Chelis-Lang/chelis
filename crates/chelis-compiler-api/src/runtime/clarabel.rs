@@ -4,9 +4,26 @@
 use super::{RuntimeTensorValue, RuntimeValue, Values};
 use chelis_clarabel_provider::{Cone, DenseMatrix, DenseVector, Problem, Settings, Status, solve};
 use chelis_types::types::Prim;
+use sha2::{Digest, Sha256};
 
 pub(super) const SOLVE: &str = "pkg__chelis__clarabel__Clarabel__Qp__solve";
+const PACKAGE_SOURCE: &[u8] = include_bytes!("../../../../packages/chelis-clarabel/src/qp.ch");
 const CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__";
+
+pub(crate) fn linked_package_owns_solve(
+    graph: &chelis_reef::PreparedReefGraph,
+) -> Result<bool, String> {
+    let source_sha256: [u8; 32] = Sha256::digest(PACKAGE_SOURCE).into();
+    Ok(graph
+        .linked_function_with_source_hash(
+            "chelis-clarabel",
+            "0.1.0",
+            "Clarabel.Qp",
+            "solve",
+            source_sha256,
+        )?
+        .is_some_and(|name| name == SOLVE))
+}
 
 fn constructor(name: &str, fields: Vec<RuntimeValue>, names: &[&str]) -> RuntimeValue {
     RuntimeValue::Adt {

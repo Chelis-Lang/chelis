@@ -2770,12 +2770,19 @@ fn compile_rewritten_decls_in_context(
     target: Target,
 ) -> Result<CompiledSource> {
     let _linked = chelis_types::install_linked_program_guard();
-    compile_decls_against_library(
+    let compiled = compile_decls_against_library(
         context.checked_library(),
         &context.library_dag,
         rewritten,
         target,
-    )
+    )?;
+    #[cfg(feature = "clarabel-provider")]
+    let compiled = CompiledSource {
+        native_clarabel_solve: crate::runtime::linked_package_owns_solve(&context.reef_state)
+            .map_err(|error| stage_error("reef", error, GeneralKind::ReefError))?,
+        ..compiled
+    };
+    Ok(compiled)
 }
 
 fn compile_decls_against_library(
@@ -2853,6 +2860,8 @@ fn compile_decls_against_library(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: Some(library_runtime),
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         eval_facts: std::sync::OnceLock::new(),
         host_program: std::sync::OnceLock::new(),
     })
@@ -3606,6 +3615,8 @@ struct CompiledSource {
     /// path (no separate library to merge); `Some` on the in-context
     /// path produced by `compile_new_source_in_context`.
     library_runtime: Option<LibraryRuntime>,
+    #[cfg(feature = "clarabel-provider")]
+    native_clarabel_solve: bool,
     /// Evaluation facts that depend on this compile alone, derived on the
     /// first evaluation and reused by every later one (chelis#3144).
     eval_facts: std::sync::OnceLock<EvalProgramFacts>,
@@ -3695,6 +3706,8 @@ impl CompiledSource {
                 };
                 Some(crate::runtime::PreparedHostEvaluation::new(
                     chelis_ir::host::PreparedHostProgram::new(program),
+                    #[cfg(feature = "clarabel-provider")]
+                    self.native_clarabel_solve,
                 ))
             })
             .as_ref()
@@ -4276,6 +4289,8 @@ fn compiled_from_pipeline_outcome(
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
+        #[cfg(feature = "clarabel-provider")]
+        native_clarabel_solve: false,
         eval_facts: std::sync::OnceLock::new(),
         host_program: std::sync::OnceLock::new(),
     })
