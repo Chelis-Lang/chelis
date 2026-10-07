@@ -39,9 +39,11 @@ or invalid engine report is an error. A confirmed counterexample is `refuted`.
 
 The checked, linked Chelis declaration graph is the authority for symbol
 resolution, types, module ownership, and property assumptions. Source names
-are presentation data derived from that graph; linker spellings are never
-parsed to infer ownership. Generated probes have fresh compiler-owned
-identities and are attached to modules through the linker API.
+are presentation data from the linker's name assignment, never reconstructed
+from an encoded spelling. Module ownership follows `spec/04-type-system.md`
+§2.5: lexical wrappers or the checker's canonical decoding of private
+linker names. Generated probes use fresh compiler-owned identities and the
+same validated module encoding as their owning type.
 
 The Beacon request binds the exact graph bytes, output root, input names and
 types, closed boxes, goal, compiler build, and engine binary by digest. The
@@ -53,9 +55,11 @@ unverified witness, or unrecognized reply cannot become green.
 Beacon's bound is over the real interpretation of the admitted operations on
 the supplied finite boxes and stored constants. It does not establish the
 corresponding property of machine `f32` or `f64` execution. `proof_tier`,
-`qualifiers`, `composite_verdict`, and CLI/Tide rendering retain
-`real_arithmetic` and `proven_modulo_real_arithmetic`; an unknown or an
-oracle-unverified result never receives that badge. The explicit
+`qualifiers`, `composite_verdict`, and CLI/Tide rendering report the selected
+method: a certified `ScalarUpperBound` result carries `real_arithmetic` and
+`proven_modulo_real_arithmetic`, while a verified `BoxRange` bound carries
+`sound_over_approximation` and `sound_approximate`. An unknown or an
+oracle-unverified result receives neither green badge. The explicit
 `beacon-only` tier has no fuzz or SMT fallback. `auto` is unaffected until a
 separately specified selection policy exists.
 
@@ -100,9 +104,10 @@ the proof harness. The authored predicate is checked with ordinary opacity
 rules and cannot call a helper. The property probe assembles observations
 from type-local helpers, so one property can use opaque types from several
 modules without placing all protected field reads inside an arbitrary first
-module. Lexical insertion and `linked_binding_in_module_of` share the same
-module ownership rule. This addresses
-[#3298](https://github.com/Chelis-Lang/chelis/issues/3298) and
+module. Lexical insertion and `linked_binding_in_module_of` implement the two
+module encodings permitted by §2.5; the latter uses the canonical private
+linker format, and the checker validates the generated declaration. This
+addresses [#3298](https://github.com/Chelis-Lang/chelis/issues/3298) and
 [#2613](https://github.com/Chelis-Lang/chelis/issues/2613). Generated names
 are fresh within each module and cannot shadow or be shadowed by a user
 declaration such as `__chelis_gen_probe`.
@@ -149,23 +154,24 @@ nonempty box check is part of each goal's evidence.
 
 An upper goal dispatches `output - upper <= 0`; a lower goal dispatches
 `lower - output <= 0`. Each request retains the original output root and
-records the exact folded root used for certification. A two-sided property
-dispatches one `BoxRange` goal for the original root and checks a certified
-enclosing output interval against both required bounds. It passes only when
-both comparisons pass under compatible qualifiers. A confirmed violation
-refutes the range; an unknown or unsupported side cannot be hidden by the
-other side.
+records the exact folded root used for certification. A two-sided authored
+property splits into these two `ScalarUpperBound` obligations over the same
+source expression and box. It passes only when both pass under compatible
+qualifiers. A confirmed violation refutes the range; an unknown or
+unsupported side cannot be hidden by the other side.
 
 The property runner sends these authored obligations through the shared
 discharge registry with a Beacon shim registered for the explicit tier. It
 does not install Beacon as an `auto` fallback. The existing
-`GoalShape::ScalarUpperBound` remains the one-sided carrier. Before extending
-either route, `IntervalBox` bounds move to the tagged numeric carrier required
-by `spec/design/dtype_semantics.md` §C6. `OutputRange` bounds move to that
-carrier before the type-level `GoalShape::BoxRange` and `with_beacon` seam are
-wired for authored two-sided goals. Both routes share graph/root validation
-and result conversion; a
-registry `Unknown` cannot trigger an SMT or fuzz pass under `beacon-only`.
+`GoalShape::ScalarUpperBound` remains the authored inequality carrier. Before
+extending it, `IntervalBox` bounds move to the tagged numeric carrier
+required by `spec/design/dtype_semantics.md` §C6. The existing type-level
+`GoalShape::BoxRange` registry seam stays distinct from these authored
+inequalities. A verified `BoxRange` result retains its
+`SoundOverApproximation` qualifier and `sound_approximate` badge; it is never
+promoted to the one-sided route's `proven_modulo_real_arithmetic`. The authored
+route reuses the scalar seam's graph/root validation and result conversion.
+An authored `Unknown` cannot trigger an SMT or fuzz pass under `beacon-only`.
 
 Scalar source functions need a proof-only, typed graph extraction from the
 resolved compiler representation. It emits a rank-zero numerical graph for
@@ -213,8 +219,8 @@ allowing a parser gap to hide a selected unsupported operation. Negative
 controls put the same known unsupported op both on and off the selected cone
 and check interval, Arb, zonotope, certificate, search, and CLI behavior.
 
-The scalar acceptance cone needs sound real transformers or certified
-envelopes for the checked source operations it actually reaches. For
+The scalar acceptance cone needs sound real transformers with oracle-checked
+outward bounds for the checked source operations it actually reaches. For
 `Shoals.Pricing.bs_call_f64`, that includes arithmetic, comparisons and
 branch selection, casts where present, `log`, `sqrt`, `exp`, and the
 `standard_normal_cdf`/`erf` path. A transcendental approximation is usable
@@ -244,10 +250,13 @@ The integration case is a shell-authored property importing the actual
 `sigma = 0.2`, and `t = 1`, box `s` in `[96, 104]`, and prove the two real
 goals `0 <= price` and `price <= 20`. The returned record names that source
 function and reports `proven_modulo_real_arithmetic` with independently
-checkable graph, root, domain, and engine evidence. An ATM false bound such
-as `price <= 0` must refute with a confirmed witness or fail closed; it may
-not pass. A property with a deliberately unsupported expression and the
-same package import must return unsupported with the responsible operation.
+checkable graph, root, domain, and engine evidence. This acceptance requires
+both one-sided Beacon discharges to certify the direct real interpretation
+without a separate contract or envelope assumption that would lower the
+composite badge. An ATM false bound such as `price <= 0` must refute with a
+confirmed witness or fail closed; it may not pass. A property with a
+deliberately unsupported expression and the same package import must return
+unsupported with the responsible operation.
 
 Beacon's existing Shoals Black–Scholes wire fixture checks a separate
 coefficient-based approximation. It is a useful engine regression but is
