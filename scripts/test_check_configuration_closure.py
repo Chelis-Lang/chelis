@@ -363,7 +363,8 @@ class MatrixCoverageTests(unittest.TestCase):
             self.assertEqual(run.cadence, CLOSURE.NIGHTLY)
             self.assertIn(" ".join(run.command), commands)
         gate_rows = [run for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"]
-        self.assertEqual(len(gate_rows), 4)
+        self.assertEqual(len(gate_rows), 5)
+        self.assertIn("cvc5-features", {run.label for run in gate_rows})
         for run in gate_rows:
             self.assertEqual(run.hosts, ("linux",))
             self.assertEqual(run.cadence, CLOSURE.PER_PULL_REQUEST)

@@ -331,6 +331,13 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-types/generalize-sweep-oracle",
     "--", "-D", "warnings",
 ]
+# Compile provider plus SMT together in the Rust-policy target before the
+# configuration-closure guard reads rustc dep-info from this job's target.
+CLIPPY_CVC5_FEATURES: list[str] = [
+    "cargo", "clippy", "--workspace", "--all-targets", "--features",
+    "chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
+    "--", "-D", "warnings",
+]
 # The Nix CI provider adds one native-library selection without changing the
 # developer gate's bundled OpenBLAS default or dropping any solver-free feature.
 CLIPPY_SOLVER_FREE_NIX_FEATURES = CLIPPY_SOLVER_FREE_FEATURES.copy()
@@ -584,6 +591,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_SOLVER_FREE_FEATURES,
         CLIPPY_NO_DEFAULT_FEATURES,
         CLIPPY_CORE_WITHOUT_MIGRATION,
+        CLIPPY_CVC5_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         STD_BUNDLE_REPRODUCIBILITY,

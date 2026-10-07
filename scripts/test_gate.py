@@ -782,6 +782,17 @@ class StageUnionTests(unittest.TestCase):
         self.assertNotIn("--workspace", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
         self.assertIn("--no-default-features", gate.CLIPPY_CORE_WITHOUT_MIGRATION)
 
+    def test_clarabel_ideal_configuration_is_linted_before_closure(self):
+        command = [
+            "cargo", "clippy", "--workspace", "--all-targets", "--features",
+            "chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt",
+            "--", "-D", "warnings",
+        ]
+        for stage in ("lint-and-unit", "lint-and-unit-nix"):
+            commands = gate.STAGES[stage]
+            self.assertIn(command, commands)
+            self.assertLess(commands.index(command), commands.index(gate.CONFIGURATION_CLOSURE))
+
     def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
         arguments = dict(tests_only=False, support_only=False, partition=None)
         developer = gate.selected_stage_commands("lint-and-unit", **arguments)

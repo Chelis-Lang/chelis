@@ -214,7 +214,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "-D",
             "warnings",
         ),
-        owner=".github/workflows/ci.yml",
+        owner="scripts/gate.py",
         hosts=("linux",),
         cadence=PER_PULL_REQUEST,
     ),

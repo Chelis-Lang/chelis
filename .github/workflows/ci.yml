@@ -1044,9 +1044,9 @@ jobs:
       # Clippy's `disallowed_types` ban on raw hash collections
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is
-      # the cheapest place to lint the `smt` feature's code. Registered in
-      # scripts/check_configuration_closure.py CLIPPY_MATRIX, which fails if
-      # this command drifts from it.
+      # an independent check of the `smt` feature's code. The Rust-policy
+      # gate runs the same registered command before its local dep-info
+      # closure guard; see scripts/check_configuration_closure.py.
       - name: Clippy over the cvc5 feature configuration
         run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider,chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
 
