@@ -973,15 +973,17 @@ fn main() {
         }) => {
             // Parse target for realizability inference (issue #912).
             match parse_eval_target(target.as_deref()) {
-                Ok(parsed_target) => cmd_eval(
-                    file.as_deref(),
-                    expr.as_deref(),
-                    json,
-                    allow_style_violations,
-                    parsed_target,
-                    target.is_some(), // whether user explicitly passed --target
-                    timeout,
-                ),
+                Ok(parsed_target) => chelis_types::run_on_grown_stack(|| {
+                    cmd_eval(
+                        file.as_deref(),
+                        expr.as_deref(),
+                        json,
+                        allow_style_violations,
+                        parsed_target,
+                        target.is_some(), // whether user explicitly passed --target
+                        timeout,
+                    )
+                }),
                 Err(error) => Err(error.into()),
             }
         }
@@ -1007,7 +1009,9 @@ fn main() {
             proof_scope_input.as_deref(),
             Duration::from_secs(timeout),
         )),
-        Some(Command::Cost { file, json }) => cmd_cost(&file, json),
+        Some(Command::Cost { file, json }) => {
+            chelis_types::run_on_grown_stack(|| cmd_cost(&file, json))
+        }
         Some(Command::Validate {
             surf,
             deep,
@@ -1022,14 +1026,16 @@ fn main() {
             deep,
             emit_c,
             allow_style_violations,
-        }) => cmd_build_dispatch(
-            &file,
-            output.as_deref(),
-            &target,
-            deep,
-            allow_style_violations,
-            emit_c,
-        ),
+        }) => chelis_types::run_on_grown_stack(|| {
+            cmd_build_dispatch(
+                &file,
+                output.as_deref(),
+                &target,
+                deep,
+                allow_style_violations,
+                emit_c,
+            )
+        }),
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Runtime { command }) => cmd_runtime(command),
         Some(Command::Tide { command }) => run_tide(command),
