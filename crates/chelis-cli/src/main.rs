@@ -1093,7 +1093,11 @@ fn cli_main() {
             desugar,
             file,
             allow_style_violations,
-        }) => cmd_validate(&file, surf, deep, desugar, allow_style_violations),
+        }) => chelis_types::run_on_grown_stack(|| {
+            // The style gate parses and formats before chelis-validate runs;
+            // this boundary covers those Deep walks as well as the validator.
+            cmd_validate(&file, surf, deep, desugar, allow_style_violations)
+        }),
         Some(Command::Build {
             file,
             output,

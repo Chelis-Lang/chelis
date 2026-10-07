@@ -1,0 +1,1 @@
+Deep validation handles a 1,500-level nested application in the CLI and a 4,000-level application through the embedded validator without a native stack abort. Inputs beyond the Deep parser's nesting limit retain its located error. See [#3234](https://github.com/Chelis-Lang/chelis/issues/3234).

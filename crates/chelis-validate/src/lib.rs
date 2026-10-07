@@ -67,6 +67,13 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
+    // Embedded callers reach the same stamped ingress and recursive grammar
+    // walks as the CLI. Keep the whole validation, including temporary trees
+    // and their drop, on the grown segment.
+    chelis_types::run_on_grown_stack(|| validate_deep_on_grown_stack(source))
+}
+
+fn validate_deep_on_grown_stack(source: &str) -> Result<(), ValidationError> {
     // chelis#1088: the stamped `.dp` ingress runs FIRST, so `validate --deep`
     // reaches the same program-level verdict `chelis check` does, in the same
     // words. The order is the whole point. This auxiliary Pest grammar admits
@@ -668,6 +675,23 @@ fn validate_effects_children(
 #[cfg(test)]
 mod tests {
     use super::{validate_deep, validate_desugared, validate_surf};
+
+    #[test]
+    fn embedded_deep_validator_handles_parser_supported_nesting() {
+        let depth = 4_000;
+        let body = format!(
+            "{}(lit {{type: (t-prim {{}} i32)}} 1){}",
+            "(app {} (var {} id) ".repeat(depth),
+            ")".repeat(depth)
+        );
+        let source = format!(
+            "(defsig {{}} id (t-fn {{}} (t-prim {{}} i32) (t-prim {{}} i32)))\n\
+             (def {{}} id (fn {{}} (params {{}} x) (var {{}} x)))\n\
+             (defsig {{}} main (t-fn {{}} (t-prim {{}} i32)))\n\
+             (def {{}} main (fn {{}} (params {{}}) {body}))\n"
+        );
+        validate_deep(&source).expect("embedded validator must accept parser-supported nesting");
+    }
 
     #[test]
     fn valid_tags_match_canonical_deep_vocabulary() {

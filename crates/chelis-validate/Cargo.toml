@@ -11,6 +11,7 @@ chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-macros.workspace = true
 chelis-surf.workspace = true
+chelis-types.workspace = true
 pest = "2"
 pest_derive = "2"
 thiserror.workspace = true

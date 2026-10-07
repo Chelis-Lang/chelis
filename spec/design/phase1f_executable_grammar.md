@@ -42,7 +42,10 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
   never rejected because the auxiliary grammar is incomplete.
 - `chelis validate --deep file.dp` validates Deep PEG structure plus the closed tag
   vocabulary, metadata-map requirement, arity/helper-form invariants, and dotted module/import
-  path names emitted by canonical Deep
+  path names emitted by canonical Deep. The CLI runs its style gate and validation on a grown
+  stack; the public Deep validator likewise keeps stamped ingress, grammar validation, and
+  temporary-tree teardown on a grown stack. Deep input beyond the parser's nesting budget
+  returns the parser's located diagnostic
 - `chelis validate --desugar file.ch` reuses the compiler Surf parser/desugarer and then
   validates the emitted canonical Deep
 - the oracle suite checks validator/compiler agreement across:
