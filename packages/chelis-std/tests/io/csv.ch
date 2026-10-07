@@ -101,16 +101,9 @@ def kib4_line() -> string = {
   s2048 = string_concat(s1024, s1024)
   string_concat(s2048, s2048)
 }
--- Regression shape from the PR #1213 review: a malformed FIRST data row
--- followed by a 4 KiB line. The recursive pre-#1213 parse_rows returned
--- None without touching the long line; a shape that parses every line
--- before judging validity instead drives `parse_line_chars`'s
--- per-character recursion through the evaluator on the 4 KiB line and
--- overflows the test worker's stack (SIGABRT, chelis#1225). Reaching
--- None at all therefore proves the failure short-circuit: the long line
--- was never parsed. (A 4 KiB line in a VALID row position still hits
--- chelis#1225 on this lane -- that is the parser's own wall, which no
--- row-level control flow can remove.)
+-- A malformed first data row makes the whole file invalid even when a
+-- later row is long and otherwise valid. The row-validation fold skips
+-- parsing that later row after the failure.
 def test_short_first_row_before_long_line_returns_none() -> unit ! { Test, IO } = {
   path = "/tmp/chelis_std_test_csv_short_then_long.csv"
   _ = write_file(path, string_concat("a,b\n1\n", kib4_line()))
@@ -205,7 +198,7 @@ def test_to_csv_handles_multi_kilobyte_fields() -> unit ! { Test } = {
   field = string_concat("a\"b,", tail)
   rows = [dict_of([("k", field), ("v", "plain")])]
   expected = string_concat("k,v\n\"a\"\"b,", string_concat(tail, "\",plain\n"))
-  assert_eq(to_csv(rows), expected, "4 KiB quoted field renders byte-exactly (read-back of multi-kilobyte lines is capped by the reader's recursion, chelis#954)")
+  assert_eq(to_csv(rows), expected, "4 KiB quoted field renders byte-exactly")
 }
 def test_try_write_csv_mismatched_rows_returns_none() -> unit ! { Test, IO } = {
   rows = [dict_of([("a", "1")]), dict_of([("b", "2")])]

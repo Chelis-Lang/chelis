@@ -661,18 +661,9 @@ v4 = print(ok_quote)
     assert!(text.contains("quote:NONE"), "unterminated quote: {text}");
 }
 
-/// PR #1213 review finding: a malformed FIRST data row followed by a
-/// line long enough to be expensive must return None WITHOUT parsing
-/// the later line (the recursive pre-#1213 parse_rows short-circuited;
-/// a shape that parses every line before judging validity does not).
-/// `parse_line_chars` recurses per character on every lane (chelis#1225),
-/// so an unfixed parse of the 4 MiB line overflows the C stack here,
-/// while the corpus twin of this test
-/// (`test_short_first_row_before_long_line_returns_none`) covers the
-/// same shape at 4 KiB on the eval lane, whose per-character evaluator
-/// frames are ~3 orders of magnitude larger. A 4 MiB line in a VALID
-/// row position would still crash the compiled lane — that is
-/// chelis#1225's parser wall, not a row-control-flow defect.
+/// A malformed first data row followed by a large later line returns None.
+/// The row-validation fold must preserve the failure verdict without reading
+/// later rows. The 4 MiB line also exercises the compiled package path.
 #[test]
 #[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_compiled_lane_short_circuits_before_long_line() {

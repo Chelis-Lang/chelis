@@ -74,12 +74,8 @@ def first_invalid_row(rows: List[Dict[string, string]]) -> i64 =
 -- The validity pass carries only a bool, and its body is an `if` on the
 -- accumulator rather than an `and(...)` call: a call evaluates both
 -- arguments, while `if` evaluates one branch, so after the first invalid
--- row every later line is skipped without being parsed. That preserves
--- the recursive shape's failure contract: a malformed row means the rest
--- of the file is never touched -- including a later line whose parse
--- would exhaust the eval lane's per-character recursion budget
--- (chelis#1225 tracks the eval lane's long-line stack walls; a long
--- line in a VALID file still hits them).
+-- row every later line is skipped without being parsed. A malformed row
+-- therefore leaves the rest of the file untouched, including long lines.
 --
 -- On success every line is parsed a second time to build the dicts,
 -- doubling a linear constant. Both single-parse alternatives lose more:
@@ -109,12 +105,17 @@ def fields_of(line: string) -> List[string] =
     | Some(fields) => fields
     | None => []
   }
-def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, i64), false, "", [])
-def parse_line_chars(line: string, idx: i64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =
-  if gte(idx, string_len(line)) then if in_quotes then None else Some(append(fields, current)) else {
+-- The fold carries the scanner state rather than one native call per character.
+-- A doubled quote consumes its second byte on the next index without changing
+-- the quoted field. All other quote and delimiter cases match the line grammar.
+def parse_line(line: string) -> Option[List[string]] = {
+  size = string_len(line)
+  state = fold(fn (acc: (bool, bool, string, List[string]), idx: i64) -> if acc.0 then (false, acc.1, acc.2, acc.3) else {
     ch = string_slice(line, idx, cast(1, i64))
-    if eq(ch, "\"") then if in_quotes then {
+    if eq(ch, "\"") then if acc.1 then {
       next = add(idx, cast(1, i64))
-      if and(lt(next, string_len(line)), eq(string_slice(line, next, cast(1, i64)), "\"")) then parse_line_chars(line, add(idx, cast(2, i64)), true, string_concat(current, "\""), fields) else parse_line_chars(line, add(idx, cast(1, i64)), false, current, fields)
-    } else parse_line_chars(line, add(idx, cast(1, i64)), true, current, fields) else if and(eq(ch, ","), not(in_quotes)) then parse_line_chars(line, add(idx, cast(1, i64)), false, "", append(fields, current)) else parse_line_chars(line, add(idx, cast(1, i64)), in_quotes, string_concat(current, ch), fields)
-  }
+      if lt(next, size) then if eq(string_slice(line, next, cast(1, i64)), "\"") then (true, true, string_concat(acc.2, "\""), acc.3) else (false, false, acc.2, acc.3) else (false, false, acc.2, acc.3)
+    } else (false, true, acc.2, acc.3) else if and(eq(ch, ","), not(acc.1)) then (false, false, "", append(acc.3, acc.2)) else (false, acc.1, string_concat(acc.2, ch), acc.3)
+  }, (false, false, "", []), range(cast(0, i64), size))
+  if state.1 then None else Some(append(state.3, state.2))
+}

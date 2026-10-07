@@ -1,0 +1,1 @@
+`Std.Io.Csv` parses long fields without one call frame per character on the evaluator and compiled C lanes. Valid long lines succeed, while unterminated quoted fields still return `None`. See [#1225](https://github.com/Chelis-Lang/chelis/issues/1225).
