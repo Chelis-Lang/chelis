@@ -123,6 +123,32 @@ fn a_deep_chain_through_dict_values_returns_as_a_root() {
     assert_eq!(stdout, format!("a = {nest}\n"));
 }
 
+/// chelis#2601: the same root also leaves through the machine-facing JSON
+/// encoder without a native-stack abort.
+#[test]
+fn a_deep_chain_leaves_eval_as_json() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("deep.ch");
+    write_file(&path, &format!("{TYPES}a = chain({DEPTH}i64)\n"));
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval --json runs");
+    assert!(
+        output.status.success(),
+        "eval --json aborted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 JSON output");
+    assert!(
+        stdout.contains("\"schema_version\":4"),
+        "missing execution-wire version"
+    );
+    assert_eq!(stdout.matches("\"ctor\":\"Link\"").count(), DEPTH);
+    assert!(stdout.contains("\"type\":\"adt\""));
+}
+
 /// Negative parity: a shallow value renders exactly as before.
 #[test]
 fn shallow_values_render_exactly() {
