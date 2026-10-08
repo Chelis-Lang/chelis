@@ -225,7 +225,10 @@ The scalar acceptance cone needs sound real transformers with oracle-checked
 outward bounds for the checked source operations it actually reaches. For
 `Shoals.Pricing.bs_call_f64`, that includes arithmetic, comparisons and
 branch selection, casts where present, `log`, `sqrt`, `exp`, and the
-`standard_normal_cdf`/`erf` path. A transcendental approximation is usable
+complete `standard_normal_cdf` graph in `spec/05-risc-primitives.md` §3.3,
+including `erfc`, `abs`, comparison, and `where`. Shoals's exported `erf64`
+is a separate function, not part of this call closure. A transcendental
+approximation is usable
 only with an outward error enclosure over its admitted domain; sampling or
 an unchecked library call cannot establish the range. Independently
 certified subexpression bounds are admissible when their combination soundly
