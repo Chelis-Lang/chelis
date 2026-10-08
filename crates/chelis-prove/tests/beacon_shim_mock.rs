@@ -101,9 +101,8 @@ fn shim() -> BeaconShim {
     BeaconShim::new(MOCK_BIN, populated_store())
 }
 
-/// 256 KiB of synthetic `WireDag` bytes — base64s to ~341 KiB, well past both
-/// the 32 KiB stdin auto-fallback ceiling and the ~64 KiB OS pipe buffer. This
-/// is the payload that triggered the red-team HIGH stdin deadlock.
+/// 256 KiB of synthetic `WireDag` bytes — base64s to ~341 KiB, well past the
+/// 32 KiB protocol-switch threshold.
 fn large_wire_dag_bytes() -> Vec<u8> {
     vec![b'x'; 256 * 1024]
 }
@@ -387,7 +386,11 @@ fn dag_hash_mismatch_fails_closed_before_spawning_beacon() {
     store.insert(fake_dag_hash(), b"totally different bytes".to_vec());
     let shim = BeaconShim::new(MOCK_BIN, store);
     let discharge = shim.discharge(&box_goal(), FAST_TIMEOUT_MS);
-    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    let TierBResult::Error(reason) = discharge.result() else {
+        panic!("missing Beacon must be an error: {discharge:?}");
+    };
+    assert!(reason.starts_with("unsupported: "), "{reason}");
+    assert!(reason.contains("chelis#730"), "{reason}");
     assert_eq!(discharge.soundness(), Soundness::Untrusted);
     assert!(discharge.qualifier_set().is_empty());
     assert_eq!(
@@ -697,20 +700,16 @@ fn box_goal_is_box_range_shaped() {
 }
 
 // ===========================================================================
-// RED-TEAM HIGH (pinned regression): a large request (256 KiB WireDag, base64s
-// to ~341 KiB, past the OS pipe buffer) against a NON-DRAINING child must
-// HARD-KILL at the timeout rather than hang on a full stdin pipe. The shim
-// auto-falls-back the Stdin transport to TempFile above the 32 KiB ceiling, so
-// the parent writes a temp file (not a pipe) and `wait_timeout` still fires.
-// Before the fix this hung for the child's full 600s lifetime.
+// A large request against a non-draining child must time out and be killed.
+// It uses the explicit file-path protocol above the 32 KiB threshold.
 // ===========================================================================
 
 #[test]
 fn large_request_against_non_draining_child_hard_kills_not_deadlocks() {
     crate::support::isolate();
     let _g = with_scenario("hang_no_drain");
-    // Stdin transport configured explicitly: the auto-fallback must override it
-    // for this oversized request, or the write deadlocks.
+    // Stdin transport configured explicitly: the large-request protocol switch
+    // must still select the file-path form.
     let shim =
         BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin);
     let start = std::time::Instant::now();

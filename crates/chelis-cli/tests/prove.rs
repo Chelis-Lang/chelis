@@ -823,6 +823,14 @@ fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
 /// whether the run exited successfully.
 #[cfg(feature = "smt")]
 fn prove_parity_with_cdf_contract(width: &str) -> (Vec<serde_json::Value>, bool, String) {
+    prove_parity_with_cdf_contract_and_beacon(width, "smt-only", None)
+}
+
+fn prove_parity_with_cdf_contract_and_beacon(
+    width: &str,
+    tier: &str,
+    beacon_binary: Option<&std::path::Path>,
+) -> (Vec<serde_json::Value>, bool, String) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join("myapp");
     write_file(
@@ -855,17 +863,12 @@ import Std.Contracts (normal_cdf)
         ),
     );
 
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "prove",
-            entry.to_str().unwrap(),
-            "--json",
-            "--tier",
-            "smt-only",
-        ])
-        .output()
-        .expect("run prove");
+    let mut command = Command::cargo_bin("chelis").expect("binary");
+    command.args(["prove", entry.to_str().unwrap(), "--json", "--tier", tier]);
+    if let Some(binary) = beacon_binary {
+        command.env("CHELIS_BEACON_BIN", binary);
+    }
+    let output = command.output().expect("run prove");
     let transcript = format!(
         "stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
@@ -876,6 +879,23 @@ import Std.Contracts (normal_cdf)
         output.status.success(),
         transcript,
     )
+}
+
+#[test]
+fn lu1_configured_beacon_spawn_denial_is_branded_and_nonzero() {
+    let directory = tempdir().expect("tempdir");
+    let missing = directory.path().join("missing-beacon");
+    let (properties, success, transcript) =
+        prove_parity_with_cdf_contract_and_beacon("f64", "fuzz-only", Some(&missing));
+    assert!(!success, "{transcript}");
+    assert_eq!(properties.len(), 1, "{transcript}");
+    let property = &properties[0];
+    assert_eq!(property["status"], "unsupported", "{transcript}");
+    assert_eq!(property["composite_verdict"], "unsupported", "{transcript}");
+    assert_eq!(property["proof_tier"], "none", "{transcript}");
+    let reason = property["reason"].as_str().expect("reason");
+    assert!(reason.starts_with("unsupported: "), "{transcript}");
+    assert!(reason.contains("chelis#730"), "{transcript}");
 }
 
 #[cfg(feature = "smt")]

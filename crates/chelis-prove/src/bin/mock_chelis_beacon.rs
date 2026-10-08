@@ -53,6 +53,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let scenario = std::env::var("MOCK_BEACON_SCENARIO").unwrap_or_else(|_| "proved".to_string());
 
+    if args.get(1).is_some_and(|arg| arg == "contract") && scenario == "contract_proved" {
+        let _request = read_request(&args);
+        print!(r#"{{"verdict":"proved","guarantee_class":"certified_envelope"}}"#);
+        return;
+    }
+
     // `hang_no_drain` deliberately does NOT read its input: it models a child
     // that has not yet started draining stdin, so a large stdin write would
     // block the parent's `write_all` on a full pipe. The shim's large-request

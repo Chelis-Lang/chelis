@@ -269,6 +269,7 @@ pub fn standard_contract_registry(
     runtime: &'static EmbeddedRuntime,
 ) -> AssumptionRegistry {
     standard_contract_registry_for(None, widths, None, runtime)
+        .expect("a registry without a Beacon subprocess cannot degrade")
 }
 
 /// Construct the standard contract registry, attempting to upgrade fuzz-discharged
@@ -278,7 +279,7 @@ pub fn standard_contract_registry_with_prover(
     prover: &crate::beacon_contract_prover::BeaconContractProver,
     widths: &[Prim],
     runtime: &'static EmbeddedRuntime,
-) -> AssumptionRegistry {
+) -> Result<AssumptionRegistry, chelis_types::unsupported::Unsupported> {
     standard_contract_registry_for(None, widths, Some(prover), runtime)
 }
 
@@ -291,7 +292,7 @@ pub fn standard_contract_registry_for(
     widths: &[Prim],
     prover: Option<&crate::beacon_contract_prover::BeaconContractProver>,
     runtime: &'static EmbeddedRuntime,
-) -> AssumptionRegistry {
+) -> Result<AssumptionRegistry, chelis_types::unsupported::Unsupported> {
     let mut registry = AssumptionRegistry::new();
     let selected = |id: &str| contracts.is_none_or(|contracts| contracts.contains(id));
     for contract in standard_contracts_selected(widths, selected, runtime) {
@@ -303,9 +304,9 @@ pub fn standard_contract_registry_for(
                 && invariant.record.discharge.as_ref().is_some_and(|d| {
                     d.method == DischargeMethod::Fuzz && d.evidence["status"] == "validated"
                 })
-                && let Some(discharge) = prover.prove_contract(&invariant.id)
+                && let Some(discharge) = prover.prove_contract(&invariant.id)?
             {
-                // Successfully proved by Beacon — use the certified discharge
+                // Successfully proved by Beacon — use the certified discharge.
                 let upgraded = AssumptionRecord::new(
                     &invariant.id,
                     Some(discharge),
@@ -324,7 +325,7 @@ pub fn standard_contract_registry_for(
             registry.insert(invariant.record);
         }
     }
-    registry
+    Ok(registry)
 }
 
 fn smt_invariant(id: &str, description: &str, assumption: &str) -> ContractInvariant {
@@ -1156,7 +1157,8 @@ mod tests {
                 widths,
                 None,
                 &chelis_std_bundle::EMBEDDED_RUNTIME,
-            );
+            )
+            .expect("no Beacon subprocess");
             let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, contracts);
             assert!(
                 probe

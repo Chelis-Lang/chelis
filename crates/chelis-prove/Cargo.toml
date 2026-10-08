@@ -117,12 +117,11 @@ bincode = "1"
 thiserror = { workspace = true }
 # Beacon subprocess shim (chelis#439): transport-only deps for the in-tree
 # DischargeEngine that shells to the out-of-tree chelis-beacon binary. base64
-# encodes the EXACT WireDag v6 bytes inline in the request JSON; wait-timeout
-# gives the hard subprocess kill the discharge timeout maps to; tempfile backs
-# the optional temp-file request transport. None link a solver, so the default
+# encodes the EXACT WireDag v6 bytes inline in the request JSON; the shared
+# supervisor handles child completion and teardown; tempfile backs request and
+# output capture files. None link a solver, so the default
 # build stays solver-free. (tempfile is already used elsewhere in the workspace.)
 base64 = "0.22"
-wait-timeout = "0.2"
 tempfile = "3"
 
 # WI-15: the per-OS BLAS/LAPACK backend for clarabel's `sdp` (PSD cone) feature.

@@ -122,3 +122,7 @@ The command exits `0` when all reported checks pass, `1` when a property or obli
 `2` when one is unsupported, and `3` for an error. When results differ, an error takes
 precedence, then a failure, then an unsupported result. An input or setup error can stop the
 run before a JSON summary is written; check the exit code and stderr as well as stdout.
+
+When `CHELIS_BEACON_BIN` configures Beacon for a contract-bound property, a
+denied subprocess operation or failed Beacon launch reports a branded
+`unsupported` result and exits nonzero. It cannot turn into a sampled pass.

@@ -6,7 +6,8 @@
 //!
 //! 1. transports the goal (its box/range bounds + the serialized exact-version `WireDag` v6
 //!    bytes, inline base64) to the pinned binary;
-//! 2. enforces the discharge `timeout_ms` as a HARD subprocess kill;
+//! 2. supervises child completion and kills it at `timeout_ms`, reporting
+//!    denied wait or teardown operations as unsupported;
 //! 3. maps the returned `CheckReport` JSON to a [`Discharge`], fail-closed, via
 //!    the integrity gate [`Discharge::new`].
 //!
@@ -31,20 +32,18 @@
 //! The shim is TRANSPORT ONLY: no solver linkage, no cvc5-named symbol. It ships
 //! in the DEFAULT (non-smt) build and keeps it solver-free (the
 //! `check_is_solver_free_on_the_corpus` gate). Its deps (`base64`,
-//! `wait-timeout`, `std::process`, `serde_json`, `sha2`) are transport
+//! `std::process`, `serde_json`, `sha2`) are transport
 //! utilities.
 
 use chelis_unord::UnordMap;
-use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::beacon_supervisor::{self, Input, Invocation, Outcome, ProcessOps, SystemOps};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
-use wait_timeout::ChildExt as _;
 
 use crate::discharge::{
     Discharge, DischargeEngine, Goal, GoalShape, IntervalBox, OutputRange, Qualifier, QualifierSet,
@@ -57,22 +56,10 @@ mod relaxation;
 /// The schema version of the request the shim emits. Beacon pins against this.
 const REQUEST_SCHEMA_VERSION: u32 = 2;
 
-/// The request-size ceiling above which the [`RequestTransport::Stdin`] path
-/// auto-falls-back to [`RequestTransport::TempFile`] to stay deadlock-safe.
-///
-/// Writing a request larger than the OS pipe buffer (commonly 64 KiB on Linux)
-/// to a child that has not yet started DRAINING stdin blocks `write_all` on the
-/// full pipe forever: `wait_timeout` is never reached, so the hard-kill
-/// guarantee (`docs/design/beacon_subprocess_shim.md` §6) silently fails and the
-/// call hangs for the child's whole lifetime. A WireDag artifact base64s to well
-/// past this for non-trivial programs, so this is a real path, not a corner.
-///
-/// 32 KiB is comfortably under the typical 64 KiB pipe buffer, so a request at
-/// or below it fits in the buffer and `write_all` returns without the child
-/// having read a byte; anything larger uses the temp-file transport, which the
-/// red team proved deadlock-safe at all sizes (the child reads a file, the
-/// parent writes no pipe). The threshold is a safety floor, not a tuning knob:
-/// it only decides stdin-vs-tempfile, never the soundness mapping.
+/// The request-size ceiling above which the [`RequestTransport::Stdin`] protocol
+/// switches to [`RequestTransport::TempFile`]. Both protocols use file-backed
+/// input in the supervisor, so neither writes to a potentially blocked child
+/// pipe. The threshold changes transport only, never the soundness mapping.
 const STDIN_REQUEST_MAX_BYTES: usize = 32 * 1024;
 
 /// The environment variable the shim falls back to for the `chelis-beacon`
@@ -160,10 +147,8 @@ impl WireDagByteStore {
     }
 }
 
-/// Whether the shim sends the request on the child's stdin (`--request -`) or
-/// via a temp file (`--request <path>`). Stdin is the default; the temp-file arm
-/// exists so a binary that cannot read stdin (or a very large request) still has
-/// a path, and so the temp-file invocation is itself testable.
+/// Whether the shim passes the request on the child's stdin (`--request -`)
+/// or by path (`--request <path>`). The supervisor backs stdin with a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestTransport {
     /// `chelis-beacon dispatch --request -`, request on stdin.
@@ -235,13 +220,9 @@ impl BeaconShim {
 
     /// The transport actually used for a request of `request_len` bytes.
     ///
-    /// Deadlock-safety floor (the red-team HIGH): a [`RequestTransport::Stdin`]
-    /// request larger than [`STDIN_REQUEST_MAX_BYTES`] would block `write_all`
-    /// on a full pipe against a non-draining child and never reach the
-    /// hard-kill, so it auto-falls-back to the proven-deadlock-safe
-    /// [`RequestTransport::TempFile`]. A small Stdin request stays on stdin; an
-    /// explicitly-`TempFile` shim always uses the temp file. This is a transport
-    /// decision ONLY; it never touches the soundness mapping.
+    /// A large request uses the explicit file-path protocol. A smaller request
+    /// retains the stdin protocol, whose descriptor is file-backed by the
+    /// supervisor. This decision never touches the soundness mapping.
     fn effective_transport(&self, request_len: usize) -> RequestTransport {
         match self.transport {
             RequestTransport::Stdin if request_len > STDIN_REQUEST_MAX_BYTES => {
@@ -284,22 +265,31 @@ impl BeaconShim {
         })
     }
 
-    /// Spawn `chelis-beacon`, feed it `request_bytes`, enforce `timeout_ms` as a
-    /// HARD kill, and return the raw subprocess outcome. Any spawn/wait/IO error
-    /// or a timeout is surfaced as a fail-closed [`SubprocessOutcome::Failed`];
+    /// Spawn `chelis-beacon`, feed it `request_bytes`, and supervise its
+    /// deadline. Denied operations become [`SubprocessOutcome::Failed`]; a
+    /// successfully killed timeout becomes [`SubprocessOutcome::TimedOut`].
     /// this function never panics on a misbehaving child.
     fn run_beacon(&self, request_bytes: &[u8], timeout_ms: u64) -> SubprocessOutcome {
-        // The temp file (if any) must outlive the child, so it is bound here.
-        let mut command = Command::new(&self.binary);
-        command.arg(if self.oracle_mode == BeaconOracleMode::ReluLinear {
-            "relax"
-        } else {
-            "dispatch"
-        });
+        self.run_beacon_with_ops(request_bytes, timeout_ms, &SystemOps)
+    }
 
-        // Auto-fall-back to the temp-file transport for a request too large to
-        // write to a stdin pipe without risking a full-buffer deadlock (the
-        // red-team HIGH). The decision is made ONCE here, off the request size.
+    pub(crate) fn run_beacon_with_ops(
+        &self,
+        request_bytes: &[u8],
+        timeout_ms: u64,
+        ops: &impl ProcessOps,
+    ) -> SubprocessOutcome {
+        // The temp file (if any) must outlive the child, so it is bound here.
+        let mut args = vec![std::ffi::OsString::from(
+            if self.oracle_mode == BeaconOracleMode::ReluLinear {
+                "relax"
+            } else {
+                "dispatch"
+            },
+        )];
+
+        // Select the explicit file-path protocol for large requests. The
+        // supervisor also backs the stdin protocol with a file.
         let transport = if self.oracle_mode == BeaconOracleMode::ReluLinear {
             // Beacon's relax CLI accepts a request path, not dispatch's `-` stdin form.
             RequestTransport::TempFile
@@ -307,130 +297,48 @@ impl BeaconShim {
             self.effective_transport(request_bytes.len())
         };
 
-        let _tempfile_guard = match transport {
+        let input = match transport {
             RequestTransport::Stdin => {
-                command.arg("--request").arg("-");
-                command.stdin(Stdio::piped());
-                None
+                args.push("--request".into());
+                args.push("-".into());
+                Input::Stdin(request_bytes)
             }
             RequestTransport::TempFile => {
-                let mut file = match tempfile::NamedTempFile::new() {
-                    Ok(f) => f,
-                    Err(err) => {
-                        return SubprocessOutcome::Failed {
-                            reason: format!("could not create request temp file: {err}"),
-                            stderr: String::new(),
-                        };
-                    }
-                };
-                if let Err(err) = file.write_all(request_bytes) {
-                    return SubprocessOutcome::Failed {
-                        reason: format!("could not write request temp file: {err}"),
-                        stderr: String::new(),
-                    };
-                }
-                command.arg("--request").arg(file.path());
-                command.stdin(Stdio::null());
-                Some(file)
+                args.push("--request".into());
+                Input::RequestFile(request_bytes)
             }
         };
-        // A split tree can exceed a pipe's capacity. File-backed capture lets
-        // the child finish while we enforce its deadline without blocking on
-        // either output stream.
-        let captures = (|| -> std::io::Result<_> {
-            let stdout = tempfile::NamedTempFile::new()?;
-            let stderr = tempfile::NamedTempFile::new()?;
-            command.stdout(Stdio::from(stdout.reopen()?));
-            command.stderr(Stdio::from(stderr.reopen()?));
-            Ok((stdout, stderr))
-        })();
-        let (stdout_capture, stderr_capture) = match captures {
-            Ok(files) => files,
-            Err(err) => {
-                return SubprocessOutcome::Failed {
-                    reason: format!("could not create beacon output captures: {err}"),
-                    stderr: String::new(),
-                };
-            }
-        };
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                return SubprocessOutcome::Failed {
-                    reason: format!("could not spawn `{}`: {err}", self.binary.display()),
-                    stderr: String::new(),
-                };
-            }
-        };
-
-        // Feed the request on stdin, then drop the handle so the child sees EOF.
-        // Only the (small-request) stdin transport writes a pipe here; the
-        // large-request fallback already wrote the temp file above.
-        if transport == RequestTransport::Stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            let write_result = stdin.write_all(request_bytes);
-            // Drop the handle explicitly so the child sees EOF before we wait.
-            drop(stdin);
-            if let Err(err) = write_result {
-                // Best-effort kill; the child may have already exited.
-                let _ = child.kill();
-                let _ = child.wait();
-                return SubprocessOutcome::Failed {
-                    reason: format!("could not write request to beacon stdin: {err}"),
-                    stderr: String::new(),
-                };
-            }
-        }
-
-        // HARD kill at the timeout (Q3): wait_timeout returns None on expiry.
-        let timeout = Duration::from_millis(timeout_ms);
-        match child.wait_timeout(timeout) {
-            Ok(Some(status)) => {
-                // Exited within the budget; collect its output.
-                let output = match std::fs::read(stdout_capture.path()).and_then(|stdout| {
-                    std::fs::read(stderr_capture.path()).map(|stderr| (stdout, stderr))
-                }) {
-                    Ok(output) => output,
-                    Err(err) => {
-                        return SubprocessOutcome::Failed {
-                            reason: format!("could not collect beacon output: {err}"),
-                            stderr: String::new(),
-                        };
-                    }
-                };
-                let stdout = String::from_utf8_lossy(&output.0).into_owned();
-                let stderr = String::from_utf8_lossy(&output.1).into_owned();
+        match beacon_supervisor::run_with_ops(
+            Invocation {
+                binary: &self.binary,
+                args: &args,
+                input,
+                timeout: Duration::from_millis(timeout_ms),
+            },
+            ops,
+        ) {
+            Outcome::Completed {
+                status,
+                stdout,
+                stderr,
+            } => {
+                let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&stderr).into_owned();
                 if status.success() {
                     SubprocessOutcome::Exited { stdout, stderr }
                 } else {
                     SubprocessOutcome::Rejected {
-                        reason: format!(
-                            "beacon exited with nonzero status {}",
-                            status
-                                .code()
-                                .map_or_else(|| "signal".to_string(), |c| c.to_string())
-                        ),
-                        stderr,
+                        reason: format!("beacon exited with nonzero status {status}"),
                         stdout,
+                        stderr,
                     }
                 }
             }
-            Ok(None) => {
-                // Timed out: hard-kill, reap, and fail closed (never a pass).
-                let _ = child.kill();
-                let _ = child.wait();
-                SubprocessOutcome::TimedOut
-            }
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                SubprocessOutcome::Failed {
-                    reason: format!("error waiting on beacon: {err}"),
-                    stderr: String::new(),
-                }
-            }
+            Outcome::TimedOut => SubprocessOutcome::TimedOut,
+            Outcome::Degraded(unsupported) => SubprocessOutcome::Failed {
+                reason: unsupported.to_string(),
+                stderr: String::new(),
+            },
         }
     }
 }
@@ -439,7 +347,7 @@ impl BeaconShim {
 /// [`Discharge`]. Kept separate so the subprocess mechanics and the soundness
 /// mapping are independently testable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SubprocessOutcome {
+pub(crate) enum SubprocessOutcome {
     /// The binary exited successfully; carries its stdout (the `CheckReport`
     /// JSON) and stderr.
     Exited { stdout: String, stderr: String },
