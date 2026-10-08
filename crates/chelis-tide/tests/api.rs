@@ -599,6 +599,49 @@ async fn validate_endpoint_reports_validity_and_failures() {
     assert_eq!(bad["stage"], "validate");
 }
 
+#[test]
+fn validate_endpoint_survives_deep_rejected_surf_on_a_small_stack() {
+    const CHILD_ENV: &str = "CHELIS_3234_HTTP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("HTTP test runtime");
+                runtime.block_on(async {
+                    let comment = format!("{}{}", "{-".repeat(5_000), "-}".repeat(5_000));
+                    let source = format!("module Probe.Deep\n{comment}\nx = 1i64 y\n");
+                    let (_, response) = post_json(
+                        router(),
+                        "/validate",
+                        json!({"mode":"surf","source":source}),
+                    )
+                    .await;
+                    assert_eq!(response["ok"], false, "{response}");
+                    assert_eq!(response["stage"], "validate", "{response}");
+                    assert!(response.to_string().contains("compiler parse failed"));
+                });
+            })
+            .expect("spawn 2 MiB HTTP worker")
+            .join()
+            .expect("HTTP worker returned");
+        return;
+    }
+
+    let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "validate_endpoint_survives_deep_rejected_surf_on_a_small_stack",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("run isolated HTTP probe");
+    assert!(result.status.success(), "{result:?}");
+}
+
 #[tokio::test]
 async fn decompile_endpoint_round_trips_and_rejects_bad_deep() {
     let (_, desugared) = post_json(router(), "/desugar", json!({"source":HELLO_TENSOR})).await;

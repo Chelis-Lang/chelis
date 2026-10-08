@@ -40,3 +40,16 @@ fn deeply_nested_unterminated_comment_reports_parse_error() {
     );
     assert!(stderr.contains("unterminated block comment"), "{stderr}");
 }
+
+#[test]
+fn deeply_nested_comment_before_invalid_surf_reports_a_parse_error() {
+    let source = format!(
+        "module Probe.Deep\n{}{}\nx = 1i64 y\n",
+        "{-".repeat(5_000),
+        "-}".repeat(5_000)
+    );
+    let output = validate_surf(&source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr.contains("compiler parse failed"), "{stderr}");
+}

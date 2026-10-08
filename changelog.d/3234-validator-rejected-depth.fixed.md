@@ -1,0 +1,1 @@
+Surf validation returns a parse error for deeply nested rejected input instead of aborting on the auxiliary PEG pass, including through the Tide `/validate` endpoint. See [#3234](https://github.com/Chelis-Lang/chelis/issues/3234).

@@ -26,12 +26,17 @@ pub enum ValidationError {
     Failed(String),
 }
 
+// The PEG only supplies a second opinion after the compiler parser rejects.
+// Bound its recursive work by source size; accepted sources have no such limit.
+const SURF_PEG_CLASSIFICATION_MAX_BYTES: usize = 32 * 1024;
+
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
     // The hand-written compiler parser decides acceptance. The independent
-    // PEG classifies a parser rejection when the source is lexically valid
+    // PEG classifies a bounded parser rejection when the source is lexically valid
     // (spec/design/phase1f_executable_grammar.md):
     //   * parser accepts -> accept without running the auxiliary grammar
     //   * lexer rejects -> report its lexical error without running the grammar
+    //   * above classification budget -> report the compiler's reason
     //   * grammar accepts + parser rejects -> REJECT with the compiler's
     //     reason (chelis#706: the grammar admits bare-statement
     //     juxtaposition the parser rejects). Reporting success here would
@@ -54,7 +59,18 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
         }
         Err(err) => err,
     };
-    match surf::Grammar::parse(surf::Rule::program, source) {
+    if source.len() > SURF_PEG_CLASSIFICATION_MAX_BYTES {
+        return Err(ValidationError::Failed(format!(
+            "PEG classification skipped for rejected source above the {}-byte budget; \
+             compiler parse failed: {parse_err}",
+            SURF_PEG_CLASSIFICATION_MAX_BYTES
+        )));
+    }
+
+    // Pest recursively parses the rejected source, and its temporary Pairs may
+    // also recursively drop. Keep both operations within the grown segment for
+    // embedding hosts and Tide workers with small native thread stacks.
+    chelis_types::run_on_grown_stack(|| match surf::Grammar::parse(surf::Rule::program, source) {
         Ok(_) => Err(ValidationError::Failed(format!(
             "the Surf PEG grammar accepts this program but the compiler parser rejects it \
              (the grammar is too lenient, a chelis-validate conformance gap); \
@@ -63,7 +79,7 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
         Err(pest_err) => Err(ValidationError::Failed(format!(
             "{pest_err}\ncompiler parse failed: {parse_err}"
         ))),
-    }
+    })
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
