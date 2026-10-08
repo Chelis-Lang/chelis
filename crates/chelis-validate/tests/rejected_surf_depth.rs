@@ -135,17 +135,14 @@ fn rejected_nested_expression_reports_a_parse_error_on_a_small_stack() {
 
 #[test]
 fn accepted_extreme_parentheses_survive_a_small_stack() {
-    run_on_small_stack_in_child(
-        "accepted_extreme_parentheses_survive_a_small_stack",
-        || {
-            let source = nested_expression_source(40_000, true);
-            assert!(
-                chelis_surf::parser::parse_str(&source).is_ok(),
-                "valid Surf was rejected by the direct parser"
-            );
-            assert!(validate_surf(&source).is_ok(), "valid Surf was rejected");
-        },
-    );
+    run_on_small_stack_in_child("accepted_extreme_parentheses_survive_a_small_stack", || {
+        let source = nested_expression_source(40_000, true);
+        assert!(
+            chelis_surf::parser::parse_str(&source).is_ok(),
+            "valid Surf was rejected by the direct parser"
+        );
+        assert!(validate_surf(&source).is_ok(), "valid Surf was rejected");
+    });
 }
 
 #[test]
