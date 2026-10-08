@@ -1919,6 +1919,15 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        // Every parenthesized expression re-enters this Pratt parser. Check
+        // remaining native stack at that recursive entry so valid deep input
+        // and its error path can grow regardless of the caller's thread size.
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+            self.parse_expr_inner(min_bp)
+        })
+    }
+
+    fn parse_expr_inner(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         if self.mode != ParseMode::LegacyV018
             && min_bp > 0
             && matches!(
@@ -3360,6 +3369,10 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_inner())
+    }
+
+    fn parse_type_inner(&mut self) -> Result<TypeExpr, ParseError> {
         // Parse first type, then check for ->
         let mut types = vec![self.parse_type_atom()?];
 
@@ -3617,6 +3630,10 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_pattern_inner())
+    }
+
+    fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         match self.peek().clone() {
             TokenKind::Underscore => {
                 let tok = self.advance();

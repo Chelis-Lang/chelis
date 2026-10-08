@@ -21,6 +21,24 @@ fn nested_expression_source(depth: usize, valid: bool) -> String {
     )
 }
 
+fn nested_type_source(depth: usize, valid: bool) -> String {
+    let tail = if valid { "" } else { " y" };
+    format!(
+        "module Probe.Deep\ndef identity(x: {}i64{}) -> i64 = x{tail}\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
+fn nested_pattern_source(depth: usize, valid: bool) -> String {
+    let tail = if valid { "" } else { " y" };
+    format!(
+        "module Probe.Deep\nx = match 1i64 with {{ | {}_{} => 1i64 }}{tail}\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
 fn run_on_small_stack_in_child(test_name: &str, probe: impl FnOnce() + Send + 'static) {
     if std::env::var_os(CHILD_ENV).is_some() {
         std::thread::Builder::new()
@@ -111,6 +129,75 @@ fn rejected_nested_expression_reports_a_parse_error_on_a_small_stack() {
                 error.to_string().contains("compiler parse failed"),
                 "{error}"
             );
+        },
+    );
+}
+
+#[test]
+fn accepted_extreme_parentheses_survive_a_small_stack() {
+    run_on_small_stack_in_child(
+        "accepted_extreme_parentheses_survive_a_small_stack",
+        || {
+            let source = nested_expression_source(40_000, true);
+            assert!(
+                chelis_surf::parser::parse_str(&source).is_ok(),
+                "valid Surf was rejected by the direct parser"
+            );
+            assert!(validate_surf(&source).is_ok(), "valid Surf was rejected");
+        },
+    );
+}
+
+#[test]
+fn rejected_extreme_parentheses_report_a_parse_error_on_a_small_stack() {
+    run_on_small_stack_in_child(
+        "rejected_extreme_parentheses_report_a_parse_error_on_a_small_stack",
+        || {
+            let source = nested_expression_source(40_000, false);
+            assert!(
+                chelis_surf::parser::parse_str(&source).is_err(),
+                "invalid Surf was accepted by the direct parser"
+            );
+            let error = validate_surf(&source).expect_err("invalid Surf must fail");
+            let message = error.to_string();
+            assert!(message.contains("compiler parse failed"), "{message}");
+            assert!(message.contains("byte"), "{message}");
+        },
+    );
+}
+
+#[test]
+fn extreme_type_parentheses_keep_accept_and_reject_verdicts() {
+    run_on_small_stack_in_child(
+        "extreme_type_parentheses_keep_accept_and_reject_verdicts",
+        || {
+            let valid = nested_type_source(40_000, true);
+            assert!(chelis_surf::parser::parse_str(&valid).is_ok());
+            assert!(validate_surf(&valid).is_ok());
+            let invalid = nested_type_source(40_000, false);
+            assert!(chelis_surf::parser::parse_str(&invalid).is_err());
+            let error = validate_surf(&invalid).expect_err("invalid type source must fail");
+            let message = error.to_string();
+            assert!(message.contains("compiler parse failed"), "{message}");
+            assert!(message.contains("byte"), "{message}");
+        },
+    );
+}
+
+#[test]
+fn extreme_pattern_parentheses_keep_accept_and_reject_verdicts() {
+    run_on_small_stack_in_child(
+        "extreme_pattern_parentheses_keep_accept_and_reject_verdicts",
+        || {
+            let valid = nested_pattern_source(40_000, true);
+            assert!(chelis_surf::parser::parse_str(&valid).is_ok());
+            assert!(validate_surf(&valid).is_ok());
+            let invalid = nested_pattern_source(40_000, false);
+            assert!(chelis_surf::parser::parse_str(&invalid).is_err());
+            let error = validate_surf(&invalid).expect_err("invalid pattern source must fail");
+            let message = error.to_string();
+            assert!(message.contains("compiler parse failed"), "{message}");
+            assert!(message.contains("byte"), "{message}");
         },
     );
 }

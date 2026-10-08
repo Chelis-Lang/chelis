@@ -53,3 +53,35 @@ fn deeply_nested_comment_before_invalid_surf_reports_a_parse_error() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(stderr.contains("compiler parse failed"), "{stderr}");
 }
+
+#[test]
+fn extreme_parentheses_keep_cli_accept_and_reject_verdicts() {
+    let valid = format!("x = {}1i64{}\n", "(".repeat(40_000), ")".repeat(40_000));
+    let accepted = validate_surf(&valid);
+    assert!(accepted.status.success(), "{accepted:?}");
+
+    let invalid = format!("{} y\n", valid.trim_end());
+    let rejected = validate_surf(&invalid);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+    assert!(stderr.contains("compiler parse failed"), "{stderr}");
+}
+
+#[test]
+fn extreme_type_and_pattern_parentheses_reach_cli_verdicts() {
+    let open = "(".repeat(40_000);
+    let close = ")".repeat(40_000);
+    for valid in [
+        format!("def identity(x: {open}i64{close}) -> i64 = x\n"),
+        format!("x = match 1i64 with {{ | {open}_{close} => 1i64 }}\n"),
+    ] {
+        let accepted = validate_surf(&valid);
+        assert!(accepted.status.success(), "{accepted:?}");
+
+        let invalid = format!("{} y\n", valid.trim_end());
+        let rejected = validate_surf(&invalid);
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+        assert!(stderr.contains("compiler parse failed"), "{stderr}");
+    }
+}
