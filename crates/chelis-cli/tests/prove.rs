@@ -822,10 +822,12 @@ fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
 /// `std.normal_cdf.reflection` contract and return the property records and
 /// whether the run exited successfully.
 #[cfg(feature = "smt")]
+#[cfg(feature = "chelis-prove")]
 fn prove_parity_with_cdf_contract(width: &str) -> (Vec<serde_json::Value>, bool, String) {
     prove_parity_with_cdf_contract_and_beacon(width, "smt-only", None)
 }
 
+#[cfg(feature = "chelis-prove")]
 fn prove_parity_with_cdf_contract_and_beacon(
     width: &str,
     tier: &str,
@@ -882,6 +884,7 @@ import Std.Contracts (normal_cdf)
 }
 
 #[test]
+#[cfg(feature = "chelis-prove")]
 fn lu1_configured_beacon_spawn_denial_is_branded_and_nonzero() {
     let directory = tempdir().expect("tempdir");
     let missing = directory.path().join("missing-beacon");

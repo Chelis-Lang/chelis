@@ -1,5 +1,7 @@
 //! LU1: a configured Beacon subprocess is supervised on the contract route.
 
+mod support;
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -10,6 +12,7 @@ static SCENARIO_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn beacon_callers_cannot_use_direct_wait_timeout_or_child_lifecycle_calls() {
+    crate::support::isolate();
     fn scan(path: &Path) {
         for entry in std::fs::read_dir(path).expect("source directory") {
             let path = entry.expect("source entry").path();
@@ -51,6 +54,7 @@ fn beacon_callers_cannot_use_direct_wait_timeout_or_child_lifecycle_calls() {
 
 #[test]
 fn contract_completion_returns_certified_evidence() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "contract_proved") };
     let discharge = BeaconContractProver::new(MOCK_BIN)
@@ -63,6 +67,7 @@ fn contract_completion_returns_certified_evidence() {
 
 #[test]
 fn missing_binary_is_a_branded_degradation() {
+    crate::support::isolate();
     let directory = tempfile::tempdir().unwrap();
     let err = BeaconContractProver::new(directory.path().join("missing-beacon"))
         .prove_contract("std.normal_cdf.reflection")
@@ -73,6 +78,7 @@ fn missing_binary_is_a_branded_degradation() {
 
 #[test]
 fn crashed_child_is_a_branded_degradation() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "crash") };
     let err = BeaconContractProver::new(MOCK_BIN)
@@ -85,6 +91,7 @@ fn crashed_child_is_a_branded_degradation() {
 
 #[test]
 fn malformed_successful_contract_response_is_branded() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "unparseable") };
     let err = BeaconContractProver::new(MOCK_BIN)
@@ -97,6 +104,7 @@ fn malformed_successful_contract_response_is_branded() {
 
 #[test]
 fn wrong_contract_identity_and_trust_are_branded() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     for scenario in ["contract_wrong_id", "contract_contradictory"] {
         unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", scenario) };
@@ -114,6 +122,7 @@ fn wrong_contract_identity_and_trust_are_branded() {
 
 #[test]
 fn completed_unknown_contract_response_preserves_no_proof() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "contract_unknown") };
     let result = BeaconContractProver::new(MOCK_BIN)
@@ -125,6 +134,7 @@ fn completed_unknown_contract_response_preserves_no_proof() {
 
 #[test]
 fn oversized_contract_output_is_branded() {
+    crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
     unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "oversized_output") };
     let err = BeaconContractProver::new(MOCK_BIN)
