@@ -31,6 +31,20 @@ fn chain_program() -> Vec<chelis_deep::ast::Expr> {
     chelis_surf::desugar::desugar_program(&decls).expect("desugar Chain declaration")
 }
 
+fn opaque_carrier_program() -> Vec<chelis_deep::ast::Expr> {
+    let source = "type Chain =\n  | End { value: f32 }\n  | Link { next: Chain }\n\
+@opaque\n@invariant(c) c.seed >= 0.0\ntype Carrier =\n  | Carrier { seed: f32, next: Chain }\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("parse Carrier declaration");
+    chelis_surf::desugar::desugar_program(&decls).expect("desugar Carrier declaration")
+}
+
+fn scalar_f32(value: f32) -> ExecutionValue {
+    serde_json::from_value(serde_json::json!({
+        "type": "scalar", "value": {"dtype": "f32", "bits": format!("{:08x}", value.to_bits())}
+    }))
+    .expect("f32 scalar")
+}
+
 fn run_on_small_stack_in_child(test_name: &str, probe: impl FnOnce() + Send + 'static) {
     if std::env::var_os(CHILD_ENV).is_some() {
         std::thread::Builder::new()
@@ -139,6 +153,70 @@ fn nested_adt_decode_accepts_and_rejects_deep_values_on_a_small_stack() {
             let error = try_decode_adt_value(&program, &invalid).expect_err("reject leaf");
             assert!(matches!(error, DecodeError::Structural(_)), "{error}");
             std::mem::forget(invalid);
+        },
+    );
+}
+
+#[test]
+fn opaque_carrier_checks_deep_adt_representation_without_overflow() {
+    run_on_small_stack_in_child(
+        "opaque_carrier_checks_deep_adt_representation_without_overflow",
+        || {
+            let program = opaque_carrier_program();
+            let chain = nested_adt(
+                5_000,
+                ExecutionValue::Adt {
+                    ctor: "End".to_string(),
+                    fields: vec![scalar_f32(0.0)],
+                },
+            );
+            let good = ExecutionValue::Adt {
+                ctor: "Carrier".to_string(),
+                fields: vec![scalar_f32(0.25), chain],
+            };
+            let decoded = try_decode_adt_value(&program, &good).expect("accept finite Carrier");
+            drop(decoded);
+            std::mem::forget(good);
+
+            let bad = ExecutionValue::Adt {
+                ctor: "Carrier".to_string(),
+                fields: vec![
+                    scalar_f32(-0.25),
+                    nested_adt(
+                        5_000,
+                        ExecutionValue::Adt {
+                            ctor: "End".to_string(),
+                            fields: vec![scalar_f32(0.0)],
+                        },
+                    ),
+                ],
+            };
+            let error = try_decode_adt_value(&program, &bad).expect_err("reject Carrier");
+            assert!(matches!(error, DecodeError::Invariant(_)), "{error}");
+            std::mem::forget(bad);
+
+            let nonfinite = ExecutionValue::Adt {
+                ctor: "Carrier".to_string(),
+                fields: vec![
+                    scalar_f32(0.25),
+                    nested_adt(
+                        5_000,
+                        ExecutionValue::Adt {
+                            ctor: "End".to_string(),
+                            fields: vec![scalar_f32(f32::NAN)],
+                        },
+                    ),
+                ],
+            };
+            let error = try_decode_adt_value(&program, &nonfinite)
+                .expect_err("reject non-finite representation");
+            let DecodeError::Invariant(message) = error else {
+                panic!("expected invariant error, got {error}");
+            };
+            let field_path = format!("next.{}value", "next.".repeat(5_000));
+            assert!(message.contains("opaque type `Carrier`"), "{message}");
+            assert!(message.contains(&field_path), "{message}");
+            std::mem::forget(nonfinite);
         },
     );
 }
