@@ -122,3 +122,7 @@ The command exits `0` when all reported checks pass, `1` when a property or obli
 `2` when one is unsupported, and `3` for an error. When results differ, an error takes
 precedence, then a failure, then an unsupported result. An input or setup error can stop the
 run before a JSON summary is written; check the exit code and stderr as well as stdout.
+
+For a contract-bound property, a subprocess failure in the configured external
+contract checker reports a branded `unsupported` result and exits nonzero. A
+failed checker cannot turn into a sampled pass.

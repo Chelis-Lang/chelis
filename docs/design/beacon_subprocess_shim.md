@@ -15,14 +15,14 @@ A thin in-tree `DischargeEngine` (`BeaconShim`, in
 
 - `fitness(goal)` is true iff `goal.shape` is `GoalShape::BoxRange`.
 - `discharge(goal, timeout_ms)` builds a request JSON, spawns the pinned
-  `chelis-beacon` binary with `timeout_ms` as a HARD subprocess kill, parses the
+  `chelis-beacon` binary through the shared timeout supervisor, parses the
   returned `CheckReport` JSON, and maps it to a `Discharge` per §5 — all built
   through `Discharge::new` (the integrity gate).
 
 The shim is TRANSPORT ONLY: no verifier logic, no solver linkage. It adds no
 cvc5-named symbol, so the default (non-smt) build stays solver-free (the
 `check_is_solver_free_on_the_corpus` gate). It is available in the DEFAULT build
-(`std::process` + `serde_json` + `base64` + `sha2` + `wait-timeout`).
+(`std::process` + `serde_json` + `base64` + `sha2`).
 
 ## 2. The byte flow (content-addressed store, NO frozen-surface change)
 
@@ -162,17 +162,20 @@ under either answer.
 
 - Spawn failure, nonzero exit, unparseable report → `Untrusted` +
   `TierBResult::Error`, with captured stderr in the `Discharge` evidence.
-- Timeout: `timeout_ms` is a HARD subprocess kill (via `wait-timeout`); on
-  timeout the child is killed and the result is `Untrusted` +
-  `Error("beacon timeout")`, never a silent pass.
-- Large-request deadlock safety: writing a request larger than the OS pipe
-  buffer to a child that has not yet drained stdin would block `write_all` on the
-  full pipe and NEVER reach the hard kill. The stdin transport therefore
-  auto-falls-back to the temp-file transport when the request exceeds a safety
-  ceiling (`STDIN_REQUEST_MAX_BYTES`, 32 KiB, under the typical 64 KiB pipe
-  buffer). The temp-file transport writes no pipe (the child reads a file), so
-  the hard kill always fires regardless of request size. This is a transport
-  decision only; it never affects the soundness mapping.
+- Timeout: the shared Beacon supervisor kills and reaps the child at
+  `timeout_ms`, returning `Untrusted` + `Error("beacon timeout")`. A denied
+  wait or teardown operation returns a branded unsupported error.
+- The supervisor caps each captured output stream at 8 MiB while Beacon runs
+  and bounds the final read. Reaching the cap returns a branded unsupported
+  error. A completed contract response must have the expected schema version,
+  contract identity, verdict, guarantee class, soundness, and discharge
+  qualifiers; a malformed or contradictory response also returns branded
+  unsupported.
+- Input deadlock safety: the supervisor writes input to a temporary file before
+  spawning. The `--request -` protocol reads that file on stdin, so a child
+  that never reads cannot block the parent before its timeout starts. Large
+  requests use the `--request <path>` protocol. The transport choice never
+  affects the soundness mapping.
 - Store miss (hash populated but bytes absent) or unpopulated `goal.ir` →
   `Untrusted` + `TierBResult::Error` (distinct from binary-not-configured, which
   is no-fit). Never a crash.
@@ -185,7 +188,7 @@ through `Discharge::new`.
 ## 7. Gating
 
 Transport-only: the shim ships in the DEFAULT build and adds no solver-named
-symbol. New crate dependencies (`base64`, `wait-timeout`) are transport
+symbol. The `base64` crate dependency is transport
 utilities and introduce no cvc5 symbol, so `check_is_solver_free_on_the_corpus`
 (which greps `nm -C | grep -i cvc5`) stays green in the default build. `sha2` and
 `serde_json` are already chelis-prove deps; `tempfile` is already in-workspace.

@@ -1,14 +1,13 @@
 //! Subprocess-based contract prover that calls the `chelis-beacon` binary's
 //! `contract` command to discharge certified-envelope assumptions.
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use wait_timeout::ChildExt;
+use chelis_types::unsupported::Unsupported;
 
 use crate::beacon_shim::BEACON_BIN_ENV;
+use crate::beacon_supervisor::{self, Input, Invocation, Outcome, ProcessOps, SystemOps};
 use crate::composition::{AssumptionDischarge, DischargeMethod};
 
 /// A subprocess-based contract prover that invokes the `chelis-beacon contract`
@@ -31,6 +30,12 @@ impl BeaconContractProver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
     /// Discover the binary via the `CHELIS_BEACON_BIN` environment variable.
     /// Returns `None` if the variable is unset or empty.
     pub fn from_env() -> Option<Self> {
@@ -42,21 +47,22 @@ impl BeaconContractProver {
     }
 
     /// Attempt to prove a contract by invoking `chelis-beacon contract --query -`
-    /// with the contract id on stdin. Returns `Some(AssumptionDischarge)` if the
-    /// response indicates a certified-envelope proof, `None` otherwise.
+    /// with the contract id on stdin. Returns a certified-envelope proof only
+    /// when Beacon completed and returned one. A subprocess failure is typed
+    /// degradation, distinct from an ordinary completed "no proof" response.
     ///
-    /// Returns `None` (honest fallback to fuzz) on ANY failure: spawn error,
-    /// timeout, non-zero exit, parse error, unexpected verdict. This is
-    /// intentionally silent — a misconfigured `CHELIS_BEACON_BIN` degrades to
-    /// fuzz rather than crashing the prover.
-    ///
-    /// # Pipe buffer assumption
-    ///
-    /// Stdout is read AFTER `wait_timeout` returns. This is safe because the
-    /// Beacon contract response is always a small JSON object (~1KB), well under
-    /// the OS pipe buffer (~64KB on Linux). If Beacon ever produces responses
-    /// larger than the pipe buffer, the child would block and this would timeout.
-    pub fn prove_contract(&self, contract_id: &str) -> Option<AssumptionDischarge> {
+    pub fn prove_contract(
+        &self,
+        contract_id: &str,
+    ) -> Result<Option<AssumptionDischarge>, Unsupported> {
+        self.prove_contract_with_ops(contract_id, &SystemOps)
+    }
+
+    pub(crate) fn prove_contract_with_ops(
+        &self,
+        contract_id: &str,
+        ops: &impl ProcessOps,
+    ) -> Result<Option<AssumptionDischarge>, Unsupported> {
         // The domain [-300, 300] is the committed erf envelope's full coverage.
         // For structural proofs (monotonicity, reflection), Beacon ignores the
         // domain entirely — the proof is universal. For the range contract, the
@@ -65,73 +71,88 @@ impl BeaconContractProver {
             "contract_id": contract_id,
             "domain": [{"name": "x", "lo": -300.0, "hi": 300.0}],
         });
-        let request_bytes = serde_json::to_vec(&request).ok()?;
+        let request_bytes = serde_json::to_vec(&request).expect("owned JSON request serializes");
+        let args = ["contract".into(), "--query".into(), "-".into()];
+        let stdout = match beacon_supervisor::run_with_ops(
+            Invocation {
+                binary: &self.binary,
+                args: &args,
+                input: Input::Stdin(&request_bytes),
+                timeout: Duration::from_millis(self.timeout_ms),
+            },
+            ops,
+        ) {
+            Outcome::Completed { status, stdout, .. } if status.success() => stdout,
+            Outcome::Completed { status, .. } => {
+                return Err(beacon_supervisor::abnormal_exit(status));
+            }
+            Outcome::TimedOut => return Err(beacon_supervisor::timeout_unsupported()),
+            Outcome::Degraded(reason) => return Err(reason),
+        };
 
-        let mut child = Command::new(&self.binary)
-            .args(["contract", "--query", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .ok()?;
-
-        // Write the request to stdin and explicitly close the handle so the
-        // child sees EOF immediately.
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|_| beacon_supervisor::protocol_unsupported("invalid JSON response"))?;
+        let invalid = || beacon_supervisor::protocol_unsupported("invalid contract response");
+        if response
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || response
+                .get("contract_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(contract_id)
         {
-            let mut stdin = child.stdin.take()?;
-            if stdin.write_all(&request_bytes).is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            drop(stdin); // Explicit EOF delivery
+            return Err(invalid());
         }
-
-        // Wait with timeout; hard-kill on expiry.
-        let timeout = Duration::from_millis(self.timeout_ms);
-        let status = match child.wait_timeout(timeout) {
-            Ok(Some(status)) => status,
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+        let verdict = response
+            .get("verdict")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let guarantee_class = response
+            .get("guarantee_class")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let soundness = response
+            .get("soundness")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let expected_qualifiers: &[&str] = match (verdict, guarantee_class, soundness) {
+            ("proved", "certified_envelope", "sound_approximate") => {
+                &["sound_over_approximation", "special_function_certified"]
             }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            ("proved", "sound_over_approximation", "sound_approximate") => {
+                &["sound_over_approximation"]
             }
+            (
+                "proved_oracle_unverified" | "unknown" | "unsupported" | "invalid",
+                "untrusted",
+                "untrusted",
+            ) => &[],
+            _ => return Err(invalid()),
         };
-
-        if !status.success() {
-            return None;
+        let qualifiers = response
+            .get("discharge_qualifiers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(invalid)?;
+        if qualifiers.len() != expected_qualifiers.len()
+            || expected_qualifiers.iter().any(|expected| {
+                qualifiers
+                    .iter()
+                    .filter(|value| value.as_str() == Some(expected))
+                    .count()
+                    != 1
+            })
+        {
+            return Err(invalid());
         }
-
-        // Read stdout. The child has exited and the response is small (~1KB),
-        // so the pipe buffer was never full and the data is available.
-        let stdout = {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            if let Some(mut out) = child.stdout.take() {
-                let _ = out.read_to_end(&mut buf);
-            }
-            buf
-        };
-
-        let response: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
-
-        let verdict = response.get("verdict")?.as_str()?;
-        let guarantee_class = response.get("guarantee_class")?.as_str()?;
-
-        if verdict == "proved" && guarantee_class == "certified_envelope" {
-            let mut evidence = response.clone();
-            evidence["status"] = serde_json::json!("proved");
-            Some(AssumptionDischarge::new(
-                DischargeMethod::CertifiedEnvelope,
-                evidence,
-            ))
-        } else {
-            None
+        if guarantee_class != "certified_envelope" {
+            return Ok(None);
         }
+        let mut evidence = response;
+        evidence["status"] = serde_json::json!("proved");
+        Ok(Some(AssumptionDischarge::new(
+            DischargeMethod::CertifiedEnvelope,
+            evidence,
+        )))
     }
 }

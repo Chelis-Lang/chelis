@@ -825,6 +825,7 @@ dependencies = [
  "chelis-unord",
  "clarabel",
  "cvc5-rs",
+ "libc",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -835,7 +836,6 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.18",
- "wait-timeout",
  "z3",
 ]
 

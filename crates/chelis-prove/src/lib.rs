@@ -14,6 +14,7 @@ pub mod arb_oracle;
 pub mod artifact;
 pub mod beacon_contract_prover;
 pub mod beacon_shim;
+mod beacon_supervisor;
 // WI-15 SoS certificate engine (Clarabel). The whole module is behind the
 // `clarabel` feature so the default / smt / solver-free builds link none of it.
 #[cfg(feature = "clarabel")]

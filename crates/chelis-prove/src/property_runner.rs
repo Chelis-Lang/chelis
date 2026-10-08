@@ -1011,7 +1011,8 @@ fn contract_assumptions(
     let reached = contracts.iter().cloned().collect::<BTreeSet<_>>();
     let prover = BeaconContractProver::from_env();
     let registry =
-        standard_contract_registry_for(Some(&reached), &widths, prover.as_ref(), runtime);
+        standard_contract_registry_for(Some(&reached), &widths, prover.as_ref(), runtime)
+            .map_err(|reason| reason.to_string())?;
     let probe = registry.probe_consumer(
         &property.name,
         CompositeVerdict::Proven,
