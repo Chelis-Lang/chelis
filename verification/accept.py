@@ -38,7 +38,7 @@ Stages, in order:
 7. whole-core plan   fresh call graphs and chunk plans (default and lowering-trace); each
                      plan lists exactly native_shell.json, no core item depends on an
                      internal shell item, and the core dependents of each pinned primitive
-                     equal verification/runtime_sites.json.
+                     match the exact chain list in verification/runtime_sites.json.
 8. whole-core        separately compiled extraction of both chains and compilation
                      of the unmodified generated Lean.
 9. coverage          independent re-validation of each chain's coverage report:
@@ -54,12 +54,13 @@ Stages, in order:
                      verification/lean/ClosureAudit.lean then inventories the
                      transitive closure of every accepted theorem (axioms, opaque
                      constants, extern/implemented_by, witness paths).
-11. assumptions      each inventory against the justified trusted base in
-                     verification/trusted_base.json; any unmatched name rejects.
-                     Every collection obligation Aeneas emitted for the chain
-                     (e.g. the totality of a crate iterator's own size_hint) must be
-                     discharged by an accepted theorem whose statement is exactly
-                     the obligation's proposition.
+11. assumptions      complete inventories for both chains must match the trusted base
+                     in verification/trusted_base.json. Any unmatched name rejects.
+                     Exact accepted names must match Audit.acceptedFor for the selected chain.
+                     Each public theorem needs its exact caller and boundary proposition.
+                     All 32 public-entry requirements remain in the contract.
+                     Each collection obligation needs an accepted theorem with exactly
+                     that proposition as its statement.
 """
 
 import argparse
@@ -105,6 +106,19 @@ SHELL_BOUNDARY = frozenset({"primitive", "shell_type"})
 SHELL_INTERNAL = frozenset({"shell_state", "shell_entry", "shell_helper"})
 # Kinds of proof obligations Aeneas emits with -emit-collection-obligations.
 OBLIGATION_KINDS = frozenset({"iterator_size_hint_total"})
+RUNTIME_SITE_PRIMITIVES = frozenset({
+    *(f"chelis_types::native::{{impl chelis_types::native::NativeServices}}::{name}"
+      for name in ("cancellation_observed", "profile_start", "profile_phase")),
+    *(f"chelis_ir::lowering_runtime::{{impl chelis_ir::lowering_runtime::LoweringRuntime}}::{name}"
+      for name in ("detail_profile_start", "detail_profile_phase",
+                   "detail_profile_declaration_start", "detail_profile_declaration", "report_internal")),
+})
+PUBLIC_ENTRY_COUNTS = {"default": 27, "lowering-trace": 32}
+PUBLIC_BOUNDARY_RELATIONS = {
+    "resume": "ChelisBridge.Runtime.Entries.BoundaryRelation",
+    "catch": "ChelisBridge.Runtime.Entries.CatchBoundaryRelation",
+    "panic_on_rejection": "ChelisBridge.Runtime.Entries.PanicBoundaryRelation",
+}
 
 
 class AcceptanceFailure(RuntimeError):
@@ -459,32 +473,137 @@ def check_no_catch_unwind(crate: str = "chelis-types") -> int:
     return scanned
 
 
+def check_runtime_sites() -> dict:
+    """Check both chain lists and the complete primitive inventory."""
+    contract = json.loads((VERIFICATION / "runtime_sites.json").read_text())
+    if contract.get("schema_version") != 2:
+        raise AcceptanceFailure("runtime_sites.json: expected schema_version 2")
+    sites = contract.get("sites")
+    reasons = contract.get("justifications")
+    if not isinstance(sites, dict) or set(sites) != set(CHAINS):
+        raise AcceptanceFailure("runtime_sites.json: expected exactly both chain lists")
+    if not isinstance(reasons, dict) or set(reasons) != RUNTIME_SITE_PRIMITIVES:
+        raise AcceptanceFailure("runtime_sites.json: incomplete primitive justifications")
+    if any(not isinstance(reason, str) or not reason.strip() for reason in reasons.values()):
+        raise AcceptanceFailure("runtime_sites.json: empty primitive justification")
+    for chain, primitives in sites.items():
+        if not isinstance(primitives, dict) or set(primitives) != RUNTIME_SITE_PRIMITIVES:
+            raise AcceptanceFailure(f"runtime_sites.json: {chain} has an incomplete primitive inventory")
+        for pattern, callers in primitives.items():
+            if (not isinstance(callers, list) or not callers
+                    or any(not isinstance(name, str) or not name.strip() for name in callers)
+                    or len(callers) != len(set(callers))):
+                raise AcceptanceFailure(f"runtime_sites.json: invalid sites for {chain}: {pattern}")
+    return sites
+
+
+def check_public_entries() -> dict[str, set[str]]:
+    """Keep all 32 public-entry proof requirements and their chain assignments."""
+    contract = json.loads((VERIFICATION / "public_entries.json").read_text())
+    entries = contract.get("entries")
+    if contract.get("schema_version") != 1 or not isinstance(entries, list) or len(entries) != 32:
+        raise AcceptanceFailure("public_entries.json: expected all 32 entries in schema_version 1")
+    required = {chain: set() for chain in CHAINS}
+    seen = {field: set() for field in ("production", "inner", "theorem")}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise AcceptanceFailure("public_entries.json: invalid entry")
+        for field, names in seen.items():
+            name = entry.get(field)
+            if not isinstance(name, str) or not name.strip() or name in names:
+                raise AcceptanceFailure(f"public_entries.json: missing or duplicate {field}: {name}")
+            names.add(name)
+        if not entry["theorem"].startswith("ChelisBridge.Runtime.Entries."):
+            raise AcceptanceFailure(f"public_entries.json: invalid theorem name: {entry['theorem']}")
+        if entry.get("boundary_kind") not in {"resume", "catch", "panic_on_rejection"}:
+            raise AcceptanceFailure(f"public_entries.json: invalid boundary kind: {entry['production']}")
+        chains = entry.get("chains")
+        if (not isinstance(chains, list) or not chains
+                or any(not isinstance(chain, str) or chain not in CHAINS for chain in chains)
+                or len(chains) != len(set(chains))):
+            raise AcceptanceFailure(f"public_entries.json: invalid chains for {entry['production']}")
+        for chain in chains:
+            required[chain].add(entry["theorem"])
+    for chain, names in required.items():
+        if len(names) != PUBLIC_ENTRY_COUNTS[chain]:
+            raise AcceptanceFailure(f"public_entries.json: {chain} needs {PUBLIC_ENTRY_COUNTS[chain]} entries")
+    return required
+
+
+def public_entry_statements(chain: str) -> dict[str, dict[str, str]]:
+    """Read exact caller propositions for the selected chain."""
+    check_public_entries()
+    entries = json.loads((VERIFICATION / "public_entries.json").read_text())["entries"]
+    statements = {}
+    for entry in entries:
+        if chain not in entry["chains"]:
+            continue
+        for field in ("statement", "lean_inner", "lean_boundary"):
+            value = entry.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise AcceptanceFailure(
+                    f"{chain}: missing exact public-entry {field}: {entry['production']}")
+        if entry["lean_boundary"] != PUBLIC_BOUNDARY_RELATIONS[entry["boundary_kind"]]:
+            raise AcceptanceFailure(
+                f"{chain}: caller boundary differs from its kind: {entry['production']}")
+        statements[entry["theorem"]] = {
+            field: entry[field] for field in ("statement", "lean_inner", "lean_boundary", "boundary_kind")}
+    return statements
+
+
+def accepted_roots(chain: str, required: set[str]) -> set[str]:
+    """Select common roots and the exact applicable caller roots."""
+    source = (VERIFICATION / "lean" / "ChelisBridge" / "Audit.lean").read_text()
+    lists = {}
+    for name in ("acceptedCommon", "wholeCoreRoots", "defaultEntryRoots", "traceOnlyEntryRoots"):
+        declaration = re.search(rf"^def {name} : List Name := \[(.*?)^\]", source, re.M | re.S)
+        if declaration is None:
+            raise AcceptanceFailure(f"Audit.lean: {name} not found")
+        names = re.findall(r"^\s*`{1,2}([A-Za-z0-9_.']+)\s*,?\s*$", declaration.group(1), re.M)
+        if not names or len(names) != len(set(names)):
+            raise AcceptanceFailure(f"Audit.lean: invalid {name}")
+        lists[name] = set(names)
+    callers = lists["defaultEntryRoots"]
+    if chain == "lowering-trace":
+        callers = callers | lists["traceOnlyEntryRoots"]
+    common = lists["acceptedCommon"] | lists["wholeCoreRoots"]
+    if (lists["acceptedCommon"] & lists["wholeCoreRoots"]
+            or callers != required or callers & common):
+        raise AcceptanceFailure(f"{chain}: Audit caller roots differ from public_entries.json")
+    return common | callers
+
+
 def check_shell_plan(chain: str, plan: dict) -> dict:
-    """The plan lists exactly native_shell.json, no core item depends on an internal shell item
-    (the structural part of RA-tls), and the core dependents of each primitive pinned in
-    verification/runtime_sites.json are exactly the pinned sites."""
+    """Check the shell inventory and exact cancellation and profile callers."""
+    if chain not in CHAINS:
+        raise AcceptanceFailure(f"unknown plan chain: {chain}")
+    if not isinstance(plan, dict) or plan.get("chain") != chain:
+        raise AcceptanceFailure(f"{chain} plan: chain identity differs")
+    sites = check_runtime_sites()[chain]
     declared = {item["pattern"]: item["kind"]
                 for item in json.loads((VERIFICATION / "native_shell.json").read_text())["items"]}
-    shell = plan.get("native_shell", {})
-    if set(shell) != set(declared):
-        raise AcceptanceFailure(f"{chain} plan: native shell differs from native_shell.json: "
-                                f"{sorted(set(shell) ^ set(declared))[:5]}")
+    shell = plan.get("native_shell")
+    if not isinstance(shell, dict) or set(shell) != set(declared):
+        raise AcceptanceFailure(f"{chain} plan: native shell differs from native_shell.json")
+    for pattern, item in shell.items():
+        callers = item.get("core_dependents") if isinstance(item, dict) else None
+        if (not isinstance(callers, list)
+                or any(not isinstance(name, str) or not name.strip() for name in callers)
+                or len(callers) != len(set(callers))):
+            raise AcceptanceFailure(f"{chain} plan: invalid core_dependents for {pattern}")
     internal = [pattern for pattern, kind in declared.items() if kind in SHELL_INTERNAL]
     reached = {pattern: shell[pattern]["core_dependents"] for pattern in internal
-               if shell[pattern].get("core_dependents")}
+               if shell[pattern]["core_dependents"]}
     if reached:
         raise AcceptanceFailure(f"{chain} plan: core items depend on internal shell items: {reached}")
-    sites = json.loads((VERIFICATION / "runtime_sites.json").read_text())["sites"]
     for pattern, pinned in sites.items():
-        if pattern not in shell:
-            raise AcceptanceFailure(f"runtime_sites.json pins {pattern}, which is not a shell item")
-        actual = set(shell[pattern].get("core_dependents", []))
-        if actual != set(pinned["sites"]):
+        actual = set(shell[pattern]["core_dependents"])
+        if actual != set(pinned):
             raise AcceptanceFailure(
                 f"{chain} plan: the core sites of {pattern} differ from runtime_sites.json: "
-                f"new {sorted(actual - set(pinned['sites']))}, gone {sorted(set(pinned['sites']) - actual)}")
-    return {"internal": len(internal), "pinned": {pattern: len(pinned["sites"])
-                                                    for pattern, pinned in sites.items()}}
+                f"new {sorted(actual - set(pinned))}, gone {sorted(set(pinned) - actual)}")
+    return {"internal": len(internal), "pinned": {pattern: len(pinned)
+                                                for pattern, pinned in sites.items()}}
 
 
 def static_checks(aeneas_lean: Path) -> dict:
@@ -495,6 +614,9 @@ def static_checks(aeneas_lean: Path) -> dict:
         "evidence": check_evidence(trusted),
         "panic_strategy": check_panic_strategy(),
         "catch_unwind_free_files": check_no_catch_unwind(),
+        "runtime_sites": {chain: {pattern: len(callers) for pattern, callers in primitives.items()}
+                          for chain, primitives in check_runtime_sites().items()},
+        "public_entries": {chain: len(names) for chain, names in check_public_entries().items()},
     }
 
 
@@ -790,44 +912,103 @@ def stage_correspondence(context: Run):
         begun = time.time()
         run([
             "lake", "build", "-R", "-K", f"model={model}", "-K", f"modelRoots={roots}",
+            "-K", f"chain={chain}", "-K", "scope=whole-core",
             "ChelisBridge", "ChelisBridge.Audit",
         ], cwd=bridge, log=log)
         # The inventory must describe exactly this chain's build, so it is taken before
         # the next chain replaces the model.
         inventory = context.directory / f"assumptions-{chain}.json"
-        run(["lake", "env", "lean", "--run", "ClosureAudit.lean", inventory],
+        run(["lake", "env", "lean", "--run", "ClosureAudit.lean", "whole-core", chain,
+             VERIFICATION / "public_entries.json", inventory],
             cwd=bridge, log=context.directory / f"assumptions-{chain}.log")
         context.inventories[chain] = fresh(inventory, begun)
         results[chain] = {"log": str(log), "inventory": str(inventory), "clone_id": str(clone_id)}
     return results
 
 
+def check_closure_inventory(chain: str, found: dict, required: set[str]) -> set[str]:
+    """Reject incomplete closure reports and missing public-entry theorem evidence."""
+    if chain not in CHAINS:
+        raise AcceptanceFailure(f"unknown inventory chain: {chain}")
+    fields = {"scope", "chain", "accepted", "accepted_names", "reachable", "axioms", "opaque", "extern",
+              "modules", "discharged", "witnesses", "entry_statements"}
+    if not isinstance(found, dict) or not fields.issubset(found):
+        raise AcceptanceFailure(f"{chain}: incomplete closure inventory")
+    if found["chain"] != chain:
+        raise AcceptanceFailure(f"{chain}: closure inventory uses a different chain")
+    if found["scope"] != "whole-core":
+        raise AcceptanceFailure(f"{chain}: fragment inventory cannot satisfy whole-core acceptance")
+    for field in ("accepted_names", "axioms", "opaque", "extern"):
+        names = found[field]
+        if (not isinstance(names, list)
+                or any(not isinstance(name, str) or not name.strip() for name in names)):
+            raise AcceptanceFailure(f"{chain}: invalid {field} inventory")
+    accepted = found["accepted_names"]
+    if (type(found["accepted"]) is not int or not accepted
+            or found["accepted"] != len(accepted) or len(accepted) != len(set(accepted))):
+        raise AcceptanceFailure(f"{chain}: accepted theorem names and count differ")
+    accepted = set(accepted)
+    expected = accepted_roots(chain, required)
+    if accepted != expected:
+        raise AcceptanceFailure(f"{chain}: theorem inventory differs from Audit.acceptedFor: "
+                                f"missing {sorted(expected - accepted)}, "
+                                f"extra {sorted(accepted - expected)}")
+    missing = required - accepted
+    if missing:
+        raise AcceptanceFailure(f"{chain}: missing public-entry theorem evidence: {sorted(missing)}")
+    if found["entry_statements"] != public_entry_statements(chain):
+        raise AcceptanceFailure(f"{chain}: exact caller proposition evidence differs")
+    modules = found["modules"]
+    if (type(found["reachable"]) is not int or found["reachable"] < len(accepted)
+            or not isinstance(modules, dict) or not modules
+            or any(not isinstance(name, str) or not name or type(count) is not int or count <= 0
+                   for name, count in modules.items())
+            or sum(modules.values()) != found["reachable"]):
+        raise AcceptanceFailure(f"{chain}: incomplete reachable declaration counts")
+    discharged = found["discharged"]
+    if (not isinstance(discharged, dict)
+            or any(not isinstance(name, str) or not name
+                   or not isinstance(theorem, str) or theorem not in accepted
+                   for name, theorem in discharged.items())):
+        raise AcceptanceFailure(f"{chain}: invalid discharged theorem evidence")
+    witnesses = found["witnesses"]
+    assumptions = set(found["axioms"] + found["opaque"] + found["extern"])
+    if not isinstance(witnesses, dict) or set(witnesses) != assumptions:
+        raise AcceptanceFailure(f"{chain}: incomplete assumption witnesses")
+    for name, path in witnesses.items():
+        if (not isinstance(path, list) or not path or path[-1] != name
+                or path[0] not in accepted
+                or any(not isinstance(step, str) or not step for step in path)):
+            raise AcceptanceFailure(f"{chain}: invalid witness path for {name}")
+    return accepted
+
+
 def stage_assumptions(context: Run):
-    """Validate each chain's inventory (written by the correspondence stage right after
-    that chain's bridge build) against the justified trusted base."""
-    import re
+    """Check both complete inventories against the trust and public-entry contracts."""
 
     trusted = json.loads((VERIFICATION / "trusted_base.json").read_text())
     patterns = {
         kind: [re.compile(entry["match"]) for entry in trusted.get(kind, [])]
         for kind in ("axioms", "opaque", "extern")
     }
+    if set(context.inventories) != set(CHAINS) or set(context.obligations) != set(CHAINS):
+        raise AcceptanceFailure("assumptions: expected inventories and obligations for exactly both chains")
+    required = check_public_entries()
     results = {}
     for chain in CHAINS:
         found = json.loads(context.inventories[chain].read_text())
-        if found.get("accepted", 0) == 0:
-            raise AcceptanceFailure(f"{chain}: the audit saw no accepted theorems")
+        check_closure_inventory(chain, found, required[chain])
         for kind, allowed in patterns.items():
-            unexpected = [name for name in found.get(kind, [])
+            unexpected = [name for name in found[kind]
                           if not any(pattern.fullmatch(name) for pattern in allowed)]
             if unexpected:
-                paths = {name: found.get("witnesses", {}).get(name) for name in unexpected[:3]}
+                paths = {name: found["witnesses"].get(name) for name in unexpected[:3]}
                 raise AcceptanceFailure(
                     f"{chain}: unjustified {kind} in the accepted closure: {unexpected[:10]}; "
                     f"witness paths: {paths}"
                 )
         undischarged = [obligation for obligation in context.obligations[chain]
-                        if obligation["proposition"] not in found.get("discharged", {})]
+                        if obligation["proposition"] not in found["discharged"]]
         if undischarged:
             raise AcceptanceFailure(
                 f"{chain}: {len(undischarged)} collection obligations have no accepted theorem "
@@ -836,8 +1017,10 @@ def stage_assumptions(context: Run):
             )
         results[chain] = {
             "accepted": found["accepted"], "reachable": found["reachable"],
+            "accepted_names": found["accepted_names"],
+            "public_entries": len(required[chain]),
             "obligations": len(context.obligations[chain]),
-            **{kind: len(found.get(kind, [])) for kind in patterns},
+            **{kind: len(found[kind]) for kind in patterns},
         }
     return results
 
@@ -876,6 +1059,8 @@ def main():
         print(json.dumps(static_checks(args.aeneas_lean_dir.resolve()), indent=2))
         for argument in args.plan:
             chain, _, path = argument.partition("=")
+            if not _ or not path:
+                parser.error("--plan needs CHAIN=PATH")
             print(f"{chain}: {json.dumps(check_shell_plan(chain, json.loads(Path(path).read_text())))}")
         print("\nSTATIC CHECKS PASSED")
         return

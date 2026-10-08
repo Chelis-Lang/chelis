@@ -1,3 +1,4 @@
+import Lean
 import ChelisBridge.Audit
 import Lean.Compiler.ExternAttr
 import Lean.Compiler.ImplementedByAttr
@@ -5,22 +6,19 @@ import Lean.Compiler.ImplementedByAttr
 /-!
 # Transitive assumption inventory of the accepted bridge theorems
 
-`lake env lean --run ClosureAudit.lean <output.json>` loads the built bridge, walks every
-constant reachable from the statement or proof of each theorem in
-`ChelisBridge.Audit.accepted` (types, values, constructors, recursor rules), and writes:
+`lake env lean --run ClosureAudit.lean <scope> <chain> <contract.json> <output.json>` selects the built scope and feature chain.
+It follows every statement and proof dependency from `ChelisBridge.Audit.acceptedFor`.
+The report contains these fields:
 
-* `axioms`: axiom declarations in that closure (anything beyond the three standard
-  axioms is a trusted assumption that must be justified);
-* `opaque`: `opaque` constants, whose definitions proofs cannot see (a theorem about an
-  opaque model holds for every implementation, so each one must be justified);
-* `extern` / `implemented_by`: constants whose compiled code differs from their kernel
-  definition. Kernel proofs do not use it; it matters only for evaluation-based evidence
-  such as `#guard`, which is therefore never counted as proof;
-* per-module-root counts of the reachable declarations;
-* `discharged`: for every accepted theorem whose statement is exactly a proposition
-  constant (`def P : Prop`), the map `P ↦ theorem`. Aeneas states collection
-  obligations this way (e.g. `<Impl>.size_hint_total`), and the acceptance script
-  requires each emitted obligation to appear here.
+* `axioms`: axiom declarations in the closure. Nonstandard axioms need a trust entry.
+* `opaque`: constants whose definitions are not visible to proofs. Each constant needs a trust entry.
+* `extern`: constants with `extern` or `implemented_by` code. Kernel proofs use their definitions, not the compiled code.
+* `modules`: per-module-root counts of reachable declarations.
+* `accepted_names`: exact accepted theorem names. `accepted` gives their count.
+* `scope` and `chain`: the compiled layout scope and feature chain.
+* `entry_statements`: exact caller propositions checked against theorem types by the kernel.
+* `discharged`: the map from proposition constants to accepted theorems with exactly those statements.
+  Aeneas collection obligations use proposition constants. Each obligation needs an entry in this map.
 
 The acceptance script compares the result with `verification/trusted_base.json`.
 -/
@@ -66,7 +64,7 @@ partial def closure (env : Environment) (roots : List Name) : IO (NameSet × Nam
 partial def witness (parent : NameMap Name) (decl : Name) (acc : List String := []) : List String :=
   let acc := decl.toString :: acc
   match parent.find? decl with
-  | some p => if acc.length > 64 then acc else witness parent p acc
+  | some p => witness parent p acc
   | none => acc
 
 def moduleRoot (env : Environment) (decl : Name) : String :=
@@ -91,16 +89,147 @@ def dischargedProposition (env : Environment) (thm : Name) : Option Name := do
   guard (defn.type.consumeMData == .sort .zero)
   return proposition
 
+def verifyEntryStatement (env : Environment) (theoremName : Name)
+    (statement : String) (inner boundary : Name) : IO Unit := do
+
+  let stx ← match Parser.runParserCategory env `term statement with
+    | .ok stx => pure stx
+    | .error message => throw <| IO.userError message
+
+  let action : CoreM Unit := do
+    let (expected, _) ← Meta.MetaM.run' <| Elab.Term.TermElabM.run do
+
+      let expected ← Elab.Term.elabType stx
+      Elab.Term.synthesizeSyntheticMVarsNoPostponing
+      let expected ← instantiateMVars expected
+
+      if expected.hasMVar || expected.hasLevelMVar then
+        throwError "caller statement contains unresolved variables"
+      return expected
+
+    unless expected.getUsedConstants.contains inner do
+      throwError "caller statement does not use extracted inner function {inner}"
+
+    let some (.defnInfo _) := env.find? inner
+      | throwError "extracted inner function is not a definition: {inner}"
+
+    unless expected.getUsedConstants.contains boundary do
+      throwError "caller statement does not use its boundary definition: {boundary}"
+
+    match env.find? boundary with
+    | some (.defnInfo _) | some (.inductInfo _) => pure ()
+    | _ => throwError "caller boundary is not a definition or inductive relation: {boundary}"
+
+
+    let some (.thmInfo info) := env.find? theoremName
+      | throwError "caller evidence is not a theorem: {theoremName}"
+
+    unless info.type.getUsedConstants.contains inner do
+      throwError "caller theorem states a general law instead of the extracted caller: {theoremName}"
+
+    unless info.type.getUsedConstants.contains boundary do
+      throwError "caller theorem does not state its boundary relation: {theoremName}"
+
+
+    match Kernel.isDefEq env {} expected (mkConst ``True) with
+    | .ok true => throwError "caller statement is True: {theoremName}"
+
+    | .error _ => throwError "invalid caller statement"
+    | .ok false => pure ()
+
+    match Kernel.isDefEq env {} expected info.type with
+    | .ok true => pure ()
+
+    | .ok false => throwError "caller theorem has a different statement: {theoremName}"
+    | .error _ => throwError "invalid caller theorem statement"
+
+  discard <| action.toIO
+    { fileName := "public_entries.json", fileMap := default }
+    { env := env }
+
+def checkEntryStatements (env : Environment) (chain : String)
+    (contractPath : System.FilePath) (roots : List Name) : IO Json := do
+
+  let contract ← IO.ofExcept <| Json.parse (← IO.FS.readFile contractPath)
+  let entries ← IO.ofExcept <| contract.getObjValAs? (Array Json) "entries"
+
+  unless entries.size == 32 do
+    throw <| IO.userError "public-entry contract does not contain all 32 entries"
+
+  let mut checked : List (String × Json) := []
+  for entry in entries do
+    let chains ← IO.ofExcept <| entry.getObjValAs? (Array String) "chains"
+
+    unless chains.contains chain do continue
+    let theoremName ← IO.ofExcept <| entry.getObjValAs? String "theorem"
+    let statement ← IO.ofExcept <| entry.getObjValAs? String "statement"
+
+    let inner ← IO.ofExcept <| entry.getObjValAs? String "lean_inner"
+    let kind ← IO.ofExcept <| entry.getObjValAs? String "boundary_kind"
+    let boundary ← IO.ofExcept <| entry.getObjValAs? String "lean_boundary"
+
+    let expectedBoundary ← match kind with
+      | "resume" => pure "ChelisBridge.Runtime.Entries.BoundaryRelation"
+
+      | "catch" => pure "ChelisBridge.Runtime.Entries.CatchBoundaryRelation"
+
+      | "panic_on_rejection" => pure "ChelisBridge.Runtime.Entries.PanicBoundaryRelation"
+
+      | _ => throw <| IO.userError s!"unknown caller boundary kind: {kind}"
+
+    unless boundary == expectedBoundary do
+      throw <| IO.userError s!"caller boundary differs from its kind: {theoremName}"
+
+
+    unless roots.contains theoremName.toName do
+      throw <| IO.userError s!"caller theorem is not an accepted root: {theoremName}"
+
+    verifyEntryStatement env theoremName.toName statement inner.toName boundary.toName
+    checked := (theoremName, Json.mkObj [
+      ("statement", toJson statement),
+      ("lean_inner", toJson inner),
+      ("lean_boundary", toJson boundary),
+      ("boundary_kind", toJson kind)]) :: checked
+
+  let expectedCount := if chain == "default" then 27 else 32
+  unless checked.length == expectedCount do
+    throw <| IO.userError "public-entry contract uses the wrong chain inventory"
+
+  return Json.mkObj checked
+
+
 def main (args : List String) : IO UInt32 := do
-  let [output] := args
-    | IO.eprintln "usage: lake env lean --run ClosureAudit.lean <output.json>"; return 2
+  let [scope, chain, contract, output] := args
+    | IO.eprintln "usage: ClosureAudit.lean <scope> <chain> <public_entries.json> <output.json>"
+
+      return 2
+
+  unless scope == chelisAcceptanceScope && chain == chelisAcceptanceChain do
+    throw <| IO.userError "closure scope or chain differs from the compiled bridge"
+
+
+  unless chain == "default" || chain == "lowering-trace" do
+    throw <| IO.userError "closure inventory needs a production chain"
+
   initSearchPath (← findSysroot)
   let env ← importModules #[{ module := `ChelisBridge.Audit }] {} (trustLevel := 0)
-  let roots := ChelisBridge.Audit.accepted
+
+  let some roots := ChelisBridge.Audit.acceptedFor scope chain
+    | throw <| IO.userError "unknown acceptance scope or chain"
+
+
+  let mut uniqueRoots : NameSet := {}
   for root in roots do
+    if uniqueRoots.contains root then
+      throw <| IO.userError s!"duplicate accepted theorem: {root}"
+    uniqueRoots := uniqueRoots.insert root
     match env.find? root with
     | some (.thmInfo _) => pure ()
     | _ => throw <| IO.userError s!"accepted name is not a theorem: {root}"
+  let entryStatements ← if scope == "whole-core" then
+    checkEntryStatements env chain contract roots
+    else pure <| Json.mkObj []
+
   let (reachable, parent) ← closure env roots
   let mut axioms : Array Name := #[]
   let mut opaques : Array Name := #[]
@@ -122,7 +251,11 @@ def main (args : List String) : IO UInt32 := do
   let discharged := roots.filterMap fun root =>
     (dischargedProposition env root).map fun proposition => (proposition.toString, toJson root.toString)
   let report := Json.mkObj [
+    ("scope", toJson scope),
+    ("chain", toJson chain),
+    ("entry_statements", entryStatements),
     ("accepted", toJson roots.length),
+    ("accepted_names", toJson (sortedStrings roots.toArray)),
     ("reachable", toJson reachable.size),
     ("axioms", toJson (sortedStrings axioms)),
     ("opaque", toJson (sortedStrings opaques)),

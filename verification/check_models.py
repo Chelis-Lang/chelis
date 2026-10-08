@@ -233,6 +233,8 @@ REJECTED_ROOTS = {
         "reject_generic_collector", "reject_zip_consumer",
         "reject_borrowed_map_hint", "reject_mapped_vec_zip", "reject_drop_vec_zip",
         "reject_dispatch_method", "reject_dispatch_impl",
+        "reject_mapped_nested_zip", "reject_borrowed_zip_left", "reject_cloned_zip_left",
+        "reject_deque_hint", "reject_take_mapped_skip", "reject_skip_in_place",
     )),
     # A native-shell scope on a borrow of a borrow: its instance is not the model at
     # an extended state (a staged backward function, see ModelStateABI.threaded_fun_body).
@@ -302,6 +304,80 @@ FIXTURE_COPIES = {
         "end": "fn sha256_concat",
         "differences": (),
     }],
+    "unwind_replay": [
+        {
+            "production": "crates/chelis-ir/src/lowering_runtime.rs",
+            "fixture": "verification/unwind_replay_oracle.rs",
+            "start": item,
+            "end": item,
+            "differences": (
+                ("stacker::grow(LOWERING_GROW_SEGMENT_BYTES, move || f(runtime, state))",
+                 "f(runtime, state)"),
+            ) if item == "fn catch_native_unwind" else (),
+        }
+        for item in (
+            "enum LoweringFailure",
+            "fn into_diagnostic",
+            "fn resume_at_boundary",
+            "fn resume_native_unwind",
+            "fn scoped",
+            "struct LoweringRuntime",
+            "fn unrepresentable_panic_suppressed",
+            "fn set_unrepresentable_panic_suppressed",
+            "fn set_output_suppressed",
+            "fn with_suppress_unrepresentable_panic",
+            "fn raise_lowering_diagnostic",
+            "fn raise_unrepresentable",
+            "fn observe_raise",
+            "fn raise_fatal_lowering_diagnostic",
+            "fn catch_lowering<",
+            "fn catch_lowering_with",
+            "fn catch_native_unwind",
+            "fn with_native_lowering_runtime",
+            "fn unrepresentable_diagnostic",
+        )
+    ] + [
+        {
+            "production": "crates/chelis-ir/src/lowering_runtime.rs",
+            "fixture": "verification/unwind_replay_oracle.rs",
+            "start": "static CHELIS_PANIC_HOOK_INSTALLED",
+            "end": "fn install_chelis_panic_hook",
+            "differences": (),
+        },
+        {
+            "production": "crates/chelis-ir/src/lowering_runtime.rs",
+            "fixture": "verification/unwind_replay_oracle.rs",
+            "start": "struct NativeLoweringState",
+            "end": "struct NativeLoweringState",
+            "differences": (
+                ("struct NativeLoweringState { suppress_unrepresentable: Cell<bool>, "
+                 "suppress_output: Cell<bool>, summary_probe_builds: Cell<u64>, "
+                 "next_preflight_frame: Cell<u64>, }",
+                 "struct NativeLoweringState { suppress_unrepresentable: Cell<bool>, "
+                 "suppress_output: Cell<bool>, }"),
+            ),
+        },
+        {
+            "production": "crates/chelis-ir/src/lowering_runtime.rs",
+            "fixture": "verification/unwind_replay_oracle.rs",
+            "start": "static NATIVE_LOWERING_STATE",
+            "end": "static NATIVE_LOWERING_STATE",
+            "differences": (
+                ("NativeLoweringState { suppress_unrepresentable: Cell::new(false), "
+                 "suppress_output: Cell::new(false), summary_probe_builds: Cell::new(0), "
+                 "next_preflight_frame: Cell::new(0), }",
+                 "NativeLoweringState { suppress_unrepresentable: Cell::new(false), "
+                 "suppress_output: Cell::new(false), }"),
+            ),
+        },
+        {
+            "production": "crates/chelis-ir/src/lower.rs",
+            "fixture": "verification/unwind_replay_oracle.rs",
+            "start": "fn fatal(mut self) -> Self",
+            "end": "fn fatal(mut self) -> Self",
+            "differences": (),
+        },
+    ],
 }
 
 RUST_TOKEN = re.compile(
@@ -424,6 +500,7 @@ def check_float_model(lean_library: Path, root: Path) -> None:
 
 def check_unwind_replay(lean_library: Path, root: Path) -> None:
     """The native unwind segments against their Lean replays (Runtime/Unwind.lean)."""
+    check_fixture_copies("unwind_replay", root)
     with tempfile.TemporaryDirectory(prefix="chelis-unwind-replay-") as directory:
         output = Path(directory)
         native = output / "native"

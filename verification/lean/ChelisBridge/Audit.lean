@@ -1,3 +1,5 @@
+import ChelisAcceptanceChain
+import ChelisProofScope
 import ChelisBridge.Float
 import ChelisBridge.Tensor
 import ChelisBridge.Model
@@ -17,6 +19,8 @@ import ChelisBridge.Runtime.ExtractedScopes
 import ChelisBridge.Runtime.CloneId
 import ChelisBridge.Runtime.ExtractedHostScopes
 import ChelisBridge.Runtime.ExtractedUnwind
+import ChelisBridge.Runtime.ExtractedProfile
+import ChelisBridge.Runtime.Entries
 import ChelisBridge.StrOrder
 import ChelisBridge.SuccessorEdgesHint
 import ChelisBridge.Numeric
@@ -48,7 +52,7 @@ import Lean.Util.CollectAxioms
 
 Elaborating this module fails unless
 
-* every theorem in `accepted` (the accepted bridge results) exists and depends only on
+* every theorem selected by `acceptedFor` exists and depends only on
   `propext`, `Classical.choice` and `Quot.sound` (so no `sorryAx`, no `Lean.ofReduceBool`
   or `native_decide` auxiliary axiom, no new axiom);
 * every other theorem declared in an imported `ChelisBridge` module satisfies the same
@@ -60,8 +64,8 @@ namespace ChelisBridge.Audit
 
 open Lean Elab Command
 
-/-- Theorems accepted as bridge results (the final accepted set). -/
-def accepted : List Name := [
+/-- These roots apply to the fragment and both production chains. -/
+def acceptedCommon : List Name := [
   -- Float
   ``ChelisBridge.representable_abs_iff,
   ``ChelisBridge.representable_neg_iff,
@@ -366,6 +370,134 @@ def accepted : List Name := [
   ``ChelisBridge.Runtime.ExtractedHostScopes.preflightLens_set_pop,
   ``ChelisBridge.Runtime.ExtractedHostScopes.withPreflight_spec,
   ``ChelisBridge.Runtime.ExtractedHostScopes.withPreflight_obligation,
+
+  ``ChelisBridge.Runtime.Cancellation.threads_commute,
+
+  ``ChelisBridge.Runtime.CloneId.vec,
+
+  ``ChelisBridge.Runtime.CloneId.cid_dag_DimExpr,
+
+  ``ChelisBridge.Runtime.CloneId.nvec_HostBinding,
+
+  ``ChelisBridge.Runtime.CloneId.nvec_HostExpr,
+
+  ``ChelisBridge.Runtime.CloneId.nvec_HostMatchArm,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostBinding,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostCallback,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostCallbackKind,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostExpr,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostExprKind,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_HostMatchArm,
+
+  ``ChelisBridge.Runtime.CloneId.lenlist_HostBinding,
+
+  ``ChelisBridge.Runtime.CloneId.lenlist_HostExpr,
+
+  ``ChelisBridge.Runtime.CloneId.lenlist_HostMatchArm,
+
+  ``ChelisBridge.Runtime.CloneId.nvec_HostTypeTerm,
+
+  ``ChelisBridge.Runtime.CloneId.cid_host_type_state_HostTypeTerm,
+
+  ``ChelisBridge.Runtime.CloneId.lenlist_HostTypeTerm,
+
+  ``ChelisBridge.Runtime.Entries.continue_success,
+
+  ``ChelisBridge.Runtime.Entries.continue_ordinary_error,
+
+  ``ChelisBridge.Runtime.Entries.continue_typed_unwind,
+
+  ``ChelisBridge.Runtime.Entries.boundary_no_claim_for_lean_failure,
+
+  ``ChelisBridge.Runtime.Entries.continue_typed_payload,
+
+  ``ChelisBridge.Runtime.Entries.boundary_no_claim_for_divergence,
+
+  ``ChelisBridge.Runtime.Entries.boundary_no_unexpected_claim,
+
+  ``ChelisBridge.Runtime.Entries.boundary_no_abort_claim,
+
+  ``ChelisBridge.Runtime.Entries.boundary_unique,
+
+  ``ChelisBridge.Runtime.ExtractedHostScopes.okHost_stCall,
+
+  ``ChelisBridge.Runtime.ExtractedHostScopes.okResult_asComb,
+
+  ``ChelisBridge.Runtime.ExtractedHostScopes.scopeSpec_asComb,
+
+  ``ChelisBridge.Runtime.ExtractedHostScopes.insS_pairwise,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.profile_start_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.profile_phase_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_start_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_phase_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_declaration_start_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_declaration_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.report_internal_related,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_start_defined,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_declaration_start_defined,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_start_noninterference,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_declaration_start_noninterference,
+
+  ``ChelisBridge.Runtime.ExtractedProfile.detail_profile_start_exhaustion,
+
+  ``ChelisBridge.Runtime.ExtractedScopes.bind_ok_inv,
+
+  ``ChelisBridge.Runtime.ExtractedScopes.catchLoweringWith_installed,
+
+  ``ChelisBridge.Runtime.Ids.allocU32_closed,
+
+  ``ChelisBridge.Runtime.Ids.capacity_exhaustion_panics,
+
+  ``ChelisBridge.Runtime.Scopes.ScopeSpec.under,
+
+  ``ChelisBridge.Runtime.Scopes.PreflightObligation.from_const,
+
+  ``ChelisBridge.Runtime.Scopes.installed_of_spec,
+
+  ``ChelisBridge.Runtime.Scopes.monoProbe_restores,
+
+  ``ChelisBridge.Runtime.Scopes.hostInvocation_restores,
+
+  ``ChelisBridge.Runtime.Scopes.suppression_clears,
+
+  ``ChelisBridge.Runtime.Stack.nested_unit_keeps_bail,
+
+  ``ChelisBridge.Runtime.Stack.first_write_wins,
+
+  ``ChelisBridge.Runtime.Stack.cn_with_grown_stack,
+
+  ``ChelisBridge.Runtime.Stack.cn_grow_stack_if_needed,
+
+  ``ChelisBridge.Runtime.Unwind.scopeExit_embed,
+
+
+  ``ChelisBridge.Runtime.Unwind.new_scope_exit_replaces_unwind,
+
+  ``ChelisBridge.Runtime.Unwind.observed_hook_visibility,
+
+  ``ChelisBridge.Runtime.Unwind.replay_hook_installation,
+
+  ``ChelisBridge.Runtime.IdsLink.matched_host_var_draws_distinct,
+
+  ``ChelisBridge.Runtime.IdsLink.fresh_id_recorded_exhaustion,
+
   ``ChelisBridge.StrOrder.lexCmp_enc_ne,
   ``ChelisBridge.StrOrder.lexCmp_bytesOf,
   ``ChelisBridge.StrOrder.compare_eq_lexCmp,
@@ -746,6 +878,251 @@ def accepted : List Name := [
   ``ChelisBridge.Resource.random_and_decode_error_unchecked
 ]
 
+def wholeCoreRoots : List Name := [
+  `ChelisBridge.Runtime.ExtractedCancellation.sink_poll_eq,
+
+  `ChelisBridge.Runtime.ExtractedCancellation.extractedPollN_services,
+
+  `ChelisBridge.Runtime.ExtractedCancellation.extracted_native_stream,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.cycle_path_cancelled,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.initialization_analysis_cancelled,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.check_linearity_cancelled,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.check_linearity_with_context_cancelled,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.eval_eval_tensor_internal_with_result_claims_loop0_loop0_loop3_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_build_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_build_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_build_loop0_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_cycle_path_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_cycle_path_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_cycle_path_loop0_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_initialization_analysis_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_later_eager_value_dependencies_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_later_eager_value_dependencies_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_later_eager_value_dependencies_loop0_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_later_eager_value_dependencies_loop0_loop0_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_TopLevelReferenceGraph_later_eager_value_dependencies_loop0_loop0_loop1_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_scc_vertex_components_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_scc_vertex_components_loop0_loop2_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_scc_vertex_components_loop0_loop2_loop0_loop0_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.infer_declarations_scc_vertex_components_loop0_loop3_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.linearity_check_linearity_loop_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedCancellation.linearity_check_linearity_with_context_loop1_body_poll_eq,
+
+  ``ChelisBridge.Runtime.ExtractedStack.exit_frame_eq,
+
+  ``ChelisBridge.Runtime.ExtractedStack.exit_frame_project,
+
+  ``ChelisBridge.Runtime.ExtractedStack.frame_exhausted_pass,
+
+  ``ChelisBridge.Runtime.ExtractedStack.frame_exhausted_bail,
+
+  ``ChelisBridge.Runtime.ExtractedStack.record_first,
+
+  ``ChelisBridge.Runtime.ExtractedStack.enter_scope_eq,
+
+  ``ChelisBridge.Runtime.ExtractedStack.take_error_none,
+
+  ``ChelisBridge.Runtime.ExtractedStack.exit_scope_eq,
+
+  ``ChelisBridge.Runtime.ExtractedStack.take_error_eq,
+
+  ``ChelisBridge.Runtime.ExtractedStack.take_error_some,
+
+  ``ChelisBridge.Runtime.ExtractedStack.take_error_idempotent,
+
+  ``ChelisBridge.Runtime.ExtractedStack.drain_stack_bail_none,
+
+  ``ChelisBridge.Runtime.ExtractedStack.drain_stack_bail_some,
+
+  ``ChelisBridge.Runtime.ExtractedStack.enter_scope_project,
+
+  ``ChelisBridge.Runtime.ExtractedStack.take_error_clears,
+
+  ``ChelisBridge.Runtime.ExtractedStack.annotate_annotate_expr_with_scope_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_helpers_descend_to_tail_var_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_extract_int_for_dim_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_helpers_classify_size_in_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_helpers_extract_numeric_leaf_for_shape_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_helpers_shape_operand_type_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_helpers_shape_read_operand_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.app_shape_helpers_walk_static_cons_chain_shape_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.checked_collect_defsig_param_types_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.checked_effects_only_expr_matches_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.checked_expression_without_derived_effects_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.checked_register_annotation_owners_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.common_check_rank_body_discipline_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.common_collect_nominal_kind_evidence_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.common_is_static_numeric_bound_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declarations_collect_pattern_names_for_signature_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declarations_collect_top_level_references_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declarations_expr_mentions_unshadowed_name_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declarations_param_has_consuming_use_inner_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declarations_param_name_for_refs_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declared_surface_resolve_declared_surface_in_session_scoped_items_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.declared_surface_resolve_declared_surface_in_session_scoped_validate_carriers_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.expr_pattern_pattern_bindings_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.program_deep_type_contains_hole_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.shape_honesty_expr_shape_type_fact_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.shape_honesty_peel_borrow_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_bind_core_transform_pattern_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_classify_core_transform_value_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_core_transform_value_matches_pattern_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_expr_type_expr_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_reject_unknown_metadata_forms_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_validate_ir_expr_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_vmap_parameter_type_has_unmapped_hole_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_walk_core_transform_targets_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.validate_walk_for_tensor_precision_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.vmap_extent_analyze_expr_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.vmap_extent_transformed_callee_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.vmap_extent_transformed_function_def_returns_exit,
+
+  ``ChelisBridge.Runtime.ExtractedStack.vmap_extent_walk_vmap_sites_returns_exit,
+
+]
+
+
+def defaultEntryRoots : List Name := [
+  `ChelisBridge.Runtime.Entries.try_lower_compiled_program_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_manifested_program_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_compiled_program_with_manifest_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_manifested_execution_program_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_execution_program_with_manifest_correspondence,
+
+  `ChelisBridge.Runtime.Entries.lower_named_tensor_entry_dag_correspondence,
+
+  `ChelisBridge.Runtime.Entries.lower_named_tensor_entry_execution_plan_correspondence,
+
+  `ChelisBridge.Runtime.Entries.host_def_kernel_correspondence,
+
+  `ChelisBridge.Runtime.Entries.host_def_evaluation_plan_correspondence,
+
+  `ChelisBridge.Runtime.Entries.EvaluationProgram_select_roots_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_to_library_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_to_evaluation_library_correspondence,
+
+  `ChelisBridge.Runtime.Entries.lower_program_with_context_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_with_context_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_with_evaluation_context_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_subexpr_evaluation_plan_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_subexpr_evaluation_with_ordered_inputs_impl_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_subexpr_program_with_context_and_controls_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_subexpr_program_with_ordered_inputs_impl_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_staged_host_region_correspondence,
+
+  `ChelisBridge.Runtime.Entries.top_level_expr_is_lowered_correspondence,
+
+  `ChelisBridge.Runtime.Entries.top_level_lowering_map_correspondence,
+
+  `ChelisBridge.Runtime.Entries.top_level_lowering_map_with_context_correspondence,
+
+  `ChelisBridge.Runtime.Entries.expr_is_dag_lowerable_correspondence,
+
+  `ChelisBridge.Runtime.Entries.evaluation_profile_correspondence,
+
+  `ChelisBridge.Runtime.Entries.evaluation_profile_sorted_correspondence,
+
+  `ChelisBridge.Runtime.Entries.SubexprLoweringContext_lower_evaluation_plan_correspondence
+]
+
+def traceOnlyEntryRoots : List Name := [
+  `ChelisBridge.Runtime.Entries.try_lower_manifested_execution_program_with_trace_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_execution_program_with_manifest_and_trace_correspondence,
+
+  `ChelisBridge.Runtime.Entries.lower_named_tensor_entry_execution_plan_with_trace_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_to_evaluation_library_with_trace_correspondence,
+
+  `ChelisBridge.Runtime.Entries.try_lower_program_to_library_with_trace_correspondence
+]
+
+def acceptedFor (scope chain : String) : Option (List Name) :=
+  match scope, chain with
+
+  | "fragment", "default" | "fragment", "lowering-trace" => some acceptedCommon
+
+  | "whole-core", "default" => some (acceptedCommon ++ wholeCoreRoots ++ defaultEntryRoots)
+
+  | "whole-core", "lowering-trace" =>
+      some (acceptedCommon ++ wholeCoreRoots ++ defaultEntryRoots ++ traceOnlyEntryRoots)
+
+  | _, _ => none
+
+
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]
 
 def checkTheorem (n : Name) : CommandElabM Unit := do
@@ -780,7 +1157,10 @@ def audit (names : List Name) : CommandElabM Unit := do
   if scanned == 0 then throwError "no ChelisBridge module constants were scanned"
   logInfo m!"ChelisBridge audit: {names.length} accepted theorems and {scanned} package constants use only {allowedAxioms}"
 
-elab "#chelis_bridge_audit" : command => audit accepted
+elab "#chelis_bridge_audit" : command => do
+  let some roots := acceptedFor chelisAcceptanceScope chelisAcceptanceChain
+    | throwError "unknown acceptance scope or chain"
+  audit roots
 
 #chelis_bridge_audit
 
