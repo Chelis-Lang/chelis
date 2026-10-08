@@ -123,14 +123,16 @@ linked-to-source mapping at the output boundary; [#3302](https://github.com/Chel
 also requires extending the diagnostic-name rule in `spec/04-type-system.md`
 to `prove` before the public behavior changes.
 
-Acceptance uses a package fixture with a true and a false constructor-based
-property, then a property whose two opaque binders belong to different
-modules. The same declarations run as a standalone control where applicable.
-Qualified and recursively nested invariant binders and a source-name
-collision are further controls; unauthorized construction is a negative
-control. CLI JSON and Tide
-show source names without private linker spellings. A false property must
-remain false rather than becoming unsupported or vacuously green.
+Acceptance runs a package fixture with a true and a false constructor-based
+property under `fuzz-only` and SMT-enabled `auto`, matching standalone status,
+verdict, and samples. The true property reports `fuzz_validated`; the false
+property reports `failed` with a counterexample. Further controls cover a
+property with opaque binders from two modules, qualified and recursively
+nested invariant binders, and a user declaration colliding with
+`__chelis_gen_probe`. An unrelated
+rejected generated probe remains `ProbeRejected` with `status:"error"`, not
+generator starvation. Unauthorized construction remains a negative control.
+CLI JSON and Tide show source names without private linker spellings.
 
 ## Authored Beacon goals over packages
 
@@ -225,10 +227,12 @@ outward bounds for the checked source operations it actually reaches. For
 branch selection, casts where present, `log`, `sqrt`, `exp`, and the
 `standard_normal_cdf`/`erf` path. A transcendental approximation is usable
 only with an outward error enclosure over its admitted domain; sampling or
-an unchecked library call cannot establish the range. Correlation between
-the two CDF calls and shared subexpressions must survive lowering and
-propagation. A per-subexpression independent envelope that discards that
-relationship cannot be reported as proving a coupled goal.
+an unchecked library call cannot establish the range. Independently
+certified subexpression bounds are admissible when their combination soundly
+encloses the exact expression on each subbox and the certified subboxes cover
+the full input box. Relational tracking may tighten the result, but the
+acceptance oracle judges the final exact-source bound and certificate, not a
+particular correlation representation.
 
 Beacon's tensor shape-semantic operations, including reduction, movement,
 and matrix multiplication, require a separate representation decision
