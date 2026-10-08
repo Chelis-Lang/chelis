@@ -46,7 +46,10 @@ changes, six categories of files must change with it:
    (the 0.18.2 failure, chelis#1128; the pipeline-artifacts sibling is
    chelis#1234, and its message names six phantom regressions at once). The
    locks are NOT auto-synced: cargo writes them, but only when something
-   re-resolves the fixture.
+   re-resolves the fixture. The root `Cargo.lock` records the workspace
+   crates at the workspace version the same way, and CI builds with
+   `--locked`, so it is re-resolved here too rather than left as a manual
+   `cargo update --workspace` step for the release author.
 
 5. Checked-in test-fixture data that hand-pins the compiler. A Rust
    fixture built from a string literal auto-syncs through category (1),
@@ -348,6 +351,36 @@ def regenerate_compile_fail_fixture_locks(dry_run: bool) -> None:
             )
 
 
+def regenerate_workspace_lock(dry_run: bool) -> None:
+    """Re-resolve the root `Cargo.lock` after the workspace version moves.
+
+    The same `cargo update --workspace` as the fixture locks: it rewrites only
+    the workspace crates' version lines, so a release change set carries no
+    registry dependency drift.
+    """
+    lock = WORKSPACE_CARGO_TOML.with_name("Cargo.lock")
+    if dry_run:
+        print(f"[dry-run] would regenerate {lock.relative_to(REPO_ROOT)}")
+        return
+    print(f"Regenerating {lock.relative_to(REPO_ROOT)} via cargo update ...")
+    rc = subprocess.run(
+        [
+            "cargo",
+            "update",
+            "--workspace",
+            "--manifest-path",
+            str(WORKSPACE_CARGO_TOML),
+        ],
+        cwd=REPO_ROOT,
+    ).returncode
+    if rc != 0:
+        sys.exit(
+            f"error: `cargo update --workspace` exited {rc} for the workspace. "
+            f"{lock.relative_to(REPO_ROOT)} is stale, so every `--locked` build "
+            "of the release change set will refuse it."
+        )
+
+
 def regenerate_conformance_assets(dry_run: bool) -> None:
     """Rebuild the embedded conformance assets from their sources (category 6).
 
@@ -419,6 +452,7 @@ def main(argv: list[str]) -> int:
         # artifact is the thing left stale.
         print(f"All pins already at {args.version}; nothing to do.")
 
+    regenerate_workspace_lock(args.dry_run)
     regenerate_compile_fail_fixture_locks(args.dry_run)
     regenerate_conformance_assets(args.dry_run)
 
