@@ -274,7 +274,8 @@ pub fn standard_contract_registry(
 
 /// Construct the standard contract registry, attempting to upgrade fuzz-discharged
 /// contracts to certified-envelope discharges using the given prover.
-/// Contracts the prover cannot prove stay fuzz-discharged (honest degradation).
+/// An ordinary completed no-proof response keeps the original fuzz discharge;
+/// a configured Beacon subprocess failure returns an unsupported error.
 pub fn standard_contract_registry_with_prover(
     prover: &crate::beacon_contract_prover::BeaconContractProver,
     widths: &[Prim],

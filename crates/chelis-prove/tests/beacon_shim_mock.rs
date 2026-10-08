@@ -386,11 +386,7 @@ fn dag_hash_mismatch_fails_closed_before_spawning_beacon() {
     store.insert(fake_dag_hash(), b"totally different bytes".to_vec());
     let shim = BeaconShim::new(MOCK_BIN, store);
     let discharge = shim.discharge(&box_goal(), FAST_TIMEOUT_MS);
-    let TierBResult::Error(reason) = discharge.result() else {
-        panic!("missing Beacon must be an error: {discharge:?}");
-    };
-    assert!(reason.starts_with("unsupported: "), "{reason}");
-    assert!(reason.contains("chelis#730"), "{reason}");
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
     assert_eq!(discharge.soundness(), Soundness::Untrusted);
     assert!(discharge.qualifier_set().is_empty());
     assert_eq!(
@@ -638,7 +634,11 @@ fn nonexistent_binary_fails_closed_not_a_crash() {
     let _g = with_scenario("proved");
     let shim = BeaconShim::new("/nonexistent/path/to/chelis-beacon-xyz", populated_store());
     let discharge = shim.discharge(&box_goal(), FAST_TIMEOUT_MS);
-    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    let TierBResult::Error(reason) = discharge.result() else {
+        panic!("missing Beacon must be an error: {discharge:?}");
+    };
+    assert!(reason.starts_with("unsupported: "), "{reason}");
+    assert!(reason.contains("chelis#730"), "{reason}");
     assert_eq!(discharge.soundness(), Soundness::Untrusted);
     assert!(discharge.qualifier_set().is_empty());
 }
