@@ -294,7 +294,79 @@ def test_to_json_long_string_renders_escaped() -> unit ! { Test } = {
   tail = fold(fn (acc: string, i: i64) -> string_concat(acc, "ab"), "", range(cast(0, i64), cast(2048, i64)))
   big = string_concat("a\"b\\c", tail)
   expected = string_concat("\"a\\\"b\\\\c", string_concat(tail, "\""))
-  assert_eq(to_json(JsonString(big)), expected, "4 KiB string with escapes renders byte-exactly (parse-back of long strings is capped by the reader's recursion, chelis#953/#954 territory)")
+  _ = assert_eq(to_json(JsonString(big)), expected, "4 KiB string with escapes renders byte-exactly")
+  assert_eq(parse_json(expected), JsonString(big), "4 KiB string parses back without input-size recursion")
+}
+def test_try_parse_json_long_invalid_string_rejects() -> unit ! { Test } = {
+  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "a"), "", range(0i64, 2048i64))
+  match try_parse_json(string_concat("\"", string_concat(prefix, "\\q\""))) with {
+    | Some(_) => fail("a long string with an invalid escape must be rejected")
+    | None => assert_true(true, "long invalid string rejected")
+  }
+}
+def test_try_parse_json_wide_containers() -> unit ! { Test } = {
+  array_text = string_concat("[", string_concat(fold(fn (acc: string, i: i64) -> string_concat(acc, "0,"), "", range(0i64, 800i64)), "1]"))
+  object_text = string_concat("{", string_concat(fold(fn (acc: string, i: i64) -> string_concat(acc, "\"k\":0,"), "", range(0i64, 400i64)), "\"last\":1}"))
+  _ = match json_array(Some(parse_json(array_text))) with {
+    | Some(items) => assert_eq(len(items), 801i64, "wide array keeps every element")
+    | None => fail("wide array did not parse")
+  }
+  match json_int(json_get(parse_json(object_text), "last")) with {
+    | Some(value) => assert_eq(value, 1i64, "wide object keeps its final entry")
+    | None => fail("wide object did not parse")
+  }
+}
+def test_try_parse_json_wide_invalid_containers_reject() -> unit ! { Test } = {
+  array_prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "0,"), "", range(0i64, 800i64))
+  object_prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "\"k\":0,"), "", range(0i64, 400i64))
+  _ = match try_parse_json(string_concat("[", string_concat(array_prefix, "]"))) with {
+    | Some(_) => fail("wide array with a trailing comma must be rejected")
+    | None => assert_true(true, "wide trailing comma array rejected")
+  }
+  match try_parse_json(string_concat("{", string_concat(object_prefix, "}"))) with {
+    | Some(_) => fail("wide object with a trailing comma must be rejected")
+    | None => assert_true(true, "wide trailing comma object rejected")
+  }
+}
+def test_try_parse_json_many_small_objects() -> unit ! { Test } = {
+  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "{\"k\":0},"), "", range(0i64, 500i64))
+  valid = string_concat("[", string_concat(prefix, "{\"last\":1}]"))
+  invalid = string_concat("[", string_concat(prefix, "{\"last\":1,}]"))
+  _ = match json_array(Some(parse_json(valid))) with {
+    | Some(items) => assert_eq(len(items), 501i64, "many small objects keep every array element")
+    | None => fail("many small objects did not parse")
+  }
+  match try_parse_json(invalid) with {
+    | Some(_) => fail("many small objects with a malformed final object must be rejected")
+    | None => assert_true(true, "malformed final object rejected")
+  }
+}
+def test_try_parse_json_many_medium_strings() -> unit ! { Test } = {
+  word = "abcdefghijklmnopqrstuvwxyzabcdefg"
+  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, string_concat("\"", string_concat(word, "\","))), "", range(0i64, 200i64))
+  valid = string_concat("[", string_concat(prefix, "\"last\"]"))
+  invalid = string_concat("[", string_concat(prefix, "\"last\",]"))
+  _ = match json_array(Some(parse_json(valid))) with {
+    | Some(items) => assert_eq(len(items), 201i64, "medium strings keep every array element")
+    | None => fail("medium strings did not parse")
+  }
+  match try_parse_json(invalid) with {
+    | Some(_) => fail("medium strings with a trailing comma must be rejected")
+    | None => assert_true(true, "medium strings with a trailing comma rejected")
+  }
+}
+def test_try_parse_json_long_number_and_whitespace() -> unit ! { Test } = {
+  digits = string_concat("1", fold(fn (acc: string, i: i64) -> string_concat(acc, "0"), "", range(0i64, 512i64)))
+  spaces = fold(fn (acc: string, i: i64) -> string_concat(acc, " "), "", range(0i64, 2048i64))
+  _ = match parse_json(digits) with {
+    | JsonBigInt(value) => assert_eq(value, digits, "long integer token stays exact")
+    | _ => fail("long integer token did not parse as JsonBigInt")
+  }
+  _ = assert_eq(parse_json(string_concat(spaces, "null")), JsonNull, "long leading whitespace parses")
+  match try_parse_json(string_concat(digits, "x")) with {
+    | Some(_) => fail("long number followed by garbage must be rejected")
+    | None => assert_true(true, "long number with garbage rejected")
+  }
 }
 def test_try_write_json_non_finite_returns_none() -> unit ! { Test, IO } = {
   doc = JsonObject(dict_of([("bad", float_json(div(0.0f64, 0.0f64)))]))
