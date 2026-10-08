@@ -312,6 +312,24 @@ pub enum LetPattern {
     Tuple(Vec<LetPattern>, Span),
 }
 
+impl LetPattern {
+    fn take_children_for_drop(&mut self, pending: &mut Vec<LetPattern>) {
+        if let Self::Tuple(items, _) = self {
+            pending.extend(std::mem::take(items));
+        }
+    }
+}
+
+impl Drop for LetPattern {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children_for_drop(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.take_children_for_drop(&mut pending);
+        }
+    }
+}
+
 /// Closed set of literal-suffix dtypes per `spec/02-surf-syntax.md` §P10a.
 /// Re-exported from `chelis_deep::lexer::LiteralSuffix` so the surf and
 /// deep grammars share the same enum.
@@ -375,6 +393,38 @@ pub enum Pattern {
     Tuple(Vec<Pattern>, Span),
     Record(String, Vec<(String, Pattern)>, Span), // Ctor { field1, field2 }
     As(String, Box<Pattern>, Span),               // x @ Pattern
+}
+
+impl Pattern {
+    fn take_children_for_drop(&mut self, pending: &mut Vec<Pattern>) {
+        match self {
+            Self::Constructor(_, items, _) | Self::Tuple(items, _) => {
+                pending.extend(std::mem::take(items));
+            }
+            Self::Record(_, fields, _) => {
+                pending.extend(
+                    std::mem::take(fields)
+                        .into_iter()
+                        .map(|(_, pattern)| pattern),
+                );
+            }
+            Self::As(_, inner, span) => {
+                let child = std::mem::replace(inner, Box::new(Self::Wildcard(*span)));
+                pending.push(*child);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for Pattern {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children_for_drop(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.take_children_for_drop(&mut pending);
+        }
+    }
 }
 
 // ===== Type Expressions =====
@@ -503,6 +553,38 @@ pub enum TypeExpr {
     Tuple(Vec<TypeExpr>, Span),                   // (f32, f32)
     Infer(Span),                                  // _
     RankSpread(String, Span),                     // ..r (rank variable; whole-shape spread)
+}
+
+impl TypeExpr {
+    fn take_children_for_drop(&mut self, pending: &mut Vec<TypeExpr>) {
+        match self {
+            Self::Tensor(items, _, _) | Self::App(_, items, _) | Self::Tuple(items, _) => {
+                pending.extend(std::mem::take(items));
+            }
+            Self::Arrow(args, result, span) => {
+                pending.extend(std::mem::take(args));
+                let child = std::mem::replace(result, Box::new(Self::Infer(*span)));
+                pending.push(*child);
+            }
+            Self::Ref(inner, span) => {
+                let child = std::mem::replace(inner, Box::new(Self::Infer(*span)));
+                pending.push(*child);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for TypeExpr {
+    fn drop(&mut self) {
+        // A parsed type may be released by an embedding caller on a small
+        // worker stack. Drain recursive children before Rust's field drop.
+        let mut pending = Vec::new();
+        self.take_children_for_drop(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.take_children_for_drop(&mut pending);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

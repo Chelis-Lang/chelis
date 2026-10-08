@@ -3271,6 +3271,12 @@ impl Parser {
     }
 
     fn parse_let_pattern(&mut self) -> Result<LetPattern, ParseError> {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+            self.parse_let_pattern_inner()
+        })
+    }
+
+    fn parse_let_pattern_inner(&mut self) -> Result<LetPattern, ParseError> {
         match self.peek().clone() {
             TokenKind::Ident(name) => {
                 let tok = self.advance();
@@ -3392,6 +3398,10 @@ impl Parser {
     }
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || self.parse_type_atom_inner())
+    }
+
+    fn parse_type_atom_inner(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek().clone() {
             TokenKind::Int(n) => {
                 // spec/02-surf-syntax.md: `IntLit` has exactly one type-position
@@ -6345,7 +6355,7 @@ mod tests {
     #[test]
     fn qualified_nullary_constructor_pattern_parses() {
         let pat = first_arm_pattern("def f(m) = match m with { | Demo.Dropout.Train => 1 }");
-        match pat {
+        match &pat {
             Pattern::Constructor(name, args, _) => {
                 assert_eq!(name, "Demo.Dropout.Train");
                 assert!(args.is_empty());
@@ -6360,7 +6370,7 @@ mod tests {
     #[test]
     fn qualified_constructor_pattern_with_args_parses() {
         let pat = first_arm_pattern("def f(m) = match m with { | Demo.List.Cons(x, xs) => 1 }");
-        match pat {
+        match &pat {
             Pattern::Constructor(name, args, _) => {
                 assert_eq!(name, "Demo.List.Cons");
                 assert_eq!(args.len(), 2);
@@ -6374,7 +6384,7 @@ mod tests {
     #[test]
     fn qualified_record_pattern_parses() {
         let pat = first_arm_pattern("def f(m) = match m with { | Demo.Frame.Col { values } => 1 }");
-        match pat {
+        match &pat {
             Pattern::Record(name, fields, _) => {
                 assert_eq!(name, "Demo.Frame.Col");
                 assert_eq!(fields.len(), 1);
@@ -6389,7 +6399,7 @@ mod tests {
     #[test]
     fn bare_constructor_pattern_unchanged() {
         let pat = first_arm_pattern("def f(m) = match m with { | None => 1 }");
-        match pat {
+        match &pat {
             Pattern::Constructor(name, args, _) => {
                 assert_eq!(name, "None");
                 assert!(args.is_empty());
