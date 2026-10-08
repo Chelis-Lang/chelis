@@ -163,15 +163,19 @@ The first acceptance theorem has fixed, compile-time-known extents and
 symbolic `f64` values. An algorithm receives a matrix `B`, vectors `q`, `b`,
 `state`, and `baseline`, and a matrix `A`; it constructs `P = B^T B`, solves
 the two-variable QP with a fixed zero/nonnegative cone partition, then passes
-the `Solved` primal through pure `apply_step(state, primal)` and `quality`
-helpers. The property assumes or proves that `baseline` is feasible and
+the `Solved` primal through pure `apply_step(state, primal)` and
+`quality(updated, state, P, q)` helpers. The property assumes or proves that
+`baseline` is feasible and
 proves, for every valuation satisfying its `where` conditions, that
 
-    quality(apply_step(state, primal))
-      >= quality(apply_step(state, baseline))
+    quality(apply_step(state, primal), state, P, q)
+      >= quality(apply_step(state, baseline), state, P, q)
 
-where `quality(state + step)` is a fixed scalar offset minus
-`1/2 step^T P step + q^T step`. A companion claim uses primal feasibility to
+where `quality(updated, state, P, q)` is a fixed scalar offset minus
+`1/2 step^T P step + q^T step` for `step = updated - state`. The typed helper
+reshapes `step` from `[2]` to `[2,1]` for `matmul(P, step_column)`, reshapes
+that product back to `[2]`, and forms the two dot products by elementwise
+multiplication and reduction. A companion claim uses primal feasibility to
 bound the updated state. The QP data, baseline, and state vary at runtime;
 the proof must establish the algebraic connection between the QP objective
 and the downstream helpers. A claim that merely solves a literal one-variable
@@ -184,7 +188,7 @@ cone topology is a fixed list of `ZeroCone` and `NonnegativeCone` blocks,
 while `P,q,A,b` entries may be symbolic. Settings remain an explicit,
 well-formed fixed record. Pure straight-line helpers, named bindings,
 conditionals, elementwise addition/subtraction/multiplication/negation,
-`permute`, `matmul`, and reductions are lowered when their dimensions are
+`permute`, `reshape`, `matmul`, and reductions are lowered when their dimensions are
 fixed. Division, effects, recursion, loops, symbolic extents, dynamic cone
 selection, and other cone families produce `unsupported` for this lane.
 
