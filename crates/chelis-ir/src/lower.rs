@@ -22300,6 +22300,12 @@ impl<'program> LowerCtx<'program> {
                 _ => {}
             }
         }
+        // A staged host region keeps every runtime branch as host control
+        // flow, a `fail` arm included: the guarded abort below exists for a
+        // DAG built for its value, and lowering past this branch in a staged
+        // region would commit the region to a static DAG for a body only the
+        // host interpreter can carry, such as a computed concat (chelis#3341).
+        self.retain_host_branch_control(cond_expr.span());
         let then_fail = match then_fail {
             Some(FailMessage::Usable(message)) => Some(message),
             _ => None,
@@ -22335,15 +22341,6 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Node(self.reject_total_fail_if(span));
             }
             (None, None) => {}
-        }
-        if self.host_program.is_some() {
-            self.host_stage_status
-                .set(crate::host::staged::StagingStatus::HostControlBoundary);
-            raise_lowering_error(
-                "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
-                Some(cond_expr.span()),
-                self.current_span_id.clone(),
-            );
         }
         let saved_branch_path = self.branch_path_condition;
         // Carry the selected path through arm lowering rather than guessing
@@ -22912,6 +22909,22 @@ impl<'program> LowerCtx<'program> {
                  form outside the supported static slice (chelis#520 D1)"
             ),
         )
+    }
+
+    /// The `if` counterpart of [`Self::retain_host_match_control`]: a runtime
+    /// branch in a staged host region stays in host control, so the plan is
+    /// declined before either arm is visited. Transform lowerers have no host
+    /// program and lower the branch themselves.
+    fn retain_host_branch_control(&self, span: Span) {
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            raise_lowering_error(
+                "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
     }
 
     /// [04-PAT-2]: when selection needs a host value or guard, the staged
