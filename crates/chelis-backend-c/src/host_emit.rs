@@ -4092,6 +4092,13 @@ fn emit_main(
 /// build error rather than a loud stub.
 fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     chelis_ir::host::collect_host_var_names(expr, out);
+    collect_called_fn_names(expr, out);
+}
+
+/// Only an emitted direct call or named callback consumes a callee frame.
+/// A bare `Var` can be a local or parameter with the same spelling as a
+/// function and must not create a recursion edge.
+fn collect_called_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
@@ -4248,10 +4255,10 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String>
     reachable
 }
 
-/// Functions that can participate in a call cycle. Named callbacks count as
-/// edges; bare function values conservatively count too, because a callback
-/// may invoke one later. Walk iteratively so graph analysis does not consume
-/// the compiler stack on a long chain of definitions.
+/// Functions that can participate in an emitted call cycle. Named callbacks
+/// count as edges; bare values do not invoke anything. Walk iteratively so
+/// graph analysis does not consume the compiler stack on a long chain of
+/// definitions.
 pub(crate) fn recursive_host_functions(program: &HostProgram) -> UnordSet<String> {
     let names: UnordSet<String> = program.functions.iter().map(|f| f.name.clone()).collect();
     let edges: UnordMap<String, Vec<String>> = program
@@ -4259,7 +4266,7 @@ pub(crate) fn recursive_host_functions(program: &HostProgram) -> UnordSet<String
         .iter()
         .map(|function| {
             let mut refs = UnordSet::new();
-            collect_referenced_fn_names(&function.body, &mut refs);
+            collect_called_fn_names(&function.body, &mut refs);
             (
                 function.name.clone(),
                 refs.into_sorted()

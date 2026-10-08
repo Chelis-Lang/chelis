@@ -168,6 +168,77 @@ fn exported_recursion_uses_the_calling_worker_threads_stack() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn shadowed_function_name_does_not_create_a_recursive_call_cycle() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("shadow.ch");
+    let source = chelis_surf::format::format_source(
+        "module Probe.ShadowStack\n\
+         def tally(tally: i64) -> i64 = add(tally, tally)\n\
+         def entry(n: i64) -> i64 = tally(n)\n",
+    )
+    .expect("format shadowed-name fixture");
+    fs::write(&path, source).expect("write library source");
+    let out = dir.path().join("output");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args([
+            "build",
+            "--target",
+            "c",
+            "--output",
+            out.to_str().expect("UTF-8 output"),
+            path.to_str().expect("UTF-8 source"),
+        ])
+        .output()
+        .expect("build static library");
+    assert!(build.status.success(), "{build:?}");
+    let emitted = fs::read_to_string(out.join("shadow.c")).expect("read emitted C");
+    assert!(
+        !emitted.contains("__chelis_host_recursive_call_guard"),
+        "scalar parameter shadowing must not emit a recursion guard"
+    );
+    let driver = out.join("driver.c");
+    fs::write(
+        &driver,
+        "#include <pthread.h>\n\
+         #include <stdio.h>\n\
+         #include \"chelis_runtime.h\"\n\
+         #include \"shadow.h\"\n\
+         static void *run(void *arg) { (void)arg; printf(\"%lld\\n\", (long long)chelis_fn_656e747279(21)); return NULL; }\n\
+         int main(void) {\n\
+             pthread_attr_t attr;\n\
+             pthread_t thread;\n\
+             if (pthread_attr_init(&attr) != 0) return 2;\n\
+             if (pthread_attr_setstacksize(&attr, 480 * 1024) != 0) return 3;\n\
+             if (pthread_create(&thread, &attr, run, NULL) != 0) return 4;\n\
+             pthread_attr_destroy(&attr);\n\
+             if (pthread_join(thread, NULL) != 0) return 5;\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("write small-stack driver");
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let compiled = Process::new(&toolchain.compiler)
+        .args(&toolchain.compile_flags)
+        .arg(&driver)
+        .arg(out.join("libshadow.a"))
+        .arg(out.join("libchelis_runtime.a"))
+        .args(&toolchain.link_flags)
+        .arg("-o")
+        .arg(out.join("driver"))
+        .output()
+        .expect("compile small-stack driver");
+    assert!(compiled.status.success(), "{compiled:?}");
+    let result = Process::new(out.join("driver"))
+        .output()
+        .expect("run small-stack driver");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert!(result.stderr.is_empty(), "{result:?}");
+}
+
 #[test]
 fn a_failed_stack_bound_query_reports_a_located_runtime_error() {
     let dir = tempdir().expect("tempdir");
