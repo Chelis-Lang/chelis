@@ -4,6 +4,7 @@
 //! Raw generated packets are transport and do not confer validated ownership.
 
 pub mod failure;
+pub mod mapped;
 pub mod metadata;
 pub mod render;
 mod schema;

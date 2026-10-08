@@ -5376,6 +5376,9 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "mmap_file",
     "mmap_read",
     "mmap_len",
+    "mmap_tensor",
+    "mmap_text",
+    "mmap_sha256",
     "process_run",
     "clock_wall_read",
     "clock_monotonic_read",
@@ -9751,6 +9754,7 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "split_keys"
                 | "fold_in"
                 | "to_tensor"
+                | "mmap_tensor"
                 | "scalar_to_tensor"
                 | "pad_sequences"
                 | "pad_sequences_to"
@@ -21338,6 +21342,11 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "mmap_file" => Some(HostTypeTerm::MappedFile),
         "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "mmap_len" => Some(HostTypeTerm::Int64),
+        // [05-OP-79]: the dtype argument is checked away before lowering, so
+        // the result type is the checker's stamped `tensor[n, T]`.
+        "mmap_tensor" => Some(fresh_host_inference()),
+        // [05-OP-80].
+        "mmap_text" | "mmap_sha256" => Some(HostTypeTerm::String),
         // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         "process_run" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,

@@ -620,6 +620,9 @@ chelis_scalar chelis_csv_int(const chelis_list *table, chelis_scalar row, chelis
 chelis_mapped_file *chelis_mmap_file(chelis_string path);
 chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
+chelis_tensor *chelis_mmap_tensor(const chelis_mapped_file *mapped, int64_t offset, int64_t count, chelis_dtype dtype);
+chelis_string chelis_mmap_text(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
+chelis_string chelis_mmap_sha256(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 
 /*
  * WS-1: bf16 / f16 per-element conversion to and from f32.

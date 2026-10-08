@@ -1944,7 +1944,15 @@ impl<'a> EvalContext<'a> {
                 // a trap line in their failure is the runtime's own.
                 || matches!(
                     name,
-                    "to_tensor" | "split" | "char_code" | "char_from_code" | "string_slice"
+                    "to_tensor"
+                        | "split"
+                        | "char_code"
+                        | "char_from_code"
+                        | "string_slice"
+                        | "mmap_read"
+                        | "mmap_tensor"
+                        | "mmap_text"
+                        | "mmap_sha256"
                 );
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
@@ -4740,21 +4748,63 @@ impl<'a> EvalContext<'a> {
                 let RuntimeValue::MappedFile(bytes) = mapped else {
                     return Err(format!("mmap_read expects MappedFile, got {mapped:?}"));
                 };
-                if offset < 0 || len < 0 {
-                    return Err("mmap_read requires non-negative offset and length".to_string());
-                }
-                let offset = offset as usize;
-                let len = len as usize;
-                if offset > bytes.len() {
-                    return Err("mmap_read offset out of bounds".to_string());
-                }
-                let end = offset.saturating_add(len).min(bytes.len());
+                let range = chelis_abi::mapped::mapped_range("mmap_read", offset, len, bytes.len())?;
                 Ok(RuntimeValue::List(
-                    bytes[offset..end]
+                    bytes[range]
                         .iter()
                         .map(|byte| RuntimeValue::int64(i64::from(*byte)))
                         .collect(),
                 ))
+            }
+            // [05-OP-79]: the checked result type states the dtype; the
+            // payload bits become the element bits.
+            "mmap_tensor" => {
+                let mapped = args
+                    .first()
+                    .ok_or_else(|| "mmap_tensor expects 3 arguments".to_string())?;
+                let offset = expect_int_arg(args, 1)?;
+                let count = expect_int_arg(args, 2)?;
+                let RuntimeValue::MappedFile(bytes) = mapped else {
+                    return Err(format!("mmap_tensor expects MappedFile, got {mapped:?}"));
+                };
+                let precision = result_type_expr
+                    .and_then(tagged_expr_children)
+                    .filter(|(tag, _)| *tag == DeepTag::TTensor)
+                    .and_then(|(_, children)| children.last())
+                    .and_then(|ty| checked_precision_leaf(ty, &self.precision_bindings))
+                    .ok_or("mmap_tensor requires a resolved checked element dtype [05-OP-79]")?;
+                let width = precision
+                    .runtime_dtype()
+                    .map_err(|error| format!("mmap_tensor dtype: {error}"))?
+                    .byte_width();
+                let range =
+                    chelis_abi::mapped::mapped_tensor_range(offset, count, width, bytes.len())?;
+                let payload = &bytes[range];
+                if precision == Prim::Bool {
+                    chelis_abi::mapped::check_bool_payload(payload)?;
+                }
+                let storage = chelis_types::tensor_from_le_payload(precision, payload)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(vec![payload.len() / width], storage),
+                )))
+            }
+            // [05-OP-80].
+            "mmap_text" | "mmap_sha256" => {
+                let mapped = args
+                    .first()
+                    .ok_or_else(|| format!("{name} expects 3 arguments"))?;
+                let offset = expect_int_arg(args, 1)?;
+                let len = expect_int_arg(args, 2)?;
+                let RuntimeValue::MappedFile(bytes) = mapped else {
+                    return Err(format!("{name} expects MappedFile, got {mapped:?}"));
+                };
+                let range = chelis_abi::mapped::mapped_range(name, offset, len, bytes.len())?;
+                let start = range.start;
+                Ok(RuntimeValue::String(if name == "mmap_text" {
+                    chelis_abi::mapped::mapped_text(start, &bytes[range])?
+                } else {
+                    chelis_abi::mapped::sha256_hex(&bytes[range])
+                }))
             }
             "mmap_len" => match args.first() {
                 Some(RuntimeValue::MappedFile(bytes)) => {

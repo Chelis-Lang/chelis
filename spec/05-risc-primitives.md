@@ -4621,6 +4621,91 @@ path even though bare `round` under `grad` remains a structural
 > Accumulator: None; all returned byte counts and offsets are exact checked
 > i64.
 
+#### Mapped tensor ingress
+
+> **[05-OP-79]** Signature: `mmap_tensor(mapped,offset,count,T)->tensor[n,T]`
+> borrows a `MappedFile`, takes an exact i64 byte `offset` and an exact i64
+> element `count`, and states the result element dtype `T` as its final
+> argument, written in the dtype position spec/02 §P9 names. It is pure: the
+> IO effect belongs to `mmap_file` ([05-OP-60]). The result is rank one and
+> its extent `n` is `count`: a literal `count` gives a literal extent and any
+> other expression a fresh runtime extent, as spec/04 §4.7.2 gives `insert`.
+> `mmap_tensor` is a reserved name (spec/04 §8.6).
+>
+> Domain: `T` is an active data element dtype (spec/04 §1.1) or a dtype
+> binder in scope whose bound admits only such dtypes ([04-DTYPE-2]). The
+> element width `w` is 1 for `i8` and `bool`, 2 for `f16`, `bf16` and `i16`,
+> 4 for `f32` and `i32`, and 8 for `f64` and `i64`. The payload is the
+> `count * w` bytes beginning at `offset`, read as a contiguous row-major
+> sequence: element `i` is the `w` bytes at `offset + i * w`, least
+> significant byte first. A float element is the IEEE 754 binary16,
+> binary32 or binary64 pattern, or the bfloat16 pattern, of its dtype; an
+> integer element is two's-complement; a `bool` element is the byte 0
+> (false) or 1 (true). The offset carries no alignment requirement.
+>
+> Result: Each element's stored bits equal its payload bits. The written
+> `T` is authoritative and the bytes are reinterpreted, never converted,
+> rounded, widened, or normalized. Every bit pattern of a float dtype is
+> admitted and preserved, including each NaN's payload and quiet or
+> signaling bit, signed zeros, subnormals, and infinities. The result is a
+> fresh tensor that owns its storage and does not alias the mapping. A
+> tensor of higher rank is a row-major `reshape` ([05-OP-49]) of this
+> result, and a declared result type on that `reshape` supplies the
+> spec/04 §4.7 runtime extent guard.
+>
+> Failure: A negative `offset` or `count`, or a payload that ends past
+> `mmap_len(mapped)`, traps `Domain`; a `count * w` or `offset + count * w`
+> outside i64 traps `Overflow`. These traps are [04-NUM-9] lines whose
+> `<op>` is `mmap_tensor` and whose `<prim>` is `i64`, and each lane
+> conveys, on context lines before the trap line, the offset, the count or
+> byte length, and the mapping length. A `bool` payload byte other than 0
+> or 1 traps `Domain` at `bool`, after a context line naming the element
+> index and the byte. Every check completes before allocation, and no
+> clamped, truncated, zero-filled, or converted result substitutes for a
+> failure. `key`, `string`, a non-dtype final argument, a missing final
+> argument, and non-i64 offsets or counts are type errors.
+>
+> Adjoint: Mapped tensor ingress has no differentiable operand and is
+> outside AD; its result enters differentiated code only as a value, and
+> no cotangent flows to the mapping.
+>
+> Accumulator: None; offsets, counts, and byte lengths are exact checked
+> i64.
+
+#### Mapped byte text and digests
+
+> **[05-OP-80]** Signature: `mmap_text(mapped,offset,length)->string` and
+> `mmap_sha256(mapped,offset,length)->string` borrow a `MappedFile` and
+> take an exact i64 byte `offset` and byte `length`. Both are pure: the IO
+> effect belongs to `mmap_file` ([05-OP-60]).
+>
+> Domain: The range is the `length` bytes beginning at `offset`, the range
+> `mmap_read` selects. An offset at the end of the mapping is valid only for
+> zero length.
+>
+> Result: `mmap_text` decodes the range as UTF-8 and returns its exact text,
+> with no byte-order-mark removal, newline translation, or Unicode
+> normalization. `mmap_sha256` returns the SHA-256 digest (FIPS 180-4) of the
+> range as 64 lowercase hexadecimal ASCII characters, two per digest byte in
+> digest order, high nibble first. An empty range gives the empty string and
+> the digest of the empty message respectively. The digest is text so that a
+> loader compares it with a recorded checksum by string equality; it is not a
+> numeric value.
+>
+> Failure: A negative `offset` or `length`, or a range that ends past
+> `mmap_len(mapped)`, traps `Domain`, and an `offset + length` outside i64
+> traps `Overflow`; each trap is an [04-NUM-9] line whose `<op>` is the
+> operation's name and whose `<prim>` is `i64`, after the same context lines
+> [05-OP-79] requires. A range that is not valid UTF-8 fails `mmap_text`
+> loudly with the message `mmap_text: invalid UTF-8 at byte <k>`, where
+> `<k>` is the decimal mapping offset of the first byte that does not begin
+> or continue a valid sequence. No replacement character, truncation, or
+> partial text substitutes for that failure.
+>
+> Adjoint: Text and digest reads are structurally non-differentiable.
+>
+> Accumulator: None; offsets and lengths are exact checked i64.
+
 #### Host clocks
 
 > **[05-OP-75]** Signature: `clock_wall_read()->(i64,i64)!{IO}` and

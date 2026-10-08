@@ -57,14 +57,23 @@ pub(super) enum ChildStampRole {
 /// an unknown child as a runtime expression. The completeness test below
 /// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
 /// of truth, so adding a tag requires an explicit ownership decision here.
-/// `(app (var to_tensor) xs T)` with a type-node dtype child `T`. A Deep
-/// binder of `to_tensor` is `ReservedName`, so the callee always names the
-/// intrinsic in a checked program.
-fn is_to_tensor_with_dtype_child(children: &[deep::Expr]) -> bool {
-    let [callee, _, dtype] = children else {
+/// `(app (var to_tensor) xs T)` or `(app (var mmap_tensor) m o n T)` with a
+/// final type-node dtype child `T`. A Deep binder of either name is
+/// `ReservedName`, so the callee always names the intrinsic in a checked
+/// program.
+fn is_dtype_argument_app(children: &[deep::Expr]) -> bool {
+    let (Some(callee), Some(dtype)) = (children.first(), children.last()) else {
         return false;
     };
-    matches!(stamped_parts(callee), Some((DeepTag::Var, _, [name])) if symbol_name(name) == Some("to_tensor"))
+    let arity = match stamped_parts(callee) {
+        Some((DeepTag::Var, _, [name])) => match symbol_name(name) {
+            Some("to_tensor") => 3,
+            Some("mmap_tensor") => 5,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    children.len() == arity
         && matches!(
             stamped_parts(dtype),
             Some((DeepTag::TPrim | DeepTag::TVar, _, _))
@@ -366,10 +375,12 @@ pub(super) fn annotate_expr_with_scope(
                 },
                 _ => children,
             };
-            // spec/03 §6.4: `to_tensor`'s dtype child is checked during
-            // inference ([05-OP-57]); every lane receives `to_tensor(xs)`.
-            let children = if tag == DeepTag::App && is_to_tensor_with_dtype_child(children) {
-                &children[..2]
+            // spec/03 §6.4: the dtype child of `to_tensor` ([05-OP-57]) and
+            // `mmap_tensor` ([05-OP-80]) is checked during inference; every
+            // lane receives the call without it, and reads the dtype from the
+            // stamped result type.
+            let children = if tag == DeepTag::App && is_dtype_argument_app(children) {
+                &children[..children.len() - 1]
             } else {
                 children
             };

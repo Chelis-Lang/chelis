@@ -57,11 +57,17 @@ pub enum DesugarError {
     UnresolvedGradTarget { target: String, span: Span },
     #[error("`grad` target `{target}` is not callable")]
     NonCallableGradTarget { target: String, span: Span },
-    /// spec/04 §8.6: `to_tensor` is reserved, so no binder may bind it.
+    /// spec/04 §8.6: `to_tensor` and `mmap_tensor` are reserved, so no
+    /// binder may bind either.
     #[error(
-        "`to_tensor` is reserved and cannot be bound (spec/04-type-system.md §8.6): it states literal dtypes (§5.6) and always names the intrinsic conversion; rename this {binder}"
+        "`{name}` is reserved and cannot be bound (spec/04-type-system.md §8.6): {}; rename this {binder}",
+        reserved_reason(name)
     )]
-    ReservedName { binder: &'static str, span: Span },
+    ReservedName {
+        name: &'static str,
+        binder: &'static str,
+        span: Span,
+    },
     /// spec/04 §5.6: an unsuffixed literal element of a `to_tensor` call
     /// without a dtype argument has no default.
     #[error("{message}")]
@@ -78,11 +84,17 @@ pub enum DesugarError {
         construct: String,
         span: Span,
     },
-    /// spec/02 §P9: the second argument of `to_tensor` is a dtype.
+    /// spec/02 §P9: the second argument of `to_tensor` and the fourth
+    /// argument of `mmap_tensor` are dtypes.
     #[error(
-        "the second argument of `to_tensor` must be a dtype, a primitive such as `f64` or a dtype-bounded binder in scope; `{found}` is neither (spec/02-surf-syntax.md §P9)"
+        "the {position} argument of `{callee}` must be a dtype, a primitive such as `f64` or a dtype-bounded binder in scope; `{found}` is neither (spec/02-surf-syntax.md §P9)"
     )]
-    NonDtypeArgument { found: String, span: Span },
+    NonDtypeArgument {
+        callee: &'static str,
+        position: &'static str,
+        found: String,
+        span: Span,
+    },
     /// spec/04 §5.6, fenced: a literal bound at a dtype binder by a
     /// declaration or a dtype argument.
     #[error(
@@ -966,11 +978,21 @@ fn reject_reserved_expression_binders(expr: &Expr) -> Result<(), DesugarError> {
     reserved_in_expr(expr)
 }
 
-fn reserved(name: &str, binder: &'static str, span: Span) -> Result<(), DesugarError> {
+/// spec/04 §8.6: the intrinsic names no binder may bind.
+const RESERVED_INTRINSIC_NAMES: [&str; 2] = ["to_tensor", "mmap_tensor"];
+
+fn reserved_reason(name: &str) -> &'static str {
     if name == "to_tensor" {
-        Err(DesugarError::ReservedName { binder, span })
+        "it states literal dtypes (§5.6) and always names the intrinsic conversion"
     } else {
-        Ok(())
+        "its fourth argument is a dtype (spec/02-surf-syntax.md §P9) and it always names the intrinsic mapped tensor read"
+    }
+}
+
+fn reserved(name: &str, binder: &'static str, span: Span) -> Result<(), DesugarError> {
+    match RESERVED_INTRINSIC_NAMES.iter().find(|reserved| **reserved == name) {
+        Some(name) => Err(DesugarError::ReservedName { name, binder, span }),
+        None => Ok(()),
     }
 }
 
@@ -1147,9 +1169,16 @@ impl<'a> SiteVisitor<'a> for LiteralSiteValidator {
         };
     }
 
-    fn dtype_argument(&mut self, dtype: &'a Expr, stated: Option<StatedDtype<'a>>) {
+    fn dtype_argument(
+        &mut self,
+        call: literal_sites::DtypeCall,
+        dtype: &'a Expr,
+        stated: Option<StatedDtype<'a>>,
+    ) {
         if self.first.is_none() && stated.is_none() {
             self.first = Some(DesugarError::NonDtypeArgument {
+                callee: call.callee(),
+                position: call.position(),
                 found: crate::format::format_expression(dtype),
                 span: expr_span(dtype),
             });
@@ -3589,6 +3618,24 @@ impl<'a> DesugarCtx<'a> {
                     dtype_node,
                 ],
             );
+        }
+        // [05-OP-79]: `mmap_tensor(m, o, n, p)` keeps `p` as a fifth `app`
+        // child (spec/03 §6.4). A `p` that names no dtype was reported by
+        // literal-site validation before desugaring.
+        if let Some(call) = literal_sites::mmap_tensor_call(func, args)
+            && let Some(stated) = literal_sites::dtype_argument(call.dtype, &self.is_type_binder())
+        {
+            let mut children = vec![self.desugar_expr_with_scope(func, local_fn_params)];
+            children.extend(
+                call.arguments
+                    .iter()
+                    .map(|arg| self.desugar_expr_with_scope(arg, local_fn_params)),
+            );
+            children.push(match stated {
+                StatedDtype::Primitive(primitive) => node(DeepTag::TPrim, vec![sym(primitive)]),
+                StatedDtype::Binder(binder) => node(DeepTag::TVar, vec![sym(binder)]),
+            });
+            return node(DeepTag::App, children);
         }
         // A callee's declared parameter type never makes a bracket-literal
         // argument a tensor (spec §5.6): the argument desugars as written.

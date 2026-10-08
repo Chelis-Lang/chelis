@@ -224,6 +224,10 @@ fn infer_app_inner(
         return report(errors, untyped_to_tensor_element_error(element));
     }
 
+    if matches!(func_name.as_deref(), Some("mmap_tensor")) {
+        return infer_mmap_tensor_app(expr, node, env, vg, subst, adt_reg, errors, product);
+    }
+
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }

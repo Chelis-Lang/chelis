@@ -938,6 +938,7 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `cast_saturate(e, i8)` | `(cast {} e' (t-prim {} i8) saturate)` | Named saturating cast to a signed integer ([05-OP-23]) |
 | `cast_wrap(e, i8)` | `(cast {} e' (t-prim {} i8) wrap)` | Named wrapping signed-integer cast ([05-OP-24]) |
 | `to_tensor(e, f64)` | `(app {} (var {} to_tensor) e' (t-prim {} f64))` | Optional second argument is a dtype; `to_tensor` is reserved |
+| `mmap_tensor(m, o, n, f32)` | `(app {} (var {} mmap_tensor) m' o' n' (t-prim {} f32))` | Required fourth argument is a dtype; `mmap_tensor` is reserved |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
@@ -974,7 +975,7 @@ their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
-The second argument of `cast`, and the optional second argument of a call to the reserved name `to_tensor` (§P10b), is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast, and the value of a final `accumulator=<dtype>` argument (spec/04 §5.7), are likewise dtypes. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
+The second argument of `cast`, the optional second argument of a call to the reserved name `to_tensor` (§P10b), and the fourth argument of a call to the reserved name `mmap_tensor` (spec/05 [05-OP-79]) is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast, and the value of a final `accumulator=<dtype>` argument (spec/04 §5.7), are likewise dtypes. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
 
 ### P10: Numeric Literals
 
@@ -1550,7 +1551,9 @@ AppExpr       <- AtomExpr CallArgs?
 # A call whose callee is the reserved identifier 'to_tensor' parses its
 # arguments as ordinary CallArgs; desugaring requires an optional second
 # argument to be an identifier naming a dtype, a primitive or a
-# dtype-bounded binder in scope, never a value (§P9, §P10b).
+# dtype-bounded binder in scope, never a value (§P9, §P10b). A call whose
+# callee is the reserved identifier 'mmap_tensor' does the same with its
+# fourth argument (§P9).
 
 # ── Atoms ──
 

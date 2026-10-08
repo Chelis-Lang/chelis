@@ -8493,17 +8493,113 @@ pub unsafe extern "C" fn chelis_mmap_read(
         ownership_ledger::Kind::MappedFile,
         "chelis_mmap_read",
     );
-    if offset < 0 || len < 0 {
-        runtime_fail!("mmap_read requires non-negative offsets");
-    }
     let mapped = &*mapped;
-    let offset = offset as usize;
-    let len = len as usize;
-    if offset > mapped.mmap.len() {
-        runtime_fail!("mmap_read offset out of bounds");
+    let range = chelis_abi::mapped::mapped_range("mmap_read", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    bytes_to_value_list(&mapped.mmap[range])
+}
+
+/// `mmap_tensor` in compiled host code ([05-OP-79]): a fresh rank-one
+/// tensor whose element bits are the little-endian payload's bits. The range
+/// and `bool` checks are the evaluator's, through `chelis_abi::mapped`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_tensor(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    count: i64,
+    dtype: chelis_dtype,
+) -> *mut chelis_tensor {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_tensor",
+    );
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_mmap_tensor dtype"),
+        "chelis_mmap_tensor dtype",
+    );
+    let mapped = &*mapped;
+    let width = dtype.byte_width();
+    let range = chelis_abi::mapped::mapped_tensor_range(offset, count, width, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    let payload = &mapped.mmap[range];
+    if dtype == RuntimeDType::Bool {
+        chelis_abi::mapped::check_bool_payload(payload)
+            .unwrap_or_else(|message| runtime_fail!("{message}"));
     }
-    let end = offset.saturating_add(len).min(mapped.mmap.len());
-    bytes_to_value_list(&mapped.mmap[offset..end])
+    let out = chelis_alloc(1, &count, dtype.id() as chelis_dtype);
+    if payload.is_empty() {
+        return out;
+    }
+    let data = tensor_data(out);
+    // Storage is native-endian at the dtype's width, so each element is
+    // decoded from its little-endian bytes rather than copied wholesale.
+    match width {
+        1 => std::ptr::copy_nonoverlapping(payload.as_ptr(), data, payload.len()),
+        2 => {
+            for (index, chunk) in payload.chunks_exact(2).enumerate() {
+                let value = u16::from_le_bytes([chunk[0], chunk[1]]);
+                data.cast::<u16>().add(index).write_unaligned(value);
+            }
+        }
+        4 => {
+            for (index, chunk) in payload.chunks_exact(4).enumerate() {
+                let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                data.cast::<u32>().add(index).write_unaligned(value);
+            }
+        }
+        _ => {
+            for (index, chunk) in payload.chunks_exact(8).enumerate() {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(chunk);
+                data.cast::<u64>()
+                    .add(index)
+                    .write_unaligned(u64::from_le_bytes(bytes));
+            }
+        }
+    }
+    out
+}
+
+/// `mmap_text` in compiled host code ([05-OP-80]): the range's exact UTF-8
+/// text, decoded through the evaluator's definition.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_text(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    len: i64,
+) -> chelis_string {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_text",
+    );
+    let mapped = &*mapped;
+    let range = chelis_abi::mapped::mapped_range("mmap_text", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    let start = range.start;
+    let text = chelis_abi::mapped::mapped_text(start, &mapped.mmap[range])
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    new_runtime_string(text)
+}
+
+/// `mmap_sha256` in compiled host code ([05-OP-80]): the range's SHA-256 as
+/// 64 lowercase hexadecimal characters, through the evaluator's definition.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_sha256(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    len: i64,
+) -> chelis_string {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_sha256",
+    );
+    let mapped = &*mapped;
+    let range = chelis_abi::mapped::mapped_range("mmap_sha256", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    new_runtime_string(chelis_abi::mapped::sha256_hex(&mapped.mmap[range]))
 }
 
 #[no_mangle]

@@ -3607,18 +3607,20 @@ Scope:
 - Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
   part of `BUILTIN_NAMES`; a `def cast` is already a parse error.
 
-**Reserved intrinsic names.** `to_tensor` is reserved. No binder in any scope
-may bind it: not a top-level or package `def`, `sig`, `macro`, or binding,
+**Reserved intrinsic names.** `to_tensor` and `mmap_tensor` are reserved. No
+binder in any scope may bind either: not a top-level or package `def`, `sig`, `macro`, or binding,
 not a function, lambda, or macro parameter, not a block binding or pattern
 binder, and not an imported name. The reef-package exemption above does not
-apply to a reserved name. A program that binds it is rejected as
+apply to a reserved name. A program that binds one is rejected as
 `ReservedName` at every ingress, Surf and Deep, before any lane runs, and the
 rejection is semantic, not a style rule. `cast`, `cast_trunc`,
 `cast_saturate`, and `cast_wrap` are keywords (`spec/02-surf-syntax.md` §1)
 and cannot be bound at all. `cast` and `to_tensor` state literal dtypes
 (§5.6), which are decided from the source text where the literal is written;
 a binding that rebound `to_tensor` would change what a literal means at a
-distance.
+distance. `mmap_tensor`'s fourth argument is a dtype position
+(`spec/02-surf-syntax.md` §P9) decided from the source text the same way, so
+a binding that rebound it would turn a dtype into a value at a distance.
 
 ---
 

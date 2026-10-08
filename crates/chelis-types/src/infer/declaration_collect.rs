@@ -701,7 +701,7 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
 }
 
 /// spec/04-type-system.md §8.6: the intrinsic names no binder may bind.
-pub(super) const RESERVED_INTRINSIC_NAMES: &[&str] = &["to_tensor"];
+pub(super) const RESERVED_INTRINSIC_NAMES: &[&str] = &["to_tensor", "mmap_tensor"];
 
 /// spec/04-type-system.md §8.6 at Deep ingress: a binder of a reserved
 /// intrinsic name in any scope (a `def` or `defsig`, an import, a function
@@ -711,12 +711,17 @@ pub(super) fn report_reserved_binders(items: &[&deep::Expr], errors: &mut Diagno
         if !RESERVED_INTRINSIC_NAMES.contains(&name) {
             return;
         }
+        let reason = if name == "to_tensor" {
+            "it states literal dtypes (\u{00a7}5.6) and always names the intrinsic conversion"
+        } else {
+            "its fourth argument is a dtype (spec/02-surf-syntax.md \u{00a7}P9) and it always \
+             names the intrinsic mapped tensor read"
+        };
         let error = CheckError::new(
             CheckErrorKind::ReservedName,
             format!(
                 "`{name}` is reserved and cannot be bound (spec/04-type-system.md \u{00a7}8.6): \
-                 it states literal dtypes (\u{00a7}5.6) and always names the intrinsic \
-                 conversion; rename this {binder}"
+                 {reason}; rename this {binder}"
             ),
             vec![],
         );
