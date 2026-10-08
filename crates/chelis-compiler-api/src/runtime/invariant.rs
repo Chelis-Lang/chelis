@@ -753,6 +753,17 @@ pub(crate) fn revalidate_adt_value(
     adt_fields: &UnordMap<String, Vec<String>>,
     module_constants: &UnordMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        revalidate_adt_value_inner(value, invariants, adt_fields, module_constants)
+    })
+}
+
+fn revalidate_adt_value_inner(
+    value: &RuntimeValue,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    module_constants: &UnordMap<String, Expr>,
+) -> Result<(), InvariantViolation> {
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         // Non-ADT values carry no opaque invariant; structural decode has
         // already vetted their shape. Recurse into containers so an opaque
