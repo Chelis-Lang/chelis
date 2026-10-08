@@ -105,6 +105,25 @@ structure State where
   installed : Bool
   cells : Nat → Int
 
+/-- A true bound needs process installation. A false bound leaves installation unknown. -/
+
+def InstallationLowerBound (known actual : Bool) : Prop :=
+  known = true → actual = true
+
+/-- Either process state can have a false installation bound. -/
+
+theorem installationLowerBound_false (actual : Bool) :
+    InstallationLowerBound false actual := by
+  simp [InstallationLowerBound]
+
+/-- A true bound determines process installation. -/
+
+theorem installationLowerBound_exact_of_true (known actual : Bool)
+    (h : InstallationLowerBound known actual) (hk : known = true) :
+    actual = known := by
+  rw [hk]
+  exact h hk
+
 /-- Update the flags of thread `t`. -/
 def State.modFlags (s : State) (t : ThreadId) (f : Flags → Flags) : State :=
   { s with flags := fun u => if u = t then f (s.flags t) else s.flags u }
@@ -1125,13 +1144,68 @@ theorem replay_native_observations :
     replay old nativeSegments s0 = nativeObservations := by
   exact ⟨rfl, rfl⟩
 
-/-- Hook visibility depends on installation and the flags of the current thread. -/
+/-- This state records exact process installation, not a thread's installation lower bound. -/
+
 theorem observed_hook_visibility (t : ThreadId) (s : State) (p : Payload) :
     observed [hookEv t s p] =
 
       if s.installed && ((s.flags t).unrep || (s.flags t).out)
       then [] else [.hook p] :=
   rfl
+
+/-- The observation relation retains both process states when the installation bound is false. -/
+
+def HookObservationRel (known : Bool) (fl : Flags) (p : Payload)
+    (obs : List Observed) : Prop :=
+
+  ∃ installed, InstallationLowerBound known installed ∧
+    obs = if installed && (fl.unrep || fl.out) then [] else [.hook p]
+
+/-- Exact process state supplies an observation that satisfies its installation lower bound. -/
+
+theorem observed_hook_lower_bound (t : ThreadId) (s : State) (p : Payload) (known : Bool)
+    (h : InstallationLowerBound known s.installed) :
+
+    HookObservationRel known (s.flags t) p (observed [hookEv t s p]) :=
+  ⟨s.installed, h, observed_hook_visibility t s p⟩
+
+/-- A true bound gives exact visibility from the current thread's suppression flags. -/
+
+theorem hookObservationRel_true (fl : Flags) (p : Payload) (obs : List Observed) :
+
+    HookObservationRel true fl p obs ↔
+      obs = if fl.unrep || fl.out then [] else [.hook p] := by
+
+  constructor
+  · rintro ⟨installed, hbound, hobs⟩
+    have hi : installed = true := hbound rfl
+    simpa [hi] using hobs
+
+  · intro hobs
+    exact ⟨true, fun _ => rfl, by simpa using hobs⟩
+
+/-- A false bound allows visible output. A suppression flag also allows a suppressed observation. -/
+
+theorem hookObservationRel_false (fl : Flags) (p : Payload) (obs : List Observed) :
+
+    HookObservationRel false fl p obs ↔
+      obs = [.hook p] ∨ ((fl.unrep || fl.out) = true ∧ obs = []) := by
+
+  constructor
+  · rintro ⟨installed, _, hobs⟩
+    cases installed with
+    | false => exact Or.inl (by simpa using hobs)
+
+    | true =>
+        cases hsupp : fl.unrep || fl.out with
+        | false => exact Or.inl (by simpa [hsupp] using hobs)
+
+        | true => exact Or.inr ⟨rfl, by simpa [hsupp] using hobs⟩
+
+  · rintro (hobs | ⟨hsupp, hobs⟩)
+    · exact ⟨false, installationLowerBound_false false, by simpa using hobs⟩
+
+    · exact ⟨true, installationLowerBound_false true, by simpa [hsupp] using hobs⟩
 
 /-- This replay includes a fatal raise before the first catch of a fresh process. -/
 theorem replay_hook_installation :

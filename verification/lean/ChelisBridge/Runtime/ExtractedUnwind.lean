@@ -18,10 +18,18 @@ language to `LowerDiagnostic` values and back.
 `Frag` is the fragment that the extracted code covers. It excludes native panics and aborts, a
 finalizer panic, session cells and other guards. For every program in `Frag`,
 `run_new` shows that `run c p` returns `.ok`. Its speculation and quiet-output flags, hook
-installation, hook entries, work list and result are those of `new`. The start state of `new` is
-any lift of the start runtime. With `unwind_equivalence` this gives the old native semantics on
-`Frag` from the extracted code. There is one lemma for each constructor (`run_pure` ...
-`run_scope_speculate`).
+installation, hook entries, work list and result are those of `new`.
+The start state of `new` is any exact model lift of the start runtime.
+With `unwind_equivalence`, this also relates the old and new language models.
+There is one lemma for each constructor (`run_pure` through `run_scope_speculate`).
+
+
+These are fragment and primitive relation laws, not whole-core caller correspondence.
+`Lifts` needs exact equality of the installation flags.
+`LowerBoundLifts` retains the process installation uncertainty of the native model.
+Native visibility uses `HookObservationRel`, or an exact lift when the lower bound is true.
+RA-tls covers thread state only. Whole-core caller proofs still need final extraction.
+
 -/
 
 open Aeneas.Std
@@ -122,9 +130,32 @@ def workList : List Ev → Works
   | nil => rfl
   | cons e a ih => cases e <;> simp [workList, ih]
 
-/-- A runtime and a state of the language agree on thread `t`. -/
+/-- Exact agreement between two model states. RA-tls does not supply the installation equality. -/
+
 abbrev Lifts (t : ThreadId) (rt : RT) (s : State) : Prop :=
   s.flags t = ⟨rt.u, rt.o⟩ ∧ s.installed = rt.installed
+
+/-- Thread flags agree. The runtime field gives only an installation lower bound. -/
+
+abbrev LowerBoundLifts (t : ThreadId) (rt : RT) (s : State) : Prop :=
+  s.flags t = ⟨rt.u, rt.o⟩ ∧ InstallationLowerBound rt.installed s.installed
+
+/-- A true bound recovers exact installation without a false-bound absence assumption. -/
+
+theorem lowerBoundLifts_exact_of_installed (t : ThreadId) (rt : RT) (s : State)
+    (hs : LowerBoundLifts t rt s) (hi : rt.installed = true) :
+
+    Lifts t rt s :=
+  ⟨hs.1, installationLowerBound_exact_of_true rt.installed s.installed hs.2 hi⟩
+
+/-- Hook visibility retains the process states that the installation bound allows. -/
+
+theorem lowerBoundLifts_hook_visibility (t : ThreadId) (rt : RT) (s : State)
+    (p : Payload) (hs : LowerBoundLifts t rt s) :
+
+    HookObservationRel rt.installed ⟨rt.u, rt.o⟩ p (observed [hookEv t s p]) := by
+  rw [← hs.1]
+  exact observed_hook_lower_bound t s p rt.installed hs.2
 
 /-- The result of `run` corresponds to the result of `new`. -/
 def Corr (c : Codec) : Out → XRes → Prop

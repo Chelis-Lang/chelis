@@ -454,6 +454,15 @@ The profile primitive proofs also compile against the frozen library.
 `.work/diag/resume38-main/profile38-frozen.log` records `EXIT 0`.
 The clock count bound remains an explicit premise.
 
+The installation field is a process-hook lower bound, not the process flag.
+A false value leaves native visibility unknown when a suppression flag is set.
+`HookObservationRel` preserves both outcomes. A true bound proves exact installation.
+RA-tls covers thread state only.
+`.work/diag/resume38-main/native38-o5-smoke.log` records these checks and the unchanged three-axiom bound.
+
+These checks use the frozen native model.
+Full extracted-module validation still needs the new fragment.
+
 Acceptance selects layout scope and feature chain separately.
 The fragment audit cannot satisfy whole-core acceptance.
 The default chain keeps 27 applicable public entries.

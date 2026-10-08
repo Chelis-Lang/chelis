@@ -215,7 +215,7 @@
       "item": "chelis_ir::lowering_runtime::LoweringRuntime",
       "kind": "shell_type",
       "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime",
-      "model": "Structure alpha_t of the native state of the current thread (RA-tls): flags u and o; installed, a lower bound of the process flag that the Chelis panic hook is installed (false does not mean not installed); the hook trace of (u, o, installed) per raise (the process hook suppresses a raise iff installed and (u or o)); the summary-probe count builds, nextPreflightFrame, the host inference variable oracle hostVar with clock hostVarsTaken, the environment oracle profileEnv with clock profileEnvReads, and the clock count profileMarks.",
+      "model": "The LoweringRuntime value records u, o, hook, builds, nextPreflightFrame, hostVar, hostVarsTaken, profileEnv, profileEnvReads, and profileMarks. The installed field is a lower bound of process hook installation. A false bound leaves installation unknown. Native visibility uses exact process installation or HookObservationRel. RA-tls covers thread state only.",
       "evidence": [
         "E-lr-observations",
         "E-lr-not-send",

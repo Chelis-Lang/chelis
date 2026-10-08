@@ -492,6 +492,20 @@ def acceptedCommon : List Name := [
 
   ``ChelisBridge.Runtime.Unwind.observed_hook_visibility,
 
+  ``ChelisBridge.Runtime.Unwind.installationLowerBound_false,
+
+  ``ChelisBridge.Runtime.Unwind.installationLowerBound_exact_of_true,
+
+  ``ChelisBridge.Runtime.Unwind.observed_hook_lower_bound,
+
+  ``ChelisBridge.Runtime.Unwind.hookObservationRel_true,
+
+  ``ChelisBridge.Runtime.Unwind.hookObservationRel_false,
+
+  ``ChelisBridge.Runtime.ExtractedUnwind.lowerBoundLifts_exact_of_installed,
+
+  ``ChelisBridge.Runtime.ExtractedUnwind.lowerBoundLifts_hook_visibility,
+
   ``ChelisBridge.Runtime.Unwind.replay_hook_installation,
 
   ``ChelisBridge.Runtime.IdsLink.matched_host_var_draws_distinct,
