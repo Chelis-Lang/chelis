@@ -221,10 +221,10 @@ def scan_object_suffix(text: string, state: Option[(i64, List[(string, Json)], b
   match state with {
     | None => None
     | Some((cursor, found, done)) => if or(done, gte(cursor, end)) then Some((cursor, found, done)) else if lte(sub(end, start), 32i64) then fold(fn (acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> object_scan_step(text, acc, position), Some((cursor, found, done)), range(if gt(cursor, start) then cursor else start, end)) else {
-      middle = add(start, floor_div(sub(end, start), 2i64))
-      left = scan_object_suffix(text, state, start, middle)
-      scan_object_suffix(text, left, middle, end)
-    }
+    middle = add(start, floor_div(sub(end, start), 2i64))
+    left = scan_object_suffix(text, state, start, middle)
+    scan_object_suffix(text, left, middle, end)
+  }
   }
 def object_scan_step(text: string, acc: Option[(i64, List[(string, Json)], bool)], position: i64) -> Option[(i64, List[(string, Json)], bool)] =
   match acc with {
@@ -276,10 +276,10 @@ def scan_array_suffix(text: string, state: Option[(i64, List[Json], bool)], star
   match state with {
     | None => None
     | Some((cursor, found, done)) => if or(done, gte(cursor, end)) then Some((cursor, found, done)) else if lte(sub(end, start), 32i64) then fold(fn (acc: Option[(i64, List[Json], bool)], position: i64) -> array_scan_step(text, acc, position), Some((cursor, found, done)), range(if gt(cursor, start) then cursor else start, end)) else {
-      middle = add(start, floor_div(sub(end, start), 2i64))
-      left = scan_array_suffix(text, state, start, middle)
-      scan_array_suffix(text, left, middle, end)
-    }
+    middle = add(start, floor_div(sub(end, start), 2i64))
+    left = scan_array_suffix(text, state, start, middle)
+    scan_array_suffix(text, left, middle, end)
+  }
   }
 def array_scan_step(text: string, acc: Option[(i64, List[Json], bool)], position: i64) -> Option[(i64, List[Json], bool)] =
   match acc with {
@@ -314,10 +314,10 @@ def scan_string_suffix(text: string, state: Option[(string, i64, bool)], start: 
   match state with {
     | None => None
     | Some((found, cursor, done)) => if or(done, gte(cursor, end)) then Some((found, cursor, done)) else if lte(sub(end, start), 32i64) then fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((found, cursor, done)), range(if gt(cursor, start) then cursor else start, end)) else {
-      middle = add(start, floor_div(sub(end, start), 2i64))
-      left = scan_string_suffix(text, state, start, middle)
-      scan_string_suffix(text, left, middle, end)
-    }
+    middle = add(start, floor_div(sub(end, start), 2i64))
+    left = scan_string_suffix(text, state, start, middle)
+    scan_string_suffix(text, left, middle, end)
+  }
   }
 def string_scan_step(text: string, step: Option[(string, i64, bool)], position: i64) -> Option[(string, i64, bool)] =
   match step with {
