@@ -1,0 +1,1 @@
+Surf validation handles 5,000 nested comments and 3,000 nested parentheses on a 2 MiB embedding or Tide worker stack, returning parse errors for rejected cases. Deeper parser nesting remains tracked by [#3234](https://github.com/Chelis-Lang/chelis/issues/3234).

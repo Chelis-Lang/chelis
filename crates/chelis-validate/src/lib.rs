@@ -26,12 +26,25 @@ pub enum ValidationError {
     Failed(String),
 }
 
+// The PEG only supplies a second opinion after the compiler parser rejects.
+// Bound its recursive work by source size; accepted sources have no such limit.
+const SURF_PEG_CLASSIFICATION_MAX_BYTES: usize = 32 * 1024;
+
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
+    // The compiler parser and the optional PEG comparison both recurse on
+    // nested expressions. Embedded callers and Tide can have a 2 MiB worker
+    // stack, so keep the whole validation and temporary-tree teardown on the
+    // same grown segment.
+    chelis_types::run_on_grown_stack(|| validate_surf_on_grown_stack(source))
+}
+
+fn validate_surf_on_grown_stack(source: &str) -> Result<(), ValidationError> {
     // The hand-written compiler parser decides acceptance. The independent
-    // PEG classifies a parser rejection when the source is lexically valid
+    // PEG classifies a bounded parser rejection when the source is lexically valid
     // (spec/design/phase1f_executable_grammar.md):
     //   * parser accepts -> accept without running the auxiliary grammar
     //   * lexer rejects -> report its lexical error without running the grammar
+    //   * above classification budget -> report the compiler's reason
     //   * grammar accepts + parser rejects -> REJECT with the compiler's
     //     reason (chelis#706: the grammar admits bare-statement
     //     juxtaposition the parser rejects). Reporting success here would
@@ -54,6 +67,15 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
         }
         Err(err) => err,
     };
+    if source.len() > SURF_PEG_CLASSIFICATION_MAX_BYTES {
+        return Err(ValidationError::Failed(format!(
+            "PEG classification skipped for rejected source above the {}-byte budget; \
+             compiler parse failed: {parse_err}",
+            SURF_PEG_CLASSIFICATION_MAX_BYTES
+        )));
+    }
+
+    // Pest's parse and temporary Pairs teardown stay on this same segment.
     match surf::Grammar::parse(surf::Rule::program, source) {
         Ok(_) => Err(ValidationError::Failed(format!(
             "the Surf PEG grammar accepts this program but the compiler parser rejects it \
