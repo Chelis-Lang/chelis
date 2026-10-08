@@ -1,0 +1,1 @@
+`chelis lint --check` handles deeply nested Surf expressions without a stack-overflow abort. Invalid deep input still receives a lint violation. See [#409](https://github.com/Chelis-Lang/chelis/issues/409).

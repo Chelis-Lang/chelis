@@ -1223,7 +1223,9 @@ fn cli_main() {
             list,
             rule,
             rules,
-        }) => match cmd_lint(paths, check, fix, list, rule.as_deref(), rules.as_deref()) {
+        }) => match chelis_types::run_on_grown_stack(|| {
+            cmd_lint(paths, check, fix, list, rule.as_deref(), rules.as_deref())
+        }) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
