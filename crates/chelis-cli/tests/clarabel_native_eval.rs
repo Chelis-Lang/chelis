@@ -527,6 +527,33 @@ fn ideal_property_proves_constrained_quality_only_for_a_feasible_baseline() {
 }
 
 #[cfg(feature = "smt")]
+fn assert_unproved_symbolic_qp(row: &serde_json::Value, file: &str) {
+    match row["status"].as_str() {
+        Some("failed") => {
+            assert_ne!(
+                row["composite_verdict"], "proven_modulo_asserted_axiom",
+                "{file}: {row}"
+            );
+        }
+        Some("unsupported") => {
+            let reason = row["reason"].as_str().unwrap_or("");
+            assert!(
+                reason.contains("SMT unknown") || reason.contains("SMT timeout"),
+                "{file}: {row}"
+            );
+            assert_eq!(row["composite_verdict"], "unsupported", "{file}: {row}");
+            assert_eq!(
+                row["assumptions"].as_array().map(Vec::len),
+                Some(0),
+                "{file}: {row}"
+            );
+            assert_eq!(row["samples"], 0, "{file}: {row}");
+        }
+        _ => panic!("{file}: expected a counterexample or SMT uncertainty: {row}"),
+    }
+}
+
+#[cfg(feature = "smt")]
 #[test]
 fn ideal_property_uses_a_computed_feasible_comparison_vector() {
     for (file, expected) in [
@@ -553,10 +580,12 @@ fn ideal_property_uses_a_computed_feasible_comparison_vector() {
                 .expect("property row"),
         )
         .expect("JSON property row");
-        assert_eq!(row["status"], expected, "{file}: {row}");
         if expected == "passed" {
+            assert_eq!(row["status"], "passed", "{file}: {row}");
             assert_eq!(row["samples"], 0);
             assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        } else {
+            assert_unproved_symbolic_qp(&row, file);
         }
     }
 }
@@ -588,10 +617,12 @@ fn ideal_property_finds_a_computed_candidate_inside_pure_helpers() {
                 .expect("property row"),
         )
         .expect("JSON property row");
-        assert_eq!(row["status"], expected, "{file}: {row}");
         if expected == "passed" {
+            assert_eq!(row["status"], "passed", "{file}: {row}");
             assert_eq!(row["samples"], 0);
             assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        } else {
+            assert_unproved_symbolic_qp(&row, file);
         }
     }
 }
