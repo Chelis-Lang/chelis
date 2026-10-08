@@ -453,6 +453,23 @@ without leaked definitions; cancellation during a run and isolation across threa
 unchanged panic-hook/finalizer order and first stack-bail receipt. Existing native
 checks are the baseline, not permission to erase runtime observations.
 
+The round-38 unwind oracle and Lean replay agree on 12 segments.
+These segments cover nested handles, scope cleanup, thread isolation, and three payload conversions.
+The replay fixture uses a token-region drift guard before compilation.
+It does not establish a general relation for arbitrary native unwinds or aborts.
+
+The proof package selects `scope=fragment` or `scope=whole-core`.
+It selects `chain=default` or `chain=lowering-trace` separately.
+The fragment scope excludes whole-core checker modules and caller obligations.
+The whole-core scope retains those modules and every applicable public caller.
+The acceptance gate rejects fragment inventories for whole-core evidence.
+Caller theorem types must equal their contract propositions in the kernel.
+
+The allowed axiom list remains `propext`, `Classical.choice`, and `Quot.sound`.
+Profile primitive proofs retain the clock-allocation bound.
+Whole-entry noninterference and wrapper composition still need final whole-core bodies.
+
+
 ## Extraction status
 
 `verification/extract.py` is a reproducible model-generation attempt, not a proof checker.

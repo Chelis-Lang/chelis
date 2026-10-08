@@ -447,6 +447,24 @@ evaluation requires an independently justified exact, nontrapping execution
 relation; the theorem asserts real semantics of the decoded graph, not bitwise
 Rust execution. Runtime shell/unwind and whole-core correspondence remain open.
 
+The round-38 native unwind replay compares 12 Rust and Lean segments.
+The fixture drift guard runs before the native oracle and Lean proof compile.
+`.work/diag/resume38-main/unwind38-replay.log` records agreement and `EXIT 0`.
+The profile primitive proofs also compile against the frozen library.
+`.work/diag/resume38-main/profile38-frozen.log` records `EXIT 0`.
+The clock count bound remains an explicit premise.
+
+Acceptance selects layout scope and feature chain separately.
+The fragment audit cannot satisfy whole-core acceptance.
+The default chain keeps 27 applicable public entries.
+The lowering-trace chain keeps all 32 public entries.
+Each caller theorem needs its exact proposition and extracted inner function.
+The kernel rejects named `True` evidence and general laws without that caller.
+
+These checks do not establish whole-entry profile noninterference or public-wrapper correspondence.
+Those statements need the final whole-core signatures and proof composition.
+
+
 `ChelisBridge.Random.dropout_forward_tensor_f64` relates an accepted
 *production* `ExecutionFrame::dropout` forward call to its scope's draw
 ordinal, the reference `runProtocol` step, and the decoded LaCaDiLE
