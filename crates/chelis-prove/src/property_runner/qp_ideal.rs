@@ -1072,6 +1072,113 @@ impl Scalarization<'_> {
     }
 }
 
+/// Collect concrete comparison terms from the checked goal, including tensor
+/// expressions formed from property parameters. Every emitted optimality
+/// instance is still gated by a separate feasibility proof below.
+fn collect_comparison_vectors(
+    expr: &Expr,
+    lowering: &Scalarization<'_>,
+    dimension: usize,
+    out: &mut Vec<Vec<SmtExpr>>,
+) -> Result<(), String> {
+    if let Some(vector) = lowering.vector(expr)
+        && vector.len() == dimension
+        && !out.contains(&vector)
+    {
+        if out.len() == 64 {
+            return Err(unsupported(
+                "goal uses more than 64 distinct comparison vectors",
+            ));
+        }
+        out.push(vector);
+    }
+    match expr {
+        Expr::Apply(callee, args, _) => {
+            // Use the same parameter binding and depth limit as scalarization:
+            // a scalar helper may hide the vector whose objective the goal
+            // compares, even though the helper's own result is not a vector.
+            if let Some(result) = lowering.call_helper(expr, |nested, body| {
+                Some(collect_comparison_vectors(body, nested, dimension, out))
+            }) {
+                result?;
+            }
+            collect_comparison_vectors(callee, lowering, dimension, out)?;
+            for arg in args {
+                collect_comparison_vectors(arg, lowering, dimension, out)?;
+            }
+        }
+        Expr::Binary(_, left, right, _) => {
+            collect_comparison_vectors(left, lowering, dimension, out)?;
+            collect_comparison_vectors(right, lowering, dimension, out)?;
+        }
+        Expr::Unary(_, inner, _) => {
+            collect_comparison_vectors(inner, lowering, dimension, out)?;
+        }
+        Expr::If(condition, then_branch, else_branch, _) => {
+            for child in [condition, then_branch, else_branch] {
+                collect_comparison_vectors(child, lowering, dimension, out)?;
+            }
+        }
+        Expr::List(items, _) => {
+            for item in items {
+                collect_comparison_vectors(item, lowering, dimension, out)?;
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                collect_comparison_vectors(value, lowering, dimension, out)?;
+            }
+        }
+        Expr::Block(bindings, body, _) => {
+            let mut scalars = lowering.scalars.clone();
+            let mut vectors = lowering.vectors.clone();
+            let mut matrices = lowering.matrices.clone();
+            for binding in bindings {
+                let LetPattern::Var(name, _) = &binding.pattern else {
+                    return Err(unsupported("comparison helper has a non-variable binding"));
+                };
+                let nested = Scalarization {
+                    primal_name: lowering.primal_name,
+                    primal: lowering.primal,
+                    scalars: &scalars,
+                    vectors: &vectors,
+                    matrices: &matrices,
+                    decls: lowering.decls,
+                    depth: lowering.depth,
+                };
+                collect_comparison_vectors(&binding.value, &nested, dimension, out)?;
+                if let Some(value) = nested.vector(&binding.value) {
+                    vectors.insert(name.clone(), value);
+                } else if let Some(value) = nested.matrix(&binding.value) {
+                    matrices.insert(name.clone(), value);
+                } else if let Some(value) = nested.scalar(&binding.value) {
+                    scalars.insert(name.clone(), value);
+                } else {
+                    return Err(unsupported(
+                        "comparison helper binding does not lower to scalar SMT arithmetic",
+                    ));
+                }
+            }
+            collect_comparison_vectors(
+                body,
+                &Scalarization {
+                    primal_name: lowering.primal_name,
+                    primal: lowering.primal,
+                    scalars: &scalars,
+                    vectors: &vectors,
+                    matrices: &matrices,
+                    decls: lowering.decls,
+                    depth: lowering.depth,
+                },
+                dimension,
+                out,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 thread_local! {
     static SOLVE_BINDING: RefCell<Option<chelis_compiler_api::RegisteredClarabelProvider>> = const { RefCell::new(None) };
 }
@@ -1277,8 +1384,21 @@ pub(super) fn prove(
     preconditions.extend(psd_premise.clone());
     variables.extend(x_names.into_iter().map(|name| (name, SmtSort::Real)));
     let symbolic = symbolic_data(&qp);
+    let mut candidates = Vec::new();
+    if let Err(reason) =
+        collect_comparison_vectors(solved_body, &lowering, qp.q.len(), &mut candidates)
+    {
+        return unsupported_outcome(reason);
+    }
+    for condition in &property.preconditions {
+        if let Err(reason) =
+            collect_comparison_vectors(condition, &lowering, qp.q.len(), &mut candidates)
+        {
+            return unsupported_outcome(reason);
+        }
+    }
     let mut comparisons = Vec::new();
-    for candidate in vectors.values().filter(|vector| vector.len() == qp.q.len()) {
+    for candidate in &candidates {
         if qp.b.is_empty() {
             comparisons.push(candidate.clone());
             continue;

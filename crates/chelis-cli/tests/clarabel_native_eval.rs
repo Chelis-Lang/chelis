@@ -528,6 +528,76 @@ fn ideal_property_proves_constrained_quality_only_for_a_feasible_baseline() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn ideal_property_uses_a_computed_feasible_comparison_vector() {
+    for (file, expected) in [
+        ("ideal_symbolic_derived_baseline.ch", "passed"),
+        ("ideal_symbolic_derived_baseline_unproved.ch", "failed"),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove computed baseline property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        assert_eq!(row["status"], expected, "{file}: {row}");
+        if expected == "passed" {
+            assert_eq!(row["samples"], 0);
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn ideal_property_finds_a_computed_candidate_inside_pure_helpers() {
+    for (file, expected) in [
+        ("ideal_symbolic_helper_baseline.ch", "passed"),
+        ("ideal_symbolic_helper_baseline_unproved.ch", "failed"),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove helper-computed baseline property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        assert_eq!(row["status"], expected, "{file}: {row}");
+        if expected == "passed" {
+            assert_eq!(row["samples"], 0);
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn ideal_property_does_not_use_the_solver_axiom_for_a_different_q() {
     let result = Command::cargo_bin("chelis")
         .expect("chelis binary")
