@@ -421,6 +421,235 @@ fn ideal_property_compares_against_a_feasible_baseline() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn ideal_property_proves_symbolic_quality_against_a_runtime_baseline() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_symbolic_quality.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove symbolic quality property");
+    let row: serde_json::Value = serde_json::from_slice(
+        result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("property row"),
+    )
+    .expect("JSON property row");
+    assert_eq!(row["status"], "passed", "{row}");
+    assert_eq!(row["samples"], 0, "{row}");
+    assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn ideal_property_proves_downstream_quality_for_symbolic_gram_qp() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_symbolic_gram_quality.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove symbolic Gram QP property");
+    let row: serde_json::Value = serde_json::from_slice(
+        result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("property row"),
+    )
+    .expect("JSON property row");
+    assert_eq!(row["status"], "passed", "{row}");
+    assert_eq!(row["samples"], 0, "{row}");
+    assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+    assert!(
+        row["qualifiers"]
+            .as_array()
+            .is_some_and(|values| values.contains(&serde_json::json!("real_arithmetic")))
+    );
+    let axiom = row["assumptions"]
+        .as_array()
+        .and_then(|records| {
+            records
+                .iter()
+                .find(|record| record["name"] == "clarabel.qp.ideal_optimality")
+        })
+        .expect("ideal call assumption");
+    assert_eq!(
+        axiom["discharge"]["evidence"]["psd_evidence"],
+        "verified_gram"
+    );
+    assert_eq!(
+        axiom["discharge"]["evidence"]["call_fingerprint_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn ideal_property_proves_constrained_quality_only_for_a_feasible_baseline() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_symbolic_constrained_quality.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove symbolic constrained QP property");
+    let row: serde_json::Value = serde_json::from_slice(
+        result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("property row"),
+    )
+    .expect("JSON property row");
+    assert_eq!(row["status"], "passed", "{row}");
+    assert_eq!(row["samples"], 0, "{row}");
+    assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn ideal_property_does_not_use_the_solver_axiom_for_a_different_q() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_symbolic_wrong_argument.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove changed-q symbolic quality property");
+    let row: serde_json::Value = serde_json::from_slice(
+        result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("property row"),
+    )
+    .expect("JSON property row");
+    assert_eq!(row["status"], "failed", "{row}");
+    assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn symbolic_p_requires_a_call_bound_psd_premise() {
+    for (file, expected) in [
+        ("ideal_symbolic_assumed_psd.ch", "passed"),
+        ("ideal_symbolic_missing_psd.ch", "unsupported"),
+        ("ideal_symbolic_indefinite_psd.ch", "unsupported"),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove symbolic P property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        assert_eq!(row["status"], expected, "{file}: {row}");
+        if expected == "passed" {
+            let assumptions = row["assumptions"].as_array().expect("assumptions");
+            assert!(
+                assumptions
+                    .iter()
+                    .any(|entry| entry["name"] == "clarabel.qp.assume_psd")
+            );
+            assert!(
+                assumptions
+                    .iter()
+                    .any(|entry| entry["name"] == "clarabel.qp.ideal_optimality")
+            );
+            let fingerprints = assumptions
+                .iter()
+                .map(|entry| entry["discharge"]["evidence"]["call_fingerprint_sha256"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(fingerprints.len(), 2);
+            assert_eq!(
+                fingerprints[0], fingerprints[1],
+                "both axioms must bind one call"
+            );
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn symbolic_qp_rejects_unproved_baseline_reversed_claim_and_vacuous_premises() {
+    for file in [
+        "ideal_symbolic_infeasible_baseline.ch",
+        "ideal_symbolic_reversed_quality.ch",
+        "ideal_symbolic_contradictory_where.ch",
+        "ideal_symbolic_unsupported_division.ch",
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove symbolic QP negative case");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        assert!(
+            ["failed", "invalid", "unsupported"].contains(&row["status"].as_str().unwrap_or("")),
+            "{file}: {row}"
+        );
+        assert_ne!(
+            row["composite_verdict"], "proven_modulo_asserted_axiom",
+            "{file}: {row}"
+        );
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn ideal_interior_optimum_is_stationary() {
     let result = Command::cargo_bin("chelis")
         .expect("chelis binary")

@@ -4,8 +4,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use chelis_reef::PreparedReefGraph;
-use chelis_surf::ast::{BinOp, Decl, Expr, Literal, LiteralSuffix, Pattern, TypeExpr, UnaryOp};
+use chelis_surf::ast::{
+    BinOp, Decl, Expr, LetPattern, Literal, LiteralSuffix, Pattern, TypeExpr, UnaryOp,
+};
 use num_rational::BigRational;
+use sha2::{Digest, Sha256};
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, DischargeMethod, DischargeTier, NonVacuityStatus,
@@ -18,17 +21,26 @@ use crate::{discharge::Goal, engine_registry::DischargeRegistry};
 use super::{Property, PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 const CONTRACT: &str = "clarabel.qp.ideal_optimality";
+const PSD_CONTRACT: &str = "clarabel.qp.assume_psd";
 const SOLVED_CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__Solved";
 const ZERO_CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__ZeroCone";
 const NONNEGATIVE_CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__NonnegativeCone";
 const SETTINGS_CTOR: &str = "Pkg__chelis__clarabel__Clarabel__Qp__Settings";
 
 struct Qp {
-    p: Vec<Vec<f64>>,
-    q: Vec<f64>,
-    a: Vec<Vec<f64>>,
-    b: Vec<f64>,
+    p: Vec<Vec<SmtExpr>>,
+    q: Vec<SmtExpr>,
+    a: Vec<Vec<SmtExpr>>,
+    b: Vec<SmtExpr>,
     cones: Vec<Cone>,
+    psd: PsdEvidence,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PsdEvidence {
+    Literal,
+    Gram,
+    Assumed,
 }
 
 enum Cone {
@@ -64,6 +76,35 @@ fn int_literal(expr: &Expr) -> Option<i64> {
         Expr::Lit(Literal::Int(value) | Literal::TypedInt(value, _), _) => Some(*value),
         _ => None,
     }
+}
+
+fn fixed_f64_vector_extent(ty: &TypeExpr) -> Option<usize> {
+    let TypeExpr::Tensor(dims, precision, _) = ty else {
+        return None;
+    };
+    if precision.as_str() != "f64" || dims.len() != 1 {
+        return None;
+    }
+    match dims.first()? {
+        TypeExpr::Named(extent, _) => extent.parse::<usize>().ok(),
+        TypeExpr::DimensionLiteral(extent, _) => extent.to_string().parse::<usize>().ok(),
+        _ => None,
+    }
+}
+
+fn fixed_f64_matrix_shape(ty: &TypeExpr) -> Option<(usize, usize)> {
+    let TypeExpr::Tensor(dims, precision, _) = ty else {
+        return None;
+    };
+    if precision.as_str() != "f64" || dims.len() != 2 {
+        return None;
+    }
+    let dimension = |dim: &TypeExpr| match dim {
+        TypeExpr::Named(extent, _) => extent.parse::<usize>().ok(),
+        TypeExpr::DimensionLiteral(extent, _) => extent.to_string().parse::<usize>().ok(),
+        _ => None,
+    };
+    Some((dimension(&dims[0])?, dimension(&dims[1])?))
 }
 
 fn empty_list_alias(expr: &Expr, decls: &[Decl]) -> bool {
@@ -196,7 +237,12 @@ fn exact_psd(p: &[Vec<f64>]) -> bool {
     true
 }
 
-fn parse_qp(args: &[Expr], decls: &[Decl]) -> Result<Qp, String> {
+fn parse_qp(
+    args: &[Expr],
+    decls: &[Decl],
+    lowering: &Scalarization<'_>,
+    assume_psd: bool,
+) -> Result<Qp, String> {
     let [p, q, a, b, cones, settings] = args else {
         return Err(unsupported(
             "solve call must carry P, q, A, b, cones, settings",
@@ -226,24 +272,156 @@ fn parse_qp(args: &[Expr], decls: &[Decl]) -> Result<Qp, String> {
             "settings must have a positive iteration limit and finite positive tolerances",
         ));
     }
-    let q = dense_vector(q, decls).ok_or_else(|| unsupported("q must be a fixed f64 vector"))?;
+    let q = dense_vector(q, decls)
+        .map(|values| values.into_iter().map(real).collect())
+        .or_else(|| lowering.vector(q))
+        .ok_or_else(|| unsupported("q must be a fixed-shape f64 vector"))?;
     let n = q.len();
     if n == 0 {
         return Err(unsupported("QP dimension n must be positive"));
     }
-    let p = dense_matrix(p, decls, n).ok_or_else(|| unsupported("P must be a fixed f64 matrix"))?;
-    if p.len() != n || !exact_psd(&p) {
+    let (p, psd) = if let Some(literal) = dense_matrix(p, decls, n) {
+        let psd = if assume_psd {
+            PsdEvidence::Assumed
+        } else if literal.len() == n && exact_psd(&literal) {
+            PsdEvidence::Literal
+        } else {
+            return Err(unsupported(
+                "P must have an exact symmetric positive semidefinite certificate",
+            ));
+        };
+        (
+            literal
+                .into_iter()
+                .map(|row| row.into_iter().map(real).collect())
+                .collect(),
+            psd,
+        )
+    } else if is_gram(p, lowering) {
+        (
+            lowering
+                .matrix(p)
+                .ok_or_else(|| unsupported("Gram P does not lower to a fixed matrix"))?,
+            if assume_psd {
+                PsdEvidence::Assumed
+            } else {
+                PsdEvidence::Gram
+            },
+        )
+    } else if assume_psd {
+        (
+            lowering
+                .matrix(p)
+                .ok_or_else(|| unsupported("P must lower to a fixed matrix"))?,
+            PsdEvidence::Assumed,
+        )
+    } else {
         return Err(unsupported(
-            "P must have an exact symmetric positive semidefinite certificate",
+            "P requires a verified literal or Gram positive semidefinite certificate",
         ));
+    };
+    if p.len() != n || p.iter().any(|row: &Vec<SmtExpr>| row.len() != n) {
+        return Err(unsupported("P dimensions do not match q"));
     }
-    let b = dense_vector(b, decls).ok_or_else(|| unsupported("b must be a fixed f64 vector"))?;
-    let a = dense_matrix(a, decls, n).ok_or_else(|| unsupported("A must be a fixed f64 matrix"))?;
-    if a.len() != b.len() {
-        return Err(unsupported("A and b row extents differ"));
+    let b: Vec<SmtExpr> = dense_vector(b, decls)
+        .map(|values| values.into_iter().map(real).collect())
+        .or_else(|| lowering.vector(b))
+        .ok_or_else(|| unsupported("b must be a fixed-shape f64 vector"))?;
+    let a: Vec<Vec<SmtExpr>> = dense_matrix(a, decls, n)
+        .map(|matrix| {
+            matrix
+                .into_iter()
+                .map(|row| row.into_iter().map(real).collect())
+                .collect()
+        })
+        .or_else(|| lowering.matrix(a))
+        .ok_or_else(|| unsupported("A must be a fixed-shape f64 matrix"))?;
+    if a.len() != b.len() || a.iter().any(|row| row.len() != n) {
+        return Err(unsupported("A and b extents must match q and each other"));
     }
     let cones = parse_cones(cones, b.len())?;
-    Ok(Qp { p, q, a, b, cones })
+    Ok(Qp {
+        p,
+        q,
+        a,
+        b,
+        cones,
+        psd,
+    })
+}
+
+fn is_gram(expr: &Expr, lowering: &Scalarization<'_>) -> bool {
+    let Some([left, right]) = app(expr, "matmul") else {
+        return false;
+    };
+    let Some([source, first_axis, second_axis]) = app(left, "permute") else {
+        return false;
+    };
+    int_literal(first_axis) == Some(1)
+        && int_literal(second_axis) == Some(0)
+        && matches!(
+            (lowering.matrix(source), lowering.matrix(right)),
+            (Some(source), Some(right)) if !source.is_empty() && source == right
+        )
+}
+
+fn determinant(matrix: &[Vec<SmtExpr>]) -> SmtExpr {
+    if matrix.len() == 1 {
+        return matrix[0][0].clone();
+    }
+    sum(matrix[0].iter().enumerate().map(|(column, coefficient)| {
+        let minor = matrix[1..]
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != column)
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let term = arith(ArithOp::Mul, coefficient.clone(), determinant(&minor));
+        if column % 2 == 0 {
+            term
+        } else {
+            arith(ArithOp::Neg, term, real(0.0))
+        }
+    }))
+}
+
+fn psd_conditions(p: &[Vec<SmtExpr>]) -> Result<Vec<SmtExpr>, String> {
+    let n = p.len();
+    if n == 0 || n > 4 || p.iter().any(|row| row.len() != n) {
+        return Err(unsupported(
+            "PSD principal-minor expansion requires a square matrix of dimension 1..4",
+        ));
+    }
+    let mut conditions = Vec::new();
+    for row in 0..n {
+        for column in row + 1..n {
+            conditions.push(cmp(
+                CmpOp::Eq,
+                p[row][column].clone(),
+                p[column][row].clone(),
+            ));
+        }
+    }
+    for mask in 1..(1usize << n) {
+        let indices = (0..n)
+            .filter(|index| mask & (1 << index) != 0)
+            .collect::<Vec<_>>();
+        let minor = indices
+            .iter()
+            .map(|row| {
+                indices
+                    .iter()
+                    .map(|column| p[*row][*column].clone())
+                    .collect()
+            })
+            .collect::<Vec<Vec<SmtExpr>>>();
+        conditions.push(cmp(CmpOp::Ge, determinant(&minor), real(0.0)));
+    }
+    Ok(conditions)
 }
 
 fn substitute(expr: &Expr, values: &BTreeMap<String, Expr>) -> Option<Expr> {
@@ -414,8 +592,8 @@ fn dot(left: &[SmtExpr], right: &[SmtExpr]) -> SmtExpr {
         .map(|(a, b)| arith(ArithOp::Mul, a, b)))
 }
 
-fn matrix_row(row: &[f64], vector: &[SmtExpr]) -> SmtExpr {
-    dot(&row.iter().copied().map(real).collect::<Vec<_>>(), vector)
+fn matrix_row(row: &[SmtExpr], vector: &[SmtExpr]) -> SmtExpr {
+    dot(row, vector)
 }
 
 fn objective(qp: &Qp, vector: &[SmtExpr]) -> SmtExpr {
@@ -426,7 +604,7 @@ fn objective(qp: &Qp, vector: &[SmtExpr]) -> SmtExpr {
             matrix_row(coefficients, vector),
         )
     }));
-    let linear = dot(&qp.q.iter().copied().map(real).collect::<Vec<_>>(), vector);
+    let linear = dot(&qp.q, vector);
     arith(
         ArithOp::Add,
         arith(ArithOp::Mul, real(0.5), quadratic),
@@ -447,7 +625,7 @@ fn feasible(qp: &Qp, vector: &[SmtExpr], strict_nonnegative: bool) -> Vec<SmtExp
             out.push(cmp(
                 comparison,
                 matrix_row(&qp.a[row], vector),
-                real(qp.b[row]),
+                qp.b[row].clone(),
             ));
             row += 1;
         }
@@ -455,14 +633,20 @@ fn feasible(qp: &Qp, vector: &[SmtExpr], strict_nonnegative: bool) -> Vec<SmtExp
     out
 }
 
-fn optimizer_axioms(qp: &Qp, x: &[SmtExpr], fresh: &mut NameSupply) -> Vec<SmtExpr> {
+fn optimizer_axioms(
+    qp: &Qp,
+    x: &[SmtExpr],
+    comparisons: &[Vec<SmtExpr>],
+    fresh: &mut NameSupply,
+    full: bool,
+) -> Vec<SmtExpr> {
     let mut out = feasible(qp, x, false);
     let stationarity = || {
         (0..qp.q.len())
             .map(|row| {
                 cmp(
                     CmpOp::Eq,
-                    arith(ArithOp::Add, matrix_row(&qp.p[row], x), real(qp.q[row])),
+                    arith(ArithOp::Add, matrix_row(&qp.p[row], x), qp.q[row].clone()),
                     real(0.0),
                 )
             })
@@ -472,29 +656,38 @@ fn optimizer_axioms(qp: &Qp, x: &[SmtExpr], fresh: &mut NameSupply) -> Vec<SmtEx
         // For a PSD unconstrained quadratic, stationarity is equivalent to
         // global minimality. This avoids a quantified nonlinear SMT goal.
         out.extend(stationarity());
+        for candidate in comparisons {
+            out.push(cmp(CmpOp::Le, objective(qp, x), objective(qp, candidate)));
+        }
         return out;
     }
-    let y_names = (0..qp.q.len())
-        .map(|index| fresh.fresh(&format!("__clarabel_y_{index}")))
-        .collect::<Vec<_>>();
-    let y = y_names
-        .iter()
-        .cloned()
-        .map(SmtExpr::Var)
-        .collect::<Vec<_>>();
-    out.push(SmtExpr::Forall(
-        y_names
-            .into_iter()
-            .map(|name| (name, SmtSort::Real))
-            .collect(),
-        Box::new(SmtExpr::Bool(
-            BoolOp::Implies,
-            vec![
-                conjunction(feasible(qp, &y, false)),
-                cmp(CmpOp::Le, objective(qp, x), objective(qp, &y)),
-            ],
-        )),
-    ));
+    if full {
+        let y_names = (0..qp.q.len())
+            .map(|index| fresh.fresh(&format!("__clarabel_y_{index}")))
+            .collect::<Vec<_>>();
+        let y = y_names
+            .iter()
+            .cloned()
+            .map(SmtExpr::Var)
+            .collect::<Vec<_>>();
+        out.push(SmtExpr::Forall(
+            y_names
+                .into_iter()
+                .map(|name| (name, SmtSort::Real))
+                .collect(),
+            Box::new(SmtExpr::Bool(
+                BoolOp::Implies,
+                vec![
+                    conjunction(feasible(qp, &y, false)),
+                    cmp(CmpOp::Le, objective(qp, x), objective(qp, &y)),
+                ],
+            )),
+        ));
+    } else {
+        for candidate in comparisons {
+            out.push(cmp(CmpOp::Le, objective(qp, x), objective(qp, candidate)));
+        }
+    }
     if qp
         .cones
         .iter()
@@ -511,22 +704,119 @@ fn optimizer_axioms(qp: &Qp, x: &[SmtExpr], fresh: &mut NameSupply) -> Vec<SmtEx
     out
 }
 
+fn symbolic_data(qp: &Qp) -> bool {
+    qp.p.iter()
+        .flat_map(|row| row.iter())
+        .chain(qp.q.iter())
+        .chain(qp.a.iter().flat_map(|row| row.iter()))
+        .chain(qp.b.iter())
+        .any(|value| !matches!(value, SmtExpr::RealLit(_)))
+}
+
 struct Scalarization<'a> {
     primal_name: &'a str,
     primal: &'a [SmtExpr],
-    parameters: &'a BTreeMap<String, SmtSort>,
+    scalars: &'a BTreeMap<String, SmtExpr>,
+    vectors: &'a BTreeMap<String, Vec<SmtExpr>>,
+    matrices: &'a BTreeMap<String, Vec<Vec<SmtExpr>>>,
+    decls: &'a [Decl],
+    depth: usize,
 }
 
 impl Scalarization<'_> {
+    fn call_helper<T>(
+        &self,
+        expr: &Expr,
+        lower: impl FnOnce(&Scalarization<'_>, &Expr) -> Option<T>,
+    ) -> Option<T> {
+        let Expr::Apply(callee, args, _) = expr else {
+            return None;
+        };
+        let Expr::Var(name, _) = callee.as_ref() else {
+            return None;
+        };
+        if self.depth >= 8 {
+            return None;
+        }
+        let Decl::FunDef {
+            params,
+            effects,
+            body,
+            ..
+        } = self
+            .decls
+            .iter()
+            .find(|decl| matches!(decl, Decl::FunDef { name: found, .. } if found == name))?
+        else {
+            return None;
+        };
+        if params.len() != args.len() || !effects.as_ref().is_none_or(Vec::is_empty) {
+            return None;
+        }
+        let mut scalars = BTreeMap::new();
+        let mut vectors = BTreeMap::new();
+        let mut matrices = BTreeMap::new();
+        for (param, arg) in params.iter().zip(args) {
+            match &param.ty {
+                Some(ty) if fixed_f64_vector_extent(ty).is_some() => {
+                    let vector = self.vector(arg)?;
+                    if vector.len() != fixed_f64_vector_extent(ty)? {
+                        return None;
+                    }
+                    vectors.insert(param.name.clone(), vector);
+                }
+                Some(ty) if fixed_f64_matrix_shape(ty).is_some() => {
+                    let matrix = self.matrix(arg)?;
+                    let shape = fixed_f64_matrix_shape(ty)?;
+                    if matrix.len() != shape.0 || matrix.iter().any(|row| row.len() != shape.1) {
+                        return None;
+                    }
+                    matrices.insert(param.name.clone(), matrix);
+                }
+                Some(TypeExpr::Named(..)) => {
+                    scalars.insert(param.name.clone(), self.scalar(arg)?);
+                }
+                _ => return None,
+            }
+        }
+        lower(
+            &Scalarization {
+                primal_name: "",
+                primal: &[],
+                scalars: &scalars,
+                vectors: &vectors,
+                matrices: &matrices,
+                decls: self.decls,
+                depth: self.depth + 1,
+            },
+            body,
+        )
+    }
+
     fn vector(&self, expr: &Expr) -> Option<Vec<SmtExpr>> {
         if matches!(expr, Expr::Var(name, _) if name == self.primal_name) {
             return Some(self.primal.to_vec());
+        }
+        if let Expr::Var(name, _) = expr
+            && let Some(vector) = self.vectors.get(name)
+        {
+            return Some(vector.clone());
         }
         if let Some([arg]) = app(expr, "to_tensor") {
             let Expr::List(items, _) = arg else {
                 return None;
             };
             return items.iter().map(|item| self.scalar(item)).collect();
+        }
+        if let Some([matrix, shape]) = app(expr, "reshape") {
+            let Expr::List(dims, _) = shape else {
+                return None;
+            };
+            if let [extent] = dims.as_slice() {
+                let rows = self.matrix(matrix)?;
+                let flat = rows.into_iter().flatten().collect::<Vec<_>>();
+                return (int_literal(extent) == i64::try_from(flat.len()).ok()).then_some(flat);
+            }
         }
         for (name, op) in [
             ("add", ArithOp::Add),
@@ -547,12 +837,93 @@ impl Scalarization<'_> {
                 );
             }
         }
-        if let Some([matrix, vector]) = app(expr, "matmul") {
-            let vector = self.vector(vector)?;
-            let matrix = dense_matrix(matrix, &[], vector.len())?;
-            return Some(matrix.iter().map(|row| matrix_row(row, &vector)).collect());
+        self.call_helper(expr, |nested, body| nested.vector(body))
+    }
+
+    fn matrix(&self, expr: &Expr) -> Option<Vec<Vec<SmtExpr>>> {
+        if let Expr::Var(name, _) = expr
+            && let Some(matrix) = self.matrices.get(name)
+        {
+            return Some(matrix.clone());
         }
-        None
+        if let Some([arg]) = app(expr, "to_tensor") {
+            let Expr::List(rows, _) = arg else {
+                return None;
+            };
+            let matrix = rows
+                .iter()
+                .map(|row| {
+                    let Expr::List(items, _) = row else {
+                        return None;
+                    };
+                    items.iter().map(|item| self.scalar(item)).collect()
+                })
+                .collect::<Option<Vec<Vec<_>>>>()?;
+            if matrix.windows(2).any(|rows| rows[0].len() != rows[1].len()) {
+                return None;
+            }
+            return Some(matrix);
+        }
+        if let Some([value, first_axis, second_axis]) = app(expr, "permute") {
+            if int_literal(first_axis) != Some(1) || int_literal(second_axis) != Some(0) {
+                return None;
+            }
+            let matrix = self.matrix(value)?;
+            let width = matrix.first()?.len();
+            if matrix.iter().any(|row| row.len() != width) {
+                return None;
+            }
+            return Some(
+                (0..width)
+                    .map(|column| matrix.iter().map(|row| row[column].clone()).collect())
+                    .collect(),
+            );
+        }
+        if let Some([value, shape]) = app(expr, "reshape") {
+            let Expr::List(dims, _) = shape else {
+                return None;
+            };
+            let [rows, columns] = dims.as_slice() else {
+                return None;
+            };
+            let rows = usize::try_from(int_literal(rows)?).ok()?;
+            let columns = usize::try_from(int_literal(columns)?).ok()?;
+            let values = self.vector(value)?;
+            if rows.checked_mul(columns)? != values.len() || columns == 0 {
+                return None;
+            }
+            return Some(values.chunks(columns).map(<[_]>::to_vec).collect());
+        }
+        if let Some([left, right]) = app(expr, "matmul") {
+            let left = self.matrix(left)?;
+            let right = self.matrix(right)?;
+            let inner = left.first()?.len();
+            let columns = right.first()?.len();
+            if left.iter().any(|row| row.len() != inner)
+                || right.len() != inner
+                || right.iter().any(|row| row.len() != columns)
+            {
+                return None;
+            }
+            return Some(
+                left.iter()
+                    .map(|row| {
+                        (0..columns)
+                            .map(|column| {
+                                sum((0..inner).map(|index| {
+                                    arith(
+                                        ArithOp::Mul,
+                                        row[index].clone(),
+                                        right[index][column].clone(),
+                                    )
+                                }))
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
+        self.call_helper(expr, |nested, body| nested.matrix(body))
     }
 
     fn scalar(&self, expr: &Expr) -> Option<SmtExpr> {
@@ -563,8 +934,42 @@ impl Scalarization<'_> {
             Expr::Lit(Literal::Int(value) | Literal::TypedInt(value, _), _) => {
                 Some(SmtExpr::IntLit(*value))
             }
-            Expr::Var(name, _) if self.parameters.contains_key(name) => {
-                Some(SmtExpr::Var(name.clone()))
+            Expr::Var(name, _) => self.scalars.get(name).cloned(),
+            Expr::Block(bindings, body, _) => {
+                let mut scalars = self.scalars.clone();
+                let mut vectors = self.vectors.clone();
+                let mut matrices = self.matrices.clone();
+                for binding in bindings {
+                    let LetPattern::Var(name, _) = &binding.pattern else {
+                        return None;
+                    };
+                    let nested = Scalarization {
+                        primal_name: self.primal_name,
+                        primal: self.primal,
+                        scalars: &scalars,
+                        vectors: &vectors,
+                        matrices: &matrices,
+                        decls: self.decls,
+                        depth: self.depth,
+                    };
+                    if let Some(value) = nested.vector(&binding.value) {
+                        vectors.insert(name.clone(), value);
+                    } else if let Some(value) = nested.matrix(&binding.value) {
+                        matrices.insert(name.clone(), value);
+                    } else {
+                        scalars.insert(name.clone(), nested.scalar(&binding.value)?);
+                    }
+                }
+                Scalarization {
+                    primal_name: self.primal_name,
+                    primal: self.primal,
+                    scalars: &scalars,
+                    vectors: &vectors,
+                    matrices: &matrices,
+                    decls: self.decls,
+                    depth: self.depth,
+                }
+                .scalar(body)
             }
             Expr::Unary(UnaryOp::Neg, value, _) => {
                 Some(arith(ArithOp::Neg, self.scalar(value)?, SmtExpr::IntLit(0)))
@@ -574,7 +979,6 @@ impl Scalarization<'_> {
                     BinOp::Add => ArithOp::Add,
                     BinOp::Sub => ArithOp::Sub,
                     BinOp::Mul => ArithOp::Mul,
-                    BinOp::Div => ArithOp::Div,
                     _ => return None,
                 };
                 Some(arith(op, self.scalar(left)?, self.scalar(right)?))
@@ -584,7 +988,6 @@ impl Scalarization<'_> {
                     ("add", ArithOp::Add),
                     ("sub", ArithOp::Sub),
                     ("mul", ArithOp::Mul),
-                    ("div", ArithOp::Div),
                 ] {
                     if let Some([left, right]) = app(expr, name) {
                         return Some(arith(op, self.scalar(left)?, self.scalar(right)?));
@@ -599,7 +1002,7 @@ impl Scalarization<'_> {
                 {
                     return Some(sum(self.vector(vector)?));
                 }
-                None
+                self.call_helper(expr, |nested, body| nested.scalar(body))
             }
         }
     }
@@ -712,8 +1115,12 @@ pub(super) fn prove(
             Vec::new(),
         )
     };
-    if super::expanded_contracts(property) != [CONTRACT] {
-        return unsupported_outcome(unsupported("ideal optimality must be the sole contract"));
+    let contracts = super::expanded_contracts(property);
+    let assume_psd = contracts == [PSD_CONTRACT, CONTRACT];
+    if contracts != [CONTRACT] && !assume_psd {
+        return unsupported_outcome(unsupported(
+            "ideal optimality requires only its own contract, optionally paired with assume_psd",
+        ));
     }
     if options.tier != "auto" && options.tier != "smt-only" {
         return unsupported_outcome(unsupported("ideal optimality requires the SMT tier"));
@@ -734,10 +1141,6 @@ pub(super) fn prove(
             Ok(value) => value,
             Err(reason) => return unsupported_outcome(reason),
         };
-    let qp = match parse_qp(&args, decls) {
-        Ok(value) => value,
-        Err(reason) => return unsupported_outcome(reason),
-    };
     let deep = match chelis_surf::desugar::desugar_program(decls) {
         Ok(value) => value,
         Err(error) => {
@@ -747,6 +1150,98 @@ pub(super) fn prove(
         }
     };
     let mut names = NameSupply::for_deep_program(&deep);
+    let mut scalars = BTreeMap::new();
+    let mut vectors = BTreeMap::new();
+    let mut matrices = BTreeMap::new();
+    let mut variables = Vec::new();
+    for param in &property.params {
+        match &param.ty {
+            Some(TypeExpr::Named(name, _)) if name == "f64" || name == "f32" => {
+                let variable = names.fresh(&format!("__clarabel_{}", param.name));
+                scalars.insert(param.name.clone(), SmtExpr::Var(variable.clone()));
+                variables.push((variable, SmtSort::Real));
+            }
+            Some(TypeExpr::Named(name, _)) if name == "i64" || name == "i32" => {
+                let variable = names.fresh(&format!("__clarabel_{}", param.name));
+                scalars.insert(param.name.clone(), SmtExpr::Var(variable.clone()));
+                variables.push((variable, SmtSort::Int));
+            }
+            Some(TypeExpr::Named(name, _)) if name == "bool" => {
+                let variable = names.fresh(&format!("__clarabel_{}", param.name));
+                scalars.insert(param.name.clone(), SmtExpr::Var(variable.clone()));
+                variables.push((variable, SmtSort::Bool));
+            }
+            Some(ty) if fixed_f64_vector_extent(ty).is_some() => {
+                let extent = fixed_f64_vector_extent(ty).expect("guarded fixed extent");
+                if extent > 64 || variables.len() + extent > 64 {
+                    return unsupported_outcome(unsupported(
+                        "symbolic QP scalarization exceeds the 64-scalar resource limit",
+                    ));
+                }
+                let mut components = Vec::with_capacity(extent);
+                for index in 0..extent {
+                    let variable = names.fresh(&format!("__clarabel_{}_{}", param.name, index));
+                    components.push(SmtExpr::Var(variable.clone()));
+                    variables.push((variable, SmtSort::Real));
+                }
+                vectors.insert(param.name.clone(), components);
+            }
+            Some(ty) if fixed_f64_matrix_shape(ty).is_some() => {
+                let (rows, columns) = fixed_f64_matrix_shape(ty).expect("guarded fixed shape");
+                let Some(count) = rows.checked_mul(columns) else {
+                    return unsupported_outcome(unsupported("symbolic matrix extent overflow"));
+                };
+                if count > 64 || variables.len() + count > 64 {
+                    return unsupported_outcome(unsupported(
+                        "symbolic QP scalarization exceeds the 64-scalar resource limit",
+                    ));
+                }
+                let mut matrix = Vec::with_capacity(rows);
+                for row in 0..rows {
+                    let mut values = Vec::with_capacity(columns);
+                    for column in 0..columns {
+                        let variable =
+                            names.fresh(&format!("__clarabel_{}_{}_{}", param.name, row, column));
+                        values.push(SmtExpr::Var(variable.clone()));
+                        variables.push((variable, SmtSort::Real));
+                    }
+                    matrix.push(values);
+                }
+                matrices.insert(param.name.clone(), matrix);
+            }
+            _ => {
+                return unsupported_outcome(unsupported(
+                    "property parameters must be fixed f64 vectors/matrices or scalar numeric/bool values",
+                ));
+            }
+        }
+    }
+    let argument_lowering = Scalarization {
+        primal_name: "",
+        primal: &[],
+        scalars: &scalars,
+        vectors: &vectors,
+        matrices: &matrices,
+        decls,
+        depth: 0,
+    };
+    let qp = match parse_qp(&args, decls, &argument_lowering, assume_psd) {
+        Ok(value) => value,
+        Err(reason) => return unsupported_outcome(reason),
+    };
+    let psd_premise = if assume_psd {
+        match psd_conditions(&qp.p) {
+            Ok(conditions) => conditions,
+            Err(reason) => return unsupported_outcome(reason),
+        }
+    } else {
+        Vec::new()
+    };
+    let call_fingerprint = {
+        let bytes = serde_json::to_vec(&(&binding.solve_symbol, &property.body, &args))
+            .expect("checked Surf expression serializes");
+        format!("{:x}", Sha256::digest(bytes))
+    };
     let x_names = (0..qp.q.len())
         .map(|index| names.fresh(&format!("__clarabel_x_{index}")))
         .collect::<Vec<_>>();
@@ -755,24 +1250,14 @@ pub(super) fn prove(
         .cloned()
         .map(SmtExpr::Var)
         .collect::<Vec<_>>();
-    let mut parameters = BTreeMap::new();
-    for param in &property.params {
-        let sort = match &param.ty {
-            Some(TypeExpr::Named(name, _)) if name == "f64" || name == "f32" => SmtSort::Real,
-            Some(TypeExpr::Named(name, _)) if name == "i64" || name == "i32" => SmtSort::Int,
-            Some(TypeExpr::Named(name, _)) if name == "bool" => SmtSort::Bool,
-            _ => {
-                return unsupported_outcome(unsupported(
-                    "property parameters must have scalar numeric or bool types",
-                ));
-            }
-        };
-        parameters.insert(param.name.clone(), sort);
-    }
     let lowering = Scalarization {
         primal_name,
         primal: &x,
-        parameters: &parameters,
+        scalars: &scalars,
+        vectors: &vectors,
+        matrices: &matrices,
+        decls,
+        depth: 0,
     };
     let Some(postcondition) = lowering.boolean(solved_body) else {
         return unsupported_outcome(unsupported(
@@ -789,20 +1274,82 @@ pub(super) fn prove(
         preconditions.push(lowered);
     }
     let user_preconditions = preconditions.clone();
-    preconditions.extend(optimizer_axioms(&qp, &x, &mut names));
-    let mut variables = parameters.into_iter().collect::<Vec<_>>();
+    preconditions.extend(psd_premise.clone());
     variables.extend(x_names.into_iter().map(|name| (name, SmtSort::Real)));
+    let symbolic = symbolic_data(&qp);
+    let mut comparisons = Vec::new();
+    for candidate in vectors.values().filter(|vector| vector.len() == qp.q.len()) {
+        if qp.b.is_empty() {
+            comparisons.push(candidate.clone());
+            continue;
+        }
+        if symbolic {
+            let feasibility_goal = SmtProperty {
+                variables: variables.clone(),
+                preconditions: preconditions.clone(),
+                postcondition: conjunction(feasible(&qp, candidate, false)),
+            };
+            if matches!(
+                DischargeRegistry::with_builtin_engines()
+                    .dispatch(&Goal::smt(feasibility_goal), options.smt_timeout_ms)
+                    .into_result(),
+                TierBResult::Proved
+            ) {
+                comparisons.push(candidate.clone());
+            }
+        }
+    }
+    preconditions.extend(optimizer_axioms(
+        &qp,
+        &x,
+        &comparisons,
+        &mut names,
+        !symbolic,
+    ));
     let smt_prop = SmtProperty {
-        variables,
+        variables: variables.clone(),
         preconditions,
         postcondition,
+    };
+    let full_axiom_prop = SmtProperty {
+        variables,
+        preconditions: user_preconditions
+            .iter()
+            .cloned()
+            .chain(psd_premise.clone())
+            .chain(optimizer_axioms(&qp, &x, &[], &mut names, true))
+            .collect(),
+        postcondition: SmtExpr::BoolLit(true),
     };
     let discharge = DischargeRegistry::with_builtin_engines()
         .dispatch(&Goal::smt(smt_prop.clone()), options.smt_timeout_ms);
     let base = Some((discharge.soundness(), discharge.qualifier_set().clone()));
     match discharge.into_result() {
         TierBResult::Proved => {
-            let non_vacuity = super::smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
+            let mut non_vacuity =
+                super::smt_non_vacuity_record(&full_axiom_prop, options.smt_timeout_ms);
+            if symbolic && matches!(non_vacuity.status, NonVacuityStatus::Unsupported) {
+                // The unrestricted quantified SAT query can be unknown even
+                // when a simple concrete valuation satisfies the full axiom.
+                // This is a stronger SAT query, never a replacement for the
+                // global-optimality formula.
+                let mut witness = full_axiom_prop.clone();
+                for (name, sort) in &witness.variables {
+                    let variable = SmtExpr::Var(name.clone());
+                    witness.preconditions.push(match sort {
+                        SmtSort::Real => cmp(CmpOp::Eq, variable, real(0.0)),
+                        SmtSort::Int => cmp(CmpOp::Eq, variable, SmtExpr::IntLit(0)),
+                        SmtSort::Bool => SmtExpr::Not(Box::new(variable)),
+                    });
+                }
+                let zero_witness = super::smt_non_vacuity_record(&witness, options.smt_timeout_ms);
+                if matches!(zero_witness.status, NonVacuityStatus::Established) {
+                    non_vacuity = zero_witness;
+                    if let Some(evidence) = non_vacuity.evidence.as_object_mut() {
+                        evidence.insert("witness".to_string(), serde_json::json!("all_zero"));
+                    }
+                }
+            }
             if !matches!(non_vacuity.status, NonVacuityStatus::Established) {
                 return unsupported_outcome(non_vacuity.reason.unwrap_or_else(|| {
                     unsupported("solver assumption non-vacuity could not be established")
@@ -819,6 +1366,12 @@ pub(super) fn prove(
                         "call": binding.solve_symbol,
                         "abi_version": binding.abi_version,
                         "provider_archive_sha256": binding.archive_sha256,
+                        "call_fingerprint_sha256": call_fingerprint,
+                        "psd_evidence": match qp.psd {
+                            PsdEvidence::Literal => "exact_literal",
+                            PsdEvidence::Gram => "verified_gram",
+                            PsdEvidence::Assumed => "assume_psd",
+                        },
                         "justification": "author opted into ideal exact-real optimizer contract",
                     }),
                 )),
@@ -828,7 +1381,7 @@ pub(super) fn prove(
             .with_discharge_tier(DischargeTier::new(
                 DischargeMethod::Axiom.engine(),
                 DischargeMethod::Axiom,
-                Some(binding.solve_symbol),
+                Some(binding.solve_symbol.clone()),
             ));
             let mut assumptions = if user_preconditions.is_empty() {
                 Vec::new()
@@ -857,6 +1410,34 @@ pub(super) fn prove(
                     user_non_vacuity,
                 )
             };
+            if assume_psd {
+                assumptions.push(
+                    AssumptionRecord::new(
+                        PSD_CONTRACT,
+                        Some(AssumptionDischarge::new(
+                            DischargeMethod::Axiom,
+                            serde_json::json!({
+                                "status": "asserted",
+                                "arith_model": "real",
+                                "provider": "chelis-clarabel/0.1.0",
+                                "call": binding.solve_symbol,
+                                "abi_version": binding.abi_version,
+                                "provider_archive_sha256": binding.archive_sha256,
+                                "call_fingerprint_sha256": call_fingerprint,
+                                "condition": "symmetric and all principal minors nonnegative",
+                                "justification": "author opted into the call-bound ideal-real PSD premise",
+                            }),
+                        )),
+                        Some(non_vacuity.clone()),
+                    )
+                    .with_source("native_provider", binding.solve_symbol.clone())
+                    .with_discharge_tier(DischargeTier::new(
+                        DischargeMethod::Axiom.engine(),
+                        DischargeMethod::Axiom,
+                        Some(binding.solve_symbol.clone()),
+                    )),
+                );
+            }
             assumptions.push(axiom);
             PropertyOutcome::with_base_discharge(
                 property.name.clone(),

@@ -49,6 +49,8 @@ From `examples/clarabel_qp`, run:
 ../../target/debug/chelis prove tests/ideal_stationary.ch --tier smt-only --json
 ../../target/debug/chelis prove tests/ideal_baseline.ch --tier smt-only --json
 ../../target/debug/chelis prove tests/ideal_wrapper.ch --tier smt-only --json
+../../target/debug/chelis prove tests/ideal_symbolic_constrained_quality.ch --tier smt-only --json
+../../target/debug/chelis prove tests/ideal_symbolic_assumed_psd.ch --tier smt-only --json
 ```
 
 These properties opt into `clarabel.qp.ideal_optimality` for the imported
@@ -56,8 +58,11 @@ These properties opt into `clarabel.qp.ideal_optimality` for the imported
 ideal real optimizer axiom and carries `real_arithmetic`; it does not certify
 the returned floating-point bits. `ideal_wrapper.ch` passes a typed tensor
 through a Chelis helper that returns one `solve` call; the proof follows that
-same dependency-owned call. The first proof lowering handles fixed literal QP
-data with zero and nonnegative cones. Runtime calls also support
+same dependency-owned call. The proof lowering handles fixed-size symbolic QP
+data with zero and nonnegative cones, including a verified `B^T B` PSD
+construction. A property using another symbolic `P` can explicitly add
+`clarabel.qp.assume_psd`; the report lists that call-bound PSD premise as a
+separate axiom. Runtime calls also support
 second-order, exponential, power, and generalized-power cones. An unsupported
 proof shape reports `unsupported`, and a changed provider source cannot grant
 the axiom. Without the provider feature, the package declaration's fallback

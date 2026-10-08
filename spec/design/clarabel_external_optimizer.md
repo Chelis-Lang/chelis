@@ -88,8 +88,8 @@ equality constraints, the same stationarity consequence is available. The
 prover applies only consequences it can lower and discharge; it never treats
 an unsupported goal as true.
 
-The executable SMT lowering scalarizes fixed literal `f64` QP data and
-zero/nonnegative cones. It follows a typed Chelis helper that
+The executable SMT lowering scalarizes fixed-size `f64` QP data and
+zero/nonnegative cones. Its symbolic-input path is described below. It follows a typed Chelis helper that
 returns one direct call to the same resolved `solve` declaration, substituting
 its arguments before constructing the proof goal. Dynamic runtime dimensions
 and the other runtime cone families are outside that deductive lowering and produce an

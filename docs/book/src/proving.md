@@ -87,8 +87,15 @@ non-`Solved` arm must establish its claim without that assumption. See the
 executable files in `examples/clarabel_qp/tests/` and the commands
 in `packages/chelis-clarabel/README.md`.
 
-The SMT lowering accepts fixed literal QP data with zero and nonnegative
-cones, and checks that `P` is exactly symmetric and positive semidefinite.
+The SMT lowering accepts fixed-size `f64` QP data with symbolic entries,
+pure straight-line helpers, and fixed zero and nonnegative cone blocks.
+It proves the PSD premise for exact literal `P` or a `B^T B` construction.
+For another symbolic `P`, add
+`with contract = "clarabel.qp.assume_psd"` to the same property. That explicit
+premise applies to the resolved call's `P` and is listed as a separate axiom.
+For example, `tests/ideal_symbolic_constrained_quality.ch` proves that a
+feasible baseline cannot score better than the optimizer after the algorithm
+applies its step, for every input satisfying the property's `where` condition.
 Other cone families can still be used at runtime; properties that require
 their ideal contract report `unsupported`. A successful dependent result says
 `proven_modulo_asserted_axiom` and lists `real_arithmetic`. It is a conditional
