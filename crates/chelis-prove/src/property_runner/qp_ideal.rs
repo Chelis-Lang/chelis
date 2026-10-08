@@ -1101,6 +1101,48 @@ impl Scalarization<'_> {
                     .collect(),
             );
         }
+        for (name, op) in [
+            ("add", ArithOp::Add),
+            ("sub", ArithOp::Sub),
+            ("mul", ArithOp::Mul),
+        ] {
+            if let Some([left, right]) = app(expr, name) {
+                let left = self.matrix(left)?;
+                let right = self.matrix(right)?;
+                if left.len() != right.len()
+                    || left
+                        .iter()
+                        .zip(&right)
+                        .any(|(left_row, right_row)| left_row.len() != right_row.len())
+                {
+                    return None;
+                }
+                return Some(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(left_row, right_row)| {
+                            left_row
+                                .into_iter()
+                                .zip(right_row)
+                                .map(|(left, right)| arith(op, left, right))
+                                .collect()
+                        })
+                        .collect(),
+                );
+            }
+        }
+        if let Some([value]) = app(expr, "neg") {
+            return Some(
+                self.matrix(value)?
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|component| arith(ArithOp::Neg, component, real(0.0)))
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
         self.call_helper(expr, |nested, body| nested.matrix(body))
     }
 

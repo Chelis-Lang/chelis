@@ -683,6 +683,44 @@ fn symbolic_gram_evidence_survives_pure_helpers() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn symbolic_matrix_elementwise_arithmetic_preserves_qp_constraints() {
+    for (file, should_pass) in [
+        ("ideal_symbolic_matrix_ops.ch", true),
+        ("ideal_symbolic_matrix_ops_unproved.ch", false),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove matrix arithmetic property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        if should_pass {
+            assert_eq!(row["status"], "passed", "{file}: {row}");
+            assert_eq!(row["samples"], 0);
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        } else {
+            assert_ne!(row["status"], "passed", "{file}: {row}");
+            assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn ideal_property_does_not_use_the_solver_axiom_for_a_different_q() {
     let result = Command::cargo_bin("chelis")
         .expect("chelis binary")
