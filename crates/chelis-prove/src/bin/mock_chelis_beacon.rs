@@ -53,10 +53,71 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let scenario = std::env::var("MOCK_BEACON_SCENARIO").unwrap_or_else(|_| "proved".to_string());
 
-    if args.get(1).is_some_and(|arg| arg == "contract") && scenario == "contract_proved" {
-        let _request = read_request(&args);
-        print!(r#"{{"verdict":"proved","guarantee_class":"certified_envelope"}}"#);
-        return;
+    if args.get(1).is_some_and(|arg| arg == "contract") {
+        match scenario.as_str() {
+            "contract_proved" => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_request(&args)).unwrap();
+                print!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "contract_id": request["contract_id"],
+                        "verdict": "proved",
+                        "guarantee_class": "certified_envelope",
+                        "soundness": "sound_approximate",
+                        "evidence": {},
+                    })
+                );
+                return;
+            }
+            "contract_unknown" => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_request(&args)).unwrap();
+                print!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "contract_id": request["contract_id"],
+                        "verdict": "unknown",
+                        "guarantee_class": "untrusted",
+                        "soundness": "untrusted",
+                        "evidence": {},
+                    })
+                );
+                return;
+            }
+            "contract_wrong_id" => {
+                let _request = read_request(&args);
+                print!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "contract_id": "std.normal_cdf.range",
+                        "verdict": "proved",
+                        "guarantee_class": "certified_envelope",
+                        "soundness": "sound_approximate",
+                    })
+                );
+                return;
+            }
+            "contract_contradictory" => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_request(&args)).unwrap();
+                print!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "contract_id": request["contract_id"],
+                        "verdict": "proved",
+                        "guarantee_class": "certified_envelope",
+                        "soundness": "untrusted",
+                    })
+                );
+                return;
+            }
+            _ => {}
+        }
     }
 
     // `hang_no_drain` deliberately does NOT read its input: it models a child
@@ -118,6 +179,15 @@ fn main() {
         }
         "unparseable" => {
             print!("this is not json at all <<<");
+        }
+        "oversized_output" => {
+            use std::io::Write as _;
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..144 {
+                if std::io::stdout().write_all(&chunk).is_err() {
+                    return;
+                }
+            }
         }
         "hang" => {
             // Sleep far beyond any test timeout so the shim's hard-kill fires

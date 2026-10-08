@@ -90,19 +90,48 @@ impl BeaconContractProver {
             Outcome::Degraded(reason) => return Err(reason),
         };
 
-        Ok((|| {
-            let response: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
-            let verdict = response.get("verdict")?.as_str()?;
-            let guarantee_class = response.get("guarantee_class")?.as_str()?;
-            if verdict != "proved" || guarantee_class != "certified_envelope" {
-                return None;
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|_| beacon_supervisor::protocol_unsupported("invalid JSON response"))?;
+        let invalid = || beacon_supervisor::protocol_unsupported("invalid contract response");
+        if response
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || response
+                .get("contract_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(contract_id)
+        {
+            return Err(invalid());
+        }
+        let verdict = response
+            .get("verdict")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let guarantee_class = response
+            .get("guarantee_class")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let soundness = response
+            .get("soundness")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        match (verdict, guarantee_class, soundness) {
+            ("proved", "certified_envelope", "sound_approximate") => {
+                let mut evidence = response;
+                evidence["status"] = serde_json::json!("proved");
+                Ok(Some(AssumptionDischarge::new(
+                    DischargeMethod::CertifiedEnvelope,
+                    evidence,
+                )))
             }
-            let mut evidence = response;
-            evidence["status"] = serde_json::json!("proved");
-            Some(AssumptionDischarge::new(
-                DischargeMethod::CertifiedEnvelope,
-                evidence,
-            ))
-        })())
+            ("proved", "sound_over_approximation", "sound_approximate")
+            | (
+                "proved_oracle_unverified" | "unknown" | "unsupported" | "invalid",
+                "untrusted",
+                "untrusted",
+            ) => Ok(None),
+            _ => Err(invalid()),
+        }
     }
 }

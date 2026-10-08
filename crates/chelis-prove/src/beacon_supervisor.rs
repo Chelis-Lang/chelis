@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -12,6 +12,7 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_BUDGET: Duration = Duration::from_secs(1);
+const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Invocation<'a> {
     pub binary: &'a Path,
@@ -47,6 +48,7 @@ pub(crate) trait ProcessOps {
     fn write(&self, stdin: &mut tempfile::NamedTempFile, bytes: &[u8]) -> io::Result<()>;
     fn poll(&self, child: &mut Child) -> io::Result<Option<ExitStatus>>;
     fn kill(&self, child: &mut Child) -> io::Result<()>;
+    fn size(&self, path: &Path) -> io::Result<u64>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 }
 
@@ -62,6 +64,31 @@ impl ProcessOps for SystemOps {
     }
 
     fn spawn(&self, command: &mut Command) -> io::Result<Child> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            // This runs in the child after fork. The two syscalls do not
+            // allocate or invoke Rust callbacks. Keep an existing lower
+            // file-size limit, and cap regular-file output even if the parent
+            // is delayed between polling observations.
+            unsafe {
+                command.pre_exec(|| {
+                    let mut limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    limit.rlim_cur = limit.rlim_cur.min(MAX_CAPTURE_BYTES as libc::rlim_t);
+                    if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
         command.spawn()
     }
 
@@ -77,8 +104,16 @@ impl ProcessOps for SystemOps {
         child.kill()
     }
 
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        Ok(std::fs::metadata(path)?.len())
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        std::fs::read(path)
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_CAPTURE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 }
 
@@ -135,6 +170,13 @@ pub(crate) fn run_with_ops(invocation: Invocation<'_>, ops: &impl ProcessOps) ->
 
     let started = Instant::now();
     let status = loop {
+        if let Some(fault) = capture_fault(&stdout, &stderr, ops) {
+            let cleanup = terminate(&mut child, ops);
+            return Outcome::Degraded(degraded_detail(
+                &fault.description(),
+                cleanup.err().as_deref(),
+            ));
+        }
         match ops.poll(&mut child) {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= invocation.timeout => {
@@ -158,19 +200,60 @@ pub(crate) fn run_with_ops(invocation: Invocation<'_>, ops: &impl ProcessOps) ->
         }
     };
 
+    if let Some(fault) = capture_fault(&stdout, &stderr, ops) {
+        return Outcome::Degraded(degraded_detail(&fault.description(), None));
+    }
+
     let stdout_bytes = match ops.read(stdout.path()) {
         Ok(bytes) => bytes,
         Err(error) => return Outcome::Degraded(degraded("stdout read", &error)),
     };
+    if stdout_bytes.len() as u64 >= MAX_CAPTURE_BYTES {
+        return Outcome::Degraded(degraded_detail("stdout capture limit exceeded", None));
+    }
     let stderr_bytes = match ops.read(stderr.path()) {
         Ok(bytes) => bytes,
         Err(error) => return Outcome::Degraded(degraded("stderr read", &error)),
     };
+    if stderr_bytes.len() as u64 >= MAX_CAPTURE_BYTES {
+        return Outcome::Degraded(degraded_detail("stderr capture limit exceeded", None));
+    }
     Outcome::Completed {
         status,
         stdout: stdout_bytes,
         stderr: stderr_bytes,
     }
+}
+
+enum CaptureFault {
+    Limit(&'static str),
+    Metadata(&'static str, io::Error),
+}
+
+impl CaptureFault {
+    fn description(&self) -> String {
+        match self {
+            Self::Limit(stream) => format!("{stream} capture limit exceeded"),
+            Self::Metadata(stream, error) => {
+                format!("{stream} capture metadata failed ({})", io_identity(error))
+            }
+        }
+    }
+}
+
+fn capture_fault(
+    stdout: &tempfile::NamedTempFile,
+    stderr: &tempfile::NamedTempFile,
+    ops: &impl ProcessOps,
+) -> Option<CaptureFault> {
+    for (stream, path) in [("stdout", stdout.path()), ("stderr", stderr.path())] {
+        match ops.size(path) {
+            Ok(size) if size >= MAX_CAPTURE_BYTES => return Some(CaptureFault::Limit(stream)),
+            Ok(_) => {}
+            Err(error) => return Some(CaptureFault::Metadata(stream, error)),
+        }
+    }
+    None
 }
 
 /// Never call blocking `wait`: a sandbox may deny the wait or kill operation.
@@ -246,6 +329,10 @@ pub(crate) fn timeout_unsupported() -> Unsupported {
     degraded_detail("timed out and was killed", None)
 }
 
+pub(crate) fn protocol_unsupported(reason: &str) -> Unsupported {
+    degraded_detail(&format!("contract protocol failed ({reason})"), None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -266,6 +353,8 @@ mod tests {
         RequestWrite,
         Wait,
         Kill,
+        FirstSize,
+        SecondSize,
         FirstRead,
         SecondRead,
     }
@@ -275,6 +364,7 @@ mod tests {
         captures: Cell<usize>,
         reopens: Cell<usize>,
         polls: Cell<usize>,
+        sizes: Cell<usize>,
         reads: Cell<usize>,
     }
 
@@ -285,6 +375,7 @@ mod tests {
                 captures: Cell::new(0),
                 reopens: Cell::new(0),
                 polls: Cell::new(0),
+                sizes: Cell::new(0),
                 reads: Cell::new(0),
             }
         }
@@ -372,6 +463,19 @@ mod tests {
             }
         }
 
+        fn size(&self, path: &Path) -> io::Result<u64> {
+            let call = self.sizes.get() + 1;
+            self.sizes.set(call);
+            if matches!(
+                (self.denied, call),
+                (Denied::FirstSize, 1) | (Denied::SecondSize, 2)
+            ) {
+                Err(Self::denied())
+            } else {
+                SystemOps.size(path)
+            }
+        }
+
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
             let call = self.reads.get() + 1;
             self.reads.set(call);
@@ -400,6 +504,8 @@ mod tests {
             Denied::RequestWrite,
             Denied::Wait,
             Denied::Kill,
+            Denied::FirstSize,
+            Denied::SecondSize,
             Denied::FirstRead,
             Denied::SecondRead,
         ];

@@ -123,6 +123,7 @@ thiserror = { workspace = true }
 # build stays solver-free. (tempfile is already used elsewhere in the workspace.)
 base64 = "0.22"
 tempfile = "3"
+libc.workspace = true
 
 # WI-15: the per-OS BLAS/LAPACK backend for clarabel's `sdp` (PSD cone) feature.
 # These reference the SAME optional `clarabel` crate as the base [dependencies]

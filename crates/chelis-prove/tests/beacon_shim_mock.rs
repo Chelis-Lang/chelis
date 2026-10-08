@@ -643,6 +643,19 @@ fn nonexistent_binary_fails_closed_not_a_crash() {
     assert!(discharge.qualifier_set().is_empty());
 }
 
+#[test]
+fn oversized_beacon_output_is_branded_and_untrusted() {
+    crate::support::isolate();
+    let _g = with_scenario("oversized_output");
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    let TierBResult::Error(reason) = discharge.result() else {
+        panic!("oversized Beacon output must be an error: {discharge:?}");
+    };
+    assert!(reason.starts_with("unsupported: "), "{reason}");
+    assert!(reason.contains("capture limit"), "{reason}");
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+}
+
 // ===========================================================================
 // Store convenience: get returns the inserted bytes; a miss is None.
 // ===========================================================================

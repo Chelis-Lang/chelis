@@ -825,6 +825,7 @@ dependencies = [
  "chelis-unord",
  "clarabel",
  "cvc5-rs",
+ "libc",
  "num-bigint",
  "num-rational",
  "num-traits",

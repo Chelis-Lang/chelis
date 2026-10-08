@@ -82,3 +82,55 @@ fn crashed_child_is_a_branded_degradation() {
     assert!(err.to_string().contains("chelis#730"), "{err}");
     unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
 }
+
+#[test]
+fn malformed_successful_contract_response_is_branded() {
+    let _guard = SCENARIO_LOCK.lock().unwrap();
+    unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "unparseable") };
+    let err = BeaconContractProver::new(MOCK_BIN)
+        .prove_contract("std.normal_cdf.reflection")
+        .expect_err("malformed successful response is not a no-proof result");
+    assert!(err.to_string().starts_with("unsupported: "), "{err}");
+    assert!(err.to_string().contains("chelis#730"), "{err}");
+    unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
+}
+
+#[test]
+fn wrong_contract_identity_and_trust_are_branded() {
+    let _guard = SCENARIO_LOCK.lock().unwrap();
+    for scenario in ["contract_wrong_id", "contract_contradictory"] {
+        unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", scenario) };
+        let err = BeaconContractProver::new(MOCK_BIN)
+            .prove_contract("std.normal_cdf.reflection")
+            .expect_err("contradictory or misattributed proof is not a discharge");
+        assert!(
+            err.to_string().starts_with("unsupported: "),
+            "{scenario}: {err}"
+        );
+        assert!(err.to_string().contains("chelis#730"), "{scenario}: {err}");
+    }
+    unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
+}
+
+#[test]
+fn completed_unknown_contract_response_preserves_no_proof() {
+    let _guard = SCENARIO_LOCK.lock().unwrap();
+    unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "contract_unknown") };
+    let result = BeaconContractProver::new(MOCK_BIN)
+        .prove_contract("std.normal_cdf.reflection")
+        .expect("valid completed no-proof response");
+    assert!(result.is_none());
+    unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
+}
+
+#[test]
+fn oversized_contract_output_is_branded() {
+    let _guard = SCENARIO_LOCK.lock().unwrap();
+    unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "oversized_output") };
+    let err = BeaconContractProver::new(MOCK_BIN)
+        .prove_contract("std.normal_cdf.reflection")
+        .expect_err("oversized output must degrade");
+    assert!(err.to_string().starts_with("unsupported: "), "{err}");
+    assert!(err.to_string().contains("capture limit"), "{err}");
+    unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
+}
