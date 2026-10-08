@@ -47,6 +47,32 @@ fn build(source: &str, output_dir: &Path) -> PathBuf {
     output_dir.join(path.file_stem().expect("source stem"))
 }
 
+fn emit_c(source: &str, output_dir: &Path) -> PathBuf {
+    let path = output_dir.with_extension("ch");
+    fs::write(&path, source).expect("write canonical Surf");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args([
+            "build",
+            "--target",
+            "c",
+            "--emit-c",
+            "--output",
+            output_dir.to_str().expect("UTF-8 path"),
+            path.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("emit C sources");
+    assert!(
+        output.status.success(),
+        "emit C: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output_dir
+        .join(path.file_stem().expect("source stem"))
+        .with_extension("c")
+}
+
 #[test]
 fn compiled_recursion_succeeds_with_stack_to_spare() {
     let dir = tempdir().expect("tempdir");
@@ -62,13 +88,18 @@ fn compiled_recursion_succeeds_with_stack_to_spare() {
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn compiled_recursion_reports_the_call_span_before_stack_exhaustion() {
     let dir = tempdir().expect("tempdir");
     let program = source(120_000, true);
     let recursive_call_start = program.find("lsum(xs, add(").expect("recursive call");
     let binary = build(&program, &dir.path().join("deep"));
-    let output = Process::new(&binary).output().expect("run deep artifact");
+    let output = Process::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
+        .output()
+        .expect("run deep artifact with 2 MiB stack");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -243,8 +274,7 @@ fn shadowed_function_name_does_not_create_a_recursive_call_cycle() {
 fn a_failed_stack_bound_query_reports_a_located_runtime_error() {
     let dir = tempdir().expect("tempdir");
     let out = dir.path().join("unavailable");
-    let _original_binary = build(&source(1000, false), &out);
-    let emitted_path = out.join("unavailable.c");
+    let emitted_path = emit_c(&source(1000, false), &out);
     let emitted = fs::read_to_string(&emitted_path).expect("read generated C");
     let query = "arena->stack_low = __chelis_host_stack_low(&arena->stack_high);";
     assert_eq!(emitted.matches(query).count(), 1, "one stack-bound query");
@@ -275,6 +305,7 @@ fn a_failed_stack_bound_query_reports_a_located_runtime_error() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn named_callback_recursion_reports_the_callback_call_span() {
     let dir = tempdir().expect("tempdir");
@@ -287,9 +318,11 @@ fn named_callback_recursion_reports_the_callback_call_span() {
     .expect("format callback recursion");
     let callback_start = program.find("map(descend").expect("named callback");
     let binary = build(&program, &dir.path().join("callback"));
-    let output = Process::new(&binary)
+    let output = Process::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
         .output()
-        .expect("run callback recursion");
+        .expect("run callback recursion with 2 MiB stack");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

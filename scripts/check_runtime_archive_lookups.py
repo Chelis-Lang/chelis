@@ -579,6 +579,19 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/tests/issue_2312_compiled_stack.rs",
+        "archive-name",
+        lines=(
+            '.arg(out.join("libchelis_runtime.a"))',
+            '.arg(out.join("libchelis_runtime.a"))',
+            '.arg(out.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the exact runtime archive staged by `chelis build` in `out`"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/tests/issue_2318_key_form.rs",
         "archive-name",
         lines=(
