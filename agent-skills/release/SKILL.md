@@ -23,9 +23,12 @@ The user names the version. Never start a release the user did not ask for.
 
 - `workspace.package.version` in the root `Cargo.toml` is the previous release, and the
   tag is `v` plus the new version.
-- Before 1.0, a minor bump may break documented behavior; a patch bump may not. A
-  pending fragment named `*.breaking.md` in `changelog.d/` therefore rules out a patch
-  release. If the named version conflicts with the pending fragments, stop and ask.
+- Before 1.0, a minor bump may break documented behavior. A patch bump is reserved for
+  bug fixes that do not change documented behavior (`phase3j_pre_release.md`), so a
+  pending `*.breaking.md` fragment in `changelog.d/` rules out a patch release, and a
+  pending `added` or `changed` fragment needs the user's confirmation that a patch is
+  still intended. If the named version conflicts with the pending fragments, stop and
+  ask.
 
 ## Prepare On Current Main
 
@@ -33,9 +36,10 @@ Work in a fresh worktree on `origin/main`, with its own `uv venv --python 3.11`.
 
 1. Record the state of `main` for the PR body: the head SHA, the CI and Hull runs on that
    SHA (`gh run list --branch main --commit <sha>`), and the open `failing-on-main`
-   issues (`gh issue list --label failing-on-main`). Read the latest run of
-   `loud-unsupported-nightly.yml`, which the PR-author guide asks to be checked before a
-   release. Red results do not block on their own; the user decides, so list them.
+   issues (`gh issue list --label failing-on-main`). Dispatch
+   `gh workflow run loud-unsupported-nightly.yml`, which the PR-author guide asks to be
+   run by hand before a release, and record its result. Red results do not block on
+   their own; the user decides, so list them.
 2. Bump and assemble:
 
    ```sh
