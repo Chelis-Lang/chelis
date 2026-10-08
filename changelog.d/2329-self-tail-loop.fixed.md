@@ -1,0 +1,1 @@
+The C backend reuses a compiled function frame for verified direct self-tail calls with scalar results and no delegated entry receipt. This lets deep list reductions such as the `lsum` case in [#2329](https://github.com/Chelis-Lang/chelis/issues/2329) complete without exhausting the native call stack; non-tail recursion retains its located stack-budget error.
