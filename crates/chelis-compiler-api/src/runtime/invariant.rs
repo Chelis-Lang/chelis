@@ -629,6 +629,15 @@ fn render_value_for_diagnostic(value: &RuntimeValue) -> String {
     render_value(value)
 }
 
+enum RepresentationStep<'a> {
+    Visit {
+        value: &'a RuntimeValue,
+        type_name: &'a str,
+        field_label: Option<String>,
+    },
+    LeaveField,
+}
+
 /// Reject any non-finite scalar/tensor element inside a value (RFC H1).
 /// Keep both the traversal and the field path on the heap: an opaque record
 /// may contain an arbitrarily deep, otherwise valid recursive ADT.
@@ -639,16 +648,7 @@ fn check_representation_finite<'a>(
     adt_fields: &'a UnordMap<String, Vec<String>>,
     path: &str,
 ) -> Result<(), InvariantViolation> {
-    enum Step<'a> {
-        Visit {
-            value: &'a RuntimeValue,
-            type_name: &'a str,
-            field_label: Option<String>,
-        },
-        LeaveField,
-    }
-
-    let mut pending = vec![Step::Visit {
+    let mut pending = vec![RepresentationStep::Visit {
         value,
         type_name,
         field_label: None,
@@ -659,7 +659,7 @@ fn check_representation_finite<'a>(
         vec![path.to_string()]
     };
     while let Some(step) = pending.pop() {
-        let Step::Visit {
+        let RepresentationStep::Visit {
             value,
             type_name,
             field_label,
@@ -670,7 +670,7 @@ fn check_representation_finite<'a>(
         };
         if let Some(label) = field_label {
             path_parts.push(label);
-            pending.push(Step::LeaveField);
+            pending.push(RepresentationStep::LeaveField);
         }
         match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
@@ -713,7 +713,7 @@ fn check_representation_finite<'a>(
                         .and_then(|names| names.get(index))
                         .cloned()
                         .unwrap_or_else(|| index.to_string());
-                    pending.push(Step::Visit {
+                    pending.push(RepresentationStep::Visit {
                         value: field,
                         type_name: name_for_field,
                         field_label: Some(field_label),

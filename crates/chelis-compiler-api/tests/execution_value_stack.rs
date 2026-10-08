@@ -1,4 +1,4 @@
-//! Deep public execution values must survive ordinary embedding API paths.
+//! Deep public execution values must survive embedding input decoding.
 
 use chelis_compiler_api::schema::ExecutionValue;
 use chelis_compiler_api::{DecodeError, try_decode_adt_value};
@@ -71,21 +71,6 @@ fn shallow_list_has_the_canonical_recursive_wire_shape() {
     assert_eq!(
         encoded,
         serde_json::json!({"type":"list","value":[{"type":"unit"}]})
-    );
-}
-
-#[test]
-fn ordinary_serde_serializes_a_deep_value_on_a_small_stack() {
-    run_on_small_stack_in_child(
-        "ordinary_serde_serializes_a_deep_value_on_a_small_stack",
-        || {
-            let value = nested_list(5_000, ExecutionValue::Unit);
-            let encoded = serde_json::to_vec(&value).expect("serialize deep value");
-            assert!(encoded.starts_with(b"{\"type\":\"list\""));
-            assert!(encoded.ends_with(b"]}"));
-            assert!(encoded.len() > 100_000);
-            std::mem::forget(value); // isolate serialization from recursive drop
-        },
     );
 }
 

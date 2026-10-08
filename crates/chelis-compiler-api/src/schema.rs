@@ -853,7 +853,7 @@ pub struct DictEntryValue {
 
 /// Machine-facing execution value. Numeric descendants retain their sealed
 /// dtype and stored bits; booleans have one separate execution spelling.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionValue {
     Tensor {
@@ -885,67 +885,6 @@ pub enum ExecutionValue {
     Adt {
         ctor: String,
         fields: Vec<ExecutionValue>,
-    },
-    Unit,
-}
-
-impl Serialize for ExecutionValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Serde calls this again for each nested value. Grow at that entry,
-        // including for callers that use an ordinary serializer directly.
-        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
-            let borrowed = match self {
-                Self::Tensor { value } => ExecutionValueRef::Tensor { value },
-                Self::Scalar { value } => ExecutionValueRef::Scalar { value },
-                Self::Bool { value } => ExecutionValueRef::Bool { value },
-                Self::Key { bits } => ExecutionValueRef::Key { bits },
-                Self::String { value } => ExecutionValueRef::String { value },
-                Self::List { value } => ExecutionValueRef::List { value },
-                Self::Dict { entries } => ExecutionValueRef::Dict { entries },
-                Self::Tuple { value } => ExecutionValueRef::Tuple { value },
-                Self::Adt { ctor, fields } => ExecutionValueRef::Adt { ctor, fields },
-                Self::Unit => ExecutionValueRef::Unit,
-            };
-            borrowed.serialize(serializer)
-        })
-    }
-}
-
-// Keep Serde's generated representation of the public enum, including for
-// non-JSON serializers, while inserting a growth point at every nested value.
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ExecutionValueRef<'a> {
-    Tensor {
-        value: &'a TensorValue,
-    },
-    Scalar {
-        value: &'a NumericScalar,
-    },
-    Bool {
-        value: &'a bool,
-    },
-    Key {
-        bits: &'a chelis_types::KeyBits,
-    },
-    String {
-        value: &'a String,
-    },
-    List {
-        value: &'a Vec<ExecutionValue>,
-    },
-    Dict {
-        entries: &'a Vec<DictEntryValue>,
-    },
-    Tuple {
-        value: &'a Vec<ExecutionValue>,
-    },
-    Adt {
-        ctor: &'a String,
-        fields: &'a Vec<ExecutionValue>,
     },
     Unit,
 }
