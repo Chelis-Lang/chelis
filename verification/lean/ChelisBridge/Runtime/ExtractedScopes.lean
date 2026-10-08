@@ -256,8 +256,10 @@ theorem raiseFatal_spec (s : RT) (d : chelis_ir.lower.LowerDiagnostic) :
       .ok (.Diagnostic { d with fatal := true },
         { s with o := true, hook := s.hook ++ [(s.u, true, s.installed)] }) := by
   unfold chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal_lowering_diagnostic
-  cases hf : d.fatal <;>
-    simp [raiseLowering_spec, chelis_ir.lower.LowerDiagnostic.impl.fatal,
+  cases hf : d.fatal
+  all_goals cases d
+  all_goals
+    simp_all [raiseLowering_spec, chelis_ir.lower.LowerDiagnostic.impl.fatal,
       Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_output_suppressed]
 
 /-- **A boundary re-raise never returns.** `resume_at_boundary` of any failure is a native

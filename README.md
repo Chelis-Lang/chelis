@@ -460,6 +460,14 @@ A false value leaves native visibility unknown when a suppression flag is set.
 RA-tls covers thread state only.
 `.work/diag/resume38-main/native38-o5-smoke.log` records these checks and the unchanged three-axiom bound.
 
+The isolated fixtures in `.work/diag/resume38-main/native-isolated41` use the preserved pre-protocol compiler and frozen Lean library.
+Both fixture drift guards pass. Native services pass five real-stacker tests, and lowering runtime passes twelve native tests.
+Both extracted models compile and pass their existing Lean scenario checks.
+
+`lowering_runtime_models/payload-pairing-audit.log` records seven fixture payload proofs using only the same three allowed axioms.
+The fatal proof handles both diagnostic flag cases without changing its statement.
+These diagnostic fixtures do not discharge final production O6, O7, or whole-core acceptance.
+
 These checks use the frozen native model.
 Full extracted-module validation still needs the new fragment.
 
