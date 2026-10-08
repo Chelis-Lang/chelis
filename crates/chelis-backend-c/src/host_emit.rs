@@ -3719,9 +3719,23 @@ fn emit_function(
     ));
     emitter.finish_expression_sites()?;
     if emitter.tail_loop_used {
-        emitter
-            .lines
-            .insert(0, "    __chelis_tail_loop_entry: ;".to_string());
+        let plan = emitter.tail_loop.as_ref().ok_or_else(|| {
+            invalid_abi_shape(
+                "self-tail loop used without a parameter plan".to_string(),
+                "verified C host tail emission",
+            )
+        })?;
+        let mut entry = Vec::with_capacity(plan.formals.len() + 1);
+        for (index, formal) in plan.formals.iter().enumerate() {
+            // `__chelis_global_` is escaped for authored names by c_ident.
+            // Capture the actual C formal before any block-local shadow can
+            // hide it at the tail-call site.
+            entry.push(format!(
+                "    void *const __chelis_global_tail_slot_{index} = (void *)&{formal};"
+            ));
+        }
+        entry.push("    __chelis_tail_loop_entry: ;".to_string());
+        emitter.lines.splice(0..0, entry);
     }
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
@@ -10591,24 +10605,22 @@ impl<'a> HostEmitter<'a> {
                 }
             ))
         );
-        let loop_formals = self
-            .tail_loop
-            .as_ref()
-            .filter(|plan| {
-                verified_tail
-                    && target == "__result"
-                    && plan.function == function
-                    && plan.formals.len() == arg_vars.len()
-            })
-            .map(|plan| plan.formals.clone());
-        if let Some(formals) = loop_formals {
+        let use_tail_loop = self.tail_loop.as_ref().is_some_and(|plan| {
+            verified_tail
+                && target == "__result"
+                && plan.function == function
+                && plan.formals.len() == arg_vars.len()
+        });
+        if use_tail_loop {
             // Every argument and the verifier's pre-call ownership actions
             // have completed. The temporaries keep their values independent
-            // of the formal assignments, including when an argument refers
-            // to an earlier formal. Restarting replays the ordinary entry
-            // checks and keeps the final return's provenance path intact.
-            for (formal, arg) in formals.iter().zip(&arg_vars) {
-                self.lines.push(format!("{}{formal} = {arg};", self.indent));
+            // of the formal assignments. Stable slots refer to the actual
+            // formals even when a block-local binding shadows their names.
+            for (index, arg) in arg_vars.iter().enumerate() {
+                self.lines.push(format!(
+                    "{}memcpy(__chelis_global_tail_slot_{index}, &{arg}, sizeof({arg}));",
+                    self.indent
+                ));
             }
             self.lines
                 .push(format!("{}goto __chelis_tail_loop_entry;", self.indent));

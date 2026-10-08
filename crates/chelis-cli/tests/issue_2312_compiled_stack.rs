@@ -5,6 +5,7 @@ use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn source(elements: usize, preceding_effect: bool) -> String {
@@ -44,6 +45,16 @@ fn swapping_tail_source(iterations: usize) -> String {
          result = swap(7i64, 11i64, {iterations}i64)\n"
     );
     chelis_surf::format::format_source(&raw).expect("format swapping tail fixture")
+}
+
+fn shadowing_tail_source() -> String {
+    let raw = "module Probe.TailShadow\n\
+               def step(n: i64) -> i64 = {\n\
+                 n = sub(n, 1i64)\n\
+                 if eq(n, 0i64) then 0i64 else step(n)\n\
+               }\n\
+               result = step(3i64)\n";
+    chelis_surf::format::format_source(raw).expect("format shadowing tail fixture")
 }
 
 fn build(source: &str, output_dir: &Path) -> PathBuf {
@@ -146,6 +157,22 @@ fn self_tail_loop_preserves_simultaneous_argument_updates() {
         .expect("run swapping recursion with 2 MiB stack");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "result = 7\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn self_tail_loop_updates_the_formal_under_a_shadowing_local() {
+    let dir = tempdir().expect("tempdir");
+    let binary = build(&shadowing_tail_source(), &dir.path().join("tail_shadow"));
+    let output = Command::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
+        .timeout(Duration::from_secs(3))
+        .output()
+        .expect("run shadowing recursion with 2 MiB stack");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "result = 0\n");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 

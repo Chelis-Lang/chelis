@@ -587,8 +587,9 @@ post-dominance, not source scope alone:
 For a verified direct self-tail call with a scalar result and no delegated
 entry receipt, the C host emitter reuses the private function frame as a loop.
 It evaluates the next arguments in source order, performs the verifier's
-pre-call clones and terminal releases, assigns the next formal values, and
-re-enters the function's entry checks. The loop edge does not consume a native
+pre-call clones and terminal releases, writes the next formal values through
+stable slots that block-local shadows cannot capture, and re-enters the
+function's entry checks. The loop edge does not consume a native
 recursion budget. Non-tail calls and recursion through another function keep
 the stack-budget check. The final return still supplies result provenance,
 and the loop performs arithmetic in the same order as the recursive source.
