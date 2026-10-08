@@ -20320,16 +20320,14 @@ impl<'program> LowerCtx<'program> {
         let refined = DimInfo::Named(name.clone(), known_extent);
 
         // A same-shape primitive's output type is part of its physical
-        // operand-agreement contract. A caller-side label is only a view, so
-        // stamping it directly on that producer can make a valid primitive
-        // internally inconsistent (for example, `relu` producing
-        // `Named("d", Some(2))` while its operand remains `Lit(2)`). Retain
-        // the exact producer and put the diagnostic-only refinement on an
-        // administrative carrier instead.
-        if matches!(
-            crate::axis_sources::same_shape_result_agreement(&self.dag, id),
-            Ok(Some(_))
-        ) {
+        // operand-agreement contract, and a guarded abort's is exactly its
+        // fallback's. A caller-side label is only a view, so stamping it
+        // directly on such a producer can make a valid primitive internally
+        // inconsistent (for example, `relu` producing `Named("d", Some(2))`
+        // while its operand remains `Lit(2)`). Retain the exact producer and
+        // put the diagnostic-only refinement on an administrative carrier
+        // instead.
+        if crate::axis_sources::result_type_is_operand_bound(&self.dag, id) {
             let source = self.dag.get(id).expect("result");
             let mut output_type = source.output_type.clone();
             output_type.dims[axis] = refined;

@@ -383,6 +383,21 @@ pub fn same_shape_result_agreement(
     Ok(Some(SameShapeAgreement { members }))
 }
 
+/// Whether `node`'s output type is fixed by an operand's type, so a
+/// caller-side label must not be stamped onto the node itself.
+///
+/// A same-shape producer's result agrees with its operands by its physical
+/// agreement contract. A guarded abort ([05-OP-68]) is stricter: its result
+/// has exactly its fallback's type, which `verify` checks structurally. A
+/// label stamped onto either alone makes the node disagree with the operand
+/// it is defined by (chelis#3338), so the label belongs on a carrier.
+pub fn result_type_is_operand_bound(dag: &Dag, node: NodeId) -> bool {
+    matches!(
+        dag.get(node).map(|owner| &owner.op),
+        Some(RiscOp::GuardedFail { .. })
+    ) || matches!(same_shape_result_agreement(dag, node), Ok(Some(_)))
+}
+
 /// The sources of a node that declares its own shape with no operand to read
 /// it from: `Const` (a uniform fill at positive rank) and `ConstTensor`.
 ///
