@@ -20,23 +20,47 @@ fn float_bits_are_stored_unchanged() {
     let f32s = tensor_from_le_payload(Prim::F32, &le(&f32_bits, u32::to_le_bytes)).unwrap();
     let f16s = tensor_from_le_payload(Prim::F16, &le(&f16_bits, u16::to_le_bytes)).unwrap();
     let bf16s = tensor_from_le_payload(Prim::Bf16, &le(&bf16_bits, u16::to_le_bytes)).unwrap();
-    let StorageView::F64(values) = f64s.view() else { panic!("f64 storage") };
-    assert_eq!(values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), f64_bits);
-    let StorageView::F32(values) = f32s.view() else { panic!("f32 storage") };
-    assert_eq!(values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), f32_bits);
-    let StorageView::F16(values) = f16s.view() else { panic!("f16 storage") };
-    assert_eq!(values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), f16_bits);
-    let StorageView::Bf16(values) = bf16s.view() else { panic!("bf16 storage") };
-    assert_eq!(values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), bf16_bits);
+    let StorageView::F64(values) = f64s.view() else {
+        panic!("f64 storage")
+    };
+    assert_eq!(
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        f64_bits
+    );
+    let StorageView::F32(values) = f32s.view() else {
+        panic!("f32 storage")
+    };
+    assert_eq!(
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        f32_bits
+    );
+    let StorageView::F16(values) = f16s.view() else {
+        panic!("f16 storage")
+    };
+    assert_eq!(
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        f16_bits
+    );
+    let StorageView::Bf16(values) = bf16s.view() else {
+        panic!("bf16 storage")
+    };
+    assert_eq!(
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        bf16_bits
+    );
 }
 
 #[test]
 fn integers_and_bools_are_stored_unchanged() {
     let i16s = tensor_from_le_payload(Prim::Int16, &le(&[i16::MIN, -2], i16::to_le_bytes)).unwrap();
-    let StorageView::I16(values) = i16s.view() else { panic!("i16 storage") };
+    let StorageView::I16(values) = i16s.view() else {
+        panic!("i16 storage")
+    };
     assert_eq!(values, [i16::MIN, -2]);
     let bools = tensor_from_le_payload(Prim::Bool, &[1, 0]).unwrap();
-    let StorageView::Bool(values) = bools.view() else { panic!("bool storage") };
+    let StorageView::Bool(values) = bools.view() else {
+        panic!("bool storage")
+    };
     assert_eq!(values, [1, 0]);
 }
 

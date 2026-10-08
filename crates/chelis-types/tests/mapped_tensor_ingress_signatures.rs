@@ -67,7 +67,9 @@ fn rejects_with(source: &str, fragments: &[&str]) {
     );
 }
 
-const DATA_DTYPES: [&str; 9] = ["f64", "f32", "f16", "bf16", "i64", "i32", "i16", "i8", "bool"];
+const DATA_DTYPES: [&str; 9] = [
+    "f64", "f32", "f16", "bf16", "i64", "i32", "i16", "i8", "bool",
+];
 
 /// Every active data element dtype is a result dtype, and the result has
 /// that dtype; a declared result of another dtype rejects.
@@ -163,7 +165,5 @@ fn mapped_reads_are_pure() {
 /// A dtype binder in scope is a dtype argument.
 #[test]
 fn a_dtype_binder_is_a_dtype_argument() {
-    accepts(
-        "def ok[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)",
-    );
+    accepts("def ok[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)");
 }

@@ -8537,24 +8537,24 @@ pub unsafe extern "C" fn chelis_mmap_tensor(
     match width {
         1 => std::ptr::copy_nonoverlapping(payload.as_ptr(), data, payload.len()),
         2 => {
-            for (index, chunk) in payload.chunks_exact(2).enumerate() {
-                let value = u16::from_le_bytes([chunk[0], chunk[1]]);
-                data.cast::<u16>().add(index).write_unaligned(value);
+            for (index, chunk) in payload.as_chunks::<2>().0.iter().enumerate() {
+                data.cast::<u16>()
+                    .add(index)
+                    .write_unaligned(u16::from_le_bytes(*chunk));
             }
         }
         4 => {
-            for (index, chunk) in payload.chunks_exact(4).enumerate() {
-                let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                data.cast::<u32>().add(index).write_unaligned(value);
+            for (index, chunk) in payload.as_chunks::<4>().0.iter().enumerate() {
+                data.cast::<u32>()
+                    .add(index)
+                    .write_unaligned(u32::from_le_bytes(*chunk));
             }
         }
         _ => {
-            for (index, chunk) in payload.chunks_exact(8).enumerate() {
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(chunk);
+            for (index, chunk) in payload.as_chunks::<8>().0.iter().enumerate() {
                 data.cast::<u64>()
                     .add(index)
-                    .write_unaligned(u64::from_le_bytes(bytes));
+                    .write_unaligned(u64::from_le_bytes(*chunk));
             }
         }
     }

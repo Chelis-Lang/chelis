@@ -990,7 +990,10 @@ fn reserved_reason(name: &str) -> &'static str {
 }
 
 fn reserved(name: &str, binder: &'static str, span: Span) -> Result<(), DesugarError> {
-    match RESERVED_INTRINSIC_NAMES.iter().find(|reserved| **reserved == name) {
+    match RESERVED_INTRINSIC_NAMES
+        .iter()
+        .find(|reserved| **reserved == name)
+    {
         Some(name) => Err(DesugarError::ReservedName { name, binder, span }),
         None => Ok(()),
     }

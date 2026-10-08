@@ -87,7 +87,10 @@ fn assert_lanes_print(dir: &TempDir, name: &str, source: &str, expected: &str) {
 /// The last `lines` nonempty lines of a failure's stderr, without the lane's
 /// `error: ` boundary prefix.
 fn tail(stderr: &str, lines: usize) -> Vec<String> {
-    let nonempty: Vec<&str> = stderr.lines().filter(|line| !line.trim().is_empty()).collect();
+    let nonempty: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     nonempty[nonempty.len().saturating_sub(lines)..]
         .iter()
         .map(|line| line.trim_start_matches("error: ").to_string())
@@ -100,7 +103,11 @@ fn assert_lanes_fail(dir: &TempDir, name: &str, source: &str, expected: &[&str])
         ("eval", eval(dir, name, source)),
         ("C", compiled(dir, name, source)),
     ] {
-        assert!(!run.success, "{lane} must fail for `{name}`; stdout:\n{}", run.stdout);
+        assert!(
+            !run.success,
+            "{lane} must fail for `{name}`; stdout:\n{}",
+            run.stdout
+        );
         assert_eq!(
             tail(&run.stderr, expected.len()),
             expected,
@@ -118,9 +125,12 @@ fn program(path: &Path, body: &str) -> String {
     )
 }
 
+/// One `(dtype, byte offset, element count, expected rendering)` row.
+type DtypeRow = (&'static str, usize, usize, &'static str);
+
 /// One payload per data element dtype, each at an unaligned offset after a
 /// three-byte prefix, with its expected rendering.
-fn every_dtype_fixture() -> (Vec<u8>, Vec<(&'static str, usize, usize, &'static str)>) {
+fn every_dtype_fixture() -> (Vec<u8>, Vec<DtypeRow>) {
     let mut bytes = b"pre".to_vec();
     let mut rows = Vec::new();
     let mut push = |dtype, count, payload: Vec<u8>, rendered| {
@@ -130,7 +140,10 @@ fn every_dtype_fixture() -> (Vec<u8>, Vec<(&'static str, usize, usize, &'static 
     push(
         "f64",
         2,
-        [0.1f64, -0.0].iter().flat_map(|x| x.to_le_bytes()).collect(),
+        [0.1f64, -0.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
         "tensor(shape=[2], data=[0.1, -0.0])",
     );
     push(
@@ -145,13 +158,19 @@ fn every_dtype_fixture() -> (Vec<u8>, Vec<(&'static str, usize, usize, &'static 
     push(
         "f16",
         2,
-        [0x3c00u16, 0xc000].iter().flat_map(|x| x.to_le_bytes()).collect(),
+        [0x3c00u16, 0xc000]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
         "tensor(shape=[2], data=[1.0, -2.0])",
     );
     push(
         "bf16",
         2,
-        [0x3f80u16, 0x3f00].iter().flat_map(|x| x.to_le_bytes()).collect(),
+        [0x3f80u16, 0x3f00]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
         "tensor(shape=[2], data=[1.0, 0.5])",
     );
     push(
@@ -163,7 +182,10 @@ fn every_dtype_fixture() -> (Vec<u8>, Vec<(&'static str, usize, usize, &'static 
     push(
         "i32",
         2,
-        [-9i32, i32::MAX].iter().flat_map(|x| x.to_le_bytes()).collect(),
+        [-9i32, i32::MAX]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
         "tensor(shape=[2], data=[-9, 2147483647])",
     );
     push(
@@ -207,7 +229,12 @@ fn every_data_dtype_reads_its_payload_in_eval_and_c() {
         .map(|(_, _, _, rendered)| format!("{rendered}\n"))
         .collect::<String>()
         + "run = ()\n";
-    assert_lanes_print(&dir, "every_dtype", &program(&data, &format!("{body}\n  ()")), &expected);
+    assert_lanes_print(
+        &dir,
+        "every_dtype",
+        &program(&data, &format!("{body}\n  ()")),
+        &expected,
+    );
 }
 
 /// A computed count is a fresh extent, and a declared result extent is
@@ -216,8 +243,14 @@ fn every_data_dtype_reads_its_payload_in_eval_and_c() {
 fn a_declared_extent_guards_a_computed_count() {
     let dir = tempdir().expect("tempdir");
     let data = dir.path().join("payload.bin");
-    fs::write(&data, [1.0f32, 2.0, 3.0].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>())
-        .expect("write payload");
+    fs::write(
+        &data,
+        [1.0f32, 2.0, 3.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .expect("write payload");
     let read = |declared: usize| {
         program(
             &data,
@@ -236,7 +269,11 @@ fn a_declared_extent_guards_a_computed_count() {
         eval(&dir, "disagreeing_extent", &read(4)),
         compiled(&dir, "disagreeing_extent", &read(4)),
     ] {
-        assert!(!run.success, "a disagreeing extent must trap: {}", run.stdout);
+        assert!(
+            !run.success,
+            "a disagreeing extent must trap: {}",
+            run.stdout
+        );
         assert_eq!(
             tail(&run.stderr, 1),
             ["numeric trap: domain in mmap_tensor at i64"],
@@ -297,7 +334,12 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
         ),
     ];
     for (name, call, expected) in cases {
-        assert_lanes_fail(&dir, name, &program(&data, &format!("  print({call})")), expected);
+        assert_lanes_fail(
+            &dir,
+            name,
+            &program(&data, &format!("  print({call})")),
+            expected,
+        );
     }
 }
 
@@ -431,12 +473,19 @@ fn the_dtype_argument_round_trips_through_deep() {
     let dir = tempdir().expect("tempdir");
     let source = "def ok(m: MappedFile) -> tensor[*, bf16] = mmap_tensor(m, 0i64, 1i64, bf16)\n";
     let path = write_source(&dir, "round", source);
-    chelis().args(["fmt", "--check", path.to_str().unwrap()]).assert().success();
+    chelis()
+        .args(["fmt", "--check", path.to_str().unwrap()])
+        .assert()
+        .success();
     let deep = chelis()
         .args(["deep", path.to_str().unwrap()])
         .output()
         .expect("chelis deep runs");
-    assert!(deep.status.success(), "{}", String::from_utf8_lossy(&deep.stderr));
+    assert!(
+        deep.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deep.stderr)
+    );
     let deep_text = String::from_utf8(deep.stdout).expect("utf-8");
     assert!(deep_text.contains("(t-prim {} bf16)"), "{deep_text}");
     let deep_path = dir.path().join("round.dp");
@@ -445,7 +494,11 @@ fn the_dtype_argument_round_trips_through_deep() {
         .args(["surf", deep_path.to_str().unwrap()])
         .output()
         .expect("chelis surf runs");
-    assert!(surf.status.success(), "{}", String::from_utf8_lossy(&surf.stderr));
+    assert!(
+        surf.status.success(),
+        "{}",
+        String::from_utf8_lossy(&surf.stderr)
+    );
     assert_eq!(String::from_utf8(surf.stdout).expect("utf-8"), source);
 }
 
@@ -462,10 +515,14 @@ fn hnw(tensors: &[ArchiveTensor]) -> Vec<u8> {
     let mut payload = Vec::new();
     let mut entries = Vec::new();
     for (id, dtype, shape, data) in tensors {
-        while payload.len() % 64 != 0 {
+        while !payload.len().is_multiple_of(64) {
             payload.push(0);
         }
-        let shape = shape.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let shape = shape
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         entries.push(format!(
             "{{\"byte_len\":{},\"consumer\":\"M.{id}\",\"dtype\":\"{dtype}\",\"encoding\":\"raw-le\",\"id\":\"{id}\",\"layout\":\"onnx-row-major\",\"offset\":{},\"onnx_name\":\"{id}\",\"sha256\":\"{}\",\"shape\":[{shape}]}}",
             data.len(),
@@ -487,7 +544,7 @@ fn hnw(tensors: &[ArchiveTensor]) -> Vec<u8> {
     archive.extend_from_slice(&Sha256::digest(manifest.as_bytes()));
     archive.extend_from_slice(&Sha256::digest(&payload));
     archive.extend_from_slice(manifest.as_bytes());
-    while archive.len() % 64 != 0 {
+    while !archive.len().is_multiple_of(64) {
         archive.push(0);
     }
     archive.extend_from_slice(&payload);
@@ -500,9 +557,19 @@ fn le<T: Copy, const N: usize>(values: &[T], bytes: fn(T) -> [u8; N]) -> Vec<u8>
 
 fn model_archive() -> Vec<u8> {
     hnw(&[
-        ("w", "f32", vec![2, 3], le(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.5], f32::to_le_bytes)),
+        (
+            "w",
+            "f32",
+            vec![2, 3],
+            le(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.5], f32::to_le_bytes),
+        ),
         ("b", "f64", vec![2], le(&[0.1f64, -0.25], f64::to_le_bytes)),
-        ("ids", "i64", vec![2], le(&[-1i64, 1 << 40], i64::to_le_bytes)),
+        (
+            "ids",
+            "i64",
+            vec![2],
+            le(&[-1i64, 1 << 40], i64::to_le_bytes),
+        ),
         ("idx", "i32", vec![3], le(&[7i32, -8, 9], i32::to_le_bytes)),
         ("mask", "bool", vec![3], vec![1, 0, 1]),
     ])
@@ -568,7 +635,12 @@ fn archive_mismatches_fail_with_a_named_reason() {
     ];
     for (name, body, detail) in reader_cases {
         let expected = format!("Std.Io.Tensors: {path_text}: {detail}");
-        assert_lanes_fail(&dir, name, &archive_program(&good, body), &[expected.as_str()]);
+        assert_lanes_fail(
+            &dir,
+            name,
+            &archive_program(&good, body),
+            &[expected.as_str()],
+        );
     }
     let corrupt = |name: &str, bytes: Vec<u8>| {
         let path = dir.path().join(format!("{name}.hnw"));
@@ -595,7 +667,12 @@ fn archive_mismatches_fail_with_a_named_reason() {
             "  ()",
             "manifest checksum mismatch",
         ),
-        ("bad_magic", corrupt("bad_magic", magic), "  ()", "bad magic"),
+        (
+            "bad_magic",
+            corrupt("bad_magic", magic),
+            "  ()",
+            "bad magic",
+        ),
         (
             "truncated",
             corrupt("truncated", archive[..40].to_vec()),
@@ -605,6 +682,11 @@ fn archive_mismatches_fail_with_a_named_reason() {
     ];
     for (name, path, body, detail) in opened {
         let expected = format!("Std.Io.Tensors: {}: {detail}", path.to_str().unwrap());
-        assert_lanes_fail(&dir, name, &archive_program(&path, body), &[expected.as_str()]);
+        assert_lanes_fail(
+            &dir,
+            name,
+            &archive_program(&path, body),
+            &[expected.as_str()],
+        );
     }
 }

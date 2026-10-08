@@ -4748,7 +4748,8 @@ impl<'a> EvalContext<'a> {
                 let RuntimeValue::MappedFile(bytes) = mapped else {
                     return Err(format!("mmap_read expects MappedFile, got {mapped:?}"));
                 };
-                let range = chelis_abi::mapped::mapped_range("mmap_read", offset, len, bytes.len())?;
+                let range =
+                    chelis_abi::mapped::mapped_range("mmap_read", offset, len, bytes.len())?;
                 Ok(RuntimeValue::List(
                     bytes[range]
                         .iter()
@@ -4765,7 +4766,7 @@ impl<'a> EvalContext<'a> {
                 let offset = expect_int_arg(args, 1)?;
                 let count = expect_int_arg(args, 2)?;
                 let RuntimeValue::MappedFile(bytes) = mapped else {
-                    return Err(format!("mmap_tensor expects MappedFile, got {mapped:?}"));
+                    return Err("mmap_tensor expects a MappedFile handle".to_string());
                 };
                 let precision = result_type_expr
                     .and_then(tagged_expr_children)
@@ -4796,7 +4797,7 @@ impl<'a> EvalContext<'a> {
                 let offset = expect_int_arg(args, 1)?;
                 let len = expect_int_arg(args, 2)?;
                 let RuntimeValue::MappedFile(bytes) = mapped else {
-                    return Err(format!("{name} expects MappedFile, got {mapped:?}"));
+                    return Err(format!("{name} expects a MappedFile handle"));
                 };
                 let range = chelis_abi::mapped::mapped_range(name, offset, len, bytes.len())?;
                 let start = range.start;

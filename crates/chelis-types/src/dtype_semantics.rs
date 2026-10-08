@@ -4567,11 +4567,7 @@ where
 /// unmet precondition.
 pub fn tensor_from_le_payload(prim: Prim, bytes: &[u8]) -> Result<TensorStorage, String> {
     fn chunks<const N: usize>(bytes: &[u8]) -> impl Iterator<Item = [u8; N]> + '_ {
-        bytes.chunks_exact(N).map(|chunk| {
-            let mut element = [0u8; N];
-            element.copy_from_slice(chunk);
-            element
-        })
+        bytes.as_chunks::<N>().0.iter().copied()
     }
     let width = match prim {
         Prim::Int8 | Prim::Bool => 1,
@@ -4585,7 +4581,7 @@ pub fn tensor_from_le_payload(prim: Prim, bytes: &[u8]) -> Result<TensorStorage,
             ));
         }
     };
-    if bytes.len() % width != 0 {
+    if !bytes.len().is_multiple_of(width) {
         return Err(format!(
             "mmap_tensor payload of {} bytes is not a whole number of {}-byte elements",
             bytes.len(),

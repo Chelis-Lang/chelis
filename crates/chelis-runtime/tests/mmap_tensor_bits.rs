@@ -28,7 +28,10 @@ fn nan_payloads_and_signaling_bits_survive_the_read() {
     bytes.extend(f32_bits.iter().flat_map(|bits| bits.to_le_bytes()));
     bytes.extend(f16_bits.iter().flat_map(|bits| bits.to_le_bytes()));
     bytes.extend(bf16_bits.iter().flat_map(|bits| bits.to_le_bytes()));
-    let path = std::env::temp_dir().join(format!("chelis-mmap-tensor-bits-{}.bin", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "chelis-mmap-tensor-bits-{}.bin",
+        std::process::id()
+    ));
     fs::write(&path, &bytes).expect("write payload");
     unsafe {
         let path_text = CString::new(path.to_str().unwrap()).unwrap();

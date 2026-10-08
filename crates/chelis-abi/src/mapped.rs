@@ -91,7 +91,12 @@ pub fn check_bool_payload(bytes: &[u8]) -> Result<(), String> {
                 "mmap_tensor bool element {index} has byte {}, expected 0 or 1",
                 bytes[index]
             );
-            Err(trap(NumericTrapKind::Domain, "mmap_tensor", "bool", &context))
+            Err(trap(
+                NumericTrapKind::Domain,
+                "mmap_tensor",
+                "bool",
+                &context,
+            ))
         }
     }
 }
@@ -136,17 +141,35 @@ mod tests {
     #[test]
     fn ranges_outside_the_mapping_trap() {
         let past = mapped_range("mmap_read", 3, 3, 5).unwrap_err();
-        assert!(past.ends_with("\nnumeric trap: domain in mmap_read at i64"), "{past}");
+        assert!(
+            past.ends_with("\nnumeric trap: domain in mmap_read at i64"),
+            "{past}"
+        );
         let at_end = mapped_range("mmap_read", 6, 0, 5).unwrap_err();
-        assert!(at_end.ends_with("numeric trap: domain in mmap_read at i64"), "{at_end}");
+        assert!(
+            at_end.ends_with("numeric trap: domain in mmap_read at i64"),
+            "{at_end}"
+        );
         let negative = mapped_range("mmap_text", -1, 0, 5).unwrap_err();
-        assert!(negative.starts_with("mmap_text offset is negative: -1\n"), "{negative}");
+        assert!(
+            negative.starts_with("mmap_text offset is negative: -1\n"),
+            "{negative}"
+        );
         let overflow = mapped_range("mmap_sha256", i64::MAX, 1, 5).unwrap_err();
-        assert!(overflow.ends_with("numeric trap: overflow in mmap_sha256 at i64"), "{overflow}");
+        assert!(
+            overflow.ends_with("numeric trap: overflow in mmap_sha256 at i64"),
+            "{overflow}"
+        );
         let count = mapped_tensor_range(0, -1, 4, 5).unwrap_err();
-        assert!(count.starts_with("mmap_tensor count is negative: -1\n"), "{count}");
+        assert!(
+            count.starts_with("mmap_tensor count is negative: -1\n"),
+            "{count}"
+        );
         let product = mapped_tensor_range(0, i64::MAX / 2, 4, 5).unwrap_err();
-        assert!(product.ends_with("numeric trap: overflow in mmap_tensor at i64"), "{product}");
+        assert!(
+            product.ends_with("numeric trap: overflow in mmap_tensor at i64"),
+            "{product}"
+        );
     }
 
     #[test]
@@ -162,7 +185,10 @@ mod tests {
 
     #[test]
     fn text_decodes_exactly_and_names_the_first_invalid_byte() {
-        assert_eq!(mapped_text(0, "a\u{e9}\r\n".as_bytes()), Ok("a\u{e9}\r\n".to_string()));
+        assert_eq!(
+            mapped_text(0, "a\u{e9}\r\n".as_bytes()),
+            Ok("a\u{e9}\r\n".to_string())
+        );
         assert_eq!(
             mapped_text(10, &[b'a', 0xc3, b'b']),
             Err("mmap_text: invalid UTF-8 at byte 11".to_string())

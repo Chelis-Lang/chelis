@@ -708,7 +708,8 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
         let site = match call.dtype {
             Some(dtype) => {
                 let stated = dtype_argument(dtype, &self.is_binder());
-                self.visitor.dtype_argument(DtypeCall::ToTensor, dtype, stated);
+                self.visitor
+                    .dtype_argument(DtypeCall::ToTensor, dtype, stated);
                 Site::DtypeArgument(stated)
             }
             None => Site::MissingDtype {
