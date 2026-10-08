@@ -57,6 +57,9 @@ the same dataset identity receive the relational monotonicity assumption.
 Missing trusted calls, different-dataset pairs, and the not-yet-bridged range
 or boundary contracts return `unsupported` under `smt-only`.
 
+The source-bound Clarabel QP contract and the design for extending it to
+symbolic fixed-shape inputs are in [Clarabel as an external optimizer](clarabel_external_optimizer.md).
+
 The chelis#979 acceptance oracle is:
 
 ```sh

@@ -88,8 +88,8 @@ equality constraints, the same stationarity consequence is available. The
 prover applies only consequences it can lower and discharge; it never treats
 an unsupported goal as true.
 
-The SMT lowering scalarizes fixed literal `f64` QP data and zero/nonnegative
-cones. It follows a typed Chelis helper that
+The executable SMT lowering scalarizes fixed literal `f64` QP data and
+zero/nonnegative cones. It follows a typed Chelis helper that
 returns one direct call to the same resolved `solve` declaration, substituting
 its arguments before constructing the proof goal. Dynamic runtime dimensions
 and the other runtime cone families are outside that deductive lowering and produce an
@@ -147,3 +147,153 @@ argument binding, and fail-closed unsupported cases.
 The concrete bounded-result contract is a separate proof view. It requires an
 explicit bound that applies to the floating-point result and cannot be inferred
 from `Solved` or requested tolerances alone.
+
+## Symbolic-input proof extension
+
+The fixed-literal lowering demonstrates call attribution and conditional
+reporting, but it cannot prove a property of an algorithm that constructs QP
+data from its inputs. This extension keeps the same `solve` API and ideal-real
+contract. It changes the proof representation and the set of programs the
+prover can lower; it does not change runtime optimization or claim a bound on
+the `f64` result. The controlling semantics are in `spec/11-ffi.md`.
+
+### Acceptance theorem and supported program form
+
+The first acceptance theorem has fixed, compile-time-known extents and
+symbolic `f64` values. An algorithm receives a matrix `B`, vectors `q`, `b`,
+`state`, and `baseline`, and a matrix `A`; it constructs `P = B^T B`, solves
+the two-variable QP with a fixed zero/nonnegative cone partition, then passes
+the `Solved` primal through pure `apply_step(state, primal)` and
+`quality(updated, state, P, q)` helpers. The property assumes or proves that
+`baseline` is feasible and
+proves, for every valuation satisfying its `where` conditions, that
+
+    quality(apply_step(state, primal), state, P, q)
+      >= quality(apply_step(state, baseline), state, P, q)
+
+where `quality(updated, state, P, q)` is a fixed scalar offset minus
+`1/2 step^T P step + q^T step` for `step = updated - state`. The typed helper
+reshapes `step` from `[2]` to `[2,1]` for `matmul(P, step_column)`, reshapes
+that product back to `[2]`, and forms the two dot products by elementwise
+multiplication and reduction. A companion claim uses primal feasibility to
+bound the updated state. The QP data, baseline, and state vary at runtime;
+the proof must establish the algebraic connection between the QP objective
+and the downstream helpers. A claim that merely solves a literal one-variable
+QP and restates its stationary point does not satisfy this acceptance oracle.
+
+This lane specializes a property at concrete tensor extents and proves it for
+all real-valued entries satisfying the stated premises at those extents. It
+does not prove a theorem universally quantified over dimensions. Its initial
+cone topology is a fixed list of `ZeroCone` and `NonnegativeCone` blocks,
+while `P,q,A,b` entries may be symbolic. Settings remain an explicit,
+well-formed fixed record. Pure straight-line helpers, named bindings,
+conditionals, elementwise addition/subtraction/multiplication/negation,
+`permute`, `reshape`, `matmul`, and reductions are lowered when their dimensions are
+fixed. Division, effects, recursion, loops, symbolic extents, dynamic cone
+selection, and other cone families produce `unsupported` for this lane.
+
+### Typed call and value provenance
+
+The prover starts from the checked, linker-resolved program representation,
+not authored function names or a source-text search for `solve`. It assigns a
+stable identity to each admitted dependency-owned call occurrence and records
+the typed value expressions supplied as `P,q,A,b,cones,settings`. Bounded,
+capture-avoiding expansion of pure helpers exposes the call and its downstream
+uses while preserving source ownership and branch identity. If expansion
+cannot account for a value, the goal is unsupported. A `Solved` pattern binds
+one fresh real vector to that call's primal projection; every subsequent use
+of that projection in the property refers to the same vector. A different
+call, changed argument, lookalike declaration, or `Stopped` path receives no
+assumption from this occurrence. The representation keys assumptions by call
+identity even if the first lane admits only one reached solve call per goal.
+
+For a fixed shape, the proof lowerer expands typed matrix/vector values into
+real scalar terms and lowers the supported Chelis operations with their
+checked extents. It carries a real-arithmetic interpretation of the *whole*
+input construction and downstream computation. In particular, recognizing
+`B^T B` establishes PSD for the ideal real expression computed by that
+construction; it does not certify that the rounded runtime matrix is PSD.
+The `real_arithmetic` qualifier discloses that distinction. No source-level
+ghost optimizer type or new runtime ABI is needed.
+
+### Convex-domain premise
+
+The ideal contract requires symmetric PSD `P`. The lowerer first attempts a
+checked derivation: retain the exact rational PSD check for literal matrices,
+and accept a Gram construction only after verifying its typed scalar identity
+`P[i,j] = sum_k B[k,i] * B[k,j]` and the sum-of-squares basis for
+`v^T P v >= 0`. A syntax resemblance without that identity is insufficient.
+The derivation is a fact of the real proof model and its evidence is attached
+to the call. For other symbolic `P`, the author may add
+`with contract = "clarabel.qp.assume_psd"` alongside
+`clarabel.qp.ideal_optimality`. It asserts `P = P^T` and PSD for that same
+call's `P`, with a distinct `method: "axiom"` assumption record. The named
+premise cannot be used without the matching ideal-optimality call, and it
+cannot be transferred to another matrix. With neither derivation nor explicit
+premise the property is unsupported; `Solved` alone does not establish PSD.
+At a fixed dimension, the explicit premise lowers to symmetry equalities and
+nonnegative principal minors, an equivalent finite real-arithmetic PSD
+condition. Resource exhaustion in that expansion or its SMT discharge is
+`unsupported`; the contract name is not an uninterpreted predicate that may
+be asserted without the matrix-specific condition.
+Implementing this bound pair requires removing the executable lowering's
+sole-contract restriction while retaining source-bound contract checks.
+
+### Discharge and report
+
+The ideal model grants primal feasibility and objective minimality over
+feasible vectors for the call's own data. Instead of sending an unrestricted
+quantified nonlinear QP axiom to SMT for every property, the lowerer finds the
+comparison vectors that the goal actually uses. It proves each candidate's
+feasibility under the property's preconditions, then instantiates the
+optimality implication at that candidate. A comparison with unproved
+feasibility cannot borrow the implication. The lowerer normalizes polynomial
+identities introduced by pure helpers before dispatching the residual
+property to the existing SMT engine. The existing sound stationarity rules
+remain available for the unconstrained and admitted interior cases; this
+extension does not treat stationarity as an arbitrary solver observation.
+
+For a goal `A => G`, SMT checks the selected sound consequences `A` and
+`not G` for a counterexample. The separate non-vacuity query uses the *full*
+feasibility-and-global-optimality axiom, the convex-domain premise, and the
+property preconditions. SAT establishes that at least one ideal-model input
+valuation satisfies them; SAT of only the goal-directed instances would be
+insufficient. This check does not establish a runtime `Solved` outcome for
+every input. Timeout, unknown, unsupported lowering, an unestablished
+convex-domain premise, or a vacuous assumption set cannot produce a green
+proof or fall through to fuzz sampling. The existing
+`proven_modulo_asserted_axiom` verdict and
+`real_arithmetic` qualifier remain the report strength. Each dependent
+assumption identifies its resolved provider symbol and archive digest, its
+call occurrence, and a deterministic fingerprint of the typed symbolic input
+expressions; the fingerprint is over expressions, not runtime values. The PSD
+derivation or explicit PSD axiom appears separately in evidence. An
+independent property retains its own verdict without a Clarabel dependency.
+No new verdict token or top-level report kind is introduced.
+
+### Implementation sequence and regression oracle
+
+Before implementation, add spec-derived positive and negative CLI test stubs
+for the symbolic acceptance theorem, an arbitrary-`P` variant with explicit
+PSD assumption, and every failure condition below. Then replace the literal
+argument parser and direct-wrapper substitution with the typed call/value
+representation; add fixed-shape symbolic scalarization, PSD derivation and
+explicit-premise binding, goal-directed optimality instantiation, and
+downstream helper lowering. Preserve the existing literal proofs as regression
+witnesses. The optional provider/SMT tests and feature-specific Clippy remain
+owned by Clarabel paths, with broader coverage in the scheduled run; unrelated
+PRs do not acquire a new serial Clarabel check.
+
+The positive oracle runs `chelis prove --tier smt-only --json` on the
+algorithm property and requires `status: "passed"`, zero samples, a
+call-bound ideal-optimality assumption, the PSD evidence appropriate to the
+variant, `proven_modulo_asserted_axiom`, and `real_arithmetic`. Negative twins
+change the QP argument or call owner, use a `Stopped` arm, omit the PSD
+premise, substitute an infeasible baseline, or reverse the downstream
+inequality. Additional rejection tests cover contradictory premises, a
+second solve result trying to inherit the first call's assumption, and a
+symbolic shape or cone family outside this lane. Every negative must produce
+`failed`, `invalid`, or `unsupported` as appropriate, with no
+axiom-laundered pass. Runtime evaluator and compiled-C parity remain governed
+by the existing provider tests; this extension adds no numerical-execution
+guarantee.

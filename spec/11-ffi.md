@@ -244,12 +244,31 @@ A named property contract over a provider call is opt-in. Its assumptions
 attach to the resolved, dependency-owned call and the precise arguments of
 that call, and only to the status branch named by the contract. For
 `clarabel.qp.ideal_optimality`, a `Solved` branch may interpret the call's
-primal tensor as an exact real optimizer for that call's `P,q,A,b,K` after the
-property's convex-domain premises are established or themselves explicitly
-assumed. This is an axiom about the ideal proof model, not a claim that the
-returned f64 bits encode an exact minimizer. A dependent proof reports
-`proven_modulo_asserted_axiom` and `real_arithmetic`; a proof independent of
-the contract retains its own strength. Unsupported cone families, dynamic
-dimensions, or proof obligations yield an explicit unsupported result rather
-than an unqualified proof or sampling fallback. No such assumption is
-available for a non-`Solved` status.
+primal tensor as a fresh exact real optimizer for that call's `P,q,A,b,K`.
+The model requires `P = P^T` and `v^T P v >= 0` for every real vector `v` of
+the decision dimension. A property may quantify over the values of typed
+matrix and vector inputs; the QP data need not be literals. The assumption
+follows that call's result through pure Chelis computations in the property,
+without transferring to a different call, different arguments, or a
+non-`Solved` status. For each admitted input valuation the proof must establish
+its stated consequence from that valuation's call-bound assumptions.
+
+The prover discharges the symmetric positive-semidefinite premise in its real
+arithmetic model or the author explicitly opts into
+`with contract = "clarabel.qp.assume_psd"` for the same call. That second
+contract asserts exactly `P = P^T` and `v^T P v >= 0` for every such `v`; it
+is recorded as a distinct axiom dependency. A requested ideal-optimality proof
+with neither a PSD discharge nor this explicit premise is unsupported.
+Using optimality against a comparison vector additionally requires a proof of
+that vector's feasibility for the same `A,b,K`. Contradictory premises cannot
+produce a passing result.
+
+These are axioms about the ideal proof model, not claims that the returned
+`f64` bits encode an exact minimizer or that floating-point construction of
+`P` preserves a real-arithmetic PSD derivation. A dependent proof reports
+`proven_modulo_asserted_axiom`, retains `real_arithmetic`, and identifies every
+call-bound axiom it used; a proof independent of these contracts retains its
+own strength. A prover that cannot lower a dimension, cone, program operation,
+or proof obligation reports `unsupported` rather than an unqualified proof or
+sampling fallback. No optimizer assumption is available for a non-`Solved`
+status.
