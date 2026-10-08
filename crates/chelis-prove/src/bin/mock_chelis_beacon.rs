@@ -66,6 +66,7 @@ fn main() {
                         "verdict": "proved",
                         "guarantee_class": "certified_envelope",
                         "soundness": "sound_approximate",
+                        "discharge_qualifiers": ["sound_over_approximation", "special_function_certified"],
                         "evidence": {},
                     })
                 );
@@ -82,6 +83,24 @@ fn main() {
                         "verdict": "unknown",
                         "guarantee_class": "untrusted",
                         "soundness": "untrusted",
+                        "discharge_qualifiers": [],
+                        "evidence": {},
+                    })
+                );
+                return;
+            }
+            "contract_uncertified_proved" => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_request(&args)).unwrap();
+                print!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "contract_id": request["contract_id"],
+                        "verdict": "proved",
+                        "guarantee_class": "sound_over_approximation",
+                        "soundness": "sound_approximate",
+                        "discharge_qualifiers": ["sound_over_approximation"],
                         "evidence": {},
                     })
                 );
@@ -97,8 +116,29 @@ fn main() {
                         "verdict": "proved",
                         "guarantee_class": "certified_envelope",
                         "soundness": "sound_approximate",
+                        "discharge_qualifiers": ["sound_over_approximation", "special_function_certified"],
                     })
                 );
+                return;
+            }
+            "contract_empty_qualifiers" | "contract_missing_qualifiers" => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_request(&args)).unwrap();
+                let mut report = serde_json::json!({
+                    "schema_version": 1,
+                    "contract_id": request["contract_id"],
+                    "verdict": "proved",
+                    "guarantee_class": "certified_envelope",
+                    "soundness": "sound_approximate",
+                    "discharge_qualifiers": [],
+                });
+                if scenario == "contract_missing_qualifiers" {
+                    report
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("discharge_qualifiers");
+                }
+                print!("{report}");
                 return;
             }
             "contract_contradictory" => {
@@ -112,6 +152,7 @@ fn main() {
                         "verdict": "proved",
                         "guarantee_class": "certified_envelope",
                         "soundness": "untrusted",
+                        "discharge_qualifiers": ["sound_over_approximation", "special_function_certified"],
                     })
                 );
                 return;

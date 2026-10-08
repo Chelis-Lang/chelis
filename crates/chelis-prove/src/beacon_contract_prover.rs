@@ -116,22 +116,43 @@ impl BeaconContractProver {
             .get("soundness")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(invalid)?;
-        match (verdict, guarantee_class, soundness) {
+        let expected_qualifiers: &[&str] = match (verdict, guarantee_class, soundness) {
             ("proved", "certified_envelope", "sound_approximate") => {
-                let mut evidence = response;
-                evidence["status"] = serde_json::json!("proved");
-                Ok(Some(AssumptionDischarge::new(
-                    DischargeMethod::CertifiedEnvelope,
-                    evidence,
-                )))
+                &["sound_over_approximation", "special_function_certified"]
             }
-            ("proved", "sound_over_approximation", "sound_approximate")
-            | (
+            ("proved", "sound_over_approximation", "sound_approximate") => {
+                &["sound_over_approximation"]
+            }
+            (
                 "proved_oracle_unverified" | "unknown" | "unsupported" | "invalid",
                 "untrusted",
                 "untrusted",
-            ) => Ok(None),
-            _ => Err(invalid()),
+            ) => &[],
+            _ => return Err(invalid()),
+        };
+        let qualifiers = response
+            .get("discharge_qualifiers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(invalid)?;
+        if qualifiers.len() != expected_qualifiers.len()
+            || expected_qualifiers.iter().any(|expected| {
+                qualifiers
+                    .iter()
+                    .filter(|value| value.as_str() == Some(expected))
+                    .count()
+                    != 1
+            })
+        {
+            return Err(invalid());
         }
+        if guarantee_class != "certified_envelope" {
+            return Ok(None);
+        }
+        let mut evidence = response;
+        evidence["status"] = serde_json::json!("proved");
+        Ok(Some(AssumptionDischarge::new(
+            DischargeMethod::CertifiedEnvelope,
+            evidence,
+        )))
     }
 }

@@ -168,8 +168,9 @@ under either answer.
 - The supervisor caps each captured output stream at 8 MiB while Beacon runs
   and bounds the final read. Reaching the cap returns a branded unsupported
   error. A completed contract response must have the expected schema version,
-  contract identity, verdict, guarantee class, and soundness fields; a malformed
-  or contradictory response also returns branded unsupported.
+  contract identity, verdict, guarantee class, soundness, and discharge
+  qualifiers; a malformed or contradictory response also returns branded
+  unsupported.
 - Input deadlock safety: the supervisor writes input to a temporary file before
   spawning. The `--request -` protocol reads that file on stdin, so a child
   that never reads cannot block the parent before its timeout starts. Large

@@ -106,7 +106,12 @@ fn malformed_successful_contract_response_is_branded() {
 fn wrong_contract_identity_and_trust_are_branded() {
     crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
-    for scenario in ["contract_wrong_id", "contract_contradictory"] {
+    for scenario in [
+        "contract_wrong_id",
+        "contract_contradictory",
+        "contract_empty_qualifiers",
+        "contract_missing_qualifiers",
+    ] {
         unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", scenario) };
         let err = BeaconContractProver::new(MOCK_BIN)
             .prove_contract("std.normal_cdf.reflection")
@@ -124,11 +129,13 @@ fn wrong_contract_identity_and_trust_are_branded() {
 fn completed_unknown_contract_response_preserves_no_proof() {
     crate::support::isolate();
     let _guard = SCENARIO_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", "contract_unknown") };
-    let result = BeaconContractProver::new(MOCK_BIN)
-        .prove_contract("std.normal_cdf.reflection")
-        .expect("valid completed no-proof response");
-    assert!(result.is_none());
+    for scenario in ["contract_unknown", "contract_uncertified_proved"] {
+        unsafe { std::env::set_var("MOCK_BEACON_SCENARIO", scenario) };
+        let result = BeaconContractProver::new(MOCK_BIN)
+            .prove_contract("std.normal_cdf.reflection")
+            .expect("valid completed no-certification response");
+        assert!(result.is_none(), "{scenario} must not certify the contract");
+    }
     unsafe { std::env::remove_var("MOCK_BEACON_SCENARIO") };
 }
 
