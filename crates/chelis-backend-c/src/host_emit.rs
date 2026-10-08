@@ -385,6 +385,7 @@ pub(crate) fn emit_host_abi_program(
     }
     reject_duplicate_emitted_function_names(&all_names)?;
     let function_specializations = function_specializations(program);
+    let recursive_functions = recursive_host_functions(program);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage)?;
     if !header.is_empty() {
         body.push(header);
@@ -541,6 +542,7 @@ pub(crate) fn emit_host_abi_program(
             &captured_globals,
             &entry_work[function_index],
             &entry_groups,
+            &recursive_functions,
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -629,6 +631,7 @@ pub(crate) fn emit_host_abi_program(
             &helper_output_types,
             helper_result_origins,
             external_helpers,
+            &recursive_functions,
         )?;
     }
 
@@ -656,6 +659,9 @@ pub(crate) fn emit_host_abi_program(
 
     let mut result_claim_support = Vec::new();
     append_host_result_claim_support(&mut result_claim_support);
+    if !recursive_functions.is_empty() {
+        append_host_stack_budget_support(&mut result_claim_support);
+    }
     append_host_result_claim_checks(&mut result_claim_support);
     result_claim_support.push(String::new());
     result_claim_support.extend(body);
@@ -682,6 +688,16 @@ pub(crate) fn emit_host_abi_program(
         "#include <stdlib.h>".to_string(),
         "#include <string.h>".to_string(),
     ];
+    if !recursive_functions.is_empty() {
+        out.insert(0, "#define _GNU_SOURCE 1".to_string());
+        out.insert(1, "#define __CHELIS_HOST_STACK_GUARD 1".to_string());
+        out.push("#include <pthread.h>".to_string());
+        out.push("#include <sys/resource.h>".to_string());
+        out.push("#if defined(__linux__)".to_string());
+        out.push("#include <sys/syscall.h>".to_string());
+        out.push("#include <unistd.h>".to_string());
+        out.push("#endif".to_string());
+    }
     out.push(String::new());
     out.extend(c_linkage_declarations([
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
@@ -2431,11 +2447,15 @@ fn append_private_host_context_args(args: &mut Vec<String>, entry_receipt: &str)
     args.push(entry_receipt.to_string());
 }
 
-fn append_invocation_origin_context(out: &mut Vec<String>) {
-    out.push(
-        "    __chelis_host_result_origin_arena __chelis_origin_arena_storage = { NULL, NULL };"
-            .to_string(),
-    );
+fn append_invocation_origin_context(out: &mut Vec<String>, guarded: bool) {
+    let fields = if guarded {
+        "NULL, NULL, 0, 0, 0"
+    } else {
+        "NULL, NULL"
+    };
+    out.push(format!(
+        "    __chelis_host_result_origin_arena __chelis_origin_arena_storage = {{ {fields} }};"
+    ));
     out.push(
         "    __chelis_host_result_origin_arena *__chelis_origin_arena = &__chelis_origin_arena_storage;"
             .to_string(),
@@ -2830,6 +2850,11 @@ typedef struct __chelis_host_result_origin {
 typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
+#ifdef __CHELIS_HOST_STACK_GUARD
+    uintptr_t stack_low;
+    uintptr_t stack_high;
+    size_t recursive_depth;
+#endif
 } __chelis_host_result_origin_arena;
 
 /* Private proof of one complete, successful entry contract. Only a verified
@@ -2973,6 +2998,94 @@ static const __chelis_host_result_origin **__chelis_host_result_origin_children(
         abort();
     }
     return children;
+}
+"#.to_string());
+}
+
+/// Private host support, emitted only for a program whose user-call graph can
+/// recurse. The stack bound is discovered on the first guarded call of each
+/// public invocation and then carried through its private calls.
+fn append_host_stack_budget_support(out: &mut Vec<String>) {
+    out.push(r#"
+static uintptr_t __chelis_host_stack_low(uintptr_t *high) {
+#if defined(__APPLE__)
+    pthread_t thread = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(thread);
+    size_t size = pthread_get_stacksize_np(thread);
+    if (top == 0 || size == 0 || size > top) return 0;
+    *high = top;
+    return top - size;
+#elif defined(__linux__)
+    pthread_attr_t attributes;
+    if (pthread_getattr_np(pthread_self(), &attributes) != 0) return 0;
+    void *base = NULL;
+    size_t size = 0;
+    int status = pthread_attr_getstack(&attributes, &base, &size);
+    pthread_attr_destroy(&attributes);
+    if (status != 0 || base == NULL || size == 0 || size > UINTPTR_MAX - (uintptr_t)base) return 0;
+    uintptr_t top = (uintptr_t)base + size;
+    uintptr_t low = (uintptr_t)base;
+    /* musl reports only the mapped portion of the main thread's growable
+       stack. The main thread alone may use RLIMIT_STACK to recover its real
+       reserved extent; pthread-created threads retain their reported size. */
+    if (syscall(SYS_gettid) == getpid()) {
+        struct rlimit limit;
+        if (getrlimit(RLIMIT_STACK, &limit) == 0 &&
+            limit.rlim_cur != RLIM_INFINITY &&
+            limit.rlim_cur > size && limit.rlim_cur <= top) {
+            low = top - (uintptr_t)limit.rlim_cur;
+        }
+    }
+    *high = top;
+    return low;
+#else
+    (void)high;
+    return 0;
+#endif
+}
+
+typedef enum __chelis_host_stack_diagnostic_kind {
+    __CHELIS_HOST_STACK_BUDGET_EXHAUSTED,
+    __CHELIS_HOST_STACK_BUDGET_UNAVAILABLE
+} __chelis_host_stack_diagnostic_kind;
+
+typedef struct __chelis_host_stack_diagnostic {
+    __chelis_host_stack_diagnostic_kind kind;
+    const char *span;
+    size_t depth;
+} __chelis_host_stack_diagnostic;
+
+static void __chelis_host_report_stack_diagnostic(__chelis_host_stack_diagnostic diagnostic) {
+    switch (diagnostic.kind) {
+        case __CHELIS_HOST_STACK_BUDGET_EXHAUSTED:
+            fprintf(stderr, "error[RuntimeStackBudgetExhausted] at %s: compiled recursive call has insufficient stack at depth %zu\n", diagnostic.span, diagnostic.depth);
+            break;
+        case __CHELIS_HOST_STACK_BUDGET_UNAVAILABLE:
+            fprintf(stderr, "error[RuntimeStackBudgetUnavailable] at %s: cannot determine current thread stack bounds\n", diagnostic.span);
+            break;
+    }
+    chelis_flush_and_exit_trap();
+}
+
+static void __chelis_host_recursive_call_guard(__chelis_host_result_origin_arena *arena, const char *span) {
+    volatile unsigned char marker = 0;
+    uintptr_t here = (uintptr_t)&marker;
+    if (arena->stack_low == 0) {
+        arena->stack_low = __chelis_host_stack_low(&arena->stack_high);
+    }
+    if (arena->stack_low == 0 || here < arena->stack_low || here >= arena->stack_high) {
+        __chelis_host_stack_diagnostic diagnostic = {
+            __CHELIS_HOST_STACK_BUDGET_UNAVAILABLE, span, arena->recursive_depth
+        };
+        __chelis_host_report_stack_diagnostic(diagnostic);
+    }
+    if (here - arena->stack_low < (uintptr_t)(512 * 1024)) {
+        __chelis_host_stack_diagnostic diagnostic = {
+            __CHELIS_HOST_STACK_BUDGET_EXHAUSTED, span, arena->recursive_depth
+        };
+        __chelis_host_report_stack_diagnostic(diagnostic);
+    }
+    arena->recursive_depth += 1;
 }
 "#.to_string());
 }
@@ -3355,6 +3468,7 @@ fn emit_function(
     captured_globals: &[String],
     entry_work: &entry_walk::EntryWork,
     entry_groups: &UnordMap<String, usize>,
+    recursive_functions: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -3394,6 +3508,7 @@ fn emit_function(
         ownership_sites,
     );
     emitter.entry_group = entry_groups.get(&function.name).copied();
+    emitter.recursive_functions = recursive_functions.clone();
     emitter.entry_groups = entry_groups.clone();
     if entry_work.extent_at_body {
         emitter.entry_proof_owners = entry_work
@@ -3655,7 +3770,7 @@ fn emit_function(
         } else {
             "NULL"
         };
-        append_invocation_origin_context(out);
+        append_invocation_origin_context(out, !recursive_functions.is_empty());
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
             if *use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some()
@@ -3748,6 +3863,7 @@ fn emit_main(
     helper_output_types: &[Vec<TensorType>],
     helper_result_origins: Vec<Option<String>>,
     external_helpers: &UnordSet<String>,
+    recursive_functions: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     // The process starts in the IEEE default environment; entering keeps a
@@ -3755,7 +3871,7 @@ fn emit_main(
     // aborts, and returning from main ends the process, so there is no
     // caller state to restore.
     out.push(format!("    {}", crate::fp_env::ENTRY));
-    append_invocation_origin_context(out);
+    append_invocation_origin_context(out, !recursive_functions.is_empty());
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def
     // whose name was mangled (`double`) or renamed (`main`) emits the raw
@@ -3773,6 +3889,7 @@ fn emit_main(
         ownership_sites,
     );
     emitter.entry_projection = entry::global_helper_coverage(program);
+    emitter.recursive_functions = recursive_functions.clone();
     emitter.external_helpers = external_helpers.clone();
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
@@ -4131,6 +4248,49 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String>
     reachable
 }
 
+/// Functions that can participate in a call cycle. Named callbacks count as
+/// edges; bare function values conservatively count too, because a callback
+/// may invoke one later. Walk iteratively so graph analysis does not consume
+/// the compiler stack on a long chain of definitions.
+pub(crate) fn recursive_host_functions(program: &HostProgram) -> UnordSet<String> {
+    let names: UnordSet<String> = program.functions.iter().map(|f| f.name.clone()).collect();
+    let edges: UnordMap<String, Vec<String>> = program
+        .functions
+        .iter()
+        .map(|function| {
+            let mut refs = UnordSet::new();
+            collect_referenced_fn_names(&function.body, &mut refs);
+            (
+                function.name.clone(),
+                refs.into_sorted()
+                    .into_iter()
+                    .filter(|name| names.contains(name))
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut recursive = UnordSet::new();
+    for function in &program.functions {
+        let mut seen = UnordSet::new();
+        let mut pending = edges
+            .get(&function.name)
+            .expect("every host function is in the call graph")
+            .clone();
+        while let Some(name) = pending.pop() {
+            if name == function.name {
+                recursive.insert(function.name.clone());
+                break;
+            }
+            if seen.insert(name.clone())
+                && let Some(next) = edges.get(&name)
+            {
+                pending.extend(next.iter().cloned());
+            }
+        }
+    }
+    recursive
+}
+
 fn verified_helper_result_origin(
     helper: VerifiedHostTensorHelperView<'_>,
 ) -> Result<Option<String>, Unsupported> {
@@ -4152,6 +4312,16 @@ fn verified_helper_result_origin(
     }
 }
 
+struct CallbackAt<'a> {
+    callback: &'a HostCallback,
+    span: Option<&'a str>,
+}
+
+struct CallReporting<'a> {
+    result_claims: Option<&'a str>,
+    span: Option<&'a str>,
+}
+
 struct HostEmitter<'a> {
     lines: Vec<String>,
     /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
@@ -4160,6 +4330,7 @@ struct HostEmitter<'a> {
     indent: String,
     helper_prefix: String,
     emitted_names: UnordMap<String, String>,
+    recursive_functions: UnordSet<String>,
     function_specializations: UnordMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
     tensor_helper_output_types: &'a [Vec<TensorType>],
@@ -4523,6 +4694,7 @@ impl<'a> HostEmitter<'a> {
             indent,
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
+            recursive_functions: UnordSet::new(),
             function_specializations,
             tensor_helpers: tensor_helpers.helpers,
             tensor_helper_output_types: tensor_helpers.output_types,
@@ -5894,7 +6066,10 @@ impl<'a> HostEmitter<'a> {
                     args,
                     arg_tys,
                     site,
-                    result_claims.as_deref(),
+                    CallReporting {
+                        result_claims: result_claims.as_deref(),
+                        span: expr.span_id.as_deref(),
+                    },
                 )?;
             }
             HostExprKind::Builtin {
@@ -6212,14 +6387,34 @@ impl<'a> HostEmitter<'a> {
             }
             HostExprKind::Map { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
-                self.assign_map(target, callback, list, ty, site, body_block)?;
+                self.assign_map(
+                    target,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
+                    list,
+                    ty,
+                    site,
+                    body_block,
+                )?;
                 self.stamp_combinator_result_origin(target, ty, "map");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
             HostExprKind::Filter { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
-                self.assign_filter(target, callback, list, ty, site, body_block)?;
+                self.assign_filter(
+                    target,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
+                    list,
+                    ty,
+                    site,
+                    body_block,
+                )?;
                 self.stamp_combinator_result_origin(target, ty, "filter");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
@@ -6233,7 +6428,10 @@ impl<'a> HostEmitter<'a> {
                 let (preheader_block, body_block) = Self::loop_blocks(site)?;
                 self.assign_fold(
                     target,
-                    callback,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
                     init,
                     list,
                     ty,
@@ -6263,7 +6461,10 @@ impl<'a> HostEmitter<'a> {
                 let (preheader_block, body_block) = Self::loop_blocks(site)?;
                 self.assign_scan(
                     target,
-                    callback,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
                     init,
                     list,
                     ty,
@@ -6281,14 +6482,34 @@ impl<'a> HostEmitter<'a> {
             }
             HostExprKind::Partition { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
-                self.assign_partition(target, callback, list, ty, site, body_block)?;
+                self.assign_partition(
+                    target,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
+                    list,
+                    ty,
+                    site,
+                    body_block,
+                )?;
                 self.stamp_combinator_result_origin(target, ty, "partition");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
             HostExprKind::FlatMap { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
-                self.assign_flat_map(target, callback, list, ty, site, body_block)?;
+                self.assign_flat_map(
+                    target,
+                    CallbackAt {
+                        callback,
+                        span: expr.span_id.as_deref(),
+                    },
+                    list,
+                    ty,
+                    site,
+                    body_block,
+                )?;
                 self.stamp_combinator_result_origin(target, ty, "flat_map");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
@@ -10242,8 +10463,12 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_tys: &[HostType],
         site: &ProjectedHostSite<'a>,
-        result_claims: Option<&str>,
+        reporting: CallReporting<'_>,
     ) -> Result<(), Unsupported> {
+        let CallReporting {
+            result_claims,
+            span: call_span,
+        } = reporting;
         let (target, ty) = destination;
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
@@ -10319,6 +10544,7 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.emit_pre_call_actions(site)?;
+        let guarded_recursive_call = self.emit_recursive_call_guard(function, call_span);
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
@@ -10352,11 +10578,35 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
+        self.emit_recursive_call_end(guarded_recursive_call);
         if !self.emitted_names.contains_key(function) {
             self.assign_interface_result_origin(target, ty);
             self.emit_result_claim_guard(target, ty, result_claims);
         }
         Ok(())
+    }
+
+    fn emit_recursive_call_guard(&mut self, function: &str, span: Option<&str>) -> bool {
+        let guarded = self.recursive_functions.contains(function)
+            && self.emitted_names.contains_key(function);
+        if guarded {
+            let span = chelis_ir::span_sanitize::sanitize_for_comment(span.unwrap_or("<unknown>"));
+            self.lines.push(format!(
+                "{}__chelis_host_recursive_call_guard(__chelis_origin_arena, {});",
+                self.indent,
+                c_utf8_byte_literal(&span),
+            ));
+        }
+        guarded
+    }
+
+    fn emit_recursive_call_end(&mut self, guarded: bool) {
+        if guarded {
+            self.lines.push(format!(
+                "{}__chelis_origin_arena->recursive_depth -= 1;",
+                self.indent
+            ));
+        }
     }
 
     fn assign_adt_construct(
@@ -10718,12 +10968,16 @@ impl<'a> HostEmitter<'a> {
     fn assign_map(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         list: &HostExpr,
         _ty: &HostType,
         site: &ProjectedHostSite<'a>,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -10761,7 +11015,12 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
+        self.emit_callback_assign(
+            callback,
+            std::slice::from_ref(&arg_var),
+            &result_var,
+            callback_span,
+        )?;
         let pushed = self.box_value_expr(&result_var, &callback.ret_ty)?;
         self.emit_loop_step_block_actions(
             site,
@@ -10786,12 +11045,16 @@ impl<'a> HostEmitter<'a> {
     fn assign_filter(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         list: &HostExpr,
         _ty: &HostType,
         site: &ProjectedHostSite<'a>,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("filter_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -10829,7 +11092,12 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
+        self.emit_callback_assign(
+            callback,
+            std::slice::from_ref(&arg_var),
+            &keep_var,
+            callback_span,
+        )?;
         // `filter_step` moves the item: a kept item moves into the result
         // and a rejected one is released here.
         self.emit_loop_step_block_actions(
@@ -10860,7 +11128,7 @@ impl<'a> HostEmitter<'a> {
     fn assign_fold(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
@@ -10868,6 +11136,10 @@ impl<'a> HostEmitter<'a> {
         preheader_block: VerifiedBlockId,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let (body_edge, exit_edge) = Self::loop_edges(site)?;
         self.assign_expr(target, init, ty)?;
         self.emit_expression_block_actions(site, preheader_block, target)?;
@@ -10951,7 +11223,7 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
+        self.emit_callback_assign(callback, &[acc_arg, item_arg], target, callback_span)?;
         self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -10974,7 +11246,7 @@ impl<'a> HostEmitter<'a> {
     fn assign_scan(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
@@ -10982,6 +11254,10 @@ impl<'a> HostEmitter<'a> {
         preheader_block: VerifiedBlockId,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let HostType::List(inner_ty) = ty else {
             self.lines
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
@@ -11068,7 +11344,7 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
+        self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var, callback_span)?;
         let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
         self.emit_loop_step_block_actions(
             site,
@@ -11093,12 +11369,16 @@ impl<'a> HostEmitter<'a> {
     fn assign_partition(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         list: &HostExpr,
         ty: &HostType,
         site: &ProjectedHostSite<'a>,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let HostType::Tuple(parts) = ty else {
             // chelis#730 Phase 1 (census row 15, section C1.4
@@ -11177,7 +11457,12 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
+        self.emit_callback_assign(
+            callback,
+            std::slice::from_ref(&arg_var),
+            &keep_var,
+            callback_span,
+        )?;
         self.emit_loop_step_block_actions(
             site,
             body_block,
@@ -11228,12 +11513,16 @@ impl<'a> HostEmitter<'a> {
     fn assign_flat_map(
         &mut self,
         target: &str,
-        callback: &HostCallback,
+        callback_at: CallbackAt<'_>,
         list: &HostExpr,
         _ty: &HostType,
         site: &ProjectedHostSite<'a>,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let CallbackAt {
+            callback,
+            span: callback_span,
+        } = callback_at;
         let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("flat_map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -11271,7 +11560,12 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
+        self.emit_callback_assign(
+            callback,
+            std::slice::from_ref(&arg_var),
+            &result_var,
+            callback_span,
+        )?;
         self.emit_loop_step_block_actions(
             site,
             body_block,
@@ -11297,6 +11591,7 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         arg_vars: &[String],
         target: &str,
+        callback_span: Option<&str>,
     ) -> Result<(), Unsupported> {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
@@ -11306,6 +11601,8 @@ impl<'a> HostEmitter<'a> {
                     arg_vars.push("NULL".to_string());
                     arg_vars.push(format!("&{}", result_origin_name(target)));
                 }
+                let guarded_recursive_call =
+                    self.emit_recursive_call_guard(function, callback_span);
                 self.lines.push(format!(
                     "{}{target} = {}({});",
                     self.indent,
@@ -11319,6 +11616,7 @@ impl<'a> HostEmitter<'a> {
                         .unwrap_or_else(|| c_ident(function)),
                     arg_vars.join(", ")
                 ));
+                self.emit_recursive_call_end(guarded_recursive_call);
                 if !self.emitted_names.contains_key(function) {
                     self.assign_interface_result_origin(target, &callback.ret_ty);
                 }

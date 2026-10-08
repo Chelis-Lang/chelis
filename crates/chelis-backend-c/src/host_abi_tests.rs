@@ -405,6 +405,36 @@ fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
 }
 
 #[test]
+fn recursive_stack_guard_is_emitted_only_for_possible_call_cycles() {
+    let recursive_source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_1.ch"
+    );
+    let recursive = verified_host_from_source(recursive_source);
+    let recursive_projected = crate::host_abi::project_program(recursive.emission())
+        .expect("project recursive host program");
+    assert!(
+        crate::host_emit::recursive_host_functions(recursive_projected.program()).contains("step")
+    );
+    let recursive_c = crate::codegen_host_program(&recursive, "recursive_stack")
+        .expect("emit recursive host program")
+        .c_source;
+    assert!(recursive_c.contains("__chelis_host_recursive_call_guard(__chelis_origin_arena"));
+
+    let straight_line = verified_host_from_source(
+        "module Probe.StraightLine\n\
+         def twice(x: i64) -> i64 = add(x, x)\n\
+         result = twice(21i64)\n",
+    );
+    let straight_projected = crate::host_abi::project_program(straight_line.emission())
+        .expect("project straight-line host program");
+    assert!(crate::host_emit::recursive_host_functions(straight_projected.program()).is_empty());
+    let straight_c = crate::codegen_host_program(&straight_line, "straight_line_stack")
+        .expect("emit straight-line host program")
+        .c_source;
+    assert!(!straight_c.contains("__chelis_host_recursive_call_guard"));
+}
+
+#[test]
 fn user_call_pre_actions_require_one_structural_direct_call_authority() {
     use chelis_ir::ownership::{VerifiedApplyKind, VerifiedHostAction, VerifiedHostOperation};
 

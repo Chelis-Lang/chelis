@@ -143,6 +143,11 @@ an executable for observable programs, or a static library for
 definitions-only modules. It retains generated sources and runtime support.
 Run `./out/app` after the example above.
 
+Compiled C programs check the current thread's stack before a recursive user
+function call. When the reserved stack budget is exhausted, the executable
+prints `RuntimeStackBudgetExhausted` with the call's source span to stderr and
+exits with status 1. Output produced by earlier effects remains available.
+
 Add `--emit-c` to stop after source emission and runtime staging, without
 requiring a native compiler. A `.dp` input takes the Deep path automatically.
 See [Build programs](backends.md) for artifact names, compiler overrides,
