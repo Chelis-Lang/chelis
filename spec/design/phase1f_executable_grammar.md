@@ -45,6 +45,9 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
   classification was skipped. The disagreement diagnostic names the grammar/parser
   split. A parser-valid program is never rejected because the auxiliary grammar
   is incomplete or because it exceeds the classification budget.
+  The hand-written Surf parser checks stack headroom at recursive expression,
+  type, and pattern entries and grows the stack when needed. Direct parser
+  and validator callers accept and reject deeply grouped forms on small stacks.
 - `chelis validate --deep file.dp` validates Deep PEG structure plus the closed tag
   vocabulary, metadata-map requirement, arity/helper-form invariants, and dotted module/import
   path names emitted by canonical Deep. The CLI runs its style gate and validation on a grown
