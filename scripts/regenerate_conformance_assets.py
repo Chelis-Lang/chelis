@@ -44,6 +44,15 @@ REPO_SKILLS = [
     "spec-sync",
 ]
 
+# Skills for work on the compiler repository alone, such as cutting a compiler
+# release. They live in `agent-skills/` beside the shared ones, so this
+# repository's agents discover them through the same links, but they are never
+# embedded or sent to a shell: the counterpart of a shell's `[conform]
+# local_skills`. Keep in lockstep with `chelis_conformance::skills::LOCAL_SKILLS`.
+LOCAL_SKILLS = [
+    "release",
+]
+
 # Downstream skills authored beside the package they teach, as
 # `(name, repo-relative SKILL.md)`. They are for shells, not for work on the
 # compiler, so they are not in `agent-skills/`; the conformance assets embed

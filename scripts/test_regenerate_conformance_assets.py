@@ -41,11 +41,17 @@ class SharedSkillsListTests(unittest.TestCase):
             p.name for p in (ROOT / "agent-skills").iterdir() if p.is_dir()
         }
         self.assertEqual(
-            set(regen.REPO_SKILLS),
+            set(regen.REPO_SKILLS) | set(regen.LOCAL_SKILLS),
             on_disk,
-            "REPO_SKILLS in regenerate_conformance_assets.py disagrees with "
-            "agent-skills/; update it (and the Rust skills::SHARED_SKILLS mirror).",
+            "REPO_SKILLS plus LOCAL_SKILLS in regenerate_conformance_assets.py "
+            "disagrees with agent-skills/; update them (and the Rust "
+            "skills::SHARED_SKILLS or skills::LOCAL_SKILLS mirror).",
         )
+
+    def test_local_skills_are_never_shared_or_embedded(self):
+        self.assertFalse(set(regen.LOCAL_SKILLS) & set(regen.SHARED_SKILLS))
+        embedded = {dest.parent.name for _, dest in regen.planned_skill_copies(ROOT)}
+        self.assertFalse(set(regen.LOCAL_SKILLS) & embedded)
 
     def test_shared_skills_are_repo_plus_package_skills(self):
         package = [name for name, _ in regen.PACKAGE_SKILLS]
