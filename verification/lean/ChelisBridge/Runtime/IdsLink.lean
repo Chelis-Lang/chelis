@@ -20,6 +20,9 @@ Trusted-base assumption RA-g (`verification/trusted_base.json`, section `runtime
 every read-modify-write on one atomic location reads the value of the preceding one in its
 modification order, so an interleaving is a global schedule of issuer labels (`Runtime/Ids.lean`).
 A thread's Lean-model oracle is the projection of that schedule onto the thread.
+
+The finite schedules describe only recorded native events. The capacity oracle returns `none`
+outside its schedule, but that default is not evidence of native exhaustion.
 -/
 
 namespace ChelisBridge.Runtime.IdsLink
@@ -97,6 +100,20 @@ theorem host_var_draws_distinct (t : Nat) (sched : List Nat) (hbound : sched.len
   have hall := distinct_below_bound sched 0 hbound
   have hsub := (List.take_sublist k _).trans (hostVarsOf_sublist t sched)
   exact (hall.sublist hsub).map toU32_injective
+
+/-- Matched host draws remain distinct within the global allocation bound. -/
+theorem matched_host_var_draws_distinct (t : Nat) (sched : List Nat)
+    (s : chelis_ir.lowering_runtime.LoweringRuntime)
+
+    (hs : ∀ n, n < (hostVarsOf t sched).length →
+      s.hostVar n = toU32 ((hostVarsOf t sched).getD n 0))
+
+    (h0 : s.hostVarsTaken = 0) (k : Nat) (hk : k ≤ (hostVarsOf t sched).length)
+    (hbound : sched.length ≤ 2 ^ 32) :
+
+    ∃ ids s', hostDraws s k = .ok (ids, s') ∧ ids.Nodup :=
+  ⟨_, _, host_var_draws t sched s hs h0 k hk,
+    host_var_draws_distinct t sched hbound k⟩
 
 /-! ## Capacity scopes -/
 
@@ -193,6 +210,26 @@ theorem fresh_id_projection (t : Nat) (sched : List Nat) (n : Nat) :
       List.getD_eq_getElem?_getD, hx]
   · simp [chelis_ir.capacity_key.CapacityScopeSupply.fresh_id, capacityOracle,
       List.getD_eq_getElem?_getD, hx]
+
+/-- A recorded exhaustion event proves both the model panic and global supply exhaustion. -/
+theorem fresh_id_recorded_exhaustion (t : Nat) (sched : List Nat) (n : Nat)
+    (hn : (capacityOf t sched)[n]? = some none) :
+
+    chelis_ir.capacity_key.CapacityScopeSupply.fresh_id
+      { draw := capacityOracle t sched, taken := n } = .fail .panic ∧
+
+    successesU64 sched 1 = (List.range (u64Max - 1)).map (1 + ·) := by
+  refine ⟨(fresh_id_projection t sched n).2 hn, ?_⟩
+
+  have hm : none ∈ capacityOf t sched := List.mem_of_getElem? hn
+  simp only [capacityOf, List.mem_map] at hm
+
+  rcases hm with ⟨⟨issuer, value⟩, he, hv⟩
+  dsimp only at hv
+  subst value
+
+  exact capacity_none_only_at_exhaustion sched 1 (by decide)
+    ⟨issuer, (List.mem_filter.mp he).1⟩
 
 /-! ## Preflight frames -/
 

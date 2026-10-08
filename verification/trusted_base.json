@@ -215,7 +215,7 @@
       "item": "chelis_ir::lowering_runtime::LoweringRuntime",
       "kind": "shell_type",
       "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime",
-      "model": "Structure alpha_t of the native state of the current thread (RA-tls): flags u and o, the hook trace of (u, o) per raise, the summary-probe count builds, nextPreflightFrame, the host inference variable oracle hostVar with clock hostVarsTaken, the environment oracle profileEnv with clock profileEnvReads, and the clock count profileMarks.",
+      "model": "Structure alpha_t of the native state of the current thread (RA-tls): flags u and o; installed, a lower bound of the process flag that the Chelis panic hook is installed (false does not mean not installed); the hook trace of (u, o, installed) per raise (the process hook suppresses a raise iff installed and (u or o)); the summary-probe count builds, nextPreflightFrame, the host inference variable oracle hostVar with clock hostVarsTaken, the environment oracle profileEnv with clock profileEnvReads, and the clock count profileMarks.",
       "evidence": [
         "E-lr-observations",
         "E-lr-not-send",
@@ -294,7 +294,7 @@
       "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise",
       "kind": "primitive",
       "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise",
-      "model": "Append (u, o) to hook and return the payload unchanged (one hook run per raise on the current thread, RA-b, RA-e).",
+      "model": "Append (u, o, installed) to hook and return the payload unchanged (one hook run per raise on the current thread, RA-b, RA-e).",
       "evidence": [
         "E-lr-observations",
         "E-model-lowering-runtime",
@@ -306,7 +306,7 @@
       "item": "chelis_ir::lowering_runtime::{impl chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind",
       "kind": "primitive",
       "lean": "Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind",
-      "model": "o := true, then f on (runtime, state), then o := false; the marker and message conversions of an unexpected native unwind are outside the modeled domain (RA-d, RA-f).",
+      "model": "o := true and installed := true (the hook is installed before the body), then f on (runtime, state), then o := false; the marker and message conversions of an unexpected native unwind are outside the modeled domain (RA-d, RA-f).",
       "evidence": [
         "E-lr-observations",
         "E-model-lowering-runtime",

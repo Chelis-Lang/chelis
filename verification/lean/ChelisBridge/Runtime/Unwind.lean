@@ -901,6 +901,18 @@ theorem replay_payload_drop :
 
 
 /-! ## O9 and O10: scope exits on a native unwind -/
+/-- An exit panic replaces the caught body payload and then destroys that payload. -/
+theorem new_scope_exit_replaces_unwind (t : ThreadId) (g : Guard) (saved : Nat → Int)
+    (fid : Nat) (s1 : State) (tr1 : List Ev)
+
+    (p q : Payload) :
+    newScopeExit t g saved fid (some q) s1 tr1 (.unwind p) =
+      (g.exit t saved s1,
+
+        tr1 ++ [.fin t fid, hookEv t (g.exit t saved s1) q] ++
+          dropEvs t ((g.exit t saved s1).flags t) p, .unwind q) :=
+  rfl
+
 
 /-- **O10. Scope exit on a native unwind.** When the body of a scope without a finalizer panic
 unwinds with `p`, the scope unwinds with `p`. Its final state is the exit of the guard applied to
@@ -1112,5 +1124,31 @@ theorem replay_native_observations :
     replay newSem nativeSegments s0 = nativeObservations ∧
     replay old nativeSegments s0 = nativeObservations := by
   exact ⟨rfl, rfl⟩
+
+/-- Hook visibility depends on installation and the flags of the current thread. -/
+theorem observed_hook_visibility (t : ThreadId) (s : State) (p : Payload) :
+    observed [hookEv t s p] =
+
+      if s.installed && ((s.flags t).unrep || (s.flags t).out)
+      then [] else [.hook p] :=
+  rfl
+
+/-- This replay includes a fatal raise before the first catch of a fresh process. -/
+theorem replay_hook_installation :
+    let before : Diag := ⟨"before-first-catch", none, false⟩
+    let inside : Diag := ⟨"in-first-catch", none, false⟩
+
+    let after : Diag := ⟨"after-first-catch", none, false⟩
+    let fatal : Diag := ⟨"fatal-after-first-catch", none, false⟩
+
+    let stmts := [Stmt.call 0 (.raiseFatal before), .catchL 0 (.raise inside),
+      .call 0 (.raise after), .call 0 (.raiseFatal fatal)]
+
+    let result := runStmts newSem stmts s0
+    observed result.2.1 = [.hook (.diag before.makeFatal), .hook (.diag after)] ∧
+
+      result.2.2 = [.err inside] ∧ result.1.installed = true ∧
+        (result.1.flags 0).out = true := by
+  exact ⟨rfl, rfl, rfl, rfl⟩
 
 end ChelisBridge.Runtime.Unwind

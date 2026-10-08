@@ -26,7 +26,7 @@ def servicesCore (c : chelis_types.native.NativeServices) :=
 
 /-- The non-profiling fields of the Lean model of `LoweringRuntime`. -/
 def runtimeCore (s : chelis_ir.lowering_runtime.LoweringRuntime) :=
-  (s.u, s.o, s.hook, s.builds, s.nextPreflightFrame, s.hostVar, s.hostVarsTaken)
+  (s.u, s.o, s.installed, s.hook, s.builds, s.nextPreflightFrame, s.hostVar, s.hostVarsTaken)
 
 /-- **O16(a).** `profile_start` returns an oracle mark and keeps the non-profiling fields. -/
 theorem profile_start_core (c : chelis_types.native.NativeServices) :

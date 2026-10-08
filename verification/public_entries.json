@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "production": "chelis_ir::host::try_lower_compiled_program",
+      "inner": "chelis_ir::host::try_lower_compiled_program_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_compiled_program_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2226
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_manifested_program",
+      "inner": "chelis_ir::host::try_lower_manifested_program_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_manifested_program_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2250
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_compiled_program_with_manifest",
+      "inner": "chelis_ir::host::try_lower_compiled_program_with_manifest_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_compiled_program_with_manifest_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2279
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_manifested_execution_program",
+      "inner": "chelis_ir::host::try_lower_manifested_execution_program_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_manifested_execution_program_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2307
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_manifested_execution_program_with_trace",
+      "inner": "chelis_ir::host::try_lower_manifested_execution_program_with_trace_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_manifested_execution_program_with_trace_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2336
+      },
+      "chains": [
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_execution_program_with_manifest",
+      "inner": "chelis_ir::host::try_lower_execution_program_with_manifest_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_execution_program_with_manifest_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2362
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::try_lower_execution_program_with_manifest_and_trace",
+      "inner": "chelis_ir::host::try_lower_execution_program_with_manifest_and_trace_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_execution_program_with_manifest_and_trace_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2382
+      },
+      "chains": [
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::lower_named_tensor_entry_dag",
+      "inner": "chelis_ir::host::lower_named_tensor_entry_dag_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.lower_named_tensor_entry_dag_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2642
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::lower_named_tensor_entry_execution_plan",
+      "inner": "chelis_ir::host::lower_named_tensor_entry_execution_plan_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.lower_named_tensor_entry_execution_plan_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2705
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::lower_named_tensor_entry_execution_plan_with_trace",
+      "inner": "chelis_ir::host::lower_named_tensor_entry_execution_plan_with_trace_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.lower_named_tensor_entry_execution_plan_with_trace_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 2739
+      },
+      "chains": [
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::host_def_kernel",
+      "inner": "chelis_ir::host::host_def_kernel_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.host_def_kernel_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 4322
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::host::host_def_evaluation_plan",
+      "inner": "chelis_ir::host::host_def_evaluation_plan_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.host_def_evaluation_plan_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/host.rs",
+        "scope_line": 4373
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::{impl chelis_ir::lower::EvaluationProgram}::select_roots",
+      "inner": "chelis_ir::lower::{impl chelis_ir::lower::EvaluationProgram}::select_roots_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.EvaluationProgram_select_roots_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 656
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_to_library",
+      "inner": "chelis_ir::lower::try_lower_program_to_library::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_to_library::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_to_library_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 841
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_to_evaluation_library",
+      "inner": "chelis_ir::lower::try_lower_program_to_evaluation_library::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_to_evaluation_library::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_to_evaluation_library_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 861
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_to_evaluation_library_with_trace",
+      "inner": "chelis_ir::lower::try_lower_program_to_evaluation_library_with_trace::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_to_evaluation_library_with_trace::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_to_evaluation_library_with_trace_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 904
+      },
+      "chains": [
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_to_library_with_trace",
+      "inner": "chelis_ir::lower::try_lower_program_to_library_with_trace::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_to_library_with_trace::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_to_library_with_trace_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 936
+      },
+      "chains": [
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::lower_program_with_context",
+      "inner": "chelis_ir::lower::lower_program_with_context_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.lower_program_with_context_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 1331
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "panic_on_rejection"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_with_context",
+      "inner": "chelis_ir::lower::try_lower_program_with_context::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_with_context::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_with_context_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 1364
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_program_with_evaluation_context",
+      "inner": "chelis_ir::lower::try_lower_program_with_evaluation_context::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_program_with_evaluation_context::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_program_with_evaluation_context_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 1376
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_subexpr_evaluation_plan",
+      "inner": "chelis_ir::lower::try_lower_subexpr_evaluation_plan_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_subexpr_evaluation_plan_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 1737
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_subexpr_evaluation_with_ordered_inputs_impl",
+      "inner": "chelis_ir::lower::try_lower_subexpr_evaluation_with_ordered_inputs_impl::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_ir::lower::SubexprLoweringOptions>> for chelis_ir::lower::try_lower_subexpr_evaluation_with_ordered_inputs_impl::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_subexpr_evaluation_with_ordered_inputs_impl_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 2004
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls",
+      "inner": "chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_types::native::NativeServices>> for chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_subexpr_program_with_context_and_controls_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 2418
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_subexpr_program_with_ordered_inputs_impl",
+      "inner": "chelis_ir::lower::try_lower_subexpr_program_with_ordered_inputs_impl::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut chelis_ir::lower::SubexprLoweringOptions>> for chelis_ir::lower::try_lower_subexpr_program_with_ordered_inputs_impl::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_subexpr_program_with_ordered_inputs_impl_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 2625
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::try_lower_staged_host_region",
+      "inner": "chelis_ir::lower::try_lower_staged_host_region::{impl core::ops::function::FnOnce<Tuple<&mut chelis_ir::lowering_runtime::LoweringRuntime, &mut Tuple<&mut chelis_ir::host::HostLoweringState, &mut chelis_types::native::NativeServices, chelis_ir::host::staged::StagingStatus, core::option::Option<&mut core::option::Option<chelis_ir::evaluation::StagedEvaluationPlan>>>>> for chelis_ir::lower::try_lower_staged_host_region::closure#0}::call_once",
+      "theorem": "ChelisBridge.Runtime.Entries.try_lower_staged_host_region_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 2692
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "catch"
+    },
+    {
+      "production": "chelis_ir::lower::top_level_expr_is_lowered",
+      "inner": "chelis_ir::lower::top_level_expr_is_lowered_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.top_level_expr_is_lowered_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 4311
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::top_level_lowering_map",
+      "inner": "chelis_ir::lower::top_level_lowering_map_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.top_level_lowering_map_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 4348
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::top_level_lowering_map_with_context",
+      "inner": "chelis_ir::lower::top_level_lowering_map_with_context_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.top_level_lowering_map_with_context_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 4395
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::expr_is_dag_lowerable",
+      "inner": "chelis_ir::lower::expr_is_dag_lowerable_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.expr_is_dag_lowerable_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 4479
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::evaluation_profile",
+      "inner": "chelis_ir::lower::evaluation_profile_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.evaluation_profile_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 6039
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::evaluation_profile_sorted",
+      "inner": "chelis_ir::lower::evaluation_profile_sorted_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.evaluation_profile_sorted_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 6070
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    },
+    {
+      "production": "chelis_ir::lower::{impl chelis_ir::lower::SubexprLoweringContext}::lower_evaluation_plan",
+      "inner": "chelis_ir::lower::{impl chelis_ir::lower::SubexprLoweringContext}::lower_evaluation_plan_inner",
+      "theorem": "ChelisBridge.Runtime.Entries.SubexprLoweringContext_lower_evaluation_plan_correspondence",
+      "source": {
+        "path": "crates/chelis-ir/src/lower.rs",
+        "scope_line": 2134
+      },
+      "chains": [
+        "default",
+        "lowering-trace"
+      ],
+      "boundary_kind": "resume"
+    }
+  ]
+}

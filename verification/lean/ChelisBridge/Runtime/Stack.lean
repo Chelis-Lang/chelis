@@ -38,8 +38,12 @@ Trusted-base assumptions (`verification/trusted_base.json`, section `runtime_ass
   check; nothing about native stack consumption is assumed.
 * RA-h: the model counts depth in `Nat`. Release builds wrap `depth += 1` (`native.rs:110`),
   while the Lean model of `enter_frame` fails at `usize::MAX` (`cn_enter_frame_overflow`).
-* RA-d: `stacker::grow` runs its closure on the same thread and returns its value, so
-  `with_grown_stack` is plain application.
+* RA-d: `stacker::grow` and `stacker::maybe_grow` execute their closures on the same thread and
+  return their values.
+
+The growth laws need successful stack allocation. Allocation failure or native stack overflow
+aborts under RA-f. These primitive laws do not prove caller correspondence or equality of
+future native stack observations.
 
 Section C maps every run over an `Oracle` to a run over a schedule of the Lean model
 `chelis_types.native.NativeServices` (field `stack`, clock `stackTaken`), and relates each step
@@ -792,5 +796,24 @@ theorem cn_reset_frames (c : chelis_types.native.NativeServices) (scopeDepth : N
       ofServices c' scopeDepth first = { ofServices c scopeDepth first with depth := 0 } ∧
       c'.stack = c.stack ∧ c'.stackTaken = c.stackTaken :=
   ⟨_, rfl, by simp [ofServices], rfl, rfl⟩
+
+open Aeneas.Std in
+/-- Stack growth preserves the closure call. -/
+theorem cn_with_grown_stack {R F : Type}
+    (inst : core.ops.function.FnOnceMutArg F chelis_types.native.NativeServices R)
+
+    (c : chelis_types.native.NativeServices) (f : F) :
+    chelis_types.native.NativeServices.with_grown_stack inst c f = inst.call_once f c :=
+  rfl
+
+open Aeneas.Std in
+/-- Conditional growth preserves the closure call. -/
+theorem cn_grow_stack_if_needed {S R F : Type}
+    (inst : core.ops.function.FnOnceMutArg F S R)
+
+    (state : S) (redZone stackSize : Usize) (f : F) :
+    chelis_ir.lowering_runtime.grow_stack_if_needed inst state redZone stackSize f =
+      inst.call_once f state :=
+  rfl
 
 end ChelisBridge.Runtime.Stack
