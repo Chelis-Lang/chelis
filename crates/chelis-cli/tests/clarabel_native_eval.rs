@@ -748,6 +748,36 @@ fn ideal_property_does_not_use_the_solver_axiom_for_a_different_q() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn second_solve_result_cannot_inherit_the_first_calls_axiom() {
+    let result = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(example())
+        .args([
+            "prove",
+            "tests/ideal_symbolic_second_solve.ch",
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("prove second solve result property");
+    let row: serde_json::Value = serde_json::from_slice(
+        result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("property row"),
+    )
+    .expect("JSON property row");
+    assert!(
+        ["failed", "invalid", "unsupported"].contains(&row["status"].as_str().unwrap_or("")),
+        "{row}"
+    );
+    assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn symbolic_p_requires_a_call_bound_psd_premise() {
     for (file, expected) in [
         ("ideal_symbolic_assumed_psd.ch", "passed"),
