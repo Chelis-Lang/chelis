@@ -88,7 +88,8 @@ executable files in `examples/clarabel_qp/tests/` and the commands
 in `packages/chelis-clarabel/README.md`.
 
 The SMT lowering accepts fixed-size `f64` QP data with symbolic entries,
-pure straight-line helpers, and fixed zero and nonnegative cone blocks.
+pure helpers with named bindings and conditionals, and fixed zero and
+nonnegative cone blocks.
 It proves the PSD premise for exact literal `P` or a `B^T B` construction.
 For another symbolic `P`, add
 `with contract = "clarabel.qp.assume_psd"` to the same property. That explicit

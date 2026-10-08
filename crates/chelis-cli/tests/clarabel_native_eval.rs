@@ -598,6 +598,91 @@ fn ideal_property_finds_a_computed_candidate_inside_pure_helpers() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn symbolic_pure_helpers_lower_vector_blocks_conditionals_and_boolean_where() {
+    for (file, should_pass) in [
+        ("ideal_symbolic_conditional_q.ch", true),
+        ("ideal_symbolic_conditional_q_wrong.ch", false),
+        ("ideal_symbolic_named_step.ch", true),
+        ("ideal_symbolic_named_step_reversed.ch", false),
+        ("ideal_symbolic_bool_where.ch", true),
+        ("ideal_symbolic_bool_where_unproved.ch", false),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove pure helper property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        if should_pass {
+            assert_eq!(row["status"], "passed", "{file}: {row}");
+            assert_eq!(row["samples"], 0);
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        } else {
+            assert!(
+                ["failed", "invalid", "unsupported"]
+                    .contains(&row["status"].as_str().unwrap_or("")),
+                "{file}: {row}"
+            );
+            assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn symbolic_gram_evidence_survives_pure_helpers() {
+    for (file, should_pass) in [
+        ("ideal_symbolic_gram_helper.ch", true),
+        ("ideal_symbolic_gram_helper_block.ch", true),
+        ("ideal_symbolic_gram_helper_invalid.ch", false),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .current_dir(example())
+            .args([
+                "prove",
+                &format!("tests/{file}"),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("prove Gram helper property");
+        let row: serde_json::Value = serde_json::from_slice(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("property row"),
+        )
+        .expect("JSON property row");
+        if should_pass {
+            assert_eq!(row["status"], "passed", "{file}: {row}");
+            assert_eq!(row["samples"], 0);
+            assert_eq!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        } else {
+            assert_eq!(row["status"], "unsupported", "{file}: {row}");
+            assert_ne!(row["composite_verdict"], "proven_modulo_asserted_axiom");
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn ideal_property_does_not_use_the_solver_axiom_for_a_different_q() {
     let result = Command::cargo_bin("chelis")
         .expect("chelis binary")

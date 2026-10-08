@@ -1,11 +1,11 @@
 //! Opt-in ideal-real model of a source-bound Clarabel QP call.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_reef::PreparedReefGraph;
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, LetPattern, Literal, LiteralSuffix, Pattern, TypeExpr, UnaryOp,
+    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, LiteralSuffix, Pattern, TypeExpr, UnaryOp,
 };
 use num_rational::BigRational;
 use sha2::{Digest, Sha256};
@@ -351,8 +351,24 @@ fn parse_qp(
 }
 
 fn is_gram(expr: &Expr, lowering: &Scalarization<'_>) -> bool {
+    match expr {
+        Expr::Var(name, _) => return lowering.gram_matrices.contains(name),
+        Expr::Block(bindings, body, _) => {
+            return lowering
+                .lower_block(bindings, body, |nested, body| Some(is_gram(body, nested)))
+                .unwrap_or(false);
+        }
+        Expr::If(condition, then_branch, else_branch, _) => {
+            return lowering.boolean(condition).is_some()
+                && is_gram(then_branch, lowering)
+                && is_gram(else_branch, lowering);
+        }
+        _ => {}
+    }
     let Some([left, right]) = app(expr, "matmul") else {
-        return false;
+        return lowering
+            .call_helper(expr, |nested, body| Some(is_gram(body, nested)))
+            .unwrap_or(false);
     };
     let Some([source, first_axis, second_axis]) = app(left, "permute") else {
         return false;
@@ -397,13 +413,9 @@ fn psd_conditions(p: &[Vec<SmtExpr>]) -> Result<Vec<SmtExpr>, String> {
         ));
     }
     let mut conditions = Vec::new();
-    for row in 0..n {
-        for column in row + 1..n {
-            conditions.push(cmp(
-                CmpOp::Eq,
-                p[row][column].clone(),
-                p[column][row].clone(),
-            ));
+    for (row, values) in p.iter().enumerate() {
+        for (column, other) in p.iter().enumerate().skip(row + 1) {
+            conditions.push(cmp(CmpOp::Eq, values[column].clone(), other[row].clone()));
         }
     }
     for mask in 1..(1usize << n) {
@@ -719,6 +731,7 @@ struct Scalarization<'a> {
     scalars: &'a BTreeMap<String, SmtExpr>,
     vectors: &'a BTreeMap<String, Vec<SmtExpr>>,
     matrices: &'a BTreeMap<String, Vec<Vec<SmtExpr>>>,
+    gram_matrices: &'a BTreeSet<String>,
     decls: &'a [Decl],
     depth: usize,
 }
@@ -756,6 +769,7 @@ impl Scalarization<'_> {
         let mut scalars = BTreeMap::new();
         let mut vectors = BTreeMap::new();
         let mut matrices = BTreeMap::new();
+        let mut gram_matrices = BTreeSet::new();
         for (param, arg) in params.iter().zip(args) {
             match &param.ty {
                 Some(ty) if fixed_f64_vector_extent(ty).is_some() => {
@@ -772,6 +786,12 @@ impl Scalarization<'_> {
                         return None;
                     }
                     matrices.insert(param.name.clone(), matrix);
+                    if is_gram(arg, self) {
+                        gram_matrices.insert(param.name.clone());
+                    }
+                }
+                Some(TypeExpr::Named(name, _)) if name == "bool" => {
+                    scalars.insert(param.name.clone(), self.boolean(arg)?);
                 }
                 Some(TypeExpr::Named(..)) => {
                     scalars.insert(param.name.clone(), self.scalar(arg)?);
@@ -786,6 +806,7 @@ impl Scalarization<'_> {
                 scalars: &scalars,
                 vectors: &vectors,
                 matrices: &matrices,
+                gram_matrices: &gram_matrices,
                 decls: self.decls,
                 depth: self.depth + 1,
             },
@@ -793,7 +814,121 @@ impl Scalarization<'_> {
         )
     }
 
+    fn lower_block<T>(
+        &self,
+        bindings: &[LetBinding],
+        body: &Expr,
+        lower: impl FnOnce(&Scalarization<'_>, &Expr) -> Option<T>,
+    ) -> Option<T> {
+        self.lower_block_with(
+            bindings,
+            body,
+            &mut (),
+            |_, _, _| Ok(()),
+            |_, nested, body| lower(nested, body),
+        )
+        .ok()
+        .flatten()
+    }
+
+    fn lower_block_with<T, S>(
+        &self,
+        bindings: &[LetBinding],
+        body: &Expr,
+        state: &mut S,
+        mut visit_binding: impl FnMut(&mut S, &Expr, &Scalarization<'_>) -> Result<(), String>,
+        lower: impl FnOnce(&mut S, &Scalarization<'_>, &Expr) -> Option<T>,
+    ) -> Result<Option<T>, String> {
+        let mut scalars = self.scalars.clone();
+        let mut vectors = self.vectors.clone();
+        let mut matrices = self.matrices.clone();
+        let mut gram_matrices = self.gram_matrices.clone();
+        for binding in bindings {
+            let LetPattern::Var(name, _) = &binding.pattern else {
+                return Ok(None);
+            };
+            let nested = Scalarization {
+                primal_name: self.primal_name,
+                primal: self.primal,
+                scalars: &scalars,
+                vectors: &vectors,
+                matrices: &matrices,
+                gram_matrices: &gram_matrices,
+                decls: self.decls,
+                depth: self.depth,
+            };
+            visit_binding(state, &binding.value, &nested)?;
+            if let Some(value) = nested.vector(&binding.value) {
+                scalars.remove(name);
+                matrices.remove(name);
+                gram_matrices.remove(name);
+                vectors.insert(name.clone(), value);
+            } else if let Some(value) = nested.matrix(&binding.value) {
+                let gram = is_gram(&binding.value, &nested);
+                scalars.remove(name);
+                vectors.remove(name);
+                matrices.insert(name.clone(), value);
+                if gram {
+                    gram_matrices.insert(name.clone());
+                } else {
+                    gram_matrices.remove(name);
+                }
+            } else if let Some(value) = nested.scalar(&binding.value) {
+                vectors.remove(name);
+                matrices.remove(name);
+                gram_matrices.remove(name);
+                scalars.insert(name.clone(), value);
+            } else {
+                let Some(value) = nested.boolean(&binding.value) else {
+                    return Ok(None);
+                };
+                vectors.remove(name);
+                matrices.remove(name);
+                gram_matrices.remove(name);
+                scalars.insert(name.clone(), value);
+            }
+        }
+        Ok(lower(
+            state,
+            &Scalarization {
+                primal_name: self.primal_name,
+                primal: self.primal,
+                scalars: &scalars,
+                vectors: &vectors,
+                matrices: &matrices,
+                gram_matrices: &gram_matrices,
+                decls: self.decls,
+                depth: self.depth,
+            },
+            body,
+        ))
+    }
+
     fn vector(&self, expr: &Expr) -> Option<Vec<SmtExpr>> {
+        if let Expr::Block(bindings, body, _) = expr {
+            return self.lower_block(bindings, body, |nested, body| nested.vector(body));
+        }
+        if let Expr::If(condition, then_branch, else_branch, _) = expr {
+            let condition = self.boolean(condition)?;
+            let then_values = self.vector(then_branch)?;
+            let else_values = self.vector(else_branch)?;
+            if then_values.len() != else_values.len() {
+                return None;
+            }
+            return Some(
+                then_values
+                    .into_iter()
+                    .zip(else_values)
+                    .map(|(then_value, else_value)| {
+                        SmtExpr::Ite(
+                            Box::new(condition.clone()),
+                            Box::new(then_value),
+                            Box::new(else_value),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         if matches!(expr, Expr::Var(name, _) if name == self.primal_name) {
             return Some(self.primal.to_vec());
         }
@@ -837,10 +972,53 @@ impl Scalarization<'_> {
                 );
             }
         }
+        if let Some([value]) = app(expr, "neg") {
+            return Some(
+                self.vector(value)?
+                    .into_iter()
+                    .map(|component| arith(ArithOp::Neg, component, real(0.0)))
+                    .collect(),
+            );
+        }
         self.call_helper(expr, |nested, body| nested.vector(body))
     }
 
     fn matrix(&self, expr: &Expr) -> Option<Vec<Vec<SmtExpr>>> {
+        if let Expr::Block(bindings, body, _) = expr {
+            return self.lower_block(bindings, body, |nested, body| nested.matrix(body));
+        }
+        if let Expr::If(condition, then_branch, else_branch, _) = expr {
+            let condition = self.boolean(condition)?;
+            let then_rows = self.matrix(then_branch)?;
+            let else_rows = self.matrix(else_branch)?;
+            if then_rows.len() != else_rows.len()
+                || then_rows
+                    .iter()
+                    .zip(&else_rows)
+                    .any(|(left, right)| left.len() != right.len())
+            {
+                return None;
+            }
+            return Some(
+                then_rows
+                    .into_iter()
+                    .zip(else_rows)
+                    .map(|(then_row, else_row)| {
+                        then_row
+                            .into_iter()
+                            .zip(else_row)
+                            .map(|(then_value, else_value)| {
+                                SmtExpr::Ite(
+                                    Box::new(condition.clone()),
+                                    Box::new(then_value),
+                                    Box::new(else_value),
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
         if let Expr::Var(name, _) = expr
             && let Some(matrix) = self.matrices.get(name)
         {
@@ -936,41 +1114,13 @@ impl Scalarization<'_> {
             }
             Expr::Var(name, _) => self.scalars.get(name).cloned(),
             Expr::Block(bindings, body, _) => {
-                let mut scalars = self.scalars.clone();
-                let mut vectors = self.vectors.clone();
-                let mut matrices = self.matrices.clone();
-                for binding in bindings {
-                    let LetPattern::Var(name, _) = &binding.pattern else {
-                        return None;
-                    };
-                    let nested = Scalarization {
-                        primal_name: self.primal_name,
-                        primal: self.primal,
-                        scalars: &scalars,
-                        vectors: &vectors,
-                        matrices: &matrices,
-                        decls: self.decls,
-                        depth: self.depth,
-                    };
-                    if let Some(value) = nested.vector(&binding.value) {
-                        vectors.insert(name.clone(), value);
-                    } else if let Some(value) = nested.matrix(&binding.value) {
-                        matrices.insert(name.clone(), value);
-                    } else {
-                        scalars.insert(name.clone(), nested.scalar(&binding.value)?);
-                    }
-                }
-                Scalarization {
-                    primal_name: self.primal_name,
-                    primal: self.primal,
-                    scalars: &scalars,
-                    vectors: &vectors,
-                    matrices: &matrices,
-                    decls: self.decls,
-                    depth: self.depth,
-                }
-                .scalar(body)
+                self.lower_block(bindings, body, |nested, body| nested.scalar(body))
             }
+            Expr::If(condition, then_branch, else_branch, _) => Some(SmtExpr::Ite(
+                Box::new(self.boolean(condition)?),
+                Box::new(self.scalar(then_branch)?),
+                Box::new(self.scalar(else_branch)?),
+            )),
             Expr::Unary(UnaryOp::Neg, value, _) => {
                 Some(arith(ArithOp::Neg, self.scalar(value)?, SmtExpr::IntLit(0)))
             }
@@ -1010,6 +1160,10 @@ impl Scalarization<'_> {
     fn boolean(&self, expr: &Expr) -> Option<SmtExpr> {
         match expr {
             Expr::Lit(Literal::Bool(value), _) => Some(SmtExpr::BoolLit(*value)),
+            Expr::Var(name, _) => self.scalars.get(name).cloned(),
+            Expr::Block(bindings, body, _) => {
+                self.lower_block(bindings, body, |nested, body| nested.boolean(body))
+            }
             Expr::Unary(UnaryOp::Not, inner, _) => {
                 Some(SmtExpr::Not(Box::new(self.boolean(inner)?)))
             }
@@ -1066,7 +1220,7 @@ impl Scalarization<'_> {
                 if let Some([inner]) = app(expr, "not") {
                     return Some(SmtExpr::Not(Box::new(self.boolean(inner)?)));
                 }
-                None
+                self.call_helper(expr, |nested, body| nested.boolean(body))
             }
         }
     }
@@ -1130,49 +1284,19 @@ fn collect_comparison_vectors(
             }
         }
         Expr::Block(bindings, body, _) => {
-            let mut scalars = lowering.scalars.clone();
-            let mut vectors = lowering.vectors.clone();
-            let mut matrices = lowering.matrices.clone();
-            for binding in bindings {
-                let LetPattern::Var(name, _) = &binding.pattern else {
-                    return Err(unsupported("comparison helper has a non-variable binding"));
-                };
-                let nested = Scalarization {
-                    primal_name: lowering.primal_name,
-                    primal: lowering.primal,
-                    scalars: &scalars,
-                    vectors: &vectors,
-                    matrices: &matrices,
-                    decls: lowering.decls,
-                    depth: lowering.depth,
-                };
-                collect_comparison_vectors(&binding.value, &nested, dimension, out)?;
-                if let Some(value) = nested.vector(&binding.value) {
-                    vectors.insert(name.clone(), value);
-                } else if let Some(value) = nested.matrix(&binding.value) {
-                    matrices.insert(name.clone(), value);
-                } else if let Some(value) = nested.scalar(&binding.value) {
-                    scalars.insert(name.clone(), value);
-                } else {
-                    return Err(unsupported(
-                        "comparison helper binding does not lower to scalar SMT arithmetic",
-                    ));
-                }
-            }
-            collect_comparison_vectors(
-                body,
-                &Scalarization {
-                    primal_name: lowering.primal_name,
-                    primal: lowering.primal,
-                    scalars: &scalars,
-                    vectors: &vectors,
-                    matrices: &matrices,
-                    decls: lowering.decls,
-                    depth: lowering.depth,
-                },
-                dimension,
-                out,
-            )?;
+            lowering
+                .lower_block_with(
+                    bindings,
+                    body,
+                    out,
+                    |out, value, nested| collect_comparison_vectors(value, nested, dimension, out),
+                    |out, nested, body| {
+                        Some(collect_comparison_vectors(body, nested, dimension, out))
+                    },
+                )?
+                .ok_or_else(|| {
+                    unsupported("comparison helper binding does not lower to scalar SMT arithmetic")
+                })??;
         }
         _ => {}
     }
@@ -1323,12 +1447,14 @@ pub(super) fn prove(
             }
         }
     }
+    let gram_matrices = BTreeSet::new();
     let argument_lowering = Scalarization {
         primal_name: "",
         primal: &[],
         scalars: &scalars,
         vectors: &vectors,
         matrices: &matrices,
+        gram_matrices: &gram_matrices,
         decls,
         depth: 0,
     };
@@ -1363,6 +1489,7 @@ pub(super) fn prove(
         scalars: &scalars,
         vectors: &vectors,
         matrices: &matrices,
+        gram_matrices: &gram_matrices,
         decls,
         depth: 0,
     };
