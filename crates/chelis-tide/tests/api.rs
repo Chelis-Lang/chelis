@@ -622,6 +622,23 @@ fn validate_endpoint_survives_deep_rejected_surf_on_a_small_stack() {
                     assert_eq!(response["ok"], false, "{response}");
                     assert_eq!(response["stage"], "validate", "{response}");
                     assert!(response.to_string().contains("compiler parse failed"));
+
+                    let nested = format!("{}1i64{}", "(".repeat(3_000), ")".repeat(3_000));
+                    let valid = format!("module Probe.Deep\nx = {nested}\n");
+                    let (_, accepted) =
+                        post_json(router(), "/validate", json!({"mode":"surf","source":valid}))
+                            .await;
+                    assert_eq!(accepted["ok"], true, "{accepted}");
+
+                    let invalid = format!("module Probe.Deep\nx = {nested} y\n");
+                    let (_, rejected) = post_json(
+                        router(),
+                        "/validate",
+                        json!({"mode":"surf","source":invalid}),
+                    )
+                    .await;
+                    assert_eq!(rejected["ok"], false, "{rejected}");
+                    assert!(rejected.to_string().contains("compiler parse failed"));
                 });
             })
             .expect("spawn 2 MiB HTTP worker")

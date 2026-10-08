@@ -31,6 +31,14 @@ pub enum ValidationError {
 const SURF_PEG_CLASSIFICATION_MAX_BYTES: usize = 32 * 1024;
 
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
+    // The compiler parser and the optional PEG comparison both recurse on
+    // nested expressions. Embedded callers and Tide can have a 2 MiB worker
+    // stack, so keep the whole validation and temporary-tree teardown on the
+    // same grown segment.
+    chelis_types::run_on_grown_stack(|| validate_surf_on_grown_stack(source))
+}
+
+fn validate_surf_on_grown_stack(source: &str) -> Result<(), ValidationError> {
     // The hand-written compiler parser decides acceptance. The independent
     // PEG classifies a bounded parser rejection when the source is lexically valid
     // (spec/design/phase1f_executable_grammar.md):
@@ -67,10 +75,8 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
         )));
     }
 
-    // Pest recursively parses the rejected source, and its temporary Pairs may
-    // also recursively drop. Keep both operations within the grown segment for
-    // embedding hosts and Tide workers with small native thread stacks.
-    chelis_types::run_on_grown_stack(|| match surf::Grammar::parse(surf::Rule::program, source) {
+    // Pest's parse and temporary Pairs teardown stay on this same segment.
+    match surf::Grammar::parse(surf::Rule::program, source) {
         Ok(_) => Err(ValidationError::Failed(format!(
             "the Surf PEG grammar accepts this program but the compiler parser rejects it \
              (the grammar is too lenient, a chelis-validate conformance gap); \
@@ -79,7 +85,7 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
         Err(pest_err) => Err(ValidationError::Failed(format!(
             "{pest_err}\ncompiler parse failed: {parse_err}"
         ))),
-    })
+    }
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {

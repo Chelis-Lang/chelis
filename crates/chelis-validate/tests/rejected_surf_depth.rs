@@ -11,6 +11,16 @@ fn nested_comment_source(depth: usize, valid: bool) -> String {
     format!("module Probe.Deep\n{comment}\n{tail}\n")
 }
 
+fn nested_expression_source(depth: usize, valid: bool) -> String {
+    let tail = if valid { "" } else { " y" };
+    format!(
+        "module Probe.Deep\nx = {}1i64{}{}\n",
+        "(".repeat(depth),
+        ")".repeat(depth),
+        tail
+    )
+}
+
 fn run_on_small_stack_in_child(test_name: &str, probe: impl FnOnce() + Send + 'static) {
     if std::env::var_os(CHILD_ENV).is_some() {
         std::thread::Builder::new()
@@ -78,6 +88,29 @@ fn extreme_rejected_comments_report_a_peg_budget_diagnostic() {
             let message = error.to_string();
             assert!(message.contains("PEG classification skipped"), "{message}");
             assert!(message.contains("compiler parse failed"), "{message}");
+        },
+    );
+}
+
+#[test]
+fn accepted_nested_expression_survives_a_small_stack() {
+    run_on_small_stack_in_child("accepted_nested_expression_survives_a_small_stack", || {
+        let source = nested_expression_source(3_000, true);
+        assert!(validate_surf(&source).is_ok(), "valid Surf was rejected");
+    });
+}
+
+#[test]
+fn rejected_nested_expression_reports_a_parse_error_on_a_small_stack() {
+    run_on_small_stack_in_child(
+        "rejected_nested_expression_reports_a_parse_error_on_a_small_stack",
+        || {
+            let source = nested_expression_source(3_000, false);
+            let error = validate_surf(&source).expect_err("invalid Surf must fail");
+            assert!(
+                error.to_string().contains("compiler parse failed"),
+                "{error}"
+            );
         },
     );
 }
