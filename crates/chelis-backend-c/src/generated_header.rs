@@ -1389,6 +1389,11 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
         "<stdint.h>",
         "<stdlib.h>",
         "<string.h>",
+        // Host recursion guards inspect the current Linux main-thread stack
+        // limit and distinguish that thread from pthread-created workers.
+        "<sys/resource.h>",
+        "<sys/syscall.h>",
+        "<unistd.h>",
     ];
     for line in preprocessor_logical_lines(source) {
         if preprocessor_directive_name(&line).as_deref() != Some("include") {

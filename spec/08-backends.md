@@ -58,6 +58,20 @@ The C backend is the reference implementation.
 Its job is to turn the DAG into portable host code that can be compiled with the system
 toolchain.
 
+Before a host call that can enter a recursive user-function cycle, the C
+backend checks the stack available to the current thread. The check uses the
+thread's actual stack bound and an invocation-local recursion counter; it does
+not impose a fixed program-wide call-count limit. It reserves 512 KiB for the
+callee and runtime reporting. If less space remains, the artifact reports
+`RuntimeStackBudgetExhausted` with the call expression's source span on stderr,
+flushes effects already written to stdout and stderr, and exits with status 1
+before entering the callee. A missing source span is reported as `<unknown>`.
+If the thread's stack bound cannot be obtained, the call reports
+`RuntimeStackBudgetUnavailable` through the same channel rather than continuing
+without a guard. Calls the backend proves cannot enter a recursive cycle do
+not pay a stack-check cost. Named callbacks in list combinators obey the same
+rule, using the enclosing combinator expression as the call span.
+
 "Reference implementation" here means the first and most complete backend, and the
 practical numeric oracle the other backends are checked against. It does not mean the C
 backend DEFINES the values: every lane, the evaluator included, owes its results to
