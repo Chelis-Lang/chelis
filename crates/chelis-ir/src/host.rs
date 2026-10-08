@@ -5605,7 +5605,7 @@ fn lower_def_body_kernel(
     let (dag, _trace) = match lowered {
         #[cfg(feature = "lowering-trace")]
         Ok((dag, trace)) => {
-            let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected);
+            let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected)?;
             let mut trace = trace;
             if let Some(trace) = &mut trace {
                 trace.record_dimension_rebinding(&dag);
@@ -5718,7 +5718,7 @@ fn lower_kernel_dag(
             declaring_params.is_some(),
         )?
     };
-    Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
+    remap_tensor_helper_dim_symbols(&dag, scope, expected)
 }
 
 fn kernel_scope_types(
@@ -6576,7 +6576,7 @@ fn lower_tensor_helper_dag(
             None,
             false,
         )?;
-        Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
+        remap_tensor_helper_dim_symbols(&dag, scope, expected)
     })
 }
 
@@ -6613,7 +6613,7 @@ fn lower_tensor_helper_product(
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
                     expr, scoped, &context, None, false,
                 )?;
-            let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
+            let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected)?;
             let mut trace = trace;
             trace.record_dimension_rebinding(&dag);
             Ok(LoweredTensorHelper {
@@ -6657,7 +6657,8 @@ fn lower_tensor_helper_dag_with_controls(
             return None;
         }
     };
-    lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected);
+    lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)
+        .unwrap_or_else(|diagnostic| crate::lower::raise_fatal_lowering_diagnostic(diagnostic));
     Some(lowered)
 }
 
@@ -17171,7 +17172,23 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
         .collect()
 }
 
+/// Rebind a lowered helper graph's checker dimensions to the activation's
+/// actual extents.
+///
+/// This runs after the `try_lower_*` entry that built `dag` has returned, so
+/// a typed refusal raised while actualizing is returned here rather than
+/// unwinding past the caller as a payload no handler renders (chelis#3340).
 fn remap_tensor_helper_dim_symbols(
+    dag: &crate::Dag,
+    scope: &UnordMap<String, HostTypeTerm>,
+    expected_output: &TensorType,
+) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
+    crate::lower::catch_lowering_diagnostic(std::panic::AssertUnwindSafe(|| {
+        remap_tensor_helper_dim_symbols_raising(dag, scope, expected_output)
+    }))
+}
+
+fn remap_tensor_helper_dim_symbols_raising(
     dag: &crate::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
     expected_output: &TensorType,
@@ -17416,6 +17433,40 @@ fn actualize_tensor_helper_types(
             candidate = format!("{base}_{suffix}");
         }
         candidate
+    }
+
+    /// The operations whose result shape is their first operand's, read the
+    /// same way by the first inference pass and by the refinement below.
+    fn forwards_first_input_shape(op: &crate::dag::RiscOp) -> bool {
+        matches!(
+            op,
+            crate::dag::RiscOp::Neg
+                | crate::dag::RiscOp::Relu
+                | crate::dag::RiscOp::Softmax { .. }
+                | crate::dag::RiscOp::Exp
+                | crate::dag::RiscOp::Log
+                | crate::dag::RiscOp::Sin
+                | crate::dag::RiscOp::Sqrt
+                | crate::dag::RiscOp::Cos
+                | crate::dag::RiscOp::Tan
+                | crate::dag::RiscOp::Atan
+                | crate::dag::RiscOp::Tanh
+                | crate::dag::RiscOp::Erf
+                | crate::dag::RiscOp::Erfc
+                | crate::dag::RiscOp::Abs
+                | crate::dag::RiscOp::Floor
+                | crate::dag::RiscOp::Ceil
+                | crate::dag::RiscOp::Round
+                | crate::dag::RiscOp::Recip
+                | crate::dag::RiscOp::UniformLike
+                | crate::dag::RiscOp::Dropout
+                | crate::dag::RiscOp::Copy
+                | crate::dag::RiscOp::Drop
+                | crate::dag::RiscOp::Realize
+                | crate::dag::RiscOp::Cast { .. }
+                | crate::dag::RiscOp::NamedCast { .. }
+                | crate::dag::RiscOp::FusedElem { .. }
+        )
     }
 
     fn known_extent(dim: &crate::dag::DimInfo) -> Option<usize> {
@@ -17821,32 +17872,7 @@ fn actualize_tensor_helper_types(
                         })
                         .unwrap_or_else(|| precision_like(input, node.output_type.precision))
                 }),
-            crate::dag::RiscOp::Neg
-            | crate::dag::RiscOp::Relu
-            | crate::dag::RiscOp::Softmax { .. }
-            | crate::dag::RiscOp::Exp
-            | crate::dag::RiscOp::Log
-            | crate::dag::RiscOp::Sin
-            | crate::dag::RiscOp::Sqrt
-            | crate::dag::RiscOp::Cos
-            | crate::dag::RiscOp::Tan
-            | crate::dag::RiscOp::Atan
-            | crate::dag::RiscOp::Tanh
-            | crate::dag::RiscOp::Erf
-            | crate::dag::RiscOp::Erfc
-            | crate::dag::RiscOp::Abs
-            | crate::dag::RiscOp::Floor
-            | crate::dag::RiscOp::Ceil
-            | crate::dag::RiscOp::Round
-            | crate::dag::RiscOp::Recip
-            | crate::dag::RiscOp::UniformLike
-            | crate::dag::RiscOp::Dropout
-            | crate::dag::RiscOp::Copy
-            | crate::dag::RiscOp::Drop
-            | crate::dag::RiscOp::Realize
-            | crate::dag::RiscOp::Cast { .. }
-            | crate::dag::RiscOp::NamedCast { .. }
-            | crate::dag::RiscOp::FusedElem { .. } => node
+            op if forwards_first_input_shape(op) => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -17995,6 +18021,24 @@ fn actualize_tensor_helper_types(
                     dims: actual.dims,
                     precision: node.output_type.precision,
                 };
+                changed = true;
+            }
+        }
+        // A refined `Expand` changes what its forwarding consumers carry.
+        // Leaving them at the first pass's type made one activation report
+        // the checker dimension both as the refined extent and as the stale
+        // one, which the rename below refused as two activations
+        // (chelis#3340).
+        for node in dag.nodes() {
+            if !forwards_first_input_shape(&node.op) {
+                continue;
+            }
+            let Some(input) = node.inputs.first().and_then(|id| inferred.get(id)) else {
+                continue;
+            };
+            let forwarded = precision_like(input, node.output_type.precision);
+            if inferred.get(&node.id) != Some(&forwarded) {
+                inferred.insert(node.id, forwarded);
                 changed = true;
             }
         }
@@ -25635,7 +25679,8 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let mut scope = UnordMap::new();
         scope.insert("x".into(), HostTypeTerm::Tensor(concrete.clone()));
 
-        let after = remap_tensor_helper_dim_symbols(&before, &scope, &concrete);
+        let after = remap_tensor_helper_dim_symbols(&before, &scope, &concrete)
+            .expect("remap actualizes the helper");
         assert_ne!(
             bincode::serialize(&before).unwrap(),
             bincode::serialize(&after).unwrap(),
@@ -26117,6 +26162,25 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 && refused.message.contains("unimplemented chelis#1277"),
             "{}",
             refused.message
+        );
+
+        // chelis#3340: the remap that every helper route calls after its
+        // lowering entry has returned hands the refusal back as a value. No
+        // enclosing catch is needed for it to reach the caller.
+        let returned = remap_tensor_helper_dim_symbols(
+            &dag,
+            &scope,
+            &TensorType {
+                dims: vec![shared.clone()],
+                precision: Prim::Int64,
+            },
+        )
+        .expect_err("the refusal is returned, not unwound");
+        assert!(returned.fatal, "{returned:?}");
+        assert!(
+            returned.message.contains("checker dimension `d7`"),
+            "{}",
+            returned.message
         );
 
         // The control: one extent for the binder is a rename, not a refusal.

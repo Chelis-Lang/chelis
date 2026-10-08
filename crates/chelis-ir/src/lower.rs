@@ -23,6 +23,10 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
+    /// The hook stays quiet only for a lowering diagnostic's own unwind; any
+    /// other panic in that scope still prints, since it is resumed.
+    static SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
     /// Counts whole-program context preparations on this thread (chelis#2207).
     static PROGRAM_CONTEXT_PREPARATIONS: Cell<u64> = const { Cell::new(0) };
 }
@@ -691,6 +695,38 @@ pub(crate) fn catch_lowering_external<R>(
     catch_lowering(f)
 }
 
+/// Return the lowering diagnostic a post-lowering pass raises, and nothing
+/// else.
+///
+/// A pass that runs after a `try_lower_*` entry has returned (helper
+/// actualization, for one) raises its typed refusals through the same
+/// `panic_any` channel, but no entry's catch encloses it. Without this
+/// boundary such a refusal unwinds to whatever catches panics next and loses
+/// its message (chelis#3340). Unlike [`catch_lowering`], an unrelated panic is
+/// resumed rather than converted, so an internal fault is not laundered into
+/// a host-fallback diagnostic.
+pub(crate) fn catch_lowering_diagnostic<R>(
+    f: impl FnOnce() -> R + std::panic::UnwindSafe,
+) -> Result<R, LowerDiagnostic> {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.set(previous));
+        }
+    }
+
+    install_chelis_panic_hook();
+    let _restore = Restore(SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.replace(true)));
+    match std::panic::catch_unwind(f) {
+        Ok(value) => Ok(value),
+        Err(payload) if payload.is::<LowerDiagnostic>() || payload.is::<UnrepresentableDag>() => {
+            Err(panic_payload_to_lower_diagnostic(&*payload))
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Install a one-time global panic hook that suppresses panic output when the
@@ -704,6 +740,12 @@ pub fn install_chelis_panic_hook() {
                 return;
             }
             if SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.get()) {
+                return;
+            }
+            if SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.get())
+                && (info.payload().is::<LowerDiagnostic>()
+                    || info.payload().is::<UnrepresentableDag>())
+            {
                 return;
             }
             prev(info);

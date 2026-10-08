@@ -11231,12 +11231,7 @@ fn run_test_with_timeout<T: Send + 'static>(
             let payload = match result {
                 Ok(inner) => inner,
                 Err(panic_payload) => {
-                    let msg = panic_payload
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "test panicked (no message)".to_string());
-                    Err(format!("panic: {msg}"))
+                    Err(format!("panic: {}", test_panic_message(&*panic_payload)))
                 }
             };
             let _ = tx.send(payload);
@@ -11247,6 +11242,51 @@ fn run_test_with_timeout<T: Send + 'static>(
     }
     rx.recv_timeout(timeout)
         .unwrap_or_else(|_| Err(timeout_msg.to_string()))
+}
+
+/// The text of a panic that escaped a test body. A lowering diagnostic is a
+/// typed payload, not a string, and must still reach the report with its
+/// message rather than as an anonymous panic (chelis#3340).
+fn test_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| {
+            payload
+                .downcast_ref::<chelis_ir::lower::LowerDiagnostic>()
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "test panicked (no message)".to_string())
+}
+
+#[cfg(test)]
+mod test_panic_message_tests {
+    use super::test_panic_message;
+
+    #[test]
+    fn a_lowering_diagnostic_payload_renders_its_message() {
+        let diagnostic = chelis_ir::lower::LowerDiagnostic::new(
+            "checker dimension `d1` with two extents",
+            None,
+            Some("surf:1..2".to_string()),
+        );
+        let payload: Box<dyn std::any::Any + Send> = Box::new(diagnostic);
+        assert_eq!(
+            test_panic_message(&*payload),
+            "checker dimension `d1` with two extents at source span `surf:1..2`"
+        );
+    }
+
+    #[test]
+    fn string_payloads_render_and_an_opaque_payload_is_named() {
+        let owned: Box<dyn std::any::Any + Send> = Box::new("owned".to_string());
+        assert_eq!(test_panic_message(&*owned), "owned");
+        let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed");
+        assert_eq!(test_panic_message(&*borrowed), "borrowed");
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(7u8);
+        assert_eq!(test_panic_message(&*opaque), "test panicked (no message)");
+    }
 }
 
 /// Evaluate the module without any synthesized test-caller binding. Returns
