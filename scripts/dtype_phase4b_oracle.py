@@ -363,7 +363,9 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |
 | `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
 | `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
-| `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |""".splitlines()
+| `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |
+| `io/tensors::TensorArchive` | `TensorArchive { path: string, mapped: MappedFile, entries: List[TensorEntry] }` |
+| `io/tensors::TensorEntry` | `TensorEntry { name: string, dtype: string, shape: List[i64], offset: i64, byte_len: i64, sha256: string }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -631,6 +633,16 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
+| `io/tensors::open_hnw` | `(string)->TensorArchive!{IO}` |
+| `io/tensors::read_bf16` | `(TensorArchive,string,List[i64])->tensor[*,bf16]` |
+| `io/tensors::read_bool` | `(TensorArchive,string,List[i64])->tensor[*,bool]` |
+| `io/tensors::read_f16` | `(TensorArchive,string,List[i64])->tensor[*,f16]` |
+| `io/tensors::read_f32` | `(TensorArchive,string,List[i64])->tensor[*,f32]` |
+| `io/tensors::read_f64` | `(TensorArchive,string,List[i64])->tensor[*,f64]` |
+| `io/tensors::read_i16` | `(TensorArchive,string,List[i64])->tensor[*,i16]` |
+| `io/tensors::read_i32` | `(TensorArchive,string,List[i64])->tensor[*,i32]` |
+| `io/tensors::read_i64` | `(TensorArchive,string,List[i64])->tensor[*,i64]` |
+| `io/tensors::read_i8` | `(TensorArchive,string,List[i64])->tensor[*,i8]` |
 | `io::mmap_size` | `(string)->i64!{IO}` |
 | `io::read_head_bytes` | `(string,i64)->List[i64]!{IO}` |
 | `process::run` | `(string,List[string])->(i64,string,string)!{IO}` |
@@ -973,10 +985,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 283 or len(set(identities)) != 283:
+    if len(identities) != 293 or len(set(identities)) != 293:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "eighty-three unique identities"
+            "ninety-three unique identities"
         )
 
 
@@ -2554,7 +2566,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred eighty-three final exported stdlib numeric definitions",
+            "exactly the two hundred ninety-three final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "

@@ -84,6 +84,11 @@ CLAUSES = {
     75: ("Both halves come from one host reading", "`nanoseconds` lies in `0..999999999`",
          "`seconds` lies in `-377705030401..253402214400`", "never runs backwards",
          "`<operation>: io: <detail>`", "No default, zero, clamped, or wrapped reading"),
+    79: ("the bytes are reinterpreted, never converted", "least significant byte first",
+         "NaN's payload and quiet or signaling bit", "A `bool` payload byte other than 0 or 1 traps `Domain` at `bool`",
+         "no cotangent flows to the mapping"),
+    80: ("64 lowercase hexadecimal ASCII characters", "`mmap_text: invalid UTF-8 at byte <k>`",
+         "No replacement character", "structurally non-differentiable"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring
@@ -124,7 +129,7 @@ CALLABLE_CLAUSES = {
         (("dict_get", "dict_insert", "dict_merge", "dict_remove"),
          "`dict_of(entries)` takes List[(K,V)]"),
         (("einsum",), "`einsum(equation,a,b)` takes a string equation and two tensors"),
-        (("expand", "insert", "pad", "permute", "shrink", "stride"),
+        (("expand", "insert", "pad", "permute", "reshape", "shrink", "stride"),
          "`reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`"),
         (("gather", "scatter", "scatter_replace", "scatter_elements"),
          "`gather(values,indices,axis)`"),
@@ -134,6 +139,10 @@ CALLABLE_CLAUSES = {
         (("matmul",), "`matmul(a,b)` uses section 4.1's batched matrix signature"),
         (("mean",), "`mean(x, axes...) -> result` admits a tensor operand of"),
         (("mmap_read", "read_bytes"), "`print(value)->unit!{IO}`, `debug(value)->value!{IO}`"),
+        (("mmap_file",), "and `mmap_file(path)->MappedFile` take"),
+        (("mmap_len",), "`mmap_len(mapped)->i64` borrow the mapped handle"),
+        (("mmap_tensor",), "`mmap_tensor(mapped,offset,count,T)->tensor[n,T]`"),
+        (("mmap_sha256", "mmap_text"), "`mmap_text(mapped,offset,length)->string` and"),
         (("rank",), "`rank(x)` and `numel(x)` borrow a tensor and return i32 and i64 respectively"),
         (("reduce_window_sum", "reduce_window_mean", "reduce_window_max", "reduce_window_min"),
          "`window_reduction(arguments...) -> result` governs exactly"),

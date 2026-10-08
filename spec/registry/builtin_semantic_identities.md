@@ -15,6 +15,9 @@ Each row names its governing atom.
 | `Boundary:mmap_file:MmapFile` | [05-OP-60] |
 | `Boundary:mmap_len:MmapLen` | [05-OP-60] |
 | `Boundary:mmap_read:MmapRead` | [05-OP-60] |
+| `Boundary:mmap_sha256:MmapSha256` | [05-OP-80] |
+| `Boundary:mmap_tensor:MmapTensor` | [05-OP-79] |
+| `Boundary:mmap_text:MmapText` | [05-OP-80] |
 | `Boundary:parse_csv:ParseCsv` | [05-OP-61] |
 | `Boundary:print:PrintRecursive` | [05-OP-60] |
 | `Boundary:process_run:ProcessRun` | [05-OP-38] |

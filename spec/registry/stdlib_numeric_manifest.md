@@ -286,6 +286,16 @@ typing rule, not an unconstrained output type variable.
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
+| `io/tensors::open_hnw` | `(string)->TensorArchive!{IO}` |
+| `io/tensors::read_bf16` | `(TensorArchive,string,List[i64])->tensor[*,bf16]` |
+| `io/tensors::read_bool` | `(TensorArchive,string,List[i64])->tensor[*,bool]` |
+| `io/tensors::read_f16` | `(TensorArchive,string,List[i64])->tensor[*,f16]` |
+| `io/tensors::read_f32` | `(TensorArchive,string,List[i64])->tensor[*,f32]` |
+| `io/tensors::read_f64` | `(TensorArchive,string,List[i64])->tensor[*,f64]` |
+| `io/tensors::read_i16` | `(TensorArchive,string,List[i64])->tensor[*,i16]` |
+| `io/tensors::read_i32` | `(TensorArchive,string,List[i64])->tensor[*,i32]` |
+| `io/tensors::read_i64` | `(TensorArchive,string,List[i64])->tensor[*,i64]` |
+| `io/tensors::read_i8` | `(TensorArchive,string,List[i64])->tensor[*,i8]` |
 | `io::mmap_size` | `(string)->i64!{IO}` |
 | `io::read_head_bytes` | `(string,i64)->List[i64]!{IO}` |
 | `process::run` | `(string,List[string])->(i64,string,string)!{IO}` |

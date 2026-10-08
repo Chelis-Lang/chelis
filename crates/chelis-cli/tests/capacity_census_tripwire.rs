@@ -763,6 +763,111 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_string chelis_mmap_sha256 ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-80]",
+        "`mmap_text(mapped,offset,length)->string` and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_mmap_text ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-80]",
+        "`mmap_text(mapped,offset,length)->string` and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_mmap_tensor ( const chelis_mapped_file * mapped , int64_t offset , int64_t count , chelis_dtype dtype ) ;",
+        &["numeric-op"],
+        "[05-OP-79]",
+        "`mmap_tensor(mapped,offset,count,T)->tensor[n,T]`"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "io/tensors::TensorArchive: () (variant {} TensorArchive (field {} path (t-prim {} string)) (field {} mapped (t-adt {} MappedFile)) (field {} entries (t-adt {} List (t-adt {} TensorEntry))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "io/tensors::TensorEntry: () (variant {} TensorEntry (field {} name (t-prim {} string)) (field {} dtype (t-prim {} string)) (field {} shape (t-adt {} List (t-prim {} i64))) (field {} offset (t-prim {} i64)) (field {} byte_len (t-prim {} i64)) (field {} sha256 (t-prim {} string)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::open_hnw: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} TensorArchive))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_bf16: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} bf16)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_bool: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_f16: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} f16)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_f32: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} f32)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_f64: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} f64)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_i16: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} i16)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_i32: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} i32)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_i64: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/tensors::read_i8: (t-fn {} (t-adt {} TensorArchive) (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-tensor {} (d-name {} *) (t-prim {} i8)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_value chelis_native_provider_call_v1 ( chelis_string operation , const chelis_value * args , chelis_scalar arity ) ;",
         &[],
         "[05-OP-78]",

@@ -2968,7 +2968,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the eighteen
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the twenty
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2998,8 +2998,9 @@ exact ADT identity by [05-OP-34].
 > comparison and rendering. The opaque `datetime::*`,
 > `datetime/business::*`, `datetime/clock::*`, `datetime/columns::*`, and
 > `datetime/zone::*`
-> identities hold [05-OP-73]'s invariants, and the opaque `decimal::Decimal`
-> identity holds [05-OP-76]'s, by construction. There is no second prelude JSON
+> identities hold [05-OP-73]'s invariants, the opaque `decimal::Decimal`
+> identity holds [05-OP-76]'s, and the opaque `io/tensors::TensorArchive`
+> identity holds [05-OP-81]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -3010,7 +3011,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred eighty-three final exported stdlib numeric definitions enumerated in the
+> the two hundred ninety-three final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -3029,7 +3030,8 @@ exact ADT identity by [05-OP-34].
 > unchanged. The `datetime::*`, `datetime/business::*`, `datetime/clock::*`,
 > `datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73].
 > The `decimal::*`
-> identities follow [05-OP-76]. Index wrappers
+> identities follow [05-OP-76], and the `io/tensors::*` identities follow
+> [05-OP-81]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -4705,6 +4707,58 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: Text and digest reads are structurally non-differentiable.
 >
 > Accumulator: None; offsets and lengths are exact checked i64.
+
+#### Typed tensor archives
+
+> **[05-OP-81]** `tensor_archive(arguments...) -> result` governs exactly the
+> `io/tensors::*` identities: the opaque archive `TensorArchive`, its
+> entry record `TensorEntry`,
+> `open_hnw(path:string)->TensorArchive!{IO}`, and, for each active data
+> element dtype `T`, the reader
+> `read_T(archive:TensorArchive,name:string,dims:List[i64])->tensor[n,T]`
+> (`read_f64`, `read_f32`, `read_f16`, `read_bf16`, `read_i64`,
+> `read_i32`, `read_i16`, `read_i8`, `read_bool`). The readers are pure.
+>
+> Domain: `open_hnw` reads the hydronnx weight archive layout of format
+> major version 1: the eight magic bytes `HNXWGT`, 0, 1; a little-endian
+> u32 header length of at least 80 at byte 8 and a little-endian u32
+> manifest length at byte 12; the manifest's SHA-256 digest at bytes 16
+> through 47; the UTF-8 JSON manifest at the header length; and the
+> payload region at the first 64-byte boundary at or after the manifest's
+> end. The manifest's `format` object names `hydronnx-weights` with
+> `major` 1, and each element of its `tensors` array carries a string
+> `id`, a string `dtype` that spells a Chelis primitive, an integer
+> `shape` array, the `layout` `onnx-row-major`, the `encoding` `raw-le`,
+> an integer payload-relative `offset` and `byte_len`, and a lowercase
+> hexadecimal `sha256` of the tensor's payload bytes.
+>
+> Result: `open_hnw` maps the file once and returns an archive whose
+> entries are the manifest's tensors in manifest order. `read_T(archive,
+> name, dims)` selects the first entry whose `id` is `name` and returns
+> [05-OP-79]'s `mmap_tensor` of its payload at `T`, with `count` the
+> checked i64 product of `dims`: the stored elements in row-major order
+> as a rank-one tensor. A declared tensor type on a `reshape` of that
+> result by `dims` gives it the declared shape.
+>
+> Failure: Every check below completes before any element is read, and
+> each failure is [05-OP-60]'s `fail` with the message
+> `Std.Io.Tensors: <path>: <detail>`. `open_hnw` fails for a file shorter
+> than 80 bytes, other magic bytes, a major version other than 1, a header
+> length below 80, a manifest whose digest differs from the recorded one,
+> a missing or malformed manifest field, another format name or major
+> version, and a layout or encoding other than the ones above. A reader
+> fails when no entry has the name, when the stored dtype is not `T`, when
+> the stored shape is not exactly `dims`, when the stored byte length is
+> not the product of `dims` times `T`'s width, and when the payload's
+> SHA-256 differs from the recorded digest. `open_hnw` does not digest the
+> whole payload region: every byte a program can read through an archive
+> is digested by the reader that returns it. Range, JSON, and UTF-8
+> failures are those of [05-OP-79], [05-OP-2], and [05-OP-80].
+>
+> Adjoint: Archive reads have no differentiable operand and are outside
+> AD.
+>
+> Accumulator: None; the product of `dims` is checked i64 arithmetic.
 
 #### Host clocks
 

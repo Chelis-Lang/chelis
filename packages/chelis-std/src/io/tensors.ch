@@ -1,5 +1,5 @@
 module Std.Io.Tensors
-export (TensorEntry, TensorArchive, open_hnw, archive_entries, read_f64, read_f32, read_f16, read_bf16, read_i64, read_i32, read_i16, read_i8, read_bool)
+export (TensorArchive, open_hnw, read_f64, read_f32, read_f16, read_bf16, read_i64, read_i32, read_i16, read_i8, read_bool)
 import Std.Io.Json (Json, parse_json, json_get, json_string, json_int, json_array)
 import Std.Text (join)
 -- One stored tensor: its name, its dtype spelled as a Chelis primitive, its
@@ -55,7 +55,6 @@ def open_hnw(path: string) -> TensorArchive ! { IO } = {
   items = required(path, "tensors", json_array(json_get(manifest, "tensors")))
   TensorArchive { path, mapped: m, entries: map(fn (item: Json) -> hnw_entry(path, payload_start, item), items) }
 }
-def archive_entries(archive: TensorArchive) -> List[TensorEntry] = archive.entries
 def find_entry(archive: TensorArchive, name: string) -> TensorEntry = {
   found = filter(fn (entry: TensorEntry) -> eq(entry.name, name), archive.entries)
   if eq(len(found), 0i64) then archive_fail(archive.path, string_concat("no tensor named ", name)) else index(found, 0i64)
