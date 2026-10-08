@@ -46,6 +46,9 @@ fn witnesses(case: BuiltinSiblingCaseId) -> Vec<Option<String>> {
         | Case::MmapFile
         | Case::MmapRead
         | Case::MmapLen
+        | Case::MmapTensor
+        | Case::MmapText
+        | Case::MmapSha256
         | Case::ProcessRun
         | Case::ClockWallRead
         | Case::ClockMonotonicRead

@@ -2143,10 +2143,21 @@ def outside(p: string) -> string = {
 mapped = mmap_file("dataset.txt")
 prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
 width = mmap_len(mapped)
+weights = mmap_tensor(mapped, cast(0, i64), cast(1, i64), i32)
+text = mmap_text(mapped, cast(0, i64), cast(4, i64))
+digest = mmap_sha256(mapped, cast(0, i64), cast(4, i64))
 contents = read_file("dataset.txt")
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        // [05-OP-79] and [05-OP-80]: the reads of an open mapping are pure.
+        for root in ["weights", "text", "digest"] {
+            assert!(
+                inferred.get(root).is_none_or(|effects| effects.is_empty()),
+                "expected {root} to stay pure, got {:?}",
+                inferred.get(root)
+            );
+        }
         assert!(
             inferred
                 .get("mapped")
