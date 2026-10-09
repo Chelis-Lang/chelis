@@ -301,8 +301,15 @@ fn the_explicit_borrow_rule_is_keyed_on_the_literal_callee() {
         ),
         "a match-bound name holding len",
     );
-    // The callee written `len` or `index` refuses the explicit borrow, as a
-    // direct call or as a pipe stage.
+    // A lexical binding named `len` owns its call (spec/04 section 8.6), so
+    // `len(&xs)` through a parameter of that name is decided by its type.
+    assert_checks(
+        "def probe(len: (&List[tensor[2, f32]]) -> i64, xs: List[tensor[2, f32]]) -> i64 = \
+         len(&xs)\n",
+        "a parameter named len",
+    );
+    // The callee written `len` or `index` that names the builtin refuses the
+    // explicit borrow, as a direct call or as a pipe stage.
     for (source, what) in [
         (
             "def probe(xs: List[tensor[2, f32]]) -> i64 = len(&xs)\n",

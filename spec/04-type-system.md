@@ -847,10 +847,11 @@ and do not consume it, so reading a container's length or an element does not
 forbid a later reuse of the container. A container operand that is already
 borrowed, such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
 referent. An explicit borrow expression is a type error only as the container
-operand of a call whose callee is written `len` or `index`, a pipe stage
-included, as in `len(&xs)` or `(&xs) |> len`. A call through any other callee,
-a function value bound to `len` or `index` included, is decided by that
-callee's type. See `spec/05-risc-primitives.md` §1.3.1.
+operand of a call whose callee is written `len` or `index` and names the
+builtin, a pipe stage included, as in `len(&xs)` or `(&xs) |> len`. A call
+through any other callee, a function value bound to `len` or `index` or a
+lexical binding that shadows the name included, is decided by that callee's
+type. See `spec/05-risc-primitives.md` §1.3.1.
 
 ---
 
