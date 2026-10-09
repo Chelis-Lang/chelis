@@ -30,6 +30,8 @@
     { "number": 2702, "kind": "issue", "state": "open" },
     { "number": 2740, "kind": "issue", "state": "open" },
     { "number": 3366, "kind": "issue", "state": "open" },
+    { "number": 3377, "kind": "issue", "state": "open" },
+    { "number": 3378, "kind": "issue", "state": "open" },
     { "number": 3410, "kind": "issue", "state": "open" },
     { "number": 3411, "kind": "issue", "state": "open" }
   ]
