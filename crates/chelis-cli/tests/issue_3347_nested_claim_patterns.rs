@@ -1210,11 +1210,19 @@ fn run_deep(case: &str, size: usize, native: bool) -> (bool, String) {
             .assert()
             .success();
         command
-            .args(["-c", &format!("ulimit -s {C_STACK_KIB} && exec \"$@\""), "sh"])
+            .args([
+                "-c",
+                &format!("ulimit -s {C_STACK_KIB} && exec \"$@\""),
+                "sh",
+            ])
             .arg(out_dir.join("deep"));
     } else {
         command
-            .args(["-c", &format!("ulimit -s {EVAL_STACK_KIB} && exec \"$@\""), "sh"])
+            .args([
+                "-c",
+                &format!("ulimit -s {EVAL_STACK_KIB} && exec \"$@\""),
+                "sh",
+            ])
             .arg(&chelis)
             .args(["eval", "--allow-style-violations", "--file"])
             .arg(&path);
@@ -1235,7 +1243,10 @@ fn run_deep(case: &str, size: usize, native: bool) -> (bool, String) {
 fn assert_deep_trap_and_control(case: &str, native: bool, context: &str, op: &str) {
     let lane = lane(native);
     let (ok, output) = run_deep(case, 3, native);
-    assert!(ok && output.contains("out = 3"), "{lane}: the agreeing chain must run\n{output}");
+    assert!(
+        ok && output.contains("out = 3"),
+        "{lane}: the agreeing chain must run\n{output}"
+    );
     let (ok, output) = run_deep(case, 5, native);
     assert!(!ok, "{lane}: the deepest link disagrees\n{output}");
     assert!(
@@ -1250,7 +1261,11 @@ fn assert_deep_trap_and_control(case: &str, native: bool, context: &str, op: &st
             .any(|line| line == format!("numeric trap: domain in {op} at i64")),
         "{lane}\n{output}"
     );
-    assert_eq!(output.matches("numeric trap:").count(), 1, "{lane}\n{output}");
+    assert_eq!(
+        output.matches("numeric trap:").count(),
+        1,
+        "{lane}\n{output}"
+    );
     assert!(!output.contains("out ="), "{lane}\n{output}");
 }
 
