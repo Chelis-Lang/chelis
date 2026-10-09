@@ -95,6 +95,11 @@ strategy. It traverses nested value-carrying type positions with cycle
 protection and uses resolved declaration identities, not string suffixes, to
 recognize opaque invariants. This closes the qualified and nested cases in
 [#2267](https://github.com/Chelis-Lang/chelis/issues/2267).
+For a nested record binder, Tier C plans its fields recursively, samples each
+field, and assembles the record in the property probe. Each contained opaque
+value is first assembled by a fresh helper in that opaque type's module. The
+assumption record names the full binder field path; a cycle or value form with
+no supported generator remains unsupported, with no raw-field fallback.
 
 For each opaque type that needs construction or invariant observation, the
 prover emits fresh helpers in that type's defining module. Generator helpers

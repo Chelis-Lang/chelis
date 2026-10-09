@@ -19,10 +19,14 @@ const MAIN: &str = "module Nested.Main
 import Nested.Left (WideLeft, left_value)
 type Wrapper =
   | Wrapper { inner: WideLeft }
+@property direct forall(p: WideLeft):
+  (left_value(p) >= -1000.0f32)
 @property qualified forall(p: Nested.Left.WideLeft):
   (left_value(p) >= -1000.0f32)
 @property nested forall(w: Wrapper):
   (left_value(w.inner) >= -1000.0f32)
+@property nested_false forall(w: Wrapper):
+  (left_value(w.inner) > 1000.0f32)
 ";
 
 fn property<'a>(records: &'a [Value], name: &str) -> &'a Value {
@@ -33,7 +37,7 @@ fn property<'a>(records: &'a [Value], name: &str) -> &'a Value {
 }
 
 #[test]
-fn qualified_and_nested_package_binders_discharge_their_invariants() {
+fn direct_qualified_and_nested_package_binders_discharge_their_invariants() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join("nested-binders");
     Command::cargo_bin("chelis")
@@ -75,7 +79,7 @@ fn qualified_and_nested_package_binders_discharge_their_invariants() {
         .collect::<Vec<Value>>();
     // The qualified direct binder is a green control on linked packages.
     // The nested record must receive the same invariant assumption.
-    for name in ["qualified", "nested"] {
+    for name in ["direct", "qualified", "nested"] {
         let result = property(&records, name);
         assert_eq!(result["status"], "passed", "{result:#}");
         assert_eq!(result["composite_verdict"], "fuzz_validated", "{result:#}");
@@ -85,5 +89,19 @@ fn qualified_and_nested_package_binders_discharge_their_invariants() {
             "the contained opaque invariant is injected once: {result:#}"
         );
     }
-    assert_eq!(output.status.code(), Some(0), "{records:#?}");
+    let false_result = property(&records, "nested_false");
+    assert_eq!(false_result["status"], "failed", "{false_result:#}");
+    assert_eq!(
+        false_result["assumptions"]
+            .as_array()
+            .expect("assumptions")
+            .len(),
+        1,
+        "the false nested property still injects its invariant: {false_result:#}"
+    );
+    assert!(
+        false_result["counterexample"].is_object(),
+        "{false_result:#}"
+    );
+    assert_ne!(output.status.code(), Some(0), "{records:#?}");
 }

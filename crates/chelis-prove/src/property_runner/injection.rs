@@ -1463,6 +1463,43 @@ type Probability =
     }
 
     #[test]
+    fn qualified_identity_does_not_confuse_equal_type_names_in_two_modules() {
+        let (mut left, left_path, left_params) = parsed_module_property(
+            "module Left
+@opaque
+@invariant(t) t.value >= 0.0f32
+type Token =
+  | Token { value: f32 }
+@property left forall(t: Left.Token):
+  true
+",
+            "left",
+        );
+        let (right, mut right_path, right_params) = parsed_module_property(
+            "module Right
+@opaque
+type Token =
+  | Token { value: f32 }
+@property right forall(t: Right.Token):
+  true
+",
+            "right",
+        );
+        right_path[0] = left.len();
+        left.extend(right);
+        assert_eq!(
+            property_has_opaque_invariant_binder(&left, &left_path, &left_params),
+            Ok(true),
+            "Left.Token has an invariant"
+        );
+        assert_eq!(
+            property_has_opaque_invariant_binder(&left, &right_path, &right_params),
+            Ok(false),
+            "Right.Token must not inherit Left.Token's invariant"
+        );
+    }
+
+    #[test]
     fn recursively_contained_opaque_invariant_binder_selects_injection() {
         let (decls, property_path, params) = parsed_module_property(
             "module M
@@ -1488,23 +1525,43 @@ type Outer =
 
     #[test]
     fn ordinary_opaque_and_recursive_records_without_invariants_do_not_select_injection() {
-        let (decls, property_path, params) = parsed_module_property(
-            "module M
+        let source = "module M
 @opaque
 type Token =
   | Token { value: f32 }
 type Recursive =
   | Recursive { next: Option[Recursive], token: Token }
+@property ordinary forall(t: Token):
+  true
 @property plain forall(r: Recursive):
   true
+";
+        for name in ["ordinary", "plain"] {
+            let (decls, property_path, params) = parsed_module_property(source, name);
+            assert_eq!(
+                property_has_opaque_invariant_binder(&decls, &property_path, &params),
+                Ok(false),
+                "cycle-safe traversal must not invent an invariant for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_program_does_not_select_injection_or_fall_through() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+@invariant(p) p.value >= 0.0f32
+type Probability =
+  | Probability { value: f32 }
+@property bounded forall(to_tensor: Probability):
+  true
 ",
-            "plain",
+            "bounded",
         );
-        assert_eq!(
-            property_has_opaque_invariant_binder(&decls, &property_path, &params),
-            Ok(false),
-            "cycle-safe traversal must not invent an invariant"
-        );
+        let error = property_has_opaque_invariant_binder(&decls, &property_path, &params)
+            .expect_err("reserved binder must fail desugaring before routing");
+        assert!(error.contains("to_tensor"), "{error}");
     }
 
     #[test]
