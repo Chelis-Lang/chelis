@@ -142,6 +142,59 @@ fn typed_key_builtin_alias_chain_retains_original_identity() {
     assert!(stdout.contains(&format!("main = {expected}")), "{stdout}");
 }
 
+/// chelis#3440: a named map or fold callback is a call through the typed
+/// alias's lexical binding, which C declares under a generated let alias.
+#[test]
+fn typed_key_builtin_aliases_execute_as_named_loop_callbacks() {
+    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  mix: key -> i64 -> key = fold_in\n  (map(seed, [1i64, -1i64]), fold(mix, seed(7i64), [1i64, 2i64]))\n}\n";
+    let expected = [
+        format!(
+            "[key({:016x}), key({:016x})]",
+            key_reference::key_from_seed(1),
+            key_reference::key_from_seed(-1)
+        ),
+        format!(
+            "key({:016x})",
+            key_reference::fold_in(key_reference::fold_in(7, 1), 2)
+        ),
+    ];
+    assert_eq!(eval_main(source).unwrap(), expected, "Eval");
+    let generated = ownership_support::emit(source, "key alias loop callbacks");
+    let (ledger, stdout) = ownership_support::run_program(&generated);
+    ownership_support::balanced(&ledger);
+    for (index, display) in expected.iter().enumerate() {
+        assert!(
+            stdout.contains(&format!("main.{index} = {display}\n")),
+            "{stdout}"
+        );
+    }
+}
+
+/// A lexical key alias shadows a def of the same spelling in a direct call
+/// and as a loop callback; neither lane may call the def.
+#[test]
+fn typed_key_builtin_alias_shadows_a_same_named_def() {
+    let source = "def mix(k: key, n: i64) -> key = k\ndef seed(x: i64) -> key = key_from_seed(0i64)\ndef main() = {\n  mix: key -> i64 -> key = fold_in\n  seed: i64 -> key = key_from_seed\n  (mix(seed(7i64), -1i64), map(seed, [1i64, -1i64]))\n}\n";
+    let expected = [
+        format!("key({:016x})", key_reference::fold_in(7, -1)),
+        format!(
+            "[key({:016x}), key({:016x})]",
+            key_reference::key_from_seed(1),
+            key_reference::key_from_seed(-1)
+        ),
+    ];
+    assert_eq!(eval_main(source).unwrap(), expected, "Eval");
+    let generated = ownership_support::emit(source, "key alias shadows def");
+    let (ledger, stdout) = ownership_support::run_program(&generated);
+    ownership_support::balanced(&ledger);
+    for (index, display) in expected.iter().enumerate() {
+        assert!(
+            stdout.contains(&format!("main.{index} = {display}\n")),
+            "{stdout}"
+        );
+    }
+}
+
 #[test]
 fn unannotated_alias_selects_scalar_and_tensor_independently_in_eval() {
     let source = "def main() = {\n  seed = key_from_seed\n  (seed(-1i64), seed(to_tensor([1i64, 2i64])))\n}\n";
