@@ -2275,7 +2275,7 @@ mod tests {
         assert_eq!(first, reparsed, "arrow-arg sig must round-trip");
         // The reparsed AST must still be the one-argument HOF shape.
         let ast = sig_type_ast(&format!("module T\nsig f[a, b, c]: {first}"));
-        match ast {
+        match &ast {
             TypeExpr::Arrow(args, _, _) => {
                 assert_eq!(args.len(), 1, "must remain a 1-argument function type");
                 assert!(

@@ -223,11 +223,11 @@ fn tensor_precision_serde_preserves_current_spans_and_accepts_legacy_strings() {
         });
         let decoded: TypeExpr =
             serde_json::from_value(legacy).expect("deserialize legacy string precision");
-        let TypeExpr::Tensor(_, precision, span) = decoded else {
+        let TypeExpr::Tensor(_, precision, span) = &decoded else {
             panic!("legacy tensor AST decoded to the wrong variant");
         };
         assert_eq!(precision.as_str(), name);
         assert_eq!(precision.span(), Span::new(0, 0));
-        assert_eq!(span, Span::new(16, 17));
+        assert_eq!(*span, Span::new(16, 17));
     }
 }
