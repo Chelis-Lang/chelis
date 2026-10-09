@@ -457,3 +457,227 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
         "fold recurrence",
     );
 }
+
+fn eval_failure(source: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        !output.status.success(),
+        "chelis eval unexpectedly succeeded for {name}:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+// chelis#3343: [05-OP-55] fold/scan over a List-typed `grad` parameter reverse
+// the executed recurrence. These Lists are staged as Cons/Nil spines of tensor
+// leaves, which the scalar `to_list(tensor)` fold path cannot read.
+
+#[test]
+fn eval_grad_through_fold_over_tensor_list_matches_literal_index_unrolling() {
+    let stdout = eval_source(
+        "\
+def fold_loss(x: tensor[1, 2, f32], ws: List[tensor[2, 2, f32]]) -> f32 = {
+  o = fold(fn (acc: tensor[1, 2, f32], w: tensor[2, 2, f32]) -> matmul(acc, w), x, ws)
+  tensor_to_scalar(sum(sum(o, 1i32), 0i32))
+}
+def index_loss(x: tensor[1, 2, f32], ws: List[tensor[2, 2, f32]]) -> f32 = {
+  o = matmul(matmul(x, index(ws, 0i64)), index(ws, 1i64))
+  tensor_to_scalar(sum(sum(o, 1i32), 0i32))
+}
+def ws() -> List[tensor[2, 2, f32]] = [to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 0.0f32], [0.0f32, 1.0f32]])]
+def x() -> tensor[1, 2, f32] = to_tensor([[1.0f32, 1.0f32]])
+gf = grad(fold_loss, wrt=ws)(x(), ws())
+gi = grad(index_loss, wrt=ws)(x(), ws())
+f0 = index(gf, 0i64)
+f1 = index(gf, 1i64)
+i0 = index(gi, 0i64)
+i1 = index(gi, 1i64)
+",
+        "ad_fold_tensor_list",
+    );
+    let f0 = parse_tensor_data(&stdout, "f0");
+    let f1 = parse_tensor_data(&stdout, "f1");
+    // d/dW0 = x^T (W1 1)^T and d/dW1 = (x W0)^T 1^T for loss = sum(x W0 W1).
+    assert_close(&f0, &[1.0, 1.0, 1.0, 1.0], 1e-6, "fold d/dw0");
+    assert_close(&f1, &[4.0, 4.0, 6.0, 6.0], 1e-6, "fold d/dw1");
+    assert_close(
+        &f0,
+        &parse_tensor_data(&stdout, "i0"),
+        0.0,
+        "fold == index d/dw0",
+    );
+    assert_close(
+        &f1,
+        &parse_tensor_data(&stdout, "i1"),
+        0.0,
+        "fold == index d/dw1",
+    );
+}
+
+#[test]
+fn eval_grad_through_fold_over_tensor_list_with_tanh_agrees_with_finite_differences() {
+    let stdout = eval_source(
+        "\
+def fold_loss[bt, h](x: tensor[bt, h, f32], ws: List[tensor[h, h, f32]]) -> f32 = {
+  o = fold(fn (acc: tensor[bt, h, f32], w: tensor[h, h, f32]) -> tanh(matmul(acc, w)), x, ws)
+  tensor_to_scalar(sum(sum(mul(o, o), 1i32), 0i32))
+}
+def index_loss[bt, h](x: tensor[bt, h, f32], ws: List[tensor[h, h, f32]]) -> f32 = {
+  o = tanh(matmul(tanh(matmul(x, index(ws, 0i64))), index(ws, 1i64)))
+  tensor_to_scalar(sum(sum(mul(o, o), 1i32), 0i32))
+}
+def px() -> tensor[1, 2, f32] = to_tensor([[0.5f32, -0.25f32]])
+def pws() -> List[tensor[2, 2, f32]] = [to_tensor([[0.5f32, 0.25f32], [-0.5f32, 1.0f32]]), to_tensor([[1.0f32, -0.25f32], [0.125f32, 0.5f32]])]
+gf = grad(fold_loss, wrt=ws)(px(), pws())
+gi = grad(index_loss, wrt=ws)(px(), pws())
+f0 = index(gf, 0i64)
+f1 = index(gf, 1i64)
+i0 = index(gi, 0i64)
+i1 = index(gi, 1i64)
+",
+        "ad_fold_tensor_list_tanh",
+    );
+    let x = [0.5_f64, -0.25];
+    let ws = [[[0.5_f64, 0.25], [-0.5, 1.0]], [[1.0, -0.25], [0.125, 0.5]]];
+    let loss = |ws: &[[[f64; 2]; 2]; 2]| {
+        let mut acc = x;
+        for w in ws {
+            acc = [
+                (acc[0] * w[0][0] + acc[1] * w[1][0]).tanh(),
+                (acc[0] * w[0][1] + acc[1] * w[1][1]).tanh(),
+            ];
+        }
+        acc[0] * acc[0] + acc[1] * acc[1]
+    };
+    let h = 1e-6;
+    for (layer, name) in [(0, "f0"), (1, "f1")] {
+        let mut fd = Vec::new();
+        for i in 0..2 {
+            for j in 0..2 {
+                let (mut plus, mut minus) = (ws, ws);
+                plus[layer][i][j] += h;
+                minus[layer][i][j] -= h;
+                fd.push((loss(&plus) - loss(&minus)) / (2.0 * h));
+            }
+        }
+        assert_close(&parse_tensor_data(&stdout, name), &fd, 1e-5, name);
+    }
+    assert_close(
+        &parse_tensor_data(&stdout, "f0"),
+        &parse_tensor_data(&stdout, "i0"),
+        0.0,
+        "fold == index d/dw0",
+    );
+    assert_close(
+        &parse_tensor_data(&stdout, "f1"),
+        &parse_tensor_data(&stdout, "i1"),
+        0.0,
+        "fold == index d/dw1",
+    );
+}
+
+#[test]
+fn eval_grad_through_fold_over_scalar_list_parameter() {
+    let stdout = eval_source(
+        "\
+def loss(ws: List[f32]) -> f32 = fold(fn (acc: f32, w: f32) -> mul(acc, w), 2.0f32, ws)
+g = grad(loss, wrt=ws)([3.0f32, 5.0f32])
+g0 = index(g, 0i64)
+g1 = index(g, 1i64)
+",
+        "ad_fold_scalar_list",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g0")],
+        &[10.0],
+        1e-6,
+        "d/dw0",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g1")],
+        &[6.0],
+        1e-6,
+        "d/dw1",
+    );
+}
+
+#[test]
+fn eval_grad_through_fold_with_tuple_accumulator_over_mapped_list() {
+    let stdout = eval_source(
+        "\
+def loss(x: tensor[2, f32], ws: List[tensor[2, f32]]) -> f32 = {
+  pair = fold(fn (acc: (tensor[2, f32], tensor[2, f32]), w: tensor[2, f32]) -> (mul(acc.0, w), add(acc.1, w)), (x, x), map(fn (v: tensor[2, f32]) -> mul(v, v), ws))
+  tensor_to_scalar(sum(add(pair.0, pair.1), 0i32))
+}
+g = grad(loss, wrt=ws)(to_tensor([1.0f32, 2.0f32]), [to_tensor([3.0f32, 4.0f32]), to_tensor([5.0f32, 6.0f32])])
+g0 = index(g, 0i64)
+g1 = index(g, 1i64)
+",
+        "ad_fold_tuple_accumulator",
+    );
+    // loss = sum(x w0^2 w1^2) + sum(x + w0^2 + w1^2).
+    assert_close(
+        &parse_tensor_data(&stdout, "g0"),
+        &[156.0, 584.0],
+        1e-4,
+        "d/dw0",
+    );
+    assert_close(
+        &parse_tensor_data(&stdout, "g1"),
+        &[100.0, 396.0],
+        1e-4,
+        "d/dw1",
+    );
+}
+
+#[test]
+fn eval_grad_through_scan_over_tensor_list_differentiates_every_state() {
+    let stdout = eval_source(
+        "\
+def loss(x: tensor[2, f32], ws: List[tensor[2, f32]]) -> f32 = {
+  states = scan(fn (acc: tensor[2, f32], w: tensor[2, f32]) -> mul(acc, w), x, ws)
+  tensor_to_scalar(sum(index(states, 0i64), 0i32)) + tensor_to_scalar(sum(index(states, 1i64), 0i32))
+}
+g = grad(loss, wrt=ws)(to_tensor([1.0f32, 2.0f32]), [to_tensor([3.0f32, 4.0f32]), to_tensor([5.0f32, 6.0f32])])
+g0 = index(g, 0i64)
+g1 = index(g, 1i64)
+",
+        "ad_scan_tensor_list",
+    );
+    // States are x w0 and x w0 w1, so d/dw0 = x + x w1 and d/dw1 = x w0.
+    assert_close(
+        &parse_tensor_data(&stdout, "g0"),
+        &[6.0, 14.0],
+        1e-6,
+        "d/dw0",
+    );
+    assert_close(
+        &parse_tensor_data(&stdout, "g1"),
+        &[3.0, 8.0],
+        1e-6,
+        "d/dw1",
+    );
+}
+
+#[test]
+fn eval_grad_through_fold_over_runtime_length_list_is_rejected_loudly() {
+    let stderr = eval_failure(
+        "\
+def loss(x: tensor[2, f32], wss: List[List[tensor[2, f32]]], k: tensor[i64]) -> f32 = tensor_to_scalar(sum(fold(fn (acc: tensor[2, f32], w: tensor[2, f32]) -> mul(acc, w), x, index(wss, tensor_to_scalar(k))), 0i32))
+g = grad(loss, wrt=wss)(to_tensor([1.0f32, 2.0f32]), [[to_tensor([3.0f32, 4.0f32])], [to_tensor([5.0f32, 6.0f32]), to_tensor([7.0f32, 8.0f32])]], scalar_to_tensor(1i64))
+",
+        "ad_fold_runtime_length_list",
+    );
+    assert!(
+        stderr.contains("`fold` under `grad` needs a List whose length is known"),
+        "a runtime-length List must be a loud fold rejection, not a placeholder:\n{stderr}"
+    );
+}

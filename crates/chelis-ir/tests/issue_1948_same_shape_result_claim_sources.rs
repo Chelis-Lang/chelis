@@ -899,3 +899,34 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         "malformed agreement must fail before execution: {errors:?}"
     );
 }
+
+/// chelis#3343 negative control. The defect was a rank-0 placeholder that fed a
+/// unary same-shape op (`tanh`) whose declared result is rank 2. The repair
+/// lowers the real operand; the verifier must still refuse the malformed
+/// graph if any construction emits it again.
+#[test]
+fn unary_same_shape_result_over_rank0_operand_is_a_verifier_error() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let placeholder = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "fold".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let tanh = dag.add_node(decl, RiscOp::Tanh, vec![placeholder], mat_f32(1, 2), None);
+    dag.add_root(tanh);
+
+    let errors = verify(&dag);
+    assert!(
+        errors.iter().any(|error| error
+            == "same-shape result at node 1 has rank 2 but no positive-rank agreement member"),
+        "a rank-2 tanh over a rank-0 operand must fail verification: {errors:?}"
+    );
+}
