@@ -469,8 +469,8 @@ fn carries_dependence(op: &RiscOp, slot: usize) -> bool {
 
 /// How an operation's atom treats one operand slot under `grad` (spec/05 §5,
 /// spec/06 §7.5). The data path, the random-rate reach, and the backward
-/// walk's exact-zero pass-through all read this one classification, so they
-/// cannot disagree about a slot. Value dependence is a separate question
+/// walk's contributions all read this one classification, so they cannot
+/// disagree about a slot. Value dependence is a separate question
 /// ([`carries_dependence`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OperandSlot {
@@ -479,25 +479,21 @@ enum OperandSlot {
     /// ([04-NUM-14]), but the slot is still a data slot: the zero comes from
     /// the operand's dtype, not from the slot.
     Data,
-    /// A control slot whose operand selects the result's value: a comparison
-    /// operand or a `where` condition. Its cotangent is exact zero for every
-    /// operand dtype, and the backward walk passes that zero to it, so a
-    /// parameter read only there still receives its exact zero gradient.
-    Selector,
-    /// A control slot of index math or metadata: an index, a movement bound,
-    /// size or axis, a `shape` read, a random control or dropout rate, or a
-    /// guard's firing predicate. Its cotangent is exact zero for every
-    /// operand dtype, and the backward walk never enters it.
-    Index,
+    /// A control slot: a comparison operand, a `where` condition, an index,
+    /// a movement bound, size or axis, a `shape` read, a random control or
+    /// dropout rate, or a guard's firing predicate. Its atom assigns exact
+    /// zero cotangent for every operand dtype, and the backward walk pushes
+    /// no contribution into it.
+    Control,
 }
 
 /// The [`OperandSlot`] of input `slot` of an `op` node. The match is
 /// exhaustive so a new operation states its slots when it is added.
 fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
-    use OperandSlot::{Data, Index, Selector};
+    use OperandSlot::{Control, Data};
     match op {
-        RiscOp::Compare(_) => Selector,
-        RiscOp::Where if slot == 0 => Selector,
+        RiscOp::Compare(_) => Control,
+        RiscOp::Where if slot == 0 => Control,
         RiscOp::Where => Data,
         // The value is input 0; every later input is an index, a runtime
         // bound or size ([05-MOV-1]), a List map's length carrier, an extent
@@ -516,13 +512,13 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
             if slot == 0 {
                 Data
             } else {
-                Index
+                Control
             }
         }
         // `target, indices, updates`.
         RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. } => {
             if slot == 1 {
-                Index
+                Control
             } else {
                 Data
             }
@@ -534,7 +530,7 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
             if slot == 1 {
                 Data
             } else {
-                Index
+                Control
             }
         }
         // `template, low, high, key`: the bounds carry their
@@ -543,7 +539,7 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
             if matches!(slot, 1 | 2) {
                 Data
             } else {
-                Index
+                Control
             }
         }
         RiscOp::OneHot { .. }
@@ -553,7 +549,7 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
         | RiscOp::SplitN { .. }
-        | RiscOp::KeySelect => Index,
+        | RiscOp::KeySelect => Control,
         RiscOp::Iota
         | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::Add
@@ -1144,14 +1140,14 @@ fn grad_dag_result(
 
         let node = forward.get(node_id).unwrap().clone();
         let rejection = structural_rejection(&node, forward);
-        // spec/06 §7.5: a node with no data path was reached only through
-        // control slots. Its cotangent is exact zero, so it contributes exact
-        // zero without constructing its adjoint, and its structural
-        // rejection does not apply. Nor does an inactive node's: no cotangent
-        // is owed to its operands.
-        let off_data_path = !data_path[node_id.0];
-        let cotangent_free = off_data_path
-            || !active[node_id.0]
+        // spec/06 §7.5: no contribution is ever pushed into a control slot
+        // (below), so the walk reaches only nodes with a data path; a node
+        // with none contributes nothing and is never visited. An inactive
+        // node's structural rejection does not apply: no cotangent is owed
+        // to its operands.
+        debug_assert!(data_path[node_id.0], "the walk entered a control slot");
+        let inactive = !active[node_id.0];
+        let cotangent_free = inactive
             || is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
         if let Some(rejection) = rejection
             && !cotangent_free
@@ -1162,34 +1158,27 @@ fn grad_dag_result(
         // A broadcast's adjoint contracts an axis. Select inactive rows
         // away while that axis still exists; the scalar/shared source may
         // no longer carry the branch activation after the reduction.
-        let masks_before_reduction = !off_data_path && matches!(node.op, RiscOp::Expand { .. });
+        let masks_before_reduction = matches!(node.op, RiscOp::Expand { .. });
         let grad_out = if masks_before_reduction {
             let input = forward.get(node.inputs[0]).expect("expand source exists");
             mask_to_activation(&mut dag, &node, input, grad_out)?
         } else {
             grad_out
         };
-        let adjoint = if off_data_path {
-            None
-        } else {
-            compute_adjoints(&node, grad_out, forward, &mut dag)
-        };
+        let adjoint = compute_adjoints(&node, grad_out, forward, &mut dag);
         let input_grads = match adjoint {
             Some(input_grads) => input_grads,
-            // A cotangent-free node without a built adjoint passes exact zero
-            // through every slot but index math, as a comparison passes it to
-            // its operands: off every data path its own cotangent is exact
-            // zero, an inactive node owes its operands none, and an integer
-            // computation receives only an integer value's exact zero. So a
-            // parameter read only through control slots still receives its
-            // exact zero, and a no-grad conversion beneath an integer
-            // computation on a data path still receives its required
-            // structural diagnostic.
+            // An inactive node owes its operands nothing.
+            None if inactive => Vec::new(),
+            // A cotangent-free integer computation whose atom defines no
+            // adjoint receives only an integer value's exact zero. Pass that
+            // zero through its data slots so a no-grad conversion beneath it
+            // still receives its required structural diagnostic.
             None if cotangent_free => node
                 .inputs
                 .iter()
                 .enumerate()
-                .filter(|&(slot, _)| operand_slot(&node.op, slot) != OperandSlot::Index)
+                .filter(|&(slot, _)| operand_slot(&node.op, slot) == OperandSlot::Data)
                 .map(|(_, &input_id)| {
                     let zero = fill_like(&mut dag, node.owner, input_id, 0.0);
                     (input_id, zero)
@@ -1204,13 +1193,32 @@ fn grad_dag_result(
                 .into());
             }
         };
+        // Bind each contribution to the operand slot it is for. spec/06 §7.5:
+        // a control slot receives no contribution, not even its atom's exact
+        // zero, so a parameter read only through control slots has none at
+        // all and its gradient is the disconnected parameter's exact +0.
+        let mut used_slots = vec![false; node.inputs.len()];
         let input_grads = input_grads
             .into_iter()
-            .map(|(input_id, grad_node)| {
-                // An exact zero off every data path is already its input's
-                // shape and has nothing to select away.
-                if masks_before_reduction || off_data_path {
-                    return Ok((input_id, grad_node));
+            .filter_map(|(input_id, grad_node)| {
+                let input_slot = node
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(slot, candidate)| {
+                        (!used_slots[slot] && *candidate == input_id).then_some(slot)
+                    })
+                    .expect("adjoint input belongs to its forward node");
+                used_slots[input_slot] = true;
+                (operand_slot(&node.op, input_slot) == OperandSlot::Data)
+                    .then_some((input_slot, input_id, grad_node))
+            })
+            .collect::<Vec<_>>();
+        let input_grads = input_grads
+            .into_iter()
+            .map(|(input_slot, input_id, grad_node)| {
+                if masks_before_reduction {
+                    return Ok((input_slot, input_id, grad_node));
                 }
                 let input = forward
                     .get(input_id)
@@ -1250,7 +1258,7 @@ fn grad_dag_result(
                     grad_node
                 };
                 mask_to_activation(&mut dag, &node, input, grad_node)
-                    .map(|masked| (input_id, masked))
+                    .map(|masked| (input_slot, input_id, masked))
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Every node added inside compute_adjoints, and every mask, is a
@@ -1259,17 +1267,7 @@ fn grad_dag_result(
         stamp_grad_marker(&mut dag, dag_size_before, &node);
 
         let consumer_position = topo_positions[&node_id];
-        let mut used_slots = vec![false; node.inputs.len()];
-        for (input_id, grad_node) in input_grads {
-            let input_slot = node
-                .inputs
-                .iter()
-                .enumerate()
-                .find_map(|(slot, candidate)| {
-                    (!used_slots[slot] && *candidate == input_id).then_some(slot)
-                })
-                .expect("adjoint input belongs to its forward node");
-            used_slots[input_slot] = true;
+        for (input_slot, input_id, grad_node) in input_grads {
             pending.entry(input_id).or_default().push(Contribution {
                 order: (consumer_position, 0, input_slot),
                 value: grad_node,
@@ -5009,10 +5007,11 @@ mod tests {
         }
     }
 
-    /// A parameter read only through control slots receives exact positive
-    /// zero, and the checked transform still returns its gradient node.
+    /// A parameter read only through control slots receives no contribution
+    /// (spec/06 §7.5), so it is a disconnected parameter with no gradient
+    /// node; Surf lowering fills it with exact +0.
     #[test]
-    fn grad_predicate_only_parameter_is_positive_zero() {
+    fn grad_predicate_only_parameter_has_no_contribution() {
         let (mut dag, x, selected) = comparison_with_discrete_cast(None, false, false);
         let owner = dag.get(selected).unwrap().owner;
         // Read a second parameter only through a comparison and a `where`
@@ -5080,8 +5079,7 @@ mod tests {
                 &UnordMap::from([("x".to_string(), -2.0), ("y".to_string(), y0)]),
             );
             assert_eq!(values[&result.grad_nodes[&x]], sign * -4.0, "y = {y0}");
-            let dy = values[&result.grad_nodes[&y]];
-            assert_eq!(dy.to_bits(), 0.0f64.to_bits(), "y = {y0}: {dy}");
+            assert!(!result.grad_nodes.contains_key(&y), "y = {y0}");
         }
     }
 

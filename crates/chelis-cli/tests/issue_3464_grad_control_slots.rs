@@ -422,3 +422,36 @@ out = grad(loss, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
         "{stderr}"
     );
 }
+
+/// spec/06 §7.5: a control slot receives no contribution, not even an exact
+/// zero, so a predicate read of `x` cannot change the sign of `x`'s data
+/// contribution `w = -0`. The accumulation then decides the sign alone: +0
+/// while it starts from a +0 base leaf, -0 under chelis#3419's rule.
+/// TODO(bf-zero, chelis#3419): once that rule lands, tighten this to
+/// require exactly `-0.0`.
+#[test]
+fn a_predicate_read_adds_no_contribution_to_a_data_gradient() {
+    let source = r#"
+def loss(x: tensor[1, f32], w: tensor[1, f32], c: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(add(mul(x, w), where(lt(x, to_tensor([0.0f32])), c, c)), 0i32))
+out = grad(loss, wrt=x)(to_tensor([1.0f32]), neg(to_tensor([0.0f32])), to_tensor([2.0f32]))
+"#;
+    for (lane, stdout) in [
+        ("eval", {
+            let output = eval(source, "predicate_signed_zero");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        }),
+        ("C", build_and_run(source, "predicate_signed_zero")),
+    ] {
+        let printed = printed_out(&stdout, "predicate_signed_zero", lane);
+        assert!(
+            printed == "tensor(shape=[1], data=[0.0])"
+                || printed == "tensor(shape=[1], data=[-0.0])",
+            "{lane}: {printed}"
+        );
+    }
+}

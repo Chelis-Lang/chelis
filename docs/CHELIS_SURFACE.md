@@ -496,7 +496,7 @@ Each target checks whether it can lower the selected source function.
   differentiated output (`spec/06` §7.5): a comparison operand, a
   `where`/`if`/`match` condition, an index, a movement bound or size, and a
   `shape` read are control slots, so an operation read only there runs
-  forward and contributes zero.
+  forward and contributes nothing.
 - **Host values and control:** `spec/06` §2.10 defines cotangents for
   selected `List` combinators, the executed `if`/`match` branch, recursive
   trajectories, and ADT fields. Integration tests cover

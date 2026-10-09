@@ -1659,14 +1659,11 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
             ]),
         )
         .unwrap();
-        assert_eq!(
-            values[&differentiated.grad_nodes[&left]].to_f64_lossy_vec(),
-            vec![0.0]
-        );
-        assert_eq!(
-            values[&differentiated.grad_nodes[&right]].to_f64_lossy_vec(),
-            vec![0.0]
-        );
+        // spec/06 §7.5: a comparison operand is a control slot and receives
+        // no contribution, so each operand is a disconnected parameter, whose
+        // gradient the caller fills with exact +0.
+        assert!(!differentiated.grad_nodes.contains_key(&left));
+        assert!(!differentiated.grad_nodes.contains_key(&right));
         let (then_grad, else_grad) = if kind == ComparisonKind::Neq {
             (1.0, 0.0)
         } else {
@@ -1824,10 +1821,10 @@ fn logical_random_activation_is_control_only_during_grad() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        values[&differentiated.grad_nodes[&template]].to_f64_lossy_vec(),
-        vec![0.0]
-    );
+    assert!(values.contains_key(&differentiated.output_node));
+    // spec/06 §7.5: the template is a control slot (a shape read) and
+    // receives no contribution; the caller fills the disconnected gradient.
+    assert!(!differentiated.grad_nodes.contains_key(&template));
 }
 
 #[test]

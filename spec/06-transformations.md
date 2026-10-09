@@ -984,10 +984,9 @@ For a typical loss function (scalar output), there is one output and the seed is
 
 ### 7.5 Handling Non-Differentiable Subgraphs
 
-When backward traversal encounters a zero-cotangent operation such as a
-comparison or `shape`, it contributes exact zero to each input named by its
-atom and traversal continues. An implementation may emit a diagnostic note,
-but that note does not change validity or the cotangent.
+A zero-cotangent operation such as a comparison or `shape` assigns exact zero
+cotangent to each input named by its atom. An implementation may emit a
+diagnostic note, but that note does not change validity or the cotangent.
 
 An operand slot to which its atom assigns exact zero cotangent for every
 operand dtype is a control slot: comparison and `is_*` operands, the `where`,
@@ -998,8 +997,11 @@ path is a path to the differentiated output that enters no control slot and no
 integer ([04-NUM-14]) is not a control slot. An operation whose result
 reaches the output only through control slots executes forward, with its
 traps, and contributes nothing: its adjoint is not constructed, so no value
-its forward evaluation computes, finite or not, enters a cotangent, and each
-operand it reads receives exact positive zero from it.
+its forward evaluation computes, finite or not, enters a cotangent. Backward
+traversal records no contribution into a control slot, not even the exact
+zero its atom assigns, so a value read only through control slots has no
+contribution, and a `wrt` leaf with none has the exact positive zero gradient
+of a parameter the output does not depend on.
 
 A value depends on a `wrt` leaf when a path from the leaf reaches it through
 operand slots that carry dependence and through no `stop_gradient`. Every
