@@ -230,6 +230,89 @@ struct DeclaredResultClaim {
     /// bound claims nothing, because the result is then its first site.
     /// Grouped by binder in declared order, as the C lane's frames are.
     first_sites: Vec<FirstSiteAxis>,
+    /// A claim on tensors the result holds inside an aggregate or nominal
+    /// value (runtime_extents.md C6.5). Its `rank` and `axes` are unused.
+    nested: Option<NestedResultClaim>,
+}
+
+/// One claim source's pattern at the position the evaluated value occupies.
+#[derive(Clone)]
+struct NestedResultClaim {
+    pattern: Arc<chelis_ir::claim_pattern::ClaimPattern>,
+    node: chelis_ir::claim_pattern::ClaimNodeId,
+    /// The invocation's binder witnesses: the first tensor parameter axis
+    /// that declares each binder, and its observed extent.
+    binders: Arc<Vec<(String, NamedResultSource, i64)>>,
+}
+
+impl NestedResultClaim {
+    fn claim(self) -> DeclaredResultClaim {
+        DeclaredResultClaim {
+            rank: 0,
+            axes: Vec::new(),
+            first_sites: Vec::new(),
+            nested: Some(self),
+        }
+    }
+
+    /// The claim a component of the value owes, if any. A fixed-rank tensor
+    /// position becomes an ordinary result claim, so every producer that
+    /// checks one (kernels included) checks it.
+    fn project(
+        &self,
+        step: chelis_ir::claim_pattern::ClaimStep<'_>,
+    ) -> Option<DeclaredResultClaim> {
+        let node = self.pattern.child(self.node, step)?;
+        let nested = Self {
+            pattern: self.pattern.clone(),
+            node,
+            binders: self.binders.clone(),
+        };
+        match self.pattern.node(node) {
+            chelis_ir::claim_pattern::ClaimNode::Tensor(tensor) => match tensor.rank {
+                Some(rank) => Some(nested.tensor_claim(rank)),
+                None => Some(nested.claim()),
+            },
+            _ => Some(nested.claim()),
+        }
+    }
+
+    /// The tensor position's obligations for a value of rank `rank`. A
+    /// binder no parameter of the invocation witnesses claims nothing, as
+    /// for a top-level result.
+    fn tensor_claim(&self, rank: usize) -> DeclaredResultClaim {
+        let chelis_ir::claim_pattern::ClaimNode::Tensor(tensor) = self.pattern.node(self.node)
+        else {
+            unreachable!("a tensor claim is built only at a tensor position");
+        };
+        let axes = tensor
+            .axes
+            .iter()
+            .filter_map(|claim| {
+                let axis = claim.position.resolve(rank)?;
+                match &claim.claim {
+                    chelis_ir::claim_pattern::ClaimDim::Literal(required) => {
+                        Some(ResultAxisClaim::literal(axis, *required))
+                    }
+                    chelis_ir::claim_pattern::ClaimDim::Binder(binder) => {
+                        self.binders.iter().find(|(name, _, _)| name == binder).map(
+                            |(_, source, required)| ResultAxisClaim {
+                                axis,
+                                required: *required,
+                                source: Some(source.clone()),
+                            },
+                        )
+                    }
+                }
+            })
+            .collect();
+        DeclaredResultClaim {
+            rank,
+            axes,
+            first_sites: Vec::new(),
+            nested: None,
+        }
+    }
 }
 
 /// One declared result axis named by an output-inferred binder of
@@ -341,6 +424,83 @@ impl DeclaredResultClaim {
             }
         }
         Ok(())
+    }
+}
+
+/// Walk `value` along a nested claim. Only the constructor the value carries
+/// is walked; a tensor's verdict names the producer `tree` records for it.
+fn nested_claim_verdict(
+    nested: &NestedResultClaim,
+    value: &RuntimeValue,
+    tree: Option<&ResultProducer>,
+) -> Result<(), String> {
+    use chelis_ir::claim_pattern::{ClaimNode, ClaimStep};
+    let child = |step: ClaimStep<'_>| {
+        nested
+            .pattern
+            .child(nested.node, step)
+            .map(|node| NestedResultClaim {
+                pattern: nested.pattern.clone(),
+                node,
+                binders: nested.binders.clone(),
+            })
+    };
+    let below = |index: usize| tree.and_then(|tree| tree.child(index));
+    match (nested.pattern.node(nested.node), value) {
+        (ClaimNode::Tensor(_), RuntimeValue::Tensor(tensor)) => {
+            let shape = &tensor.value.shape;
+            let claim = nested.tensor_claim(shape.len());
+            if let ClaimNode::Tensor(declared) = nested.pattern.node(nested.node)
+                && declared.rank.is_some_and(|rank| rank != shape.len())
+            {
+                return Ok(());
+            }
+            match tree.and_then(ResultProducer::operation) {
+                Some(op) => claim.shape_verdict(shape, op),
+                // An agreeing value needs no attribution; a disagreeing one
+                // without a recorded producer fails closed.
+                None => claim.shape_verdict(shape, "return").map_err(|_| {
+                    "host runtime: pending result claim reached a tensor without producer \
+                     provenance"
+                        .to_string()
+                }),
+            }
+        }
+        (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(child) = child(ClaimStep::Component(index)) {
+                    nested_claim_verdict(&child, item, below(index).as_ref())?;
+                }
+            }
+            Ok(())
+        }
+        (ClaimNode::List(_), RuntimeValue::List(items)) => {
+            if let Some(child) = child(ClaimStep::Element) {
+                for (index, item) in items.iter().enumerate() {
+                    nested_claim_verdict(&child, item, below(index).as_ref())?;
+                }
+            }
+            Ok(())
+        }
+        (ClaimNode::Option(_), RuntimeValue::Adt { ctor, fields, .. }) => {
+            if ctor == "Some"
+                && let (Some(child), Some(payload)) = (child(ClaimStep::Some), fields.first())
+            {
+                nested_claim_verdict(&child, payload, below(0).as_ref())?;
+            }
+            Ok(())
+        }
+        (ClaimNode::Nominal { .. }, RuntimeValue::Adt { ctor, fields, .. }) => {
+            for (index, field) in fields.iter().enumerate() {
+                if let Some(child) = child(ClaimStep::Field { ctor, field: index }) {
+                    nested_claim_verdict(&child, field, below(index).as_ref())?;
+                }
+            }
+            Ok(())
+        }
+        // The checker owns the value's kind; a disagreement is not this
+        // guard's business.
+        _ => Ok(()),
     }
 }
 
@@ -979,6 +1139,7 @@ impl<'a> EvalContext<'a> {
             .flatten();
         let result_claims = inherited_claims
             .iter()
+            .filter(|claim| claim.nested.is_none())
             .map(|claim| {
                 let axes = claim
                     .axes
@@ -1024,6 +1185,11 @@ impl<'a> EvalContext<'a> {
         );
         let values = self.mark_numeric_trap_from_trusted_result(result)?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
+        for claim in inherited_claims {
+            if let Some(nested) = &claim.nested {
+                self.check_nested_result_claim(nested, &value, result_producer.as_ref())?;
+            }
+        }
         self.result_producer = result_producer;
         Ok(value)
     }
@@ -1273,7 +1439,7 @@ impl<'a> EvalContext<'a> {
                 }
                 self.eval_expr(last)
             }
-            DeepTag::Record => self.eval_record(node),
+            DeepTag::Record => self.eval_record_with_claims(node, None),
             DeepTag::Access => self.eval_access(node),
             DeepTag::TupleGet => self.eval_tuple_get(node),
             DeepTag::Match => self.eval_match(node),
@@ -1362,7 +1528,13 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_record(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+    /// A record construction. On the result spine, `claims` are projected
+    /// into each field before it is produced (runtime_extents.md C6.5).
+    fn eval_record_with_claims(
+        &mut self,
+        node: EvalNode<'_>,
+        claims: Option<&[DeclaredResultClaim]>,
+    ) -> Result<RuntimeValue, String> {
         let kids = node.children;
         let ctor = kids
             .first()
@@ -1390,11 +1562,19 @@ impl<'a> EvalContext<'a> {
                 .first()
                 .and_then(symbol_name)
                 .ok_or_else(|| "record field name must be a symbol".to_string())?;
-            let value = self.eval_expr(
-                field_kids
-                    .get(1)
-                    .ok_or_else(|| "record field missing value".to_string())?,
-            )?;
+            let field_value = field_kids
+                .get(1)
+                .ok_or_else(|| "record field missing value".to_string())?;
+            let value = match claims {
+                Some(claims) => {
+                    let projected = Self::project_result_claims(
+                        claims,
+                        chelis_ir::claim_pattern::ClaimStep::NamedField { ctor, field: name },
+                    );
+                    self.eval_under_result_claim(field_value, &projected)?
+                }
+                None => self.eval_expr(field_value)?,
+            };
             let producer = self.result_producer.take();
             source_order.push(name.to_string());
             fields_by_name.insert(name.to_string(), value);
@@ -1746,8 +1926,21 @@ impl<'a> EvalContext<'a> {
     /// Fold consecutive `Cons(head, tail)` applications without recursing
     /// through their right spine. An authored tail expression may itself
     /// evaluate to a list, so evaluate it once after every head and retain
-    /// the usual typed improper-tail error.
-    fn eval_cons_spine(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+    /// the usual typed improper-tail error. Under a nested claim each head is
+    /// produced under the element claim, and the tail is a List of the same
+    /// claimed type.
+    fn eval_cons_spine(
+        &mut self,
+        expr: &Expr,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
+        let element =
+            Self::project_result_claims(claims, chelis_ir::claim_pattern::ClaimStep::Element);
+        let nested = claims
+            .iter()
+            .filter(|claim| claim.nested.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
         let mut heads = Vec::new();
         let mut spine = ConsSpine::new(expr);
         for cell in spine.by_ref() {
@@ -1760,10 +1953,10 @@ impl<'a> EvalContext<'a> {
         let mut values = Vec::with_capacity(heads.len());
         let mut producers = Vec::with_capacity(heads.len());
         for head in heads {
-            values.push(self.eval_expr(head)?);
+            values.push(self.eval_under_result_claim(head, &element)?);
             producers.push(self.result_producer.take());
         }
-        let tail_value = self.eval_expr(tail)?;
+        let tail_value = self.eval_under_result_claim(tail, &nested)?;
         let tail_producer = self.result_producer.take();
         let RuntimeValue::List(items) = tail_value else {
             return Err(format!("Cons tail must be a List, got {tail_value:?}"));
@@ -1798,7 +1991,33 @@ impl<'a> EvalContext<'a> {
         // tail as another call consumes one native frame per element and
         // copy-on-write prepending copies every tail built so far.
         if kids.len() == 3 && var_name(func) == Some("Cons") {
-            return self.eval_cons_spine(node.expr);
+            return self.eval_cons_spine(node.expr, claims);
+        }
+
+        // A constructor on the result spine produces each field under its
+        // projected claims, before any later field (runtime_extents.md C6.5).
+        if claims.iter().any(|claim| claim.nested.is_some())
+            && let Some(name) = var_name(func)
+            && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            && self.active_builtin_symbol(name)
+        {
+            let mut args = Vec::with_capacity(kids.len() - 1);
+            let mut arg_producers = Vec::with_capacity(kids.len() - 1);
+            for (index, arg) in kids[1..].iter().enumerate() {
+                let step = if name == "Some" {
+                    chelis_ir::claim_pattern::ClaimStep::Some
+                } else {
+                    chelis_ir::claim_pattern::ClaimStep::Field {
+                        ctor: name,
+                        field: index,
+                    }
+                };
+                let projected = Self::project_result_claims(claims, step);
+                args.push(self.eval_under_result_claim(arg, &projected)?);
+                arg_producers.push(self.result_producer.take());
+            }
+            self.result_producer = ResultProducer::aggregate(arg_producers);
+            return Ok(self.adt_value(name, args.into(), None));
         }
 
         // A `dropout` application draws here, ahead of the generic builtin
@@ -2127,6 +2346,7 @@ impl<'a> EvalContext<'a> {
                 .map(|(axis, required)| ResultAxisClaim::literal(axis, required))
                 .collect(),
             first_sites: Vec::new(),
+            nested: None,
         })
     }
 
@@ -2201,6 +2421,7 @@ impl<'a> EvalContext<'a> {
             rank: dim_exprs.len(),
             axes: Vec::new(),
             first_sites: Vec::new(),
+            nested: None,
         });
         claim.axes.extend(named);
         claim.axes.sort_by_key(|axis| axis.axis);
@@ -2296,6 +2517,7 @@ impl<'a> EvalContext<'a> {
             rank: actualized.dims.len(),
             axes,
             first_sites: Vec::new(),
+            nested: None,
         }))
     }
 
@@ -2337,6 +2559,12 @@ impl<'a> EvalContext<'a> {
                     }
                     DeepTag::Match => return self.eval_match_under_result_claim(node, claims),
                     DeepTag::App => return self.eval_app_under_result_claim(node, claims),
+                    DeepTag::Tuple if claims.iter().any(|claim| claim.nested.is_some()) => {
+                        return self.eval_tuple_under_result_claim(node, claims);
+                    }
+                    DeepTag::Record if claims.iter().any(|claim| claim.nested.is_some()) => {
+                        return self.eval_record_with_claims(node, Some(claims));
+                    }
                     _ => {}
                 }
             }
@@ -2347,22 +2575,81 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_) => {}
         }
         let value = self.eval_expr(expr)?;
-        if self.claims_are_vacuous(claims) {
-            return Ok(value);
-        }
-        let producer = self
-            .result_producer
-            .as_ref()
-            .and_then(ResultProducer::operation)
-            .ok_or_else(|| {
-                "host runtime: pending result claim reached a tensor without producer provenance"
-                    .to_string()
-            })?
-            .to_owned();
-        for claim in claims {
-            self.check_declared_result_claim(claim, &value, &producer)?;
-        }
+        self.check_claims_at_boundary(claims, &value)?;
         Ok(value)
+    }
+
+    /// Check `claims` on a value whose producer this activation has already
+    /// run, or which arrived from an interface: each tensor's verdict names
+    /// its own producer.
+    fn check_claims_at_boundary(
+        &mut self,
+        claims: &[DeclaredResultClaim],
+        value: &RuntimeValue,
+    ) -> Result<(), String> {
+        if self.claims_are_vacuous(claims) {
+            return Ok(());
+        }
+        let tree = self.result_producer.clone();
+        let mut producer = None;
+        for claim in claims {
+            if let Some(nested) = &claim.nested {
+                self.check_nested_result_claim(nested, value, tree.as_ref())?;
+                continue;
+            }
+            if self.claims_are_vacuous(std::slice::from_ref(claim)) {
+                continue;
+            }
+            if producer.is_none() {
+                producer = Some(
+                    tree.as_ref()
+                        .and_then(ResultProducer::operation)
+                        .ok_or_else(|| {
+                            "host runtime: pending result claim reached a tensor without \
+                             producer provenance"
+                                .to_string()
+                        })?
+                        .to_owned(),
+                );
+            }
+            let producer = producer.clone().expect("set above");
+            self.check_declared_result_claim(claim, value, &producer)?;
+        }
+        Ok(())
+    }
+
+    /// The claims a component of a value under construction owes: each
+    /// nested claim projected to that component. A claim on the whole value
+    /// says nothing about a component.
+    fn project_result_claims(
+        claims: &[DeclaredResultClaim],
+        step: chelis_ir::claim_pattern::ClaimStep<'_>,
+    ) -> Vec<DeclaredResultClaim> {
+        claims
+            .iter()
+            .filter_map(|claim| claim.nested.as_ref()?.project(step))
+            .collect()
+    }
+
+    /// A tuple under construction on the result spine: each component is
+    /// produced under its own projected claims, in source order.
+    fn eval_tuple_under_result_claim(
+        &mut self,
+        node: EvalNode<'_>,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
+        let mut values = Vec::with_capacity(node.children.len());
+        let mut producers = Vec::with_capacity(node.children.len());
+        for (index, child) in node.children.iter().enumerate() {
+            let projected = Self::project_result_claims(
+                claims,
+                chelis_ir::claim_pattern::ClaimStep::Component(index),
+            );
+            values.push(self.eval_under_result_claim(child, &projected)?);
+            producers.push(self.result_producer.take());
+        }
+        self.result_producer = ResultProducer::aggregate(producers);
+        Ok(RuntimeValue::Tuple(values.into()))
     }
 
     /// [`Self::eval_let`], forwarding a declared-result claim to the binding
@@ -2560,6 +2847,7 @@ impl<'a> EvalContext<'a> {
                     rank: claim.dims.len(),
                     axes,
                     first_sites: Vec::new(),
+                    nested: None,
                 });
             }
             return self.eval_under_result_claim(region.initializer(), &claims);
@@ -3208,6 +3496,32 @@ impl<'a> EvalContext<'a> {
                     //
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
+                    let nested_claim = match (&active_declaration, &authored_result) {
+                        (Some(name), Some(authored)) => self
+                            .nested_result_pattern(name, authored)?
+                            .and_then(|pattern| {
+                                let node = pattern.nested_root()?;
+                                let binders = named_result_witnesses
+                                    .iter()
+                                    .filter_map(|(name, source, size)| {
+                                        Some((
+                                            name.clone(),
+                                            source.clone(),
+                                            i64::try_from(*size).ok()?,
+                                        ))
+                                    })
+                                    .collect::<Vec<_>>();
+                                Some(
+                                    NestedResultClaim {
+                                        pattern,
+                                        node,
+                                        binders: Arc::new(binders),
+                                    }
+                                    .claim(),
+                                )
+                            }),
+                        _ => None,
+                    };
                     let late_first_sites = declaration_claim
                         .as_ref()
                         .filter(|claim| !claim.first_sites.is_empty())
@@ -3215,8 +3529,10 @@ impl<'a> EvalContext<'a> {
                             rank: claim.rank,
                             axes: Vec::new(),
                             first_sites: claim.first_sites.clone(),
+                            nested: None,
                         });
                     let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
+                    claims.extend(nested_claim);
                     claims.extend_from_slice(inherited_claims);
                     let value = self.eval_under_result_claim(&body, &claims)?;
                     // The declared result is a later site of every binder
@@ -3358,13 +3674,58 @@ impl<'a> EvalContext<'a> {
         }
     }
 
+    /// The claim pattern of def `name`'s authored result when that result is
+    /// not itself a tensor, derived once per def.
+    fn nested_result_pattern(
+        &mut self,
+        name: &str,
+        authored: &Expr,
+    ) -> Result<Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>, String> {
+        if let Some(cached) = self.nested_result_patterns.get(name) {
+            return Ok(cached.clone());
+        }
+        let pattern = if tensor_type_dim_exprs(authored).is_some() {
+            None
+        } else {
+            let pattern =
+                chelis_ir::claim_pattern::ClaimPattern::derive(authored, &self.adt_registry)
+                    .map_err(|error| format!("host runtime: `{name}` result: {error}"))?;
+            pattern.nested_root().is_some().then(|| Arc::new(pattern))
+        };
+        self.nested_result_patterns
+            .insert(name.to_string(), pattern.clone());
+        Ok(pattern)
+    }
+
     fn check_declared_result_claim(
         &mut self,
         claim: &DeclaredResultClaim,
         value: &RuntimeValue,
         producer: &str,
     ) -> Result<(), String> {
+        if let Some(nested) = &claim.nested {
+            let stamp = ResultProducer::Uniform(producer.to_owned());
+            let tree = self
+                .result_producer
+                .clone()
+                .filter(|tree| tree.matches_value(value))
+                .unwrap_or(stamp);
+            let verdict = nested_claim_verdict(nested, value, Some(&tree));
+            return self.mark_numeric_trap_from_trusted_result(verdict);
+        }
         let verdict = self.resolve_first_sites(claim).verdict(value, producer);
+        self.mark_numeric_trap_from_trusted_result(verdict)
+    }
+
+    /// Check the claims on the tensors a value holds, attributing each to
+    /// its own producer in `tree` (runtime_extents.md C6.5).
+    fn check_nested_result_claim(
+        &mut self,
+        nested: &NestedResultClaim,
+        value: &RuntimeValue,
+        tree: Option<&ResultProducer>,
+    ) -> Result<(), String> {
+        let verdict = nested_claim_verdict(nested, value, tree);
         self.mark_numeric_trap_from_trusted_result(verdict)
     }
 
@@ -3385,7 +3746,7 @@ impl<'a> EvalContext<'a> {
     fn claims_are_vacuous(&self, claims: &[DeclaredResultClaim]) -> bool {
         claims
             .iter()
-            .all(|claim| self.resolve_first_sites(claim).axes.is_empty())
+            .all(|claim| claim.nested.is_none() && self.resolve_first_sites(claim).axes.is_empty())
     }
 
     /// `claim` with each first-site axis resolved against the site that
@@ -3397,6 +3758,7 @@ impl<'a> EvalContext<'a> {
             rank: claim.rank,
             axes: claim.axes.clone(),
             first_sites: Vec::new(),
+            nested: claim.nested.clone(),
         };
         for site in &claim.first_sites {
             if let Some((source, required)) =
@@ -6024,6 +6386,7 @@ mod legacy_capture_order_tests {
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
+            nested_result_patterns: UnordMap::new(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),

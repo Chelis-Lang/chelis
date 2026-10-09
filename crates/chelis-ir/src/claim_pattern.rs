@@ -563,9 +563,13 @@ fn parameter_substitution(
     }
     let mut out = BTreeMap::new();
     for (parameter, arg) in definition.param_args.iter().zip(args) {
-        let key = match parameter {
-            NominalArg::Type(Type::Var(var)) => format!("t{}", var.0),
-            NominalArg::Dimension(Dim::Var(var)) => format!("d{}", var.0),
+        let (key, arg) = match parameter {
+            NominalArg::Type(Type::Var(var)) => (format!("t{}", var.0), arg.clone()),
+            // Surf spells a binder argument `Box[k]` as a type variable; in
+            // a dimension slot it names the dimension binder `k`.
+            NominalArg::Dimension(Dim::Var(var)) => {
+                (format!("d{}", var.0), dimension_argument(arg))
+            }
             _ => {
                 return Err(ClaimPatternError::Malformed(format!(
                     "`{}` has a parameter without a declaration variable",
@@ -573,9 +577,21 @@ fn parameter_substitution(
                 )));
             }
         };
-        out.insert(key, arg.clone());
+        out.insert(key, arg);
     }
     Ok(out)
+}
+
+fn dimension_argument(arg: &Expr) -> Expr {
+    match type_parts(arg) {
+        Some((DeepTag::TVar, children)) => Expr::node(
+            DeepTag::DVar,
+            Metadata::default(),
+            children.to_vec(),
+            arg.span(),
+        ),
+        _ => arg.clone(),
+    }
 }
 
 fn substitute(ty: &Expr, substitution: &BTreeMap<String, Expr>) -> Expr {
@@ -835,6 +851,7 @@ mod tests {
         for (arg, claim) in [
             ("(d-lit {} 3)", ClaimDim::Literal(3)),
             ("(d-var {} k)", ClaimDim::Binder("k".into())),
+            ("(t-var {} k)", ClaimDim::Binder("k".into())),
         ] {
             let pattern =
                 ClaimPattern::derive(&ty(&format!("(t-adt {{}} Box {arg})")), &registry).unwrap();
