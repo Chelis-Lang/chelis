@@ -6649,6 +6649,71 @@ mod nested_claim_walk_stack_tests {
     }
 }
 
+/// Eval holds its claims in check order: the enclosing claims, then a local
+/// ascription's (C's outer-first frame). When two of them state one
+/// obligation, projecting them to a component keeps the earlier copy, so a
+/// third claim checked between the copies never names a trap the earlier
+/// copy names without the merge.
+#[cfg(test)]
+mod nested_claim_order_tests {
+    use super::*;
+
+    fn pattern(extent: usize) -> Arc<ClaimPattern> {
+        let registry = chelis_types::adt::AdtRegistry::default();
+        let claimed = chelis_deep::parser::parse_str(&format!(
+            "(t-tuple {{}} (t-tensor {{}} (d-lit {{}} {extent}) (t-prim {{}} f32)))"
+        ))
+        .expect("type syntax")
+        .remove(0);
+        Arc::new(ClaimPattern::derive(&claimed, &registry).expect("a tuple owes a pattern"))
+    }
+
+    fn claim(pattern: &Arc<ClaimPattern>) -> DeclaredResultClaim {
+        NestedResultClaim {
+            node: pattern.nested_root().expect("the tuple owes its component"),
+            pattern: pattern.clone(),
+            binders: Arc::new(Vec::new()),
+        }
+        .claim()
+    }
+
+    fn first_failure(claims: &[DeclaredResultClaim]) -> String {
+        claims
+            .iter()
+            .find_map(|claim| claim.shape_verdict(&[5], "probe").err())
+            .expect("a claim fails")
+    }
+
+    #[test]
+    fn projection_keeps_the_earlier_copy_of_an_obligation() {
+        let three = pattern(3);
+        let four = pattern(4);
+        // The declared claim, a third claim, then the local ascription's copy
+        // of the declared claim, which shares its pattern.
+        let claims = [claim(&three), claim(&four), claim(&three)];
+        let unmerged = claims
+            .iter()
+            .filter_map(|claim| {
+                claim
+                    .nested
+                    .as_ref()?
+                    .project(chelis_ir::claim_pattern::ClaimStep::Component(0))
+            })
+            .collect::<Vec<_>>();
+        let merged = EvalContext::project_result_claims(
+            &claims,
+            chelis_ir::claim_pattern::ClaimStep::Component(0),
+        );
+        assert_eq!(unmerged.len(), 3);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(first_failure(&merged), first_failure(&unmerged));
+        assert_eq!(
+            first_failure(&merged),
+            "extent `3`: claimed = 3, probe axis 0 = 5\nnumeric trap: domain in probe at i64"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tensor_entry_actualization_tests {
     use super::*;

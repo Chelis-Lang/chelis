@@ -4205,6 +4205,126 @@ mod claim_stack_tests {
     }
 }
 
+#[cfg(test)]
+mod claim_frame_order_tests {
+    // Two nested claim frames that share one pattern table and differ only in
+    // `outer_claims_first` state one obligation at two check positions: the
+    // immediate copy is checked in link order, the outer-first copy after
+    // every immediate frame. Neither the join nor a projection may treat one
+    // as a duplicate of the other. A third claim, checked between them,
+    // fails with a different message, so a skip that moved the obligation to
+    // the outer-first position would let the third claim name the trap.
+
+    use super::{
+        append_host_result_claim_checks, append_host_result_claim_support,
+        append_nested_claim_support,
+    };
+    use std::fs;
+    use std::process::Command;
+
+    const MAIN: &str = r#"
+int main(int argc, char **argv) {
+    if (argc != 3) return 97;
+    int projected = argv[1][0] == 'p';
+    int shared = argv[2][0] == 's';
+    /* A tuple of one tensor; T claims its component at extent 3, U at 4. */
+    static const int64_t t_axes[][3] = { { 0, -1, 3 } };
+    static const int64_t u_axes[][3] = { { 0, -1, 4 } };
+    static const int64_t children[] = { 1 };
+    static const char *const labels[] = { ".0" };
+    static const __chelis_claim_node t_nodes[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, t_axes, NULL, NULL, NULL, NULL },
+    };
+    /* T's content in a table of its own: the same obligation, never equal. */
+    static const __chelis_claim_node t_copy[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, t_axes, NULL, NULL, NULL, NULL },
+    };
+    static const __chelis_claim_node u_nodes[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, u_axes, NULL, NULL, NULL, NULL },
+    };
+    /* Join: the declared copy joins a chain that holds the outer-first copy.
+       Projection: the outer-first copy heads the chain the declared copy
+       extends, so a merge keeping the first copy would keep the late one. */
+    const __chelis_claim_node *table = shared ? t_nodes : t_copy;
+    __chelis_host_result_claim third = { NULL, -1, 0, NULL, 0, u_nodes, 0, NULL, 0 };
+    __chelis_host_result_claim outer = { &third, -1, 0, NULL, 1, t_nodes, 0, NULL, 0 };
+    __chelis_host_result_claim declared = { &outer, -1, 0, NULL, 0, table, 0, NULL, 0 };
+    __chelis_host_result_origin_arena arena;
+    memset(&arena, 0, sizeof arena);
+    const __chelis_host_result_claim *chain = NULL;
+    if (projected) {
+        declared.next = &third;
+        outer.next = &declared;
+        chain = __chelis_project_host_result_claims(&arena, &outer, 1, NULL, 0);
+    } else {
+        third.node = outer.node = declared.node = 1;
+        chain = __chelis_join_host_result_claim(&arena, &declared);
+    }
+    int64_t shape[1] = { 5 };
+    chelis_tensor *value = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    __chelis_check_host_result_claims(chain, value, "probe", "numeric trap: domain in probe at i64");
+    return 96;
+}
+"#;
+
+    #[test]
+    fn frames_differing_only_in_order_are_never_merged() {
+        let mut source = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
+        );
+        let mut helpers = Vec::new();
+        append_host_result_claim_support(&mut helpers);
+        append_host_result_claim_checks(&mut helpers);
+        append_nested_claim_support(&mut helpers);
+        source.push_str(&helpers.join("\n"));
+        source.push_str(MAIN);
+        let dir = tempfile::tempdir().expect("probe directory");
+        let staged = chelis_runtime_bundle::stage(dir.path()).expect("stage the carried runtime");
+        fs::write(dir.path().join("order.c"), &source).expect("write the probe");
+        let toolchain = crate::toolchain::test_toolchain(Default::default());
+        let binary = dir.path().join("order");
+        let compiled = Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("order.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("compile the probe");
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        for site in ["join", "projection"] {
+            let first = |table: &str| {
+                let output = Command::new(&binary)
+                    .args([site, table])
+                    .output()
+                    .expect("run the probe");
+                assert!(!output.status.success(), "{site} {table}: {output:?}");
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let without_skip = first("copy");
+            assert_eq!(
+                without_skip, "extent `3`: claimed = 3, probe axis 0 = 5",
+                "{site}: the immediate claim precedes the third claim"
+            );
+            assert_eq!(first("shared"), without_skip, "{site}");
+        }
+    }
+}
+
 /// A signature entry's checks, in signature order: every observation's null,
 /// dtype and rank checks, then the ordered extent comparisons.
 ///
