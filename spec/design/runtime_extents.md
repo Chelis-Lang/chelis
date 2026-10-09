@@ -2038,16 +2038,16 @@ parameter, a named argument becomes a named claim, a binder argument becomes
 a claim on that binder in the enclosing signature's scope, and `*` becomes
 none. The introducing site is the authored type position, and the field path
 (`Box.v`, `.0`) is diagnostic text, never a lookup key. Pattern nodes are
-memoized by nominal type and substituted argument tuple. For regular
-recursion, where every recursive occurrence repeats the header's own
-arguments, such as
-`Tree[n] = Leaf { v: tensor[n, f32] } | Node { l: Tree[n], r: Tree[n] }`,
-the keys are finite, the pattern is a finite graph, and execution walks the
-runtime value along it with no depth limit. Non-regular recursion, such as
-`Nest[a] = Done { h: a } | More { t: Nest[List[a]] }`, grows its type
-arguments at each occurrence and has no finite pattern. This section does not
+memoized by nominal type and substituted argument tuple. When the tuples
+reachable from the root close to a finite set, as for
+`Tree[n] = Leaf { v: tensor[n, f32] } | Node { l: Tree[n], r: Tree[n] }` or
+`T[n] = Leaf { v: tensor[n, f32] } | Fix { t: T[3] }`, the pattern is a
+finite graph, and execution walks the runtime value along it with no depth
+limit. Recursion whose argument tuples never close, such as
+`Nest[a] = Done { h: a } | More { t: Nest[List[a]] }`, has no finite
+pattern. This section does not
 select a mechanism for it: a lane refuses a claim whose pattern passes through
-non-regular recursion with a typed diagnostic, and never skips the claim. A
+such recursion with a typed diagnostic, and never skips the claim. A
 pattern with no obligation anywhere is empty, and its claim source emits
 nothing.
 
