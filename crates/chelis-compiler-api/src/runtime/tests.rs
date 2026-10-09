@@ -3227,8 +3227,9 @@ fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking(
     // An empty result still requires representable suffix strides
     // (spec/05-risc-primitives.md, `chelis_tensor_check_reshape`'s metadata
     // rule, which every result admission shares): `[0, 2^32, 2^32]` needs the
-    // stride 2^64, so it traps `Overflow` in `diagonal` as compiled C does
-    // (chelis#3418).
+    // stride 2^64, so it traps `Overflow` in `diagonal` (chelis#3418).
+    // Compiled C cannot be compared here: it hangs while building such an
+    // input (chelis#3437).
     let error = tensor_diagonal_value(&empty(vec![0, BIG, BIG, BIG]), 0, 1)
         .expect_err("an unrepresentable stride traps even with zero elements");
     assert_eq!(

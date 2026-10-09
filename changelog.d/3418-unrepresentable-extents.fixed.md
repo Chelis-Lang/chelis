@@ -9,10 +9,12 @@ now refused consistently across `chelis check`, `chelis eval` and
   Previously the checker accepted it, `chelis eval` panicked with
   `capacity overflow`, and `chelis build` failed with an internal live-byte
   bound error.
-- A size computed at run time traps `Overflow` before allocation in
-  `chelis eval` as it does in compiled C. The trap line is
-  `numeric trap: overflow in <op> at i64`, except where C reports the
-  operation's own message (`einsum`), which `chelis eval` now matches.
+- A size computed at run time traps `Overflow` before allocation in both
+  `chelis eval` and compiled C. For `expand`, `insert`, `pad` and `einsum`
+  the two print the same report; other operations can render the trap
+  differently between the lanes (for example `reshape`, `split_keys` and
+  `pad_sequences`), which
+  [#3436](https://github.com/Chelis-Lang/chelis/issues/3436) tracks.
   `reshape` refuses an empty target whose strides do not fit.
 - A program whose tensors each fit, but whose total live bytes exceed 64
   bits, now builds.
