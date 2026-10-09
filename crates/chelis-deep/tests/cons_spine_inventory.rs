@@ -177,8 +177,34 @@ fn inspect<'a>(name: &'a str, body: &syn::Block) -> BodyScan<'a> {
 #[derive(Default)]
 struct CallScan {
     cons_recognition: bool,
-    callees: BTreeSet<String>,
-    impl_type: Option<String>,
+    calls: BTreeSet<CallRef>,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum CallRef {
+    Path(Vec<String>),
+    SelfMethod(String),
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum FunctionKey {
+    Free {
+        module: Vec<String>,
+        name: String,
+    },
+    Impl {
+        module: Vec<String>,
+        owner: String,
+        name: String,
+    },
+}
+
+impl FunctionKey {
+    fn module(&self) -> &[String] {
+        match self {
+            Self::Free { module, .. } | Self::Impl { module, .. } => module,
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for CallScan {
@@ -187,49 +213,37 @@ impl<'ast> Visit<'ast> for CallScan {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = call.func.as_ref() {
-            let segments = path.path.segments.iter().collect::<Vec<_>>();
-            if let [name] = segments.as_slice() {
-                self.callees.insert(format!("free::{}", name.ident));
-            } else if let [owner, name] = segments.as_slice() {
-                let owner = if owner.ident == "Self" {
-                    self.impl_type.clone()
-                } else {
-                    Some(owner.ident.to_string())
-                };
-                if let Some(owner) = owner {
-                    self.callees
-                        .insert(format!("impl::{owner}::{}", name.ident));
-                }
-            }
+        if let syn::Expr::Path(path) = call.func.as_ref()
+            && path.qself.is_none()
+        {
+            self.calls.insert(CallRef::Path(
+                path.path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect(),
+            ));
         }
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         self.cons_recognition |= call.method == "cons_parts";
-        if matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
-            && let Some(owner) = &self.impl_type
-        {
-            self.callees
-                .insert(format!("impl::{owner}::{}", call.method));
+        if matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
+            self.calls
+                .insert(CallRef::SelfMethod(call.method.to_string()));
         }
         syn::visit::visit_expr_method_call(self, call);
     }
 }
 
 struct FunctionFact {
-    key: String,
+    key: FunctionKey,
     name: String,
     scan: CallScan,
 }
 
-fn reaches_function(
-    start: usize,
-    target: usize,
-    functions: &[FunctionFact],
-    by_key: &BTreeMap<&str, Vec<usize>>,
-) -> bool {
+fn reaches_function(start: usize, target: usize, edges: &[Vec<usize>]) -> bool {
     let mut seen = BTreeSet::new();
     let mut work = vec![start];
     while let Some(index) = work.pop() {
@@ -239,31 +253,129 @@ fn reaches_function(
         if index == target {
             return true;
         }
-        for callee in &functions[index].scan.callees {
-            if let Some(targets) = by_key.get(callee.as_str()) {
-                work.extend(targets.iter().copied());
-            }
-        }
+        work.extend(edges[index].iter().copied());
     }
     false
 }
 
+fn source_module_path(source: &str) -> Vec<String> {
+    let Some((_, relative)) = source.split_once("/src/") else {
+        return Vec::new();
+    };
+    let mut parts = relative
+        .trim_end_matches(".rs")
+        .split('/')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if matches!(
+        parts.last().map(String::as_str),
+        Some("lib" | "main" | "mod")
+    ) {
+        parts.pop();
+    }
+    parts
+}
+
+fn resolved_callees(
+    fact: &FunctionFact,
+    call: &CallRef,
+    by_key: &BTreeMap<FunctionKey, Vec<usize>>,
+) -> Vec<usize> {
+    let module = fact.key.module();
+    let mut keys = Vec::new();
+    match call {
+        CallRef::SelfMethod(name) => {
+            if let FunctionKey::Impl { owner, .. } = &fact.key {
+                keys.push(FunctionKey::Impl {
+                    module: module.to_vec(),
+                    owner: owner.clone(),
+                    name: name.clone(),
+                });
+            }
+        }
+        CallRef::Path(path) => {
+            let Some((name, qualifiers)) = path.split_last() else {
+                return Vec::new();
+            };
+            if qualifiers.first().is_some_and(|part| part == "Self") {
+                if qualifiers.len() == 1
+                    && let FunctionKey::Impl { owner, .. } = &fact.key
+                {
+                    keys.push(FunctionKey::Impl {
+                        module: module.to_vec(),
+                        owner: owner.clone(),
+                        name: name.clone(),
+                    });
+                }
+            } else {
+                let mut target_module = module.to_vec();
+                let mut rest = qualifiers;
+                if rest.first().is_some_and(|part| part == "crate") {
+                    target_module.clear();
+                    rest = &rest[1..];
+                } else if rest.first().is_some_and(|part| part == "self") {
+                    rest = &rest[1..];
+                } else {
+                    while rest.first().is_some_and(|part| part == "super") {
+                        target_module.pop();
+                        rest = &rest[1..];
+                    }
+                }
+                target_module.extend(rest.iter().cloned());
+                keys.push(FunctionKey::Free {
+                    module: target_module,
+                    name: name.clone(),
+                });
+                if let Some((owner, prefix)) = rest.split_last() {
+                    let mut owner_module = if qualifiers.first().is_some_and(|part| part == "crate")
+                    {
+                        Vec::new()
+                    } else {
+                        let mut resolved = module.to_vec();
+                        let skip = qualifiers.len() - rest.len();
+                        for qualifier in &qualifiers[..skip] {
+                            if qualifier == "super" {
+                                resolved.pop();
+                            }
+                        }
+                        resolved
+                    };
+                    owner_module.extend(prefix.iter().cloned());
+                    keys.push(FunctionKey::Impl {
+                        module: owner_module,
+                        owner: owner.clone(),
+                        name: name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    keys.into_iter()
+        .flat_map(|key| by_key.get(&key).into_iter().flatten().copied())
+        .collect()
+}
+
 #[derive(Default)]
 struct CallGraph {
+    module: Vec<String>,
     impl_type: Option<String>,
     functions: Vec<FunctionFact>,
 }
 
 impl CallGraph {
     fn record(&mut self, name: &str, body: &syn::Block) {
-        let mut scan = CallScan {
-            impl_type: self.impl_type.clone(),
-            ..CallScan::default()
-        };
+        let mut scan = CallScan::default();
         scan.visit_block(body);
         let key = match &self.impl_type {
-            Some(owner) => format!("impl::{owner}::{name}"),
-            None => format!("free::{name}"),
+            Some(owner) => FunctionKey::Impl {
+                module: self.module.clone(),
+                owner: owner.clone(),
+                name: name.to_string(),
+            },
+            None => FunctionKey::Free {
+                module: self.module.clone(),
+                name: name.to_string(),
+            },
         };
         self.functions.push(FunctionFact {
             key,
@@ -273,10 +385,21 @@ impl CallGraph {
     }
 
     fn problems(&self, source: &str) -> Vec<String> {
-        let mut by_key: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        let mut by_key: BTreeMap<FunctionKey, Vec<usize>> = BTreeMap::new();
         for (index, fact) in self.functions.iter().enumerate() {
-            by_key.entry(fact.key.as_str()).or_default().push(index);
+            by_key.entry(fact.key.clone()).or_default().push(index);
         }
+        let edges = self
+            .functions
+            .iter()
+            .map(|fact| {
+                fact.scan
+                    .calls
+                    .iter()
+                    .flat_map(|call| resolved_callees(fact, call, &by_key))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         let mut problems = Vec::new();
         for (root, fact) in self.functions.iter().enumerate() {
             if GENERIC_RECURSION.contains(&fact.name.as_str()) {
@@ -289,14 +412,9 @@ impl CallGraph {
                 if !seen.insert(index) {
                     continue;
                 }
-                let current = &self.functions[index];
-                for callee in &current.scan.callees {
-                    if let Some(targets) = by_key.get(callee.as_str()) {
-                        for &target in targets {
-                            recursive |= target == root;
-                            work.push(target);
-                        }
-                    }
+                for &target in &edges[index] {
+                    recursive |= target == root;
+                    work.push(target);
                 }
             }
             // Generic expression evaluators and lowerers form large call
@@ -310,7 +428,7 @@ impl CallGraph {
                         || is_audited_generic_dispatch_member(source, &fact.name))
                     && seen.iter().copied().any(|candidate| {
                         self.functions[candidate].name == *anchor
-                            && reaches_function(candidate, root, &self.functions, &by_key)
+                            && reaches_function(candidate, root, &edges)
                     })
             });
             let offending_recognizer = recursive
@@ -322,8 +440,7 @@ impl CallGraph {
                         {
                             return false;
                         }
-                        !reaches_function(candidate, root, &self.functions, &by_key)
-                            || !audited_generic_dispatch
+                        !reaches_function(candidate, root, &edges) || !audited_generic_dispatch
                     })
                 })
                 .flatten();
@@ -339,6 +456,16 @@ impl CallGraph {
 }
 
 impl<'ast> Visit<'ast> for CallGraph {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if let Some((_, items)) = &item.content {
+            self.module.push(item.ident.to_string());
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module.pop();
+        }
+    }
+
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
         self.record(&item.sig.ident.to_string(), &item.block);
     }
@@ -359,7 +486,10 @@ impl<'ast> Visit<'ast> for CallGraph {
 }
 
 fn recursive_cons_walker_problems_in_file(parsed: &syn::File, source: &str) -> Vec<String> {
-    let mut graph = CallGraph::default();
+    let mut graph = CallGraph {
+        module: source_module_path(source),
+        ..CallGraph::default()
+    };
     graph.visit_file(parsed);
     graph.problems(source)
 }
@@ -510,6 +640,64 @@ fn inventory_detects_cons_recognition_and_recursion_split_across_helpers() {
     assert!(
         problems.iter().any(|problem| problem.contains("walk")),
         "mutual recursion through a separate recognizer must fail: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_detects_qualified_free_helpers_in_their_lexical_module() {
+    let source = r#"
+        mod reader {
+            pub fn recognizes(name: &str) -> bool { name == "Cons" }
+            pub fn walk(name: &str) {
+                if self::recognizes(name) { continue_walk(name); }
+            }
+            fn continue_walk(name: &str) { self::walk(name); }
+        }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "a qualified same-module helper cannot hide recursive Cons reading: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_distinguishes_qualified_free_modules_from_associated_functions() {
+    let source = r#"
+        mod reader {
+            pub fn recognizes(name: &str) -> bool { name == "Cons" }
+        }
+        struct Other;
+        impl Other { fn walk(name: &str) { let _ = name; } }
+        fn walk(name: &str) {
+            if reader::recognizes(name) { continue_walk(name); }
+        }
+        fn continue_walk(name: &str) { walk(name); }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "a qualified module function is part of the free call graph: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_resolves_super_and_crate_qualified_helpers() {
+    let source = r#"
+        mod reader {
+            pub fn recognizes(name: &str) -> bool { name == "Cons" }
+            mod nested {
+                pub fn walk(name: &str) {
+                    if super::recognizes(name) { continue_walk(name); }
+                }
+                fn continue_walk(name: &str) { crate::reader::nested::walk(name); }
+            }
+        }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "module-qualified helpers must stay in the call graph: {problems:?}"
     );
 }
 
