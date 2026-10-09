@@ -2080,9 +2080,9 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
 
     let source = fs::read_to_string(out_dir.join("fold_tuple_tensor_acc.c")).expect("generated c");
     assert!(
-        source
-            .lines()
-            .any(|line| line.trim_start().starts_with("chelis_tensor* __let_binding_")),
+        source.lines().any(|line| line
+            .trim_start()
+            .starts_with("chelis_tensor* __let_binding_")),
         "expected tuple-get binding to lower as a tensor local:\n{source}"
     );
     assert!(
