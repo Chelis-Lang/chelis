@@ -3099,7 +3099,7 @@ fn nested_claim_frame_lines(
         binder_count
     ));
     lines.push(format!(
-        "{indent}const __chelis_host_result_claim *{frame}_joined = __chelis_join_host_result_claim(&{frame}_declared);"
+        "{indent}const __chelis_host_result_claim *{frame}_joined = __chelis_join_host_result_claim(__chelis_origin_arena, &{frame}_declared);"
     ));
     lines
 }
@@ -3121,11 +3121,28 @@ fn nested_result_frame_lines(
             if let Some(state) = named_lists.iter().position(|name| name == binder) {
                 return named_list_binder_slot(state);
             }
-            function
-                .params
+            // The authored entry contract names the binders; a specialized
+            // function's ABI parameter types may have lost them.
+            let authored = function
+                .entry_contract
+                .formals()
                 .iter()
-                .find_map(|param| {
-                    let HostAbiType::Tensor(param_ty) = &param.ty else {
+                .zip(&function.params)
+                .map(|(formal, param)| match formal.pattern() {
+                    chelis_ir::host::EntryPattern::Tensor(ty) => (param, ty),
+                    _ => (param, &param.ty),
+                });
+            let declared = function.params.iter().map(|param| (param, &param.ty));
+            let witnesses: Vec<(&HostParam, &HostAbiType)> =
+                if function.entry_contract.formals().len() == function.params.len() {
+                    authored.collect()
+                } else {
+                    declared.collect()
+                };
+            witnesses
+                .into_iter()
+                .find_map(|(param, ty)| {
+                    let HostAbiType::Tensor(param_ty) = ty else {
                         return None;
                     };
                     param_ty
@@ -3594,11 +3611,50 @@ static int __chelis_claim_chain_holds(const __chelis_host_result_claim *chain, c
     return 0;
 }
 
-/* A declared pattern frame joins the chain it extends unless that chain
-   already states the same obligation: a recursive activation re-declares the
-   frame its caller projected into it, and checking it twice adds nothing. */
-static const __chelis_host_result_claim *__chelis_join_host_result_claim(const __chelis_host_result_claim *frame) {
-    return __chelis_claim_chain_holds(frame->next, frame) ? frame->next : frame;
+/* A declared pattern frame joins the chain it extends. A chain checks its
+   frames in order and the first failing frame names the trap, so a later
+   frame equal to an earlier one can never be the one that names it. When the
+   chain already holds the declared obligation, the later copy is dropped and
+   the declared frame keeps its place at the head: a recursive activation,
+   self or mutual, holds each distinct claim once and its traps name the same
+   claim they name without the duplicate. Only the frames ahead of the
+   duplicate are copied. A chain holding an outer-first frame keeps its order
+   rule untouched. */
+static const __chelis_host_result_claim *__chelis_join_host_result_claim(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *frame) {
+    const __chelis_host_result_claim *chain = frame->next;
+    if (frame->outer_claims_first) return frame;
+    if (chain != NULL && chain->nodes != NULL && __chelis_claim_frames_equal(chain, frame)) return chain;
+    int64_t before = 0;
+    const __chelis_host_result_claim *duplicate = NULL;
+    for (const __chelis_host_result_claim *at = chain; at != NULL; at = at->next) {
+        if (at->outer_claims_first) return frame;
+        if (at->nodes != NULL && __chelis_claim_frames_equal(at, frame)) {
+            duplicate = at;
+            break;
+        }
+        before += 1;
+    }
+    if (duplicate == NULL) return frame;
+    if (arena == NULL || (uint64_t)before >= (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
+        fprintf(stderr, "host runtime: invalid result claim join\n");
+        abort();
+    }
+    __chelis_host_result_claim_block *block = (__chelis_host_result_claim_block *)malloc(sizeof(__chelis_host_result_claim_block) + (size_t)(before + 1) * sizeof(__chelis_host_result_claim));
+    if (block == NULL) {
+        fprintf(stderr, "host runtime: result claim join allocation failed\n");
+        abort();
+    }
+    block->next = arena->claim_head;
+    arena->claim_head = block;
+    __chelis_host_result_claim *frames = (__chelis_host_result_claim *)(block + 1);
+    frames[0] = *frame;
+    const __chelis_host_result_claim *at = chain;
+    for (int64_t index = 1; index <= before; ++index, at = at->next) {
+        frames[index] = *at;
+        frames[index - 1].next = &frames[index];
+    }
+    frames[before].next = duplicate->next;
+    return &frames[0];
 }
 
 /* The claims a component of a value under construction owes: every pattern

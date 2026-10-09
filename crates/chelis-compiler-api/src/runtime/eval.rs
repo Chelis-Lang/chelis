@@ -3732,12 +3732,24 @@ impl<'a> EvalContext<'a> {
                             nested: None,
                         });
                     let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
-                    claims.extend(nested_claim.filter(|nested| {
-                        !inherited_claims
+                    // Claims are checked in order and the first failure names
+                    // the trap, so a later copy of an earlier claim can never
+                    // name one. The declared claim keeps its place ahead of
+                    // the inherited ones and a later equal copy is dropped:
+                    // a recursive activation, self or mutual, holds each
+                    // distinct claim once and names the trap it would name
+                    // with the copy.
+                    claims.extend(nested_claim.clone());
+                    claims.extend(
+                        inherited_claims
                             .iter()
-                            .any(|inherited| inherited.same_obligation(nested))
-                    }));
-                    claims.extend_from_slice(inherited_claims);
+                            .filter(|inherited| {
+                                !nested_claim
+                                    .as_ref()
+                                    .is_some_and(|nested| inherited.same_obligation(nested))
+                            })
+                            .cloned(),
+                    );
                     let value = self.eval_under_result_claim(&body, &claims)?;
                     // The declared result is a later site of every binder
                     // the body bound, including one whose first site ran

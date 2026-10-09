@@ -13575,6 +13575,7 @@ fn signature_binder_requirement(
 fn retain_nested_result_claim(
     body: HostExpr,
     pattern: Option<&Arc<crate::claim_pattern::ClaimPattern>>,
+    authored: &[HostParam],
     origin: &Expr,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let Some(pattern) = pattern else {
@@ -13622,13 +13623,51 @@ fn retain_nested_result_claim(
             };
             Some((contract.clone(), args.clone(), positions.clone()))
         });
+        // The authored signature names each binder's witness; the entry
+        // contract of a specialized invocation is built from actualized
+        // types that may have lost the name. A witness observed directly is
+        // the first authored tensor formal declaring the binder, read through
+        // that formal's prepared observation; any other witness keeps the
+        // contract's rule (a List element state).
         let requirements = pattern
             .binders()
             .iter()
             .map(|binder| {
-                entry.as_ref().and_then(|(contract, args, positions)| {
-                    signature_binder_requirement(contract, args, positions, binder)
-                })
+                let (contract, args, positions) = entry.as_ref()?;
+                let direct = authored.iter().enumerate().find_map(|(position, param)| {
+                    let HostTypeTerm::Tensor(tensor) = &param.ty else {
+                        return None;
+                    };
+                    let axis = tensor
+                        .dims
+                        .iter()
+                        .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))?;
+                    Some((position, param, axis))
+                });
+                let list_first = contract.formals().iter().position(|formal| {
+                    matches!(formal.pattern(), EntryPattern::List(_))
+                        && contract
+                            .named_list_binders()
+                            .iter()
+                            .any(|name| name == binder)
+                });
+                match direct {
+                    Some((position, param, axis))
+                        if list_first.is_none_or(|list| position < list) =>
+                    {
+                        let observation = positions.iter().position(|at| *at == position)?;
+                        let HostExprKind::Var(prepared, _) = &args[observation].kind else {
+                            return None;
+                        };
+                        Some(HostResultRequirementPlan::NamedDirect {
+                            claim: crate::lower::extent_binder_label(binder),
+                            source: param.name.clone(),
+                            prepared: prepared.clone(),
+                            axis,
+                        })
+                    }
+                    _ => signature_binder_requirement(contract, args, positions, binder),
+                }
             })
             .collect::<Vec<_>>();
         let mut binders = Vec::with_capacity(requirements.len());
@@ -14783,7 +14822,7 @@ fn lower_named_retained_host_invocation(
             .clone()
             .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` result: {error}")))?;
         Ok(Some((
-            retain_nested_result_claim(body, nested.as_ref(), expr)?,
+            retain_nested_result_claim(body, nested.as_ref(), &signature.params, expr)?,
             result_claim,
         )))
     })

@@ -301,6 +301,41 @@ def leaf(w: Wrap) -> i64 =
 out = leaf(rec(size_from("PATH"), 3i64))
 "#;
 
+const MUTUAL_RECURSION: &str = r#"def f[m](u: tensor[m, f32], depth: i64, size: i64) -> Box[m] = if gt(depth, 0i64) then g(u, sub(depth, 1i64), size) else make(size)
+def g[k](v: tensor[k, f32], depth: i64, size: i64) -> Box[k] = f(v, depth, size)
+out = width(f(produce(3i64), 1i64, size_from("PATH")))
+"#;
+
+const SELF_RECURSION_VARYING_WITNESS: &str = r#"def f[m](u: tensor[m, f32], depth: i64, size: i64) -> Box[m] = if gt(depth, 0i64) then f(produce(add(depth, 3i64)), sub(depth, 1i64), size) else make(size)
+out = width(f(produce(3i64), 1i64, size_from("PATH")))
+"#;
+
+const DEEP_MUTUAL_CLAIMED: &str = r#"type Wrap[n] =
+  | W { inner: Wrap[n] }
+  | B { v: tensor[n, f32] }
+def f[m](u: tensor[m, f32], depth: i64) -> Wrap[m] = if gt(depth, 0i64) then W { inner: g(u, sub(depth, 1i64)) } else B { v: produce(shape(u, 0i32)) }
+def g[k](v: tensor[k, f32], depth: i64) -> Wrap[k] = if gt(depth, 0i64) then W { inner: f(v, sub(depth, 1i64)) } else B { v: produce(shape(v, 0i32)) }
+def leaf[n](w: Wrap[n]) -> i64 =
+  match w with {
+    | W { inner } => 1i64
+    | B { v } => shape(v, 0i32)
+  }
+out = leaf(f(produce(3i64), size_from("PATH")))
+"#;
+
+const DEEP_MUTUAL_UNCLAIMED: &str = r#"type Wrap =
+  | W { inner: Wrap }
+  | B { v: tensor[*, f32] }
+def f[m](u: tensor[m, f32], depth: i64) -> Wrap = if gt(depth, 0i64) then W { inner: g(u, sub(depth, 1i64)) } else B { v: produce(shape(u, 0i32)) }
+def g[k](v: tensor[k, f32], depth: i64) -> Wrap = if gt(depth, 0i64) then W { inner: f(v, sub(depth, 1i64)) } else B { v: produce(shape(v, 0i32)) }
+def leaf(w: Wrap) -> i64 =
+  match w with {
+    | W { inner } => 1i64
+    | B { v } => shape(v, 0i32)
+  }
+out = leaf(f(produce(3i64), size_from("PATH")))
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -959,11 +994,15 @@ fn peak_resident(mut command: std::process::Command) -> (String, i64) {
 /// builder whose field claims nothing, on compiled C and on Eval. Copying the
 /// claim chain at every level made it quadratic in the depth.
 fn deep_recursion_peak(native: bool, depth: usize) -> (i64, i64) {
+    deep_peak(native, depth, DEEP_CLAIMED, DEEP_UNCLAIMED)
+}
+
+fn deep_peak(native: bool, depth: usize, claimed: &str, unclaimed: &str) -> (i64, i64) {
     let dir = tempfile::tempdir().expect("tempdir");
     let size = dir.path().join("depth.txt");
     fs::write(&size, "x".repeat(depth)).expect("depth");
     let mut peaks = Vec::new();
-    for (stem, case) in [("claimed", DEEP_CLAIMED), ("unclaimed", DEEP_UNCLAIMED)] {
+    for (stem, case) in [("claimed", claimed), ("unclaimed", unclaimed)] {
         let path = dir.path().join(format!("{stem}.ch"));
         fs::write(
             &path,
@@ -1013,4 +1052,72 @@ fn eval_recursive_claimed_builder_memory_stays_linear() {
         claimed <= 2 * unclaimed,
         "claimed peak {claimed} against unclaimed {unclaimed}"
     );
+}
+
+/// Mutual recursion f, g, f holds each distinct claim once as well: the
+/// declared claim keeps its place at the head and only a later copy drops,
+/// so memory stays linear on both lanes.
+#[test]
+fn mutual_recursive_claimed_builder_memory_stays_linear() {
+    let (claimed, unclaimed) = deep_peak(true, 4000, DEEP_MUTUAL_CLAIMED, DEEP_MUTUAL_UNCLAIMED);
+    assert!(claimed <= 3 * unclaimed, "C: {claimed} against {unclaimed}");
+    let (claimed, unclaimed) = deep_peak(false, 2000, DEEP_MUTUAL_CLAIMED, DEEP_MUTUAL_UNCLAIMED);
+    assert!(
+        claimed <= 2 * unclaimed,
+        "Eval: {claimed} against {unclaimed}"
+    );
+}
+
+/// In mutual recursion f, g, f the innermost activation's claim names the
+/// trap, as for the bare tensor: removing a repeated claim must not let an
+/// outer, different one name it first.
+fn mutual_recursion_attribution(native: bool) {
+    assert_trap_and_control(
+        MUTUAL_RECURSION,
+        native,
+        "extent `m`: u axis 0 = 3, insert axis 0 = 5",
+        "insert",
+        "out = 3",
+    );
+}
+
+#[test]
+fn eval_mutual_recursion_names_the_innermost_claim() {
+    mutual_recursion_attribution(false);
+}
+
+#[test]
+fn c_mutual_recursion_names_the_innermost_claim() {
+    mutual_recursion_attribution(true);
+}
+
+/// A self-recursive activation with its own witness, 4 wide where its caller
+/// had 3, checks its result against its own witness on both lanes.
+fn self_recursion_varying_witness(native: bool) {
+    for size in [3, 5] {
+        let (ok, output) = run(SELF_RECURSION_VARYING_WITNESS, size, native);
+        let lane = lane(native);
+        assert!(!ok, "{lane}: the inner activation claims 4\n{output}");
+        assert!(
+            output.lines().any(|line| line.trim_start_matches("error: ")
+                == format!("extent `m`: u axis 0 = 4, insert axis 0 = {size}")),
+            "{lane}\n{output}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "numeric trap: domain in insert at i64"),
+            "{lane}\n{output}"
+        );
+    }
+}
+
+#[test]
+fn eval_self_recursion_checks_its_own_witness() {
+    self_recursion_varying_witness(false);
+}
+
+#[test]
+fn c_self_recursion_checks_its_own_witness() {
+    self_recursion_varying_witness(true);
 }
