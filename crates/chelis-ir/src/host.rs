@@ -5992,8 +5992,15 @@ fn host_def_signature(
             if param_tys.is_empty() && ret_ty.is_unresolved() {
                 return None;
             }
+            // The synthesized parameters must not capture a name the bound
+            // expression reads, such as a def named `arg0`.
+            let mut read = UnordSet::new();
+            collect_deep_var_names(body, &mut read);
             for (index, param_ty) in param_tys.iter().enumerate() {
-                let pname = format!("arg{index}");
+                let mut pname = format!("arg{index}");
+                while read.contains(&pname) {
+                    pname.push('_');
+                }
                 bind_host_local(&mut scope, pname.clone(), param_ty.clone());
                 params.push(HostParam {
                     name: pname,
