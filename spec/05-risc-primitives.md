@@ -764,7 +764,7 @@ tree, or compatibility mode is not conforming.
 | `permute` | `(&tensor[d1,...,dn,p], axes: i32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
 | `expand` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D',p]` | Set the size-1 dimension at position `axis` to width `size`. Rank is unchanged and the operand's extent at `axis` is 1. Does NOT copy data. |
 | `insert` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D_plus,p]` | Insert a new dimension of width `size` at position `axis`, producing rank `rank(x) + 1`. Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
-| `pad` | `(&tensor[D,p], padding: List<List<i64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
+| `pad` | `(&tensor[D,p], padding: List<List<i64>>, fill: p) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. Every added element is `fill`, a scalar of exactly dtype `p`, literal or computed at run time. |
 | `shrink` | `(&tensor[D,p], bounds: List<List<i64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
 | `stride` | `(&tensor[D,p], strides: i64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
 
@@ -786,7 +786,7 @@ every form, which makes the canonical broadcast idiom
 | `permute` | `permute(g, inverse_permutation)` |
 | `expand` | `insert(sum(g, axis), axis, 1i64)` — sum over the broadcast axis, then restore its extent-1 slot so the adjoint keeps the operand's rank |
 | `insert` | `sum(g, axis)` — collapse the inserted dimension |
-| `pad` | `shrink(g, inverse_padding)` — extract the non-padded region |
+| `pad` | `shrink(g, inverse_padding)` — extract the non-padded region; `fill` receives [05-OP-49]'s masked reduction |
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | [05-MOV-1]'s exact zero-filled inverse sampling map at the original shape; runtime steps have zero cotangent |
 
@@ -4073,7 +4073,7 @@ path even though bare `round` under `grad` remains a structural
 #### Movement identities
 
 > **[05-OP-49]** Signature: `reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`,
-> `insert(x,axis,size)`, `pad(x,padding)`, `shrink(x,bounds)`, and
+> `insert(x,axis,size)`, `pad(x,padding,fill)`, `shrink(x,bounds)`, and
 > `stride(x,steps)` have section 2.4's tensor movement signatures, including
 > its named-axis and anchored insert forms.
 >
@@ -4084,8 +4084,8 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: Reshape preserves row-major element sequence and total element
 > count. Permute reorders axes. Expand repeats a size-one axis; insert
-> creates and repeats a new axis. Pad inserts dtype-exact zero cells, shrink
-> selects the stated half-open bounds, and stride follows [05-MOV-1]'s
+> creates and repeats a new axis. Pad places `fill`'s exact stored bits in
+> every padded cell, shrink selects the stated half-open bounds, and stride follows [05-MOV-1]'s
 > signed sampling map. All copied elements retain exact stored bits,
 > including NaN payloads and signed zeros.
 >
@@ -4099,7 +4099,15 @@ path even though bare `round` under `grad` remains a structural
 > applies the inverse permutation, expand sums the repeated axis and
 > restores its size-one slot, insert sums the inserted axis, pad shrinks to
 > the source, shrink pads exact zeros, and stride scatters to its original
-> sampling positions. Shape arguments have zero cotangent. Integer/bool data
+> sampling positions. `fill` receives an exact adjoint: the output cotangent
+> `g` with every cell holding a moved `x` element replaced by exact +0,
+> reduced over every axis by [05-OP-30] at spec/04 §5.7.1's default
+> accumulator (f32 for f16/bf16), in spec/04 §4.5.3's highest-axis-first
+> single-axis composition, each tree finalizing at `p`. Interior cotangents,
+> NaN and inf included, never enter it; a NaN in a padded cell propagates. A
+> rank-0 operand, an empty output or zero padding gives exact +0. The result
+> joins fill's other uses under spec/06 §2.4. A difference of totals, a
+> padded-only tree or a left fold does not conform. Shape arguments have zero cotangent. Integer/bool data
 > follows spec/06's structural rejection rules.
 >
 > Accumulator: Forward movement has no numeric accumulator. Repeated float

@@ -2973,6 +2973,54 @@ impl Dag {
         id
     }
 
+    /// Broadcast the rank-0 node `scalar` to the physical axes of `source`,
+    /// keeping `scalar`'s dtype. Anonymous dimensions are claims, not an
+    /// allocation or equality witness, so a ranked node that merely copies
+    /// `source`'s type has no extent source for them (the chelis#1482
+    /// refusal). Instead each `Expand` inserts one axis, lowest first, and
+    /// reads its extent directly from `source`; the adjoint therefore sums
+    /// the highest axis first, spec/04 §4.5.3's canonical composition.
+    pub fn broadcast_like(
+        &mut self,
+        owner: impl Into<Owner>,
+        scalar: NodeId,
+        source: NodeId,
+        span_id: Option<String>,
+    ) -> NodeId {
+        let owner = owner.into();
+        let precision = self
+            .get(scalar)
+            .expect("broadcast_like scalar is a node of this graph")
+            .output_type
+            .precision;
+        let dims = self
+            .get(source)
+            .expect("broadcast_like source is a node of this graph")
+            .output_type
+            .dims
+            .clone();
+        let mut broadcast = scalar;
+        for axis in 0..dims.len() {
+            broadcast = self.add_node(
+                owner,
+                RiscOp::Expand {
+                    axis,
+                    size: RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
+                    },
+                },
+                vec![broadcast, source],
+                TensorType {
+                    dims: dims[..=axis].to_vec(),
+                    precision,
+                },
+                span_id.clone(),
+            );
+        }
+        broadcast
+    }
+
     pub fn set_reusable_input(&mut self, id: NodeId, input: NodeId) {
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.reusable_input = Some(input);

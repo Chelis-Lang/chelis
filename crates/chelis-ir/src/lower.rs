@@ -16933,15 +16933,33 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     vec![]
                 };
-                let fill = if args.len() >= 3 {
-                    // chelis#776: an explicit fill argument must resolve
-                    // statically (through neg / float-cast wrappers) or fail
-                    // loudly. The `else` arm below is a true structural default
-                    // — no fill was given, so pad with zeros.
-                    self.resolve_static_scalar_arg(&args[2], ty.precision, "pad", "fill value")
-                } else {
-                    chelis_types::scalar_from_i64("pad", ty.precision, 0)
-                        .expect("zero is a member of every active pad dtype")
+                // [05-OP-49]: an explicit fill is a scalar of exactly the
+                // operand dtype, literal or computed at run time. A literal
+                // (through neg / cast wrappers) folds into the static `Pad`;
+                // any other fill is a value operand, never a substituted
+                // default (chelis#776, chelis#3389). The `None` arm is a true
+                // structural default: no fill was given, so pad with zeros.
+                let fill = match args.get(2) {
+                    None => chelis_types::scalar_from_i64("pad", ty.precision, 0)
+                        .expect("zero is a member of every active pad dtype"),
+                    Some(fill) => {
+                        let value = match extract_numeric_leaf(fill) {
+                            Some(StagedScalar::Raw(raw)) => {
+                                chelis_types::cast_raw("pad", raw, ty.precision)
+                            }
+                            Some(StagedScalar::Typed(value)) => {
+                                chelis_types::cast_scalar("pad", value, ty.precision)
+                            }
+                            None => return self.lower_runtime_fill_pad(inputs, padding, fill, ty),
+                        };
+                        value.unwrap_or_else(|trap| {
+                            raise_fatal_lowering_error(
+                                trap.to_string(),
+                                Some(fill.span()),
+                                fill.span_id().map(ToOwned::to_owned),
+                            )
+                        })
+                    }
                 };
                 self.dag.add_node(
                     self.owner(),
@@ -21138,31 +21156,90 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn resolve_static_scalar_arg(
-        &self,
-        expr: &Expr,
-        target: Prim,
-        builtin: &'static str,
-        arg_desc: &str,
-    ) -> chelis_types::ScalarValue {
-        let value = match extract_numeric_leaf(expr) {
-            Some(StagedScalar::Raw(raw)) => chelis_types::cast_raw(builtin, raw, target),
-            Some(StagedScalar::Typed(value)) => chelis_types::cast_scalar(builtin, value, target),
-            None => raise_fatal_lowering_error(
-                format!(
-                    "`{builtin}` requires a statically-resolvable {arg_desc}; a runtime-computed value cannot be carried by this DAG operand. Use a numeric literal (optionally negated or cast to the output dtype); compiled runtime values remain unsupported here (Chelis-Lang/chelis#776)"
-                ),
-                Some(expr.span()),
-                expr.span_id().map(ToOwned::to_owned),
-            ),
-        };
-        value.unwrap_or_else(|trap| {
+    /// [05-OP-49] `pad` whose fill is not a literal:
+    /// `where(pad(false_like(x), P, true), broadcast(fill), pad(x, P, 0))`.
+    /// Every lane places the fill's runtime bits in the padded cells, and the
+    /// composition's adjoint is the decided fill cotangent: Where's adjoint
+    /// replaces every moved `x` cell with exact +0, and the broadcast's
+    /// adjoint sums the highest axis first at the default accumulator
+    /// (chelis#3389). `inputs` is `[x, bound nodes...]`, which `padding`
+    /// references by slot.
+    fn lower_runtime_fill_pad(
+        &mut self,
+        inputs: Vec<NodeId>,
+        padding: Vec<(RtDim, RtDim)>,
+        fill: &Expr,
+        ty: &TensorType,
+    ) -> NodeId {
+        let fill_node = self.lower_expr_node(fill, "pad fill");
+        let fill_ty = self
+            .dag
+            .get(fill_node)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        let fail = |message: String| -> ! {
             raise_fatal_lowering_error(
-                trap.to_string(),
-                Some(expr.span()),
-                expr.span_id().map(ToOwned::to_owned),
+                message,
+                Some(fill.span()),
+                fill.span_id().map(ToOwned::to_owned),
             )
-        })
+        };
+        if !fill_ty.dims.is_empty() || fill_ty.precision != ty.precision {
+            fail(format!(
+                "`pad` fill must be a rank-0 {} value; lowering produced a rank-{} {} value",
+                ty.precision.name(),
+                fill_ty.dims.len(),
+                fill_ty.precision.name()
+            ));
+        }
+        let zero = chelis_types::scalar_from_i64("pad", ty.precision, 0)
+            .unwrap_or_else(|trap| fail(trap.to_string()));
+        let owner = self.owner();
+        let span = self.current_span_id.clone();
+        let x = inputs[0];
+        let moved = self.dag.add_node(
+            owner,
+            RiscOp::pad(padding.clone(), zero),
+            inputs.clone(),
+            ty.clone(),
+            span.clone(),
+        );
+        let unpadded = self.dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::Bool, 0.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            span.clone(),
+        );
+        let unpadded = self.dag.broadcast_like(owner, unpadded, x, span.clone());
+        let mut mask_inputs = inputs;
+        mask_inputs[0] = unpadded;
+        let padded = self.dag.add_node(
+            owner,
+            RiscOp::pad(
+                padding,
+                chelis_types::scalar_from_i64("pad", Prim::Bool, 1).expect("true is a bool scalar"),
+            ),
+            mask_inputs,
+            TensorType {
+                dims: ty.dims.clone(),
+                precision: Prim::Bool,
+            },
+            span.clone(),
+        );
+        let filled = self
+            .dag
+            .broadcast_like(owner, fill_node, padded, span.clone());
+        self.dag.add_node(
+            owner,
+            RiscOp::Where,
+            vec![padded, filled, moved],
+            ty.clone(),
+            span,
+        )
     }
 
     /// Extract a list of usize values from a slice of expressions.
@@ -29611,19 +29688,86 @@ mod regression_tests {
         assert_eq!(fill.as_i64_exact(), Some(exact));
     }
 
+    /// chelis#3389: a runtime fill is a value operand ([05-OP-49]). It lowers
+    /// to `where(pad(false_like(x), P, true), broadcast(fill), pad(x, P, 0))`,
+    /// so the padded cells hold the fill's runtime bits. chelis#776's
+    /// property survives: no `Pad` carries a substituted value for the fill,
+    /// and the padded cells are never a baked 0.0.
     #[test]
-    fn pad_runtime_fill_fails_loudly() {
-        let src =
-            format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} (var {{}} f))");
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
-        })
-        .expect_err("a runtime pad fill must fail lowering");
-        let msg = captured_lower_message(err);
-        assert!(
-            msg.contains("pad") && msg.contains("statically-resolvable"),
-            "unexpected diagnostic: {msg}"
+    fn pad_runtime_fill_selects_the_runtime_value() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+        .declared_for_test();
+        let x = ctx.dag.add_node(
+            ctx.owner(),
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
         );
+        ctx.bindings.insert("x".into(), LoweredValue::Node(x));
+        // `[[1i64, 1i64]]`, the Cons chain of Cons pairs Surf desugars to.
+        let one = "(lit {type: (t-prim {} i64)} 1)";
+        let src = format!(
+            "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32))}} (var {{}} pad) \
+             (var {{}} x) \
+             (app {{}} (var {{}} Cons) (app {{}} (var {{}} Cons) {one} \
+             (app {{}} (var {{}} Cons) {one} (var {{}} Nil))) (var {{}} Nil)) \
+             (var {{type: (t-prim {{}} f32)}} f))"
+        );
+        let expr = chelis_deep::parser::parse_str(&src).unwrap().remove(0);
+        let root = ctx.lower_expr_node(&expr, "runtime-fill pad");
+        let mut dag = ctx.dag;
+        let select = dag.get(root).unwrap();
+        assert!(matches!(select.op, RiscOp::Where), "{:?}", select.op);
+        let [mask, filled, moved] = select.inputs[..] else {
+            panic!("where reads three inputs: {:?}", select.inputs);
+        };
+        assert_eq!(dag.get(mask).unwrap().output_type.precision, Prim::Bool);
+        for node in dag.nodes() {
+            if let RiscOp::Pad { fill, .. } = &node.op {
+                let is_mask = node.id == mask && fill.as_bool_exact() == Some(true);
+                let is_moved = node.id == moved
+                    && fill.prim() == Prim::F32
+                    && fill.as_f64_lossy().to_bits() == 0.0f64.to_bits();
+                assert!(
+                    is_mask || is_moved,
+                    "a pad carries a substituted fill: {:?}",
+                    node.op
+                );
+            }
+        }
+        let mut source = filled;
+        while let RiscOp::Expand { .. } = dag.get(source).unwrap().op {
+            source = dag.get(source).unwrap().inputs[0];
+        }
+        assert_eq!(
+            dag.get(source).unwrap().op,
+            RiscOp::Load { name: "f".into() },
+            "the padded cells read the runtime fill"
+        );
+        dag.add_root(root);
+        let values = crate::eval::eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
+            "x" => Some(crate::eval::TensorValue::from_vec(
+                vec![4],
+                vec![1.0, 2.0, 3.0, 4.0],
+            )),
+            "f" => Some(crate::eval::TensorValue::scalar(9.0)),
+            _ => None,
+        })
+        .unwrap();
+        let padded = &values[&root];
+        let cells = (0..padded.len())
+            .map(|index| padded.storage().scalar_at(index).as_f64_lossy())
+            .collect::<Vec<_>>();
+        assert_eq!(cells, [9.0, 1.0, 2.0, 3.0, 4.0, 9.0]);
     }
 
     #[test]
