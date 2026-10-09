@@ -10,12 +10,13 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
+use crate::adt::AdtRegistry;
 use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
 use crate::key_admission::{KeyAdmission, KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
-use crate::types::Type;
+use crate::types::{NominalParamKind, Type, TypeVar};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
@@ -113,13 +114,29 @@ struct CopySite {
     /// it: `x`, or `p.w` for a component a projection moves out
     /// ([04-LIN-11]).
     binding: String,
-    /// The component the consume took, from the binding outward; empty for
-    /// the binding whole.
-    path: Vec<ProjectionStep>,
     consumed_by: String,
 }
 
-/// What a use leaves in its owner's copy frontier ([`BindingRecord::copy_frontier`]).
+/// One leaf of a binding's value, for the copy report ([04-LIN-11]): the
+/// component `path` names, less the deeper components `split` off it, and the
+/// latest ordinary consumes that took it, one per path into this point.
+#[derive(Debug, Clone, PartialEq)]
+struct CopyLeaf {
+    path: Vec<ProjectionStep>,
+    split: Vec<Vec<ProjectionStep>>,
+    latest: Vec<CopySite>,
+}
+
+/// A type whose components the copy report is deriving: the binding's own
+/// Deep type, or a checker type inside a record definition together with the
+/// arguments its type parameters stand for.
+#[derive(Clone)]
+enum ShapeArg<'a> {
+    Deep(&'a Expr),
+    Checked(Type, Vec<(TypeVar, ShapeArg<'a>)>),
+}
+
+/// What a use leaves in its owner's copy leaves ([`BindingRecord::copy_leaves`]).
 enum Takes {
     /// A borrow or a capture that borrows: the frontier is unchanged.
     Nothing,
@@ -342,12 +359,13 @@ struct BindingRecord {
     /// a projection overlapping a dropped component, is `UseAfterConsume`;
     /// a projection disjoint from every dropped component stays usable.
     dropped_components: Vec<(Vec<ProjectionStep>, String)>,
-    /// Report-only, for `copy_repairs`; no verdict reads it. The latest
-    /// ordinary consume of each component on every path into this point,
-    /// with the path it took ([04-LIN-11]). A later use whose path overlaps
-    /// a site's forces a copy there. Branch joins union the branches'
-    /// frontiers ([04-LIN-5]).
-    copy_frontier: Vec<CopySite>,
+    /// Report-only, for `copy_repairs`; no verdict reads it. The binding's
+    /// value split into leaves, each with the latest ordinary consumes that
+    /// took it ([04-LIN-11]). Built from the binding's type at its first
+    /// reported use; a use of a component the type did not resolve splits
+    /// a leaf of its own. Branch joins union the latest consumes per leaf
+    /// ([04-LIN-5]).
+    copy_leaves: Option<Vec<CopyLeaf>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -396,7 +414,7 @@ impl LinearScope {
                 moved_key_components: BTreeSet::new(),
                 closure_borrows: Vec::new(),
                 dropped_components: Vec::new(),
-                copy_frontier: Vec::new(),
+                copy_leaves: None,
             },
         );
         self.visible.entry(name).or_default().push(id);
@@ -649,6 +667,8 @@ struct Checker {
     /// The top-level declaration whose body the walk is in, for
     /// [`CopyRepair::declaration`].
     current_def: Option<String>,
+    /// The record definitions the copy report splits values by.
+    adt_registry: AdtRegistry,
     /// The top-level value bindings that are roots of the program under
     /// check, for the [04-LIN-6] copies; `None` makes every one a root.
     roots: Option<BTreeSet<String>>,
@@ -717,29 +737,221 @@ impl Checker {
             ),
             None => (name.to_string(), Vec::new(), source_location(expr)),
         };
+        let Some(record) = scope.record(owner) else {
+            return;
+        };
+        let initial = record
+            .copy_leaves
+            .is_none()
+            .then(|| self.initial_copy_leaves(record.ty.as_ref()));
         let Some(record) = scope.record_mut(owner) else {
             return;
         };
-        let (forced, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut record.copy_frontier)
-            .into_iter()
-            .partition(|site| projection_paths_overlap(&site.path, &path));
-        record.copy_frontier = kept;
-        match takes {
-            Takes::Nothing => record.copy_frontier.extend(forced.iter().cloned()),
-            Takes::Original => {}
-            Takes::Copyable { at, consumed_by } => record.copy_frontier.push(CopySite {
+        let leaves = record
+            .copy_leaves
+            .get_or_insert_with(|| initial.unwrap_or_default());
+        split_copy_leaf(leaves, &path);
+        let consumes = !matches!(takes, Takes::Nothing);
+        let copy = match takes {
+            Takes::Copyable { at, consumed_by } => Some(CopySite {
                 at: SiteLocation {
                     declaration: self.current_def.clone(),
                     ..at
                 },
                 binding: label,
-                path,
                 consumed_by,
             }),
+            Takes::Nothing | Takes::Original => None,
+        };
+        let mut forced: Vec<CopySite> = Vec::new();
+        for leaf in leaves
+            .iter_mut()
+            .filter(|leaf| leaf.path.starts_with(&path))
+        {
+            for site in &leaf.latest {
+                if !forced.contains(site) {
+                    forced.push(site.clone());
+                }
+            }
+            match (&copy, consumes) {
+                (Some(copy), _) => leaf.latest = vec![copy.clone()],
+                (None, true) => leaf.latest.clear(),
+                (None, false) => {}
+            }
         }
         for site in &forced {
             self.record_copy_repair(site, later.clone(), kind);
         }
+    }
+
+    /// The leaves of a value of type `ty` for the copy report: every path to
+    /// a component that is not a tuple or a single-variant record, or the
+    /// value itself when it has no such structure.
+    fn initial_copy_leaves(&self, ty: Option<&Expr>) -> Vec<CopyLeaf> {
+        let mut paths = Vec::new();
+        match ty {
+            Some(ty) => self.collect_leaf_paths(
+                &ShapeArg::Deep(ty),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut paths,
+            ),
+            None => paths.push(Vec::new()),
+        }
+        paths
+            .into_iter()
+            .map(|path| CopyLeaf {
+                path,
+                split: Vec::new(),
+                latest: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn collect_leaf_paths(
+        &self,
+        ty: &ShapeArg<'_>,
+        prefix: &mut Vec<ProjectionStep>,
+        visiting: &mut Vec<String>,
+        out: &mut Vec<Vec<ProjectionStep>>,
+    ) {
+        let components = self.shape_components(ty, visiting);
+        match components {
+            Some((name, components)) if out.len() < 256 => {
+                if let Some(name) = &name {
+                    visiting.push(name.clone());
+                }
+                for (step, component) in components {
+                    prefix.push(step);
+                    self.collect_leaf_paths(&component, prefix, visiting, out);
+                    prefix.pop();
+                }
+                if name.is_some() {
+                    visiting.pop();
+                }
+            }
+            _ => out.push(prefix.clone()),
+        }
+    }
+
+    /// The immediate components of a tuple or single-variant record type,
+    /// with the record's name for the recursion guard; `None` for any other
+    /// type, and for a record already being expanded.
+    #[allow(clippy::type_complexity)]
+    fn shape_components<'a>(
+        &self,
+        ty: &ShapeArg<'a>,
+        visiting: &[String],
+    ) -> Option<(Option<String>, Vec<(ProjectionStep, ShapeArg<'a>)>)> {
+        match ty {
+            ShapeArg::Deep(expr) => match expr.carrier() {
+                ExprCarrier::MetadataExpression(meta) => {
+                    self.shape_components(&ShapeArg::Deep(&meta.expr), visiting)
+                }
+                ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => {
+                    self.shape_components(&ShapeArg::Deep(children.first()?), visiting)
+                }
+                ExprCarrier::DecodedNode(DeepTag::TTuple, _, children) => Some((
+                    None,
+                    children
+                        .iter()
+                        .enumerate()
+                        .map(|(index, child)| (ProjectionStep::Index(index), ShapeArg::Deep(child)))
+                        .collect(),
+                )),
+                ExprCarrier::DecodedNode(DeepTag::TAdt, _, children) => {
+                    let name = children.first().and_then(symbol_name)?;
+                    let args = children.iter().skip(1).map(ShapeArg::Deep).collect();
+                    self.record_components(name, args, visiting)
+                }
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_) => None,
+            },
+            ShapeArg::Checked(ty, substitution) => match ty {
+                Type::Ref(inner) => self.shape_components(
+                    &ShapeArg::Checked((**inner).clone(), substitution.clone()),
+                    visiting,
+                ),
+                Type::Tuple(items) => Some((
+                    None,
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            (
+                                ProjectionStep::Index(index),
+                                ShapeArg::Checked(item.clone(), substitution.clone()),
+                            )
+                        })
+                        .collect(),
+                )),
+                Type::Adt(name, args) => {
+                    let args = args
+                        .iter()
+                        .map(|arg| ShapeArg::Checked(arg.clone(), substitution.clone()))
+                        .collect();
+                    self.record_components(name, args, visiting)
+                }
+                Type::KindedAdt(name, args) => {
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg.as_type() {
+                            Some(arg) => ShapeArg::Checked(arg.clone(), substitution.clone()),
+                            None => ShapeArg::Checked(Type::Unit, Vec::new()),
+                        })
+                        .collect();
+                    self.record_components(name, args, visiting)
+                }
+                Type::Var(var) => {
+                    let (_, arg) = substitution.iter().find(|(bound, _)| bound == var)?;
+                    self.shape_components(&arg.clone(), visiting)
+                }
+                _ => None,
+            },
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn record_components<'a>(
+        &self,
+        name: &str,
+        args: Vec<ShapeArg<'a>>,
+        visiting: &[String],
+    ) -> Option<(Option<String>, Vec<(ProjectionStep, ShapeArg<'a>)>)> {
+        if visiting.iter().any(|seen| seen == name) {
+            return None;
+        }
+        let definition = self.adt_registry.lookup(name)?;
+        let [variant] = definition.variants.as_slice() else {
+            return None;
+        };
+        // The type-kinded arguments, in order, stand for `param_vars`.
+        let type_args = definition
+            .param_kinds
+            .iter()
+            .zip(args)
+            .filter(|(kind, _)| matches!(kind, NominalParamKind::Type))
+            .map(|(_, arg)| arg);
+        let substitution: Vec<(TypeVar, ShapeArg<'a>)> = definition
+            .param_vars
+            .iter()
+            .copied()
+            .zip(type_args)
+            .collect();
+        let components = variant
+            .fields
+            .iter()
+            .map(|(field, ty)| {
+                Some((
+                    ProjectionStep::Field(field.clone()?),
+                    ShapeArg::Checked(ty.clone(), substitution.clone()),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((Some(name.to_string()), components))
     }
 
     fn into_copy_repairs(self) -> Vec<CopyRepair> {
@@ -836,6 +1048,7 @@ fn walk_linearity(program: &CheckedProgram, roots: Option<BTreeSet<String>>) -> 
         type_headers: program.type_headers().clone(),
         projection_root: None,
         current_def: None,
+        adt_registry: program.adt_registry().clone(),
         roots,
         projection_use: None,
         repairs: CopyRepairs::new(),
@@ -965,6 +1178,7 @@ pub fn check_linearity_with_context(
         type_headers: merged_type_headers,
         projection_root: None,
         current_def: None,
+        adt_registry: new_program.adt_registry().clone(),
         roots: None,
         projection_use: None,
         repairs: CopyRepairs::new(),
@@ -1094,10 +1308,19 @@ impl Checker {
         }
         let owner = scope.resolve_alias_chain(id).unwrap_or(id);
         let frontier = observed.get(&owner).cloned().unwrap_or_else(|| {
-            scope
+            let mut frontier: Vec<CopySite> = Vec::new();
+            for leaf in scope
                 .record(owner)
-                .map(|record| record.copy_frontier.clone())
+                .and_then(|record| record.copy_leaves.as_deref())
                 .unwrap_or_default()
+            {
+                for site in &leaf.latest {
+                    if !frontier.contains(site) {
+                        frontier.push(site.clone());
+                    }
+                }
+            }
+            frontier
         });
         let at = SiteLocation {
             declaration: Some(name.to_string()),
@@ -1111,7 +1334,6 @@ impl Checker {
             vec![CopySite {
                 at,
                 binding: name.to_string(),
-                path: Vec::new(),
                 consumed_by: format!("the root observation of `{name}`"),
             }],
         );
@@ -2407,21 +2629,15 @@ impl Checker {
                 .and_then(|rank| branch_sites.iter().find(|site| site.join_rank() == rank))
                 .map(|site| (*site).clone());
             // [04-LIN-5]: a later use copies at the latest ordinary consume of
-            // every path, so the report's frontier is every branch's.
-            let mut frontier: Vec<CopySite> = Vec::new();
-            for branch in branches {
-                for site in branch
-                    .record(*id)
-                    .map(|record| record.copy_frontier.as_slice())
-                    .unwrap_or_default()
-                {
-                    if !frontier.contains(site) {
-                        frontier.push(site.clone());
-                    }
-                }
-            }
-            if let Some(record) = scope.record_mut(*id) {
-                record.copy_frontier = frontier;
+            // every path, so each leaf joins every branch's latest consumes.
+            let branch_leaves = branches
+                .iter()
+                .filter_map(|branch| branch.record(*id)?.copy_leaves.as_ref())
+                .collect::<Vec<_>>();
+            if let Some(first) = branch_leaves.first()
+                && let Some(record) = scope.record_mut(*id)
+            {
+                record.copy_leaves = Some(join_copy_leaves(first, &branch_leaves));
             }
             let Some(site) = consumed_site else {
                 continue;
@@ -4648,6 +4864,69 @@ fn projection_chain(expr: &Expr) -> Option<(&Expr, Vec<ProjectionStep>)> {
     let (root, mut path) = projection_chain(target)?;
     path.push(step);
     Some((root, path))
+}
+
+/// Give `path` a leaf of its own when it lies strictly inside a leaf, as a
+/// component the binding's type did not resolve does. The new leaf inherits
+/// the latest consumes of the leaf it is split from.
+fn split_copy_leaf(leaves: &mut Vec<CopyLeaf>, path: &[ProjectionStep]) {
+    while let Some(index) = leaves.iter().position(|leaf| {
+        path.len() > leaf.path.len()
+            && path.starts_with(&leaf.path)
+            && !leaf.split.iter().any(|split| path.starts_with(split))
+    }) {
+        let parent = &mut leaves[index];
+        let split = parent
+            .split
+            .iter()
+            .filter(|split| split.starts_with(path))
+            .cloned()
+            .collect();
+        let latest = parent.latest.clone();
+        parent.split.push(path.to_vec());
+        leaves.push(CopyLeaf {
+            path: path.to_vec(),
+            split,
+            latest,
+        });
+    }
+}
+
+/// The union, per leaf, of every branch's latest consumes. Branches split
+/// leaves independently, so each is first refined to every leaf any branch
+/// has; a leaf of the refinement lies inside exactly one leaf of each branch.
+fn join_copy_leaves(first: &[CopyLeaf], branches: &[&Vec<CopyLeaf>]) -> Vec<CopyLeaf> {
+    let mut joined = first
+        .iter()
+        .map(|leaf| CopyLeaf {
+            latest: Vec::new(),
+            ..leaf.clone()
+        })
+        .collect::<Vec<_>>();
+    for branch in branches {
+        for leaf in branch.iter() {
+            split_copy_leaf(&mut joined, &leaf.path);
+        }
+    }
+    for target in &mut joined {
+        for branch in branches {
+            let Some(source) = branch.iter().find(|leaf| {
+                target.path.starts_with(&leaf.path)
+                    && !leaf
+                        .split
+                        .iter()
+                        .any(|split| target.path.starts_with(split))
+            }) else {
+                continue;
+            };
+            for site in &source.latest {
+                if !target.latest.contains(site) {
+                    target.latest.push(site.clone());
+                }
+            }
+        }
+    }
+    joined
 }
 
 /// A projection chain as the source spells it, `p.w` or `t.0.1`.

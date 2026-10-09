@@ -478,109 +478,259 @@ fn root_observation_forces_copies() {
     assert_eq!(aliased[0].forced_by[0].kind, CopyRepairUseKind::Root);
 }
 
-/// One use of the parameter `p` in the generated programs below: consume it
-/// whole, project one of its two components (a projection moves the component
-/// out, [04-LIN-11]), or borrow it whole.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum PUse {
-    ConsumeWhole,
-    First,
-    Second,
-    BorrowWhole,
+/// One use in the generated programs below: a call that consumes or borrows
+/// the parameter whole, or projects one component path out of it (a
+/// projection moves its component out, [04-LIN-11]).
+struct GenUse {
+    call: &'static str,
+    /// The component path the use touches; empty for the parameter whole.
+    path: &'static [&'static str],
+    consumes: bool,
 }
 
-impl PUse {
-    /// The projection path this use touches; empty for the whole value.
-    fn path(self) -> &'static [usize] {
-        match self {
-            PUse::First => &[0],
-            PUse::Second => &[1],
-            PUse::ConsumeWhole | PUse::BorrowWhole => &[],
-        }
-    }
-
-    fn consumes(self) -> bool {
-        self != PUse::BorrowWhole
-    }
+/// A parameter type for the generated programs: its declarations, its
+/// spelling, its leaves (every path to a non-product component), and the
+/// uses the generator draws from.
+struct Carrier {
+    decls: &'static str,
+    ty: &'static str,
+    leaves: &'static [&'static [&'static str]],
+    uses: &'static [GenUse],
 }
 
-/// The copies the language places for a use sequence ([04-LIN-11], spec/04
-/// section 8.3): each use forces a copy at every earlier consume still in the
-/// frontier whose path overlaps its own, one path being a prefix of the other;
-/// a consume then replaces the overlapping sites. Returns, per copy site, the
-/// uses that forced it, as indices into `uses`.
-fn expected_copies(uses: &[PUse]) -> std::collections::BTreeMap<usize, Vec<usize>> {
-    let overlap = |a: &[usize], b: &[usize]| a.iter().zip(b).all(|(x, y)| x == y);
-    let mut frontier: Vec<usize> = Vec::new();
+/// The copies the language places, modelled per leaf and independently of
+/// the checker's representation ([04-LIN-11], spec/04 section 8.3). Each leaf
+/// remembers the latest consume that touched it. A use of path `u` needs the
+/// value of every leaf under `u`, so it forces a copy at the latest consume of
+/// each of those leaves; a consume of path `q` then becomes the latest consume
+/// of every leaf under `q`. Returns, per copy site, the uses that forced it,
+/// as indices into `uses`.
+fn per_leaf_copies(
+    carrier: &Carrier,
+    uses: &[usize],
+) -> std::collections::BTreeMap<usize, Vec<usize>> {
+    let under = |leaf: &[&str], path: &[&str]| leaf.starts_with(path);
+    let mut latest: Vec<Option<usize>> = vec![None; carrier.leaves.len()];
     let mut copies = std::collections::BTreeMap::<usize, Vec<usize>>::new();
-    for (index, use_) in uses.iter().enumerate() {
-        let (forced, kept): (Vec<usize>, Vec<usize>) = frontier
+    for (index, use_) in uses.iter().map(|use_| &carrier.uses[*use_]).enumerate() {
+        let touched = carrier
+            .leaves
             .iter()
-            .partition(|site| overlap(uses[**site].path(), use_.path()));
-        for site in &forced {
-            copies.entry(*site).or_default().push(index);
+            .enumerate()
+            .filter(|(_, leaf)| under(leaf, use_.path))
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        let forced = touched
+            .iter()
+            .filter_map(|leaf| latest[*leaf])
+            .collect::<std::collections::BTreeSet<_>>();
+        for site in forced {
+            copies.entry(site).or_default().push(index);
         }
-        frontier = if use_.consumes() {
-            let mut next = kept;
-            next.push(index);
-            next
-        } else {
-            frontier
-        };
+        if use_.consumes {
+            for leaf in touched {
+                latest[leaf] = Some(index);
+            }
+        }
     }
     copies
 }
 
-/// Every sequence of two and three uses over a record's fields and a tuple's
-/// elements: the report lists exactly the copies the reference model above
-/// places, each at the consume that receives it and forced by the uses that
-/// need it. Disjoint components never copy for each other; a whole use
-/// overlaps every component, before or after it.
+const CARRIERS: &[Carrier] = &[
+    Carrier {
+        decls: "type R2 =\n  | R2 { w: tensor[2, f32], b: tensor[2, f32] }\n\
+                def eatp(p: R2) -> f32 = tensor_to_scalar(sum(p.w, 0i32))\n\
+                def lookp(p: &R2) -> f32 = 0.0f32\n",
+        ty: "R2",
+        leaves: &[&["w"], &["b"]],
+        uses: &[
+            GenUse {
+                call: "eatp(p)",
+                path: &[],
+                consumes: true,
+            },
+            GenUse {
+                call: "lookp(p)",
+                path: &[],
+                consumes: false,
+            },
+            GenUse {
+                call: "eats(p.w)",
+                path: &["w"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.b)",
+                path: &["b"],
+                consumes: true,
+            },
+        ],
+    },
+    Carrier {
+        decls: "def eatp(p: (tensor[2, f32], tensor[2, f32])) -> f32 = tensor_to_scalar(sum(p.0, 0i32))\n\
+                def lookp(p: &(tensor[2, f32], tensor[2, f32])) -> f32 = 0.0f32\n",
+        ty: "(tensor[2, f32], tensor[2, f32])",
+        leaves: &[&["0"], &["1"]],
+        uses: &[
+            GenUse {
+                call: "eatp(p)",
+                path: &[],
+                consumes: true,
+            },
+            GenUse {
+                call: "lookp(p)",
+                path: &[],
+                consumes: false,
+            },
+            GenUse {
+                call: "eats(p.0)",
+                path: &["0"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.1)",
+                path: &["1"],
+                consumes: true,
+            },
+        ],
+    },
+    Carrier {
+        decls: "type R3 =\n  | R3 { w: tensor[2, f32], b: tensor[2, f32], c: tensor[2, f32] }\n\
+                def eatp(p: R3) -> f32 = tensor_to_scalar(sum(p.w, 0i32))\n\
+                def lookp(p: &R3) -> f32 = 0.0f32\n",
+        ty: "R3",
+        leaves: &[&["w"], &["b"], &["c"]],
+        uses: &[
+            GenUse {
+                call: "eatp(p)",
+                path: &[],
+                consumes: true,
+            },
+            GenUse {
+                call: "lookp(p)",
+                path: &[],
+                consumes: false,
+            },
+            GenUse {
+                call: "eats(p.w)",
+                path: &["w"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.b)",
+                path: &["b"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.c)",
+                path: &["c"],
+                consumes: true,
+            },
+        ],
+    },
+    Carrier {
+        decls: "def eatp(p: (tensor[2, f32], tensor[2, f32], tensor[2, f32])) -> f32 = tensor_to_scalar(sum(p.0, 0i32))\n\
+                def lookp(p: &(tensor[2, f32], tensor[2, f32], tensor[2, f32])) -> f32 = 0.0f32\n",
+        ty: "(tensor[2, f32], tensor[2, f32], tensor[2, f32])",
+        leaves: &[&["0"], &["1"], &["2"]],
+        uses: &[
+            GenUse {
+                call: "eatp(p)",
+                path: &[],
+                consumes: true,
+            },
+            GenUse {
+                call: "lookp(p)",
+                path: &[],
+                consumes: false,
+            },
+            GenUse {
+                call: "eats(p.0)",
+                path: &["0"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.1)",
+                path: &["1"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.2)",
+                path: &["2"],
+                consumes: true,
+            },
+        ],
+    },
+    Carrier {
+        decls: "type Inner =\n  | Inner { w: tensor[2, f32], b: tensor[2, f32] }\n\
+                type Outer =\n  | Outer { a: Inner, c: tensor[2, f32] }\n\
+                def eatp(p: Outer) -> f32 = tensor_to_scalar(sum(p.c, 0i32))\n\
+                def lookp(p: &Outer) -> f32 = 0.0f32\n\
+                def eati(i: Inner) -> f32 = tensor_to_scalar(sum(i.w, 0i32))\n",
+        ty: "Outer",
+        leaves: &[&["a", "w"], &["a", "b"], &["c"]],
+        uses: &[
+            GenUse {
+                call: "eatp(p)",
+                path: &[],
+                consumes: true,
+            },
+            GenUse {
+                call: "lookp(p)",
+                path: &[],
+                consumes: false,
+            },
+            GenUse {
+                call: "eati(p.a)",
+                path: &["a"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.a.w)",
+                path: &["a", "w"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.a.b)",
+                path: &["a", "b"],
+                consumes: true,
+            },
+            GenUse {
+                call: "eats(p.c)",
+                path: &["c"],
+                consumes: true,
+            },
+        ],
+    },
+];
+
+/// Every sequence of one to three uses over records and tuples of two and
+/// three components and a nested record: the report lists exactly the copies
+/// the per-leaf model places, each at the consume that receives it and forced
+/// by every use that needs it. Disjoint components never copy for each
+/// other; a use of the whole, or of an enclosing component, needs every leaf
+/// under it, so sibling components that jointly cover it each force the
+/// earlier consume that last took them.
 #[test]
-fn projection_copies_follow_path_overlap_for_every_short_use_sequence() {
-    let carriers = [
-        (
-            "type Lin =\n  | Lin { w: tensor[2, f32], b: tensor[2, f32] }\n\
-             def eatp(p: Lin) -> f32 = tensor_to_scalar(sum(p.w, 0i32))\n\
-             def lookp(p: &Lin) -> f32 = 0.0f32\n",
-            "Lin",
-            ["p.w", "p.b"],
-        ),
-        (
-            "def eatp(p: (tensor[2, f32], tensor[2, f32])) -> f32 = tensor_to_scalar(sum(p.0, 0i32))\n\
-             def lookp(p: &(tensor[2, f32], tensor[2, f32])) -> f32 = 0.0f32\n",
-            "(tensor[2, f32], tensor[2, f32])",
-            ["p.0", "p.1"],
-        ),
-    ];
-    let alphabet = [
-        PUse::ConsumeWhole,
-        PUse::First,
-        PUse::Second,
-        PUse::BorrowWhole,
-    ];
-    let mut sequences: Vec<Vec<PUse>> = Vec::new();
-    for a in alphabet {
-        for b in alphabet {
-            sequences.push(vec![a, b]);
-            for c in alphabet {
-                sequences.push(vec![a, b, c]);
+fn projection_copies_match_the_per_leaf_model_for_every_short_use_sequence() {
+    for carrier in CARRIERS {
+        let alphabet = 0..carrier.uses.len();
+        let mut sequences: Vec<Vec<usize>> = Vec::new();
+        for a in alphabet.clone() {
+            sequences.push(vec![a]);
+            for b in alphabet.clone() {
+                sequences.push(vec![a, b]);
+                for c in alphabet.clone() {
+                    sequences.push(vec![a, b, c]);
+                }
             }
         }
-    }
-    for (decls, ty, [first, second]) in carriers {
         for uses in &sequences {
-            let mut body = format!("{decls}def f(p: {ty}) -> f32 = {{\n");
+            let mut body = format!("{}def f(p: {}) -> f32 = {{\n", carrier.decls, carrier.ty);
             let mut line_starts = Vec::new();
             for (index, use_) in uses.iter().enumerate() {
-                let call = match use_ {
-                    PUse::ConsumeWhole => "eatp(p)".to_string(),
-                    PUse::First => format!("eats({first})"),
-                    PUse::Second => format!("eats({second})"),
-                    PUse::BorrowWhole => "lookp(p)".to_string(),
-                };
                 line_starts.push(PRELUDE.len() + body.len());
-                body.push_str(&format!("  u{index} = {call}\n"));
+                body.push_str(&format!("  u{index} = {}\n", carrier.uses[*use_].call));
             }
             let total = (1..uses.len()).fold("u0".to_string(), |acc, index| {
                 format!("add({acc}, u{index})")
@@ -611,7 +761,16 @@ fn projection_copies_follow_path_overlap_for_every_short_use_sequence() {
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
-            assert_eq!(actual, expected_copies(uses), "{ty} {uses:?}\n{body}");
+            let calls = uses
+                .iter()
+                .map(|use_| carrier.uses[*use_].call)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                per_leaf_copies(carrier, uses),
+                "{} {calls:?}\n{body}",
+                carrier.ty
+            );
         }
     }
 }
@@ -670,4 +829,103 @@ fn a_capture_of_a_consumed_component_is_rejected() {
             "{body}: {errors:?}"
         );
     }
+}
+
+/// The witness the per-leaf model exists for: after `eatp(p)` takes the whole
+/// value, each later component projection needs the original it left, so the
+/// copy at `eatp(p)` is forced by both projections, not only the first.
+#[test]
+fn a_whole_consume_is_forced_by_every_later_component() {
+    for carrier in &CARRIERS[..2] {
+        let source = format!(
+            "{}def f(p: {}) -> f32 = {{\n  u = {}\n  v = {}\n  w = {}\n  add(add(u, v), w)\n}}\n",
+            carrier.decls,
+            carrier.ty,
+            carrier.uses[0].call,
+            carrier.uses[2].call,
+            carrier.uses[3].call
+        );
+        let repairs = accepted(&source)
+            .into_iter()
+            .filter(|repair| repair.declaration.as_deref() == Some("f"))
+            .collect::<Vec<_>>();
+        assert_eq!(repairs.len(), 1, "{}: {repairs:#?}", carrier.ty);
+        assert_eq!(span_text(&source, &repairs[0].copy_at), "eatp(p)");
+        let forced = repairs[0]
+            .forced_by
+            .iter()
+            .map(|later| span_text(&source, &later.at))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            forced,
+            [
+                carrier.uses[2].call[5..8].to_string(),
+                carrier.uses[3].call[5..8].to_string()
+            ],
+            "{}",
+            carrier.ty
+        );
+    }
+}
+
+/// Joins union the latest consumes per leaf ([04-LIN-5]): after a branch that
+/// projects `p.w` and one that consumes `p` whole, a later `p.b` needs only the
+/// whole consume, and a later `p.w` needs both branches' consumes.
+#[test]
+fn a_join_keeps_each_branch_consume_per_component() {
+    let source = "type R2 =\n  | R2 { w: tensor[2, f32], b: tensor[2, f32] }\n\
+                  def eatp(p: R2) -> f32 = tensor_to_scalar(sum(p.w, 0i32))\n\
+                  def f(p: R2, c: bool) -> f32 = {\n  u = if c then eats(p.w) else eatp(p)\n  v = eats(p.b)\n  w = eats(p.w)\n  add(add(u, v), w)\n}\n";
+    let repairs = accepted(source)
+        .into_iter()
+        .filter(|repair| repair.declaration.as_deref() == Some("f"))
+        .map(|repair| {
+            (
+                span_text(source, &repair.copy_at),
+                repair
+                    .forced_by
+                    .iter()
+                    .map(|later| span_text(source, &later.at))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repairs,
+        [
+            ("p.w".to_string(), vec!["p.w".to_string()]),
+            (
+                "eatp(p)".to_string(),
+                vec!["p.b".to_string(), "p.w".to_string()]
+            ),
+        ]
+    );
+}
+
+/// A component the binding's type does not resolve, a field whose type is a
+/// type parameter, still gets a leaf of its own when a projection reaches it.
+#[test]
+fn components_under_a_type_parameter_are_tracked_apart() {
+    let decls = "type Boxed[a] =\n  | Boxed { v: a }\n";
+    let ty = "Boxed[(tensor[2, f32], tensor[2, f32])]";
+    let disjoint = accepted(&format!(
+        "{decls}def f(p: {ty}) -> f32 = add(eats(p.v.0), eats(p.v.1))\n"
+    ));
+    assert!(
+        disjoint
+            .iter()
+            .all(|repair| repair.declaration.as_deref() != Some("f")),
+        "{disjoint:#?}"
+    );
+    let repeated = accepted(&format!(
+        "{decls}def f(p: {ty}) -> f32 = add(eats(p.v.0), eats(p.v.0))\n"
+    ));
+    assert_eq!(
+        repeated
+            .iter()
+            .filter(|repair| repair.declaration.as_deref() == Some("f"))
+            .count(),
+        1,
+        "{repeated:#?}"
+    );
 }

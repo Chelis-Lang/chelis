@@ -309,21 +309,26 @@ order, each with its span identity and its `kind`: `consume`, `borrow`, `capture
 destructuring `let`, has no source location and is not listed; the source use it
 belongs to is.
 
-Copy sites are kept per projection path. A tuple projection or field access moves its
-component out ([04-LIN-11]), so `p.w` and `p.0` are consumes of that component, and a
-use forces a copy only at an earlier consume whose path overlaps its own, one path being
-a prefix of the other: `p.w` and `p.b` never copy for each other, while a use of `p`
-whole overlaps every component, before or after it. A later ordinary consume replaces
-the overlapping sites and becomes the next copy site, so a chain of consumes reports one
-entry per earlier consume. This bookkeeping is the report's own; it reads the checker's
-walk but changes no verdict. Across a branch join the latest ordinary consume of every path
+Copy sites are kept per leaf of the binding's value. A tuple projection or field access
+moves its component out ([04-LIN-11]), so `p.w` and `p.0` are consumes of that
+component. The report splits each binding into leaves from its type: every path to a
+component that is not a tuple or a single-variant record. Each leaf remembers the latest
+ordinary consume that took it, and a use forces a copy at the latest consume of every
+leaf under its path; a consume then becomes the latest of every leaf under its own path.
+So `p.w` and `p.b` never copy for each other, a use of `p` whole needs every leaf, and
+after `eatp(p)` both a later `p.w` and a later `p.b` force the copy at `eatp(p)`, while
+a later use of `p` whole forces only the projections that took its leaves since. A
+projection the type does not resolve, such as a component of a field whose type is a
+type parameter, splits a leaf of its own. A chain of whole consumes reports one entry
+per earlier consume. This bookkeeping is the report's own; it reads the checker's walk
+but changes no verdict. Across a branch join the latest ordinary consume of every path
 receives a copy when a use follows the join ([04-LIN-5]), so each branch's consume is
-listed. Root observations happen in manifest order after every initializer: a root
-whose value an initializer consumed copies at that consume, and of two roots denoting
-one value the earlier observation copies. Entries are ordered by declaration name and
-then by source position; the report comes from the same walk `chelis check` runs, so it
-is a function of the program text. The human output prints one `copy_repair` line per
-entry.
+listed; the join unions the latest consumes per leaf. Root observations happen in
+manifest order after every initializer: a root whose value an initializer consumed
+copies at that consume, and of two roots denoting one value the earlier observation
+copies. Entries are ordered by declaration name and then by source position; the report
+comes from the same walk `chelis check` runs, so it is a function of the program text.
+The human output prints one `copy_repair` line per entry.
 
 `copy_repairs` and `copy_count` answer different questions. A repair is a copy the
 language semantics place at a source consume. `copy_count` counts the `RiscOp::Copy`
