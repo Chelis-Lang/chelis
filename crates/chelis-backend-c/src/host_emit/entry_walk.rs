@@ -795,29 +795,49 @@ static inline void __chelis_entry_named_observe(__chelis_entry_named_state *stat
         out.push(
             r#"
 
-/* `used` counts the whole path's length, including what did not fit. */
-static inline void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
-    if (path->parent != NULL) __chelis_entry_path_append(path->parent, buffer, size, used);
-    size_t room = *used < size ? size - *used : 0;
-    char *at = room > 0 ? buffer + *used : NULL;
-    int written = path->segment != NULL
-        ? snprintf(at, room, "%s", path->segment)
-        : snprintf(at, room, "[%lld]", (long long)path->index);
-    if (written > 0) *used += (size_t)written;
+/* The text of one path segment: its label, or its index rendered into
+   `scratch`. */
+static inline const char *__chelis_entry_path_segment(const __chelis_entry_path *path, char *scratch, size_t size, size_t *length) {
+    if (path->segment != NULL) {
+        *length = strlen(path->segment);
+        return path->segment;
+    }
+    int written = snprintf(scratch, size, "[%lld]", (long long)path->index);
+    *length = written > 0 ? (size_t)written : 0;
+    return scratch;
 }
 
-/* Renders only on a failing check, into storage the trap that follows ends. */
+/* Renders into storage the caller's next use of it ends. A path is linked
+   from its last segment, so one pass measures the whole text and a second
+   copies each segment to its offset from the end; neither recurses, however
+   deep the path. */
 static inline const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
     static const char marker[] = "...(truncated)";
     static char buffer[512];
+    char scratch[32];
     size_t used = 0;
-    buffer[0] = '\0';
-    __chelis_entry_path_append(path, buffer, sizeof buffer, &used);
+    for (const __chelis_entry_path *at = path; at != NULL; at = at->parent) {
+        size_t length;
+        (void)__chelis_entry_path_segment(at, scratch, sizeof scratch, &length);
+        used += length;
+    }
+    size_t end = used;
+    for (const __chelis_entry_path *at = path; at != NULL; at = at->parent) {
+        size_t length;
+        const char *text = __chelis_entry_path_segment(at, scratch, sizeof scratch, &length);
+        size_t start = end - length;
+        if (start < sizeof buffer - 1) {
+            size_t stop = end < sizeof buffer - 1 ? end : sizeof buffer - 1;
+            memcpy(buffer + start, text, stop - start);
+        }
+        end = start;
+    }
+    buffer[used < sizeof buffer - 1 ? used : sizeof buffer - 1] = '\0';
     if (used >= sizeof buffer) {
         /* A path that did not fit ends in the marker, placed at a UTF-8 lead byte. */
-        size_t end = sizeof buffer - sizeof marker;
-        while (end > 0 && (buffer[end] & 0xC0) == 0x80) --end;
-        memcpy(buffer + end, marker, sizeof marker);
+        size_t cut = sizeof buffer - sizeof marker;
+        while (cut > 0 && (buffer[cut] & 0xC0) == 0x80) --cut;
+        memcpy(buffer + cut, marker, sizeof marker);
     }
     return buffer;
 }
@@ -827,70 +847,101 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
         if nested_claims_emitted() {
             out.push(
             r#"
+/* As `__chelis_entry_named_observe`, for an observation a nested claim walk
+   reaches by `path`: the path is rendered only when a witness keeps it or a
+   comparison fails, so a deep value's agreeing observations render nothing. */
+static void __chelis_entry_named_observe_at(__chelis_entry_named_state *states, size_t count, const char *key, const __chelis_entry_path *path, int axis, int64_t value) {
+    if (states == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        __chelis_entry_named_state *state = &states[i];
+        if (strcmp(state->key, key) != 0) continue;
+        if (!state->seen || state->value != value) {
+            __chelis_entry_named_observe(state, 1, key, __chelis_entry_path_text(path), axis, value);
+        }
+        return;
+    }
+}
+
+/* Check a tensor at a formal's nested tensor node: a literal axis as a
+   literal entry extent, a binder axis through the invocation's witness
+   states. */
+static void __chelis_entry_claim_tensor(const __chelis_claim_node *pattern, chelis_value value, const __chelis_entry_path *path, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    if (pattern->kind != 0 || value.tag != CHELIS_VALUE_TENSOR) return;
+    const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+    int64_t rank = chelis_tensor_rank(tensor);
+    if (pattern->rank >= 0 && pattern->rank != rank) return;
+    for (int64_t i = 0; i < pattern->count; ++i) {
+        int64_t axis = pattern->axes[i][0] < 0 ? rank + pattern->axes[i][0] : pattern->axes[i][0];
+        if (axis < 0 || axis >= rank) continue;
+        int64_t observed = chelis_tensor_shape(tensor, axis);
+        if (pattern->axes[i][1] >= 0) {
+            __chelis_entry_named_observe_at(states, count, keys[pattern->axes[i][1]], path, (int)axis, observed);
+        } else if (observed != pattern->axes[i][2]) {
+            fprintf(stderr, "input `%s` axis %lld expected %lld, got %lld\n", __chelis_entry_path_text(path), (long long)axis, (long long)pattern->axes[i][2], (long long)observed);
+            chelis_numeric_trap("numeric trap: domain in load at i64");
+        }
+    }
+}
+
+/* One value an entry walk has entered and not finished: borrowed at the
+   root, owned below it, with the path that reaches it and the components it
+   still owes. Below the root, `path` is `here`, linked to the path of the
+   value below, which outlives it. */
+typedef struct __chelis_entry_claim_step {
+    struct __chelis_entry_claim_step *below;
+    int64_t node;
+    chelis_value value;
+    int owned;
+    const __chelis_entry_path *path;
+    __chelis_entry_path here;
+    __chelis_claim_components components;
+} __chelis_entry_claim_step;
+
+static __chelis_entry_claim_step *__chelis_entry_claim_enter(__chelis_entry_claim_step *below, const __chelis_host_result_claim *frame, int64_t node, chelis_value value, int owned, const __chelis_entry_path *root, const char *segment, int64_t index, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    __chelis_entry_claim_step *step = (__chelis_entry_claim_step *)malloc(sizeof *step);
+    if (step == NULL) {
+        fprintf(stderr, "host runtime: claim walk allocation failed\n");
+        abort();
+    }
+    memset(step, 0, sizeof *step);
+    step->below = below;
+    step->node = node;
+    step->value = value;
+    step->owned = owned;
+    if (below == NULL) {
+        step->path = root;
+    } else {
+        step->here.parent = below->path;
+        step->here.segment = segment;
+        step->here.index = index;
+        step->path = &step->here;
+    }
+    __chelis_entry_claim_tensor(&frame->nodes[node], value, step->path, keys, states, count);
+    step->components = __chelis_claim_components_of(&frame->nodes[node], value);
+    return step;
+}
+
 /* Check the claims a formal nests below a tuple or nominal type against the
-   value it carries (runtime_extents.md C6.5): a literal axis as a literal
-   entry extent, a binder axis through the invocation's witness states. */
+   value it carries (runtime_extents.md C6.5), in signature position then
+   depth-first declared order. Only the constructor a value carries is
+   walked. Components are visited in that order, each held until its own
+   components are done, from a heap stack: a deep value costs heap, never
+   native stack. */
 static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_entry_path *path, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
-    const __chelis_claim_node *pattern = &frame->nodes[node];
-    if (pattern->kind == 0 && value.tag == CHELIS_VALUE_TENSOR) {
-        const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
-        int64_t rank = chelis_tensor_rank(tensor);
-        if (pattern->rank >= 0 && pattern->rank != rank) return;
-        for (int64_t i = 0; i < pattern->count; ++i) {
-            int64_t axis = pattern->axes[i][0] < 0 ? rank + pattern->axes[i][0] : pattern->axes[i][0];
-            if (axis < 0 || axis >= rank) continue;
-            int64_t observed = chelis_tensor_shape(tensor, axis);
-            if (pattern->axes[i][1] >= 0) {
-                if (states != NULL) __chelis_entry_named_observe(states, count, keys[pattern->axes[i][1]], __chelis_entry_path_text(path), (int)axis, observed);
-            } else if (observed != pattern->axes[i][2]) {
-                fprintf(stderr, "input `%s` axis %lld expected %lld, got %lld\n", __chelis_entry_path_text(path), (long long)axis, (long long)pattern->axes[i][2], (long long)observed);
-                chelis_numeric_trap("numeric trap: domain in load at i64");
-            }
+    __chelis_entry_claim_step *top = __chelis_entry_claim_enter(NULL, frame, node, value, 0, path, NULL, 0, keys, states, count);
+    while (top != NULL) {
+        const __chelis_claim_node *pattern = &frame->nodes[top->node];
+        int64_t child, component, slot;
+        chelis_value item;
+        if (__chelis_claim_components_next(pattern, &top->components, &child, &item, &component, &slot)) {
+            const char *segment = pattern->kind == 2 ? NULL : pattern->labels[slot];
+            top = __chelis_entry_claim_enter(top, frame, child, item, 1, path, segment, pattern->kind == 2 ? component : 0, keys, states, count);
+            continue;
         }
-    } else if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
-        const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
-        for (int64_t i = 0; i < pattern->count && i < chelis_tuple_len(tuple); ++i) {
-            if (pattern->children[i] < 0) continue;
-            chelis_value item = chelis_tuple_get(tuple, i);
-            const __chelis_entry_path segment = { path, pattern->labels[i], 0 };
-            __chelis_entry_claim_walk(frame, pattern->children[i], item, &segment, keys, states, count);
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
-        const chelis_list *list = chelis_list_borrow_value(value);
-        for (int64_t i = 0; i < chelis_list_len(list); ++i) {
-            chelis_value item = chelis_list_index(list, i);
-            const __chelis_entry_path segment = { path, NULL, i };
-            __chelis_entry_claim_walk(frame, pattern->children[0], item, &segment, keys, states, count);
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
-        const chelis_option *option = chelis_option_borrow_value(value);
-        if (chelis_option_is_some(option)) {
-            chelis_value item = chelis_option_unwrap(option);
-            const __chelis_entry_path segment = { path, pattern->labels[0], 0 };
-            __chelis_entry_claim_walk(frame, pattern->children[0], item, &segment, keys, states, count);
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
-        const chelis_adt *adt = chelis_adt_borrow_value(value);
-        chelis_string tag = chelis_adt_get_tag(adt);
-        for (int64_t c = 0; c < pattern->count; ++c) {
-            chelis_string name = chelis_string_from_cstr(pattern->names[c]);
-            bool carried = chelis_string_eq(tag, name);
-            chelis_string_release(name);
-            if (!carried) continue;
-            for (int64_t slot = pattern->offsets[c]; slot < pattern->offsets[c + 1]; ++slot) {
-                int64_t field = slot - pattern->offsets[c];
-                if (pattern->children[slot] < 0 || field >= chelis_adt_field_count(adt)) continue;
-                chelis_value item = chelis_adt_get_field(adt, field);
-                const __chelis_entry_path segment = { path, pattern->labels[slot], 0 };
-                __chelis_entry_claim_walk(frame, pattern->children[slot], item, &segment, keys, states, count);
-                chelis_value_release(item);
-            }
-            break;
-        }
-        chelis_string_release(tag);
+        __chelis_entry_claim_step *done = top;
+        top = done->below;
+        if (done->owned) chelis_value_release(done->value);
+        free(done);
     }
 }
 "#

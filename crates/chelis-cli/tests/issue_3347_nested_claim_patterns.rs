@@ -325,6 +325,31 @@ def leaf(w: Wrap) -> i64 =
 out = leaf(f(produce(3i64), size_from("PATH")))
 "#;
 
+/// A chain whose element type is a type argument, so the builder's
+/// `Chain[tensor[*, f32]]` claims nothing and only the claim under test walks
+/// the value. `DEPTH` links of width 3 hang above an `End` whose width the size
+/// file gives: a walk meets the disagreement at the chain's deepest position.
+const DEEP_CHAIN: &str = r#"type Chain[t] =
+  | End { v: t }
+  | Link { v: t, next: Chain[t] }
+def grow(size: i64, k: i64) -> Chain[tensor[*, f32]] = fold(fn (acc: Chain[tensor[*, f32]], i: i64) -> Link { v: produce(3i64), next: acc }, End { v: produce(size) }, range(0i64, k))
+def head(c: Chain[tensor[*, f32]]) -> i64 =
+  match c with {
+    | End { v } => shape(v, 0i32)
+    | Link { v, next } => shape(v, 0i32)
+  }
+"#;
+
+/// The entry walk of a claimed formal.
+const DEEP_ENTRY: &str = r#"def head3(c: Chain[tensor[3, f32]]) -> i64 = head(c)
+out = head3(grow(size_from("PATH"), DEPTH))
+"#;
+
+/// The boundary walk of a claimed result whose value arrives from a formal.
+const DEEP_RESULT: &str = r#"def keep(c: Chain[tensor[*, f32]]) -> Chain[tensor[3, f32]] = c
+out = head(keep(grow(size_from("PATH"), DEPTH)))
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -1140,4 +1165,136 @@ fn eval_self_recursion_checks_its_own_witness() {
 #[test]
 fn c_self_recursion_checks_its_own_witness() {
     self_recursion_varying_witness(true);
+}
+
+/// The native stack each lane's deep rows run on. A compiled program's main
+/// thread gets 512 KiB. `chelis eval` gets 2 MiB, the least its own parser
+/// and checker run on; it evaluates inside a grown stack segment, so its
+/// claim walks' stack independence is pinned by the evaluator's own unit
+/// tests, and these rows pin the walks' cost and path text.
+const C_STACK_KIB: u32 = 512;
+const EVAL_STACK_KIB: u32 = 2048;
+
+/// The links of a deep chain: chelis#3460's 60,000 on compiled C, and
+/// 20,000 on Eval, where a walk that built every position's whole path would
+/// write gigabytes of path text.
+fn deep_links(native: bool) -> usize {
+    if native { 60_000 } else { 20_000 }
+}
+
+/// Run `case` after the shared and the deep chain's declarations, with
+/// `size` read from a file and the program's native stack limited: the
+/// compiled executable on C, the evaluating `chelis` process on Eval.
+fn run_deep(case: &str, size: usize, native: bool) -> (bool, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = dir.path().join("size.txt");
+    fs::write(&input, "x".repeat(size)).expect("size input");
+    let path = dir.path().join("deep.ch");
+    let source = format!("{PRELUDE}{DEEP_CHAIN}{case}")
+        .replace("PATH", &input.display().to_string())
+        .replace("DEPTH", &format!("{}i64", deep_links(native)));
+    fs::write(&path, source).expect("fixture");
+    let chelis = assert_cmd::cargo::cargo_bin("chelis");
+    // The shell lowers its own limit before it becomes the program, so the
+    // program's main thread starts on the bounded stack.
+    let mut command = std::process::Command::new("/bin/sh");
+    command.env("CHELIS_STYLE_GATE_DISABLE", "1");
+    if native {
+        let out_dir = dir.path().join("deep");
+        assert_cmd::Command::new(&chelis)
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["build", "--allow-style-violations"])
+            .arg(&path)
+            .args(["--target", "c", "-o"])
+            .arg(&out_dir)
+            .assert()
+            .success();
+        command
+            .args(["-c", &format!("ulimit -s {C_STACK_KIB} && exec \"$@\""), "sh"])
+            .arg(out_dir.join("deep"));
+    } else {
+        command
+            .args(["-c", &format!("ulimit -s {EVAL_STACK_KIB} && exec \"$@\""), "sh"])
+            .arg(&chelis)
+            .args(["eval", "--allow-style-violations", "--file"])
+            .arg(&path);
+    }
+    let output = command.output().expect("the deep program runs");
+    (
+        output.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+/// The extent-3 chain runs unchanged; the extent-5 one traps once, with
+/// exactly `context` and the Domain line of `op`.
+fn assert_deep_trap_and_control(case: &str, native: bool, context: &str, op: &str) {
+    let lane = lane(native);
+    let (ok, output) = run_deep(case, 3, native);
+    assert!(ok && output.contains("out = 3"), "{lane}: the agreeing chain must run\n{output}");
+    let (ok, output) = run_deep(case, 5, native);
+    assert!(!ok, "{lane}: the deepest link disagrees\n{output}");
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim_start_matches("error: ") == context),
+        "{lane}: expected `{context}`\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("numeric trap: domain in {op} at i64")),
+        "{lane}\n{output}"
+    );
+    assert_eq!(output.matches("numeric trap:").count(), 1, "{lane}\n{output}");
+    assert!(!output.contains("out ="), "{lane}\n{output}");
+}
+
+/// A formal's claim on a deep chain is walked to its last link on a bounded
+/// native stack, and the trap names the deepest link's path as each lane
+/// renders an entry path: its first 497 bytes and a truncation marker.
+fn deep_entry_walk(native: bool) {
+    let path = format!("c{}.End.v", ".Link.next".repeat(deep_links(native)));
+    let shown = format!("{}...(truncated)", &path[..497]);
+    let context = if native {
+        format!("input `{shown}` axis 0 expected 3, got 5")
+    } else {
+        format!("extent `3`: claimed = 3, {shown} axis 0 = 5")
+    };
+    assert_deep_trap_and_control(DEEP_ENTRY, native, &context, "load");
+}
+
+#[test]
+fn eval_deep_entry_walk_reaches_the_last_link() {
+    deep_entry_walk(false);
+}
+
+#[test]
+fn c_deep_entry_walk_reaches_the_last_link() {
+    deep_entry_walk(true);
+}
+
+/// A claimed result's boundary walk reaches the last link of a deep chain
+/// on a bounded native stack.
+fn deep_result_walk(native: bool) {
+    assert_deep_trap_and_control(
+        DEEP_RESULT,
+        native,
+        "extent `3`: claimed = 3, load axis 0 = 5",
+        "load",
+    );
+}
+
+#[test]
+fn eval_deep_result_walk_reaches_the_last_link() {
+    deep_result_walk(false);
+}
+
+#[test]
+fn c_deep_result_walk_reaches_the_last_link() {
+    deep_result_walk(true);
 }

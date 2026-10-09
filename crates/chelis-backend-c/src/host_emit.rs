@@ -3709,70 +3709,160 @@ static const __chelis_host_result_origin *__chelis_claim_origin_child(const __ch
     return origin->child_view[index];
 }
 
-/* Check one pattern frame at node `node` against `value`, already produced:
-   walk the value and its producer provenance together. Only the constructor
-   a value carries is walked, and every tensor is checked against the
-   producer its provenance records. */
-static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
-    const __chelis_claim_node *pattern = &frame->nodes[node];
-    if (pattern->kind == 0 && value.tag == CHELIS_VALUE_TENSOR) {
-        const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
-        __chelis_host_result_claim single = *frame;
-        single.next = NULL;
-        single.node = node;
-        single.outer_claims_first = 0;
-        if (origin == NULL || origin->child_count != -1 || origin->op == NULL || origin->trap == NULL) {
-            if (!__chelis_claim_pattern_tensor(&single, chelis_tensor_rank(tensor))) return;
-            for (int64_t i = 0; i < pattern->count; ++i) {
-                __chelis_host_result_axis claim;
-                if (__chelis_claim_pattern_axis(&single, chelis_tensor_rank(tensor), i, &claim) && chelis_tensor_shape(tensor, claim.axis) != claim.required) {
-                    fprintf(stderr, "host runtime: pending result claim reached a tensor without producer provenance\n");
-                    abort();
-                }
-            }
-            return;
-        }
-        __chelis_check_host_result_claims(&single, tensor, origin->op, origin->trap);
-    } else if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
+/* A cursor over the components of a value that a claim walk visits, in
+   declared order: a tuple's components by position, every List element, a
+   present `Option` payload, and the fields of the constructor a nominal value
+   carries. A value whose kind its pattern node does not name has none. */
+typedef struct __chelis_claim_components {
+    const void *container;
+    int64_t next;
+    int64_t end;
+    int64_t base;
+} __chelis_claim_components;
+
+static __chelis_claim_components __chelis_claim_components_of(const __chelis_claim_node *pattern, chelis_value value) {
+    __chelis_claim_components at;
+    memset(&at, 0, sizeof at);
+    if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
         const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
-        for (int64_t i = 0; i < pattern->count && i < chelis_tuple_len(tuple); ++i) {
-            if (pattern->children[i] < 0) continue;
-            chelis_value item = chelis_tuple_get(tuple, i);
-            __chelis_check_claim_frame_value(frame, pattern->children[i], item, __chelis_claim_origin_child(origin, i));
-            chelis_value_release(item);
-        }
+        int64_t length = chelis_tuple_len(tuple);
+        at.container = tuple;
+        at.end = pattern->count < length ? pattern->count : length;
     } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
         const chelis_list *list = chelis_list_borrow_value(value);
-        for (int64_t i = 0; i < chelis_list_len(list); ++i) {
-            chelis_value item = chelis_list_index(list, i);
-            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, i));
-            chelis_value_release(item);
-        }
+        at.container = list;
+        at.end = chelis_list_len(list);
     } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
         const chelis_option *option = chelis_option_borrow_value(value);
-        if (chelis_option_is_some(option)) {
-            chelis_value item = chelis_option_unwrap(option);
-            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, 0));
-            chelis_value_release(item);
-        }
+        at.container = option;
+        at.end = chelis_option_is_some(option) ? 1 : 0;
     } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
         const chelis_adt *adt = chelis_adt_borrow_value(value);
         chelis_string tag = chelis_adt_get_tag(adt);
+        at.container = adt;
         for (int64_t c = 0; c < pattern->count; ++c) {
             chelis_string name = chelis_string_from_cstr(pattern->names[c]);
             bool carried = chelis_string_eq(tag, name);
             chelis_string_release(name);
             if (!carried) continue;
-            for (int64_t slot = pattern->offsets[c]; slot < pattern->offsets[c + 1]; ++slot) {
-                int64_t field = slot - pattern->offsets[c];
-                if (pattern->children[slot] < 0 || field >= chelis_adt_field_count(adt)) continue;
-                chelis_value item = chelis_adt_get_field(adt, field);
-                __chelis_check_claim_frame_value(frame, pattern->children[slot], item, __chelis_claim_origin_child(origin, field));
-                chelis_value_release(item);
-            }
+            at.base = pattern->offsets[c];
+            at.next = pattern->offsets[c];
+            at.end = pattern->offsets[c + 1];
             break;
         }
         chelis_string_release(tag);
+    }
+    return at;
+}
+
+/* Fetch the next component `at` owes a claim on: its pattern node, the
+   component itself (the caller releases it), and its slot in the value and
+   in the pattern node. Returns 0 when none is left. */
+static int __chelis_claim_components_next(const __chelis_claim_node *pattern, __chelis_claim_components *at, int64_t *child, chelis_value *item, int64_t *component, int64_t *slot) {
+    while (at->next < at->end) {
+        int64_t index = at->next++;
+        if (pattern->kind == 1) {
+            if (pattern->children[index] < 0) continue;
+            *item = chelis_tuple_get((const chelis_tuple *)at->container, index);
+            *child = pattern->children[index];
+            *component = index;
+            *slot = index;
+        } else if (pattern->kind == 2) {
+            *item = chelis_list_index((const chelis_list *)at->container, index);
+            *child = pattern->children[0];
+            *component = index;
+            *slot = 0;
+        } else if (pattern->kind == 3) {
+            *item = chelis_option_unwrap((const chelis_option *)at->container);
+            *child = pattern->children[0];
+            *component = 0;
+            *slot = 0;
+        } else {
+            const chelis_adt *adt = (const chelis_adt *)at->container;
+            int64_t field = index - at->base;
+            if (pattern->children[index] < 0 || field >= chelis_adt_field_count(adt)) continue;
+            *item = chelis_adt_get_field(adt, field);
+            *child = pattern->children[index];
+            *component = field;
+            *slot = index;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Check a tensor at a pattern frame's tensor node `node` against the
+   producer its provenance records. */
+static void __chelis_check_claim_tensor_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
+    const __chelis_claim_node *pattern = &frame->nodes[node];
+    if (pattern->kind != 0 || value.tag != CHELIS_VALUE_TENSOR) return;
+    const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+    __chelis_host_result_claim single = *frame;
+    single.next = NULL;
+    single.node = node;
+    single.outer_claims_first = 0;
+    if (origin == NULL || origin->child_count != -1 || origin->op == NULL || origin->trap == NULL) {
+        if (!__chelis_claim_pattern_tensor(&single, chelis_tensor_rank(tensor))) return;
+        for (int64_t i = 0; i < pattern->count; ++i) {
+            __chelis_host_result_axis claim;
+            if (__chelis_claim_pattern_axis(&single, chelis_tensor_rank(tensor), i, &claim) && chelis_tensor_shape(tensor, claim.axis) != claim.required) {
+                fprintf(stderr, "host runtime: pending result claim reached a tensor without producer provenance\n");
+                abort();
+            }
+        }
+        return;
+    }
+    __chelis_check_host_result_claims(&single, tensor, origin->op, origin->trap);
+}
+
+/* One value a value walk has entered and not finished: borrowed at the
+   root, owned below it, with its provenance and the components it still
+   owes. */
+typedef struct __chelis_claim_value_step {
+    struct __chelis_claim_value_step *below;
+    int64_t node;
+    chelis_value value;
+    int owned;
+    const __chelis_host_result_origin *origin;
+    __chelis_claim_components components;
+} __chelis_claim_value_step;
+
+static __chelis_claim_value_step *__chelis_claim_value_enter(__chelis_claim_value_step *below, const __chelis_host_result_claim *frame, int64_t node, chelis_value value, int owned, const __chelis_host_result_origin *origin) {
+    __chelis_check_claim_tensor_value(frame, node, value, origin);
+    __chelis_claim_value_step *step = (__chelis_claim_value_step *)malloc(sizeof *step);
+    if (step == NULL) {
+        fprintf(stderr, "host runtime: claim walk allocation failed\n");
+        abort();
+    }
+    memset(step, 0, sizeof *step);
+    step->below = below;
+    step->node = node;
+    step->value = value;
+    step->owned = owned;
+    step->origin = origin;
+    step->components = __chelis_claim_components_of(&frame->nodes[node], value);
+    return step;
+}
+
+/* Check one pattern frame at node `node` against `value`, already produced:
+   walk the value and its producer provenance together. Only the constructor
+   a value carries is walked, and every tensor is checked against the
+   producer its provenance records. Components are visited depth first in
+   declared order, each held until its own components are done, from a heap
+   stack: a deep value costs heap, never native stack. */
+static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
+    __chelis_claim_value_step *top = __chelis_claim_value_enter(NULL, frame, node, value, 0, origin);
+    while (top != NULL) {
+        int64_t child, component, slot;
+        chelis_value item;
+        if (__chelis_claim_components_next(&frame->nodes[top->node], &top->components, &child, &item, &component, &slot)) {
+            top = __chelis_claim_value_enter(top, frame, child, item, 1, __chelis_claim_origin_child(top->origin, component));
+            continue;
+        }
+        __chelis_claim_value_step *done = top;
+        top = done->below;
+        if (done->owned) chelis_value_release(done->value);
+        free(done);
     }
 }
 

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
+use chelis_ir::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern, ClaimStep};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
@@ -451,79 +452,100 @@ impl DeclaredResultClaim {
 
 /// Walk `value` along a nested claim. Only the constructor the value carries
 /// is walked; a tensor's verdict names the producer `tree` records for it.
+/// Components are visited depth first in declared order, as a recursive walk
+/// would visit them, from a heap stack, so a deep value costs heap rather than
+/// native stack.
 fn nested_claim_verdict(
     nested: &NestedResultClaim,
     value: &RuntimeValue,
     tree: Option<&ResultProducer>,
 ) -> Result<(), String> {
-    use chelis_ir::claim_pattern::{ClaimNode, ClaimStep};
-    let child = |step: ClaimStep<'_>| {
-        nested
-            .pattern
-            .child(nested.node, step)
-            .map(|node| NestedResultClaim {
-                pattern: nested.pattern.clone(),
-                node,
-                binders: nested.binders.clone(),
-            })
-    };
-    let below = |index: usize| tree.and_then(|tree| tree.child(index));
-    match (nested.pattern.node(nested.node), value) {
-        (ClaimNode::Tensor(_), RuntimeValue::Tensor(tensor)) => {
-            let shape = &tensor.value.shape;
-            let claim = nested.tensor_claim(shape.len());
-            if let ClaimNode::Tensor(declared) = nested.pattern.node(nested.node)
-                && declared.rank.is_some_and(|rank| rank != shape.len())
-            {
-                return Ok(());
-            }
-            match tree.and_then(ResultProducer::operation) {
-                Some(op) => claim.shape_verdict(shape, op),
-                // An agreeing value needs no attribution; a disagreeing one
-                // without a recorded producer fails closed.
-                None => claim.shape_verdict(shape, "return").map_err(|_| {
-                    "host runtime: pending result claim reached a tensor without producer \
-                     provenance"
-                        .to_string()
-                }),
-            }
-        }
-        (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => {
-            for (index, item) in items.iter().enumerate() {
-                if let Some(child) = child(ClaimStep::Component(index)) {
-                    nested_claim_verdict(&child, item, below(index).as_ref())?;
-                }
-            }
-            Ok(())
-        }
-        (ClaimNode::List(_), RuntimeValue::List(items)) => {
-            if let Some(child) = child(ClaimStep::Element) {
-                for (index, item) in items.iter().enumerate() {
-                    nested_claim_verdict(&child, item, below(index).as_ref())?;
-                }
-            }
-            Ok(())
-        }
-        (ClaimNode::Option(_), RuntimeValue::Adt { ctor, fields, .. }) => {
-            if ctor == "Some"
-                && let (Some(child), Some(payload)) = (child(ClaimStep::Some), fields.first())
-            {
-                nested_claim_verdict(&child, payload, below(0).as_ref())?;
-            }
-            Ok(())
-        }
-        (ClaimNode::Nominal { .. }, RuntimeValue::Adt { ctor, fields, .. }) => {
-            for (index, field) in fields.iter().enumerate() {
-                if let Some(child) = child(ClaimStep::Field { ctor, field: index }) {
-                    nested_claim_verdict(&child, field, below(index).as_ref())?;
-                }
-            }
-            Ok(())
-        }
-        // The checker owns the value's kind; a disagreement is not this
-        // guard's business.
-        _ => Ok(()),
+    struct Visit<'a> {
+        node: ClaimNodeId,
+        value: &'a RuntimeValue,
+        tree: Option<&'a ResultProducer>,
+        next: usize,
     }
+    let pattern = &nested.pattern;
+    let mut pending = vec![Visit {
+        node: nested.node,
+        value,
+        tree,
+        next: 0,
+    }];
+    while let Some(visit) = pending.last_mut() {
+        let index = visit.next;
+        visit.next += 1;
+        // `None` once the position is done; `Some(None)` when its slot
+        // `index` owes nothing.
+        let step = match (pattern.node(visit.node), visit.value) {
+            (ClaimNode::Tensor(declared), RuntimeValue::Tensor(tensor)) => {
+                let shape = &tensor.value.shape;
+                if index == 0 && declared.rank.is_none_or(|rank| rank == shape.len()) {
+                    let claim = NestedResultClaim {
+                        pattern: pattern.clone(),
+                        node: visit.node,
+                        binders: nested.binders.clone(),
+                    }
+                    .tensor_claim(shape.len());
+                    match visit.tree.and_then(ResultProducer::operation) {
+                        Some(op) => claim.shape_verdict(shape, op)?,
+                        // An agreeing value needs no attribution; a
+                        // disagreeing one without a recorded producer fails
+                        // closed.
+                        None => claim.shape_verdict(shape, "return").map_err(|_| {
+                            "host runtime: pending result claim reached a tensor without \
+                             producer provenance"
+                                .to_string()
+                        })?,
+                    }
+                }
+                None
+            }
+            (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => items.get(index).map(|item| {
+                pattern
+                    .child(visit.node, ClaimStep::Component(index))
+                    .map(|child| (child, item))
+            }),
+            (ClaimNode::List(_), RuntimeValue::List(items)) => pattern
+                .child(visit.node, ClaimStep::Element)
+                .and_then(|child| items.get(index).map(|item| Some((child, item)))),
+            (ClaimNode::Option(_), RuntimeValue::Adt { ctor, fields, .. }) => fields
+                .first()
+                .filter(|_| index == 0 && ctor == "Some")
+                .and_then(|item| {
+                    pattern
+                        .child(visit.node, ClaimStep::Some)
+                        .map(|child| Some((child, item)))
+                }),
+            (ClaimNode::Nominal { .. }, RuntimeValue::Adt { ctor, fields, .. }) => {
+                fields.get(index).map(|field| {
+                    pattern
+                        .child(visit.node, ClaimStep::Field { ctor, field: index })
+                        .map(|child| (child, field))
+                })
+            }
+            // The checker owns the value's kind; a disagreement is not this
+            // guard's business.
+            _ => None,
+        };
+        match step {
+            None => {
+                pending.pop();
+            }
+            Some(None) => {}
+            Some(Some((child, item))) => {
+                let tree = visit.tree.and_then(|tree| tree.child_ref(index));
+                pending.push(Visit {
+                    node: child,
+                    value: item,
+                    tree,
+                    next: 0,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The declared rank and literal declared extents of a host function's result.
@@ -792,101 +814,154 @@ impl EntryClaimPatterns<'_> {
     }
 }
 
+/// An entry path as the compiled entry walk renders it. A path of 512 bytes
+/// or more keeps its first bytes, cut back to a character boundary, and ends
+/// in a truncation marker. Only that prefix is kept, so each observation a
+/// nested walk makes costs a bounded path however deep the value.
+#[derive(Clone)]
+struct EntryPathText {
+    kept: String,
+    length: usize,
+}
+
+impl EntryPathText {
+    /// The compiled walk's path buffer, its terminator included.
+    const BUFFER: usize = 512;
+    const MARKER: &'static str = "...(truncated)";
+
+    fn new(root: String) -> Self {
+        Self {
+            length: root.len(),
+            kept: root,
+        }
+    }
+
+    fn join(&self, segment: &str) -> Self {
+        let mut kept = self.kept.clone();
+        if kept.len() < Self::BUFFER {
+            kept.push_str(segment);
+        }
+        Self {
+            kept,
+            length: self.length + segment.len(),
+        }
+    }
+
+    fn render(&self) -> String {
+        if self.length < Self::BUFFER {
+            return self.kept.clone();
+        }
+        let mut end = Self::BUFFER - Self::MARKER.len() - 1;
+        while end > 0 && !self.kept.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &self.kept[..end], Self::MARKER)
+    }
+}
+
 /// Collect the tensors a formal nests in an aggregate or nominal value, in
 /// depth-first declared order, as entry observations of their claimed types.
-/// Only the constructor the value carries is walked.
+/// Only the constructor the value carries is walked. Components are visited
+/// in that order from a heap stack, so a deep value costs heap rather than
+/// native stack.
 fn collect_nested_entry_actuals(
-    pattern: &chelis_ir::claim_pattern::ClaimPattern,
-    node: chelis_ir::claim_pattern::ClaimNodeId,
+    pattern: &ClaimPattern,
+    node: ClaimNodeId,
     value: &RuntimeValue,
     path: String,
     out: &mut Vec<EntryActual>,
 ) {
-    use chelis_ir::claim_pattern::{ClaimNode, ClaimStep};
-    match (pattern.node(node), value) {
-        (ClaimNode::Tensor(claim), RuntimeValue::Tensor(tensor)) => out.push(EntryActual {
-            checked: claim.ty.clone(),
-            authored: claim.ty.clone(),
-            actual_type: TensorType {
-                dims: tensor
-                    .value
-                    .shape
-                    .iter()
-                    .copied()
-                    .map(DimInfo::Lit)
-                    .collect(),
-                precision: tensor.precision,
-            },
-            path,
-            shape: tensor.value.shape.clone(),
-        }),
-        (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => {
-            for (index, item) in items.iter().enumerate() {
-                if let Some(child) = pattern.child(node, ClaimStep::Component(index)) {
-                    collect_nested_entry_actuals(
-                        pattern,
-                        child,
-                        item,
-                        format!("{path}.{index}"),
-                        out,
-                    );
+    struct Visit<'a> {
+        node: ClaimNodeId,
+        value: &'a RuntimeValue,
+        path: EntryPathText,
+        next: usize,
+    }
+    let mut pending = vec![Visit {
+        node,
+        value,
+        path: EntryPathText::new(path),
+        next: 0,
+    }];
+    while let Some(visit) = pending.last_mut() {
+        let index = visit.next;
+        visit.next += 1;
+        // `None` once the position is done; `Some(None)` when its slot
+        // `index` owes nothing.
+        let step = match (pattern.node(visit.node), visit.value) {
+            (ClaimNode::Tensor(claim), RuntimeValue::Tensor(tensor)) => {
+                if index == 0 {
+                    out.push(EntryActual {
+                        checked: claim.ty.clone(),
+                        authored: claim.ty.clone(),
+                        actual_type: TensorType {
+                            dims: tensor
+                                .value
+                                .shape
+                                .iter()
+                                .copied()
+                                .map(DimInfo::Lit)
+                                .collect(),
+                            precision: tensor.precision,
+                        },
+                        path: visit.path.render(),
+                        shape: tensor.value.shape.clone(),
+                    });
                 }
+                None
             }
-        }
-        (ClaimNode::List(child), RuntimeValue::List(items)) => {
-            for (index, item) in items.iter().enumerate() {
-                collect_nested_entry_actuals(
-                    pattern,
-                    *child,
-                    item,
-                    format!("{path}[{index}]"),
-                    out,
-                );
-            }
-        }
-        (ClaimNode::Option(child), RuntimeValue::Adt { ctor, fields, .. }) => {
-            if ctor == "Some"
-                && let Some(payload) = fields.first()
-            {
-                collect_nested_entry_actuals(
-                    pattern,
-                    *child,
-                    payload,
-                    format!("{path}.Some.value"),
-                    out,
-                );
-            }
-        }
-        (
-            ClaimNode::Nominal { constructors, .. },
-            RuntimeValue::Adt {
-                ctor,
-                source_name,
-                fields,
-                ..
-            },
-        ) => {
-            let Some(constructor) = constructors
+            (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => items.get(index).map(|item| {
+                pattern
+                    .child(visit.node, ClaimStep::Component(index))
+                    .map(|child| (child, item, format!(".{index}")))
+            }),
+            (ClaimNode::List(child), RuntimeValue::List(items)) => items
+                .get(index)
+                .map(|item| Some((*child, item, format!("[{index}]")))),
+            (ClaimNode::Option(child), RuntimeValue::Adt { ctor, fields, .. }) => fields
+                .first()
+                .filter(|_| index == 0 && ctor == "Some")
+                .map(|payload| Some((*child, payload, ".Some.value".to_string()))),
+            (
+                ClaimNode::Nominal { constructors, .. },
+                RuntimeValue::Adt {
+                    ctor,
+                    source_name,
+                    fields,
+                    ..
+                },
+            ) => constructors
                 .iter()
                 .find(|constructor| constructor.name == *ctor || constructor.stored_name == *ctor)
-            else {
-                return;
-            };
-            let several = constructors.len() > 1;
-            for (index, (field, item)) in constructor.fields.iter().zip(fields.iter()).enumerate() {
-                let Some(child) = field.node else {
-                    continue;
-                };
-                let segment = field.name.clone().unwrap_or_else(|| index.to_string());
-                let path = if several {
-                    format!("{path}.{source_name}.{segment}")
-                } else {
-                    format!("{path}.{segment}")
-                };
-                collect_nested_entry_actuals(pattern, child, item, path, out);
+                .and_then(|constructor| constructor.fields.get(index).zip(fields.get(index)))
+                .map(|(field, item)| {
+                    field.node.map(|child| {
+                        let segment = field.name.clone().unwrap_or_else(|| index.to_string());
+                        let segment = if constructors.len() > 1 {
+                            format!(".{source_name}.{segment}")
+                        } else {
+                            format!(".{segment}")
+                        };
+                        (child, item, segment)
+                    })
+                }),
+            _ => None,
+        };
+        match step {
+            None => {
+                pending.pop();
+            }
+            Some(None) => {}
+            Some(Some((child, item, segment))) => {
+                let path = visit.path.join(&segment);
+                pending.push(Visit {
+                    node: child,
+                    value: item,
+                    path,
+                    next: 0,
+                });
             }
         }
-        _ => {}
     }
 }
 
@@ -6452,6 +6527,125 @@ fn stage_kernel_argument(
             "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {}",
             describe_value(other)
         )),
+    }
+}
+
+/// The nested claim walks visit a value from a heap stack: a chain far
+/// deeper than the walking thread's native stack could hold one frame per
+/// level is walked to its last link, agreeing and disagreeing there.
+#[cfg(test)]
+mod nested_claim_walk_stack_tests {
+    use super::*;
+
+    const LINKS: usize = 100_000;
+    /// Far less than one native frame per link.
+    const STACK_BYTES: usize = 256 * 1024;
+
+    fn chain_pattern() -> Arc<ClaimPattern> {
+        let source =
+            "type Chain[t] =\n  | End { v: t }\n  | Link { v: t, next: Chain[t] }\nout = 1i64\n";
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        let deep = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
+        let checked = chelis_types::check_ir_program(&deep)
+            .unwrap_or_else(|result| panic!("check failed: {:?}", result.errors));
+        let claimed = chelis_deep::parser::parse_str(
+            "(t-adt {} Chain (t-tensor {} (d-lit {} 3) (t-prim {} f32)))",
+        )
+        .expect("type syntax")
+        .remove(0);
+        Arc::new(
+            ClaimPattern::derive(&claimed, checked.adt_registry()).expect("Chain owes a pattern"),
+        )
+    }
+
+    fn tensor(width: usize) -> RuntimeValue {
+        RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide(
+                "deep walk test",
+                Prim::F32,
+                vec![width],
+                vec![0.0; width],
+            )
+            .expect("test tensor finalizes"),
+        )
+    }
+
+    fn adt(ctor: &str, fields: Vec<(&str, RuntimeValue)>) -> RuntimeValue {
+        let (names, values): (Vec<_>, Vec<_>) = fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .unzip();
+        RuntimeValue::Adt {
+            ctor: ctor.into(),
+            source_name: ctor.into(),
+            fields: values.into(),
+            field_names: Some(names),
+        }
+    }
+
+    /// `LINKS` width-3 links above an `End` of width `end`.
+    fn chain(end: usize) -> RuntimeValue {
+        let mut value = adt("End", vec![("v", tensor(end))]);
+        for _ in 0..LINKS {
+            value = adt("Link", vec![("v", tensor(3)), ("next", value)]);
+        }
+        value
+    }
+
+    fn on_small_stack<T: Send + 'static>(walk: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn(walk)
+            .expect("walk thread starts")
+            .join()
+            .expect("the walk returns")
+    }
+
+    #[test]
+    fn result_claim_walk_reaches_the_last_link_of_a_deep_chain() {
+        let pattern = chain_pattern();
+        let (agreeing, disagreeing) = on_small_stack(move || {
+            let claim = NestedResultClaim {
+                node: pattern.nested_root().expect("Chain owes its fields"),
+                pattern,
+                binders: Arc::new(Vec::new()),
+            };
+            let tree = ResultProducer::Interface;
+            (
+                nested_claim_verdict(&claim, &chain(3), Some(&tree)),
+                nested_claim_verdict(&claim, &chain(5), Some(&tree)),
+            )
+        });
+        assert_eq!(agreeing, Ok(()));
+        assert_eq!(
+            disagreeing,
+            Err(
+                "extent `3`: claimed = 3, load axis 0 = 5\nnumeric trap: domain in load at i64"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn entry_claim_walk_reaches_the_last_link_of_a_deep_chain() {
+        let pattern = chain_pattern();
+        let (count, first, last, shape) = on_small_stack(move || {
+            let root = pattern.nested_root().expect("Chain owes its fields");
+            let mut actuals = Vec::new();
+            collect_nested_entry_actuals(&pattern, root, &chain(5), "c".into(), &mut actuals);
+            let last = actuals.last().expect("the End link is observed");
+            (
+                actuals.len(),
+                actuals[0].path.clone(),
+                last.path.clone(),
+                last.shape.clone(),
+            )
+        });
+        assert_eq!(count, LINKS + 1);
+        assert_eq!(first, "c.Link.v");
+        let path = format!("c{}.End.v", ".Link.next".repeat(LINKS));
+        assert_eq!(last, format!("{}...(truncated)", &path[..497]));
+        assert_eq!(shape, vec![5]);
     }
 }
 
