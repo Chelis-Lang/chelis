@@ -3513,7 +3513,7 @@ impl Parser {
                     _ => {
                         return Err(ParseError::Expected {
                             expected: "precision type name".into(),
-                            found: format!("{precision:?}"),
+                            found: format!("{} type", type_expr_kind(&precision)),
                             offset: self.current_offset(),
                         });
                     }
@@ -4201,6 +4201,20 @@ fn type_span(t: &TypeExpr) -> Span {
         TypeExpr::App(_, _, s) => *s,
         TypeExpr::Tuple(_, s) => *s,
         TypeExpr::Infer(s) => *s,
+    }
+}
+
+fn type_expr_kind(t: &TypeExpr) -> &'static str {
+    match t {
+        TypeExpr::Named(_, _) => "named",
+        TypeExpr::DimensionLiteral(_, _) => "dimension literal",
+        TypeExpr::Tensor(_, _, _) => "tensor",
+        TypeExpr::Arrow(_, _, _) => "function",
+        TypeExpr::Ref(_, _) => "reference",
+        TypeExpr::App(_, _, _) => "applied",
+        TypeExpr::Tuple(_, _) => "tuple",
+        TypeExpr::Infer(_) => "inference hole",
+        TypeExpr::RankSpread(_, _) => "rank spread",
     }
 }
 

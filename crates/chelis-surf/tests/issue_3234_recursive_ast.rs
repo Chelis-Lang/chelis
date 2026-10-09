@@ -32,6 +32,13 @@ fn nested_reference_type_source(depth: usize, valid: bool) -> String {
     )
 }
 
+fn nested_invalid_tensor_precision_source(depth: usize) -> String {
+    format!(
+        "module Probe.Ast\ndef probe(x: tensor[{}i64]) -> i64 = 0i64\n",
+        "& ".repeat(depth)
+    )
+}
+
 fn nested_match_pattern_source(depth: usize, valid: bool) -> String {
     let tail = if valid { "" } else { " invalid" };
     format!(
@@ -73,6 +80,21 @@ fn direct_parser_rejects_invalid_deep_reference_type_on_small_stack() {
             drop(parsed);
             let error = parse_str(&source).expect_err("trailing token must be rejected");
             assert!(error.to_string().contains("byte"), "{error}");
+        },
+    );
+}
+
+#[test]
+fn direct_parser_reports_invalid_deep_precision_on_small_stack() {
+    on_small_stack(
+        "direct_parser_reports_invalid_deep_precision_on_small_stack",
+        || {
+            let source = nested_invalid_tensor_precision_source(20_000);
+            let error = parse_str(&source).expect_err("a reference is not a tensor precision");
+            let message = error.to_string();
+            assert!(message.contains("precision type name"), "{message}");
+            assert!(message.contains("reference type"), "{message}");
+            assert!(message.contains("byte"), "{message}");
         },
     );
 }
