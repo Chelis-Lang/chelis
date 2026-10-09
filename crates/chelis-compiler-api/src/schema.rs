@@ -853,6 +853,9 @@ pub struct DictEntryValue {
 
 /// Machine-facing execution value. Numeric descendants retain their sealed
 /// dtype and stored bits; booleans have one separate execution spelling.
+/// Owned values release nested children iteratively. Rust callers can inspect
+/// variants by reference or take children through mutable references; a value
+/// with a `Drop` implementation cannot be destructured by value.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionValue {
@@ -887,6 +890,39 @@ pub enum ExecutionValue {
         fields: Vec<ExecutionValue>,
     },
     Unit,
+}
+
+impl ExecutionValue {
+    fn take_children_for_drop(&mut self, pending: &mut Vec<ExecutionValue>) {
+        match self {
+            Self::List { value } | Self::Tuple { value } => {
+                pending.extend(std::mem::take(value));
+            }
+            Self::Adt { fields, .. } => pending.extend(std::mem::take(fields)),
+            Self::Dict { entries } => {
+                for DictEntryValue { key, value } in std::mem::take(entries) {
+                    pending.push(key);
+                    pending.push(value);
+                }
+            }
+            Self::Tensor { .. }
+            | Self::Scalar { .. }
+            | Self::Bool { .. }
+            | Self::Key { .. }
+            | Self::String { .. }
+            | Self::Unit => {}
+        }
+    }
+}
+
+impl Drop for ExecutionValue {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children_for_drop(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.take_children_for_drop(&mut pending);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1460,44 +1496,6 @@ pub struct EvalResult {
     pub roots: Vec<EvaluatedRoot>,
     pub manifest: RootManifestResult,
     pub transcript: Vec<String>,
-}
-
-/// Release a nested wire value without recursive enum/Vec drop glue. Keeping
-/// this at the result boundary leaves callers free to destructure the public
-/// `ExecutionValue` enum by value.
-fn drop_execution_value_iteratively(root: ExecutionValue) {
-    let mut pending = vec![root];
-    while let Some(value) = pending.pop() {
-        match value {
-            ExecutionValue::List { value } | ExecutionValue::Tuple { value } => {
-                pending.extend(value);
-            }
-            ExecutionValue::Adt { fields, .. } => pending.extend(fields),
-            ExecutionValue::Dict { entries } => {
-                for DictEntryValue { key, value } in entries {
-                    pending.push(key);
-                    pending.push(value);
-                }
-            }
-            ExecutionValue::Tensor { .. }
-            | ExecutionValue::Scalar { .. }
-            | ExecutionValue::Bool { .. }
-            | ExecutionValue::Key { .. }
-            | ExecutionValue::String { .. }
-            | ExecutionValue::Unit => {}
-        }
-    }
-}
-
-impl Drop for EvalResult {
-    fn drop(&mut self) {
-        for root in &mut self.roots {
-            drop_execution_value_iteratively(std::mem::replace(
-                &mut root.value,
-                ExecutionValue::Unit,
-            ));
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

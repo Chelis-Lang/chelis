@@ -39,7 +39,8 @@ fn eval_renders_the_stored_constructor_source_spelling() {
         field_names: None,
     };
     assert_eq!(render_value(&linked), "Foo__Bar(())");
-    match runtime_value_to_schema(&linked).expect("schema") {
+    let schema_value = runtime_value_to_schema(&linked).expect("schema");
+    match &schema_value {
         crate::schema::ExecutionValue::Adt { ctor, .. } => assert_eq!(ctor, "Foo__Bar"),
         _ => panic!("expected ExecutionValue::Adt"),
     }

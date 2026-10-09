@@ -89,21 +89,20 @@ fn printed_keys_feed_back_as_bindings() {
         "k = key_from_seed(7i64)\nks = split_keys(key_from_seed(7i64), 3i64)\n",
         BTreeMap::new(),
     );
-    let ExecutionValue::Key { bits } = serde_json::from_value(root_json(&printed, "k")).unwrap()
-    else {
+    let key_value: ExecutionValue = serde_json::from_value(root_json(&printed, "k")).unwrap();
+    let ExecutionValue::Key { bits } = &key_value else {
         panic!("a scalar key decodes as the key variant")
     };
     assert_eq!(bits.key().bits(), 7);
     // Bindings supply tensor parameters only (`eval_selected`), so the
     // printed key tensor is what feeds back.
-    let ExecutionValue::Tensor { value: rows } =
-        serde_json::from_value(root_json(&printed, "ks")).unwrap()
-    else {
+    let tensor_value: ExecutionValue = serde_json::from_value(root_json(&printed, "ks")).unwrap();
+    let ExecutionValue::Tensor { value: rows } = &tensor_value else {
         panic!("a key tensor decodes as a tensor")
     };
     let echoed = run_main(
         "def main(ks: tensor[3, key]) -> tensor[3, key] = ks\n",
-        BTreeMap::from([("ks".to_string(), rows)]),
+        BTreeMap::from([("ks".to_string(), rows.clone())]),
     );
     assert_eq!(
         only_root_json(&echoed),
