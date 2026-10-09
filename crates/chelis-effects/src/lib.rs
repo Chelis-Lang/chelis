@@ -2521,7 +2521,7 @@ mod decode_once_producer_tests {
             None
         );
         assert_eq!(expr.tag(), Some(DeepTag::Effects));
-        let Expr::Node(node, _) = expr else {
+        let Expr::Node(node, _) = &expr else {
             panic!("structural effects node")
         };
         let resource = node

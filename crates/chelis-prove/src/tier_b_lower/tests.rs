@@ -264,7 +264,7 @@ fn opaque_field_rewrite_does_not_cross_unclaimed_wrappers() {
 
     let structural = Expr::BareList(vec![access], span);
     let rewritten = rewrite_opaque_field_access(&structural, &opaque_params);
-    let Expr::BareList(elements, _) = rewritten else {
+    let Expr::BareList(elements, _) = &rewritten else {
         panic!("structural list carrier is preserved")
     };
     assert_eq!(elements.first().and_then(var_name), Some("p.value"));
