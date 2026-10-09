@@ -187,9 +187,10 @@ enum StaticPatternMatch {
     Match(Vec<(String, LoweredValue)>),
     /// The pattern provably does not match this value; try the next arm.
     NoMatch,
-    /// Deciding the pattern needs a value known only at run time (a literal
-    /// test of a numeric leaf, or a constructor pattern against a run-time
-    /// carrier), so the taken arm is not compile-time-known.
+    /// The pattern reads a value known only at run time: a literal or
+    /// constructor test of a run-time leaf, which leaves the taken arm
+    /// unknown at compile time, or destructuring of a run-time tuple, which
+    /// this lowering cannot project. Carries the refusal's subject.
     RuntimeTest(String),
     /// A positional pattern against a record value whose declared field order
     /// this lowering cannot establish ([04-PAT-3]).
@@ -344,7 +345,7 @@ fn match_static_pattern(pattern: &Expr, value: &LoweredValue) -> StaticPatternMa
                 items.len()
             )),
             LoweredValue::Node(_) | LoweredValue::Host { .. } => StaticPatternMatch::RuntimeTest(
-                "a tuple pattern against a tuple held only as a run-time value".to_string(),
+                "`match` destructuring of a tuple held only as a run-time value".to_string(),
             ),
             _ => StaticPatternMatch::Malformed(
                 "a `pat-tuple` against a value that is not a tuple".to_string(),
@@ -366,7 +367,8 @@ fn match_static_pattern(pattern: &Expr, value: &LoweredValue) -> StaticPatternMa
             }
             (LoweredValue::Node(_) | LoweredValue::Host { .. }, _) => {
                 StaticPatternMatch::RuntimeTest(
-                    "a literal pattern tested against a run-time value".to_string(),
+                    "`match` arm selection by a literal pattern tested against a run-time value"
+                        .to_string(),
                 )
             }
             _ => StaticPatternMatch::Malformed(
@@ -394,8 +396,8 @@ fn static_adt_parts<'v>(
         } => Ok((ctor, layout, fields)),
         LoweredValue::Node(_) | LoweredValue::Host { .. } => {
             Err(StaticPatternMatch::RuntimeTest(format!(
-                "a `{pat_ctor}` constructor pattern tested against a value whose \
-                 constructor is known only at run time"
+                "`match` arm selection by a `{pat_ctor}` constructor pattern tested \
+                 against a value whose constructor is known only at run time"
             )))
         }
         _ => Err(StaticPatternMatch::Malformed(format!(
@@ -23218,12 +23220,12 @@ impl<'program> LowerCtx<'program> {
                     self.retain_host_match_control(span);
                     self.reject_static_match(
                         span,
-                        format!("`match` arm selection by {reason}"),
+                        reason,
                         chelis_types::unimplemented_rejection!(
                             618,
-                            "static arm selection lowers a `match` only when every \
-                             pattern test is decided by compile-time-known constructors; \
-                             selecting an arm by a run-time value is not implemented"
+                            "static arm selection lowers a `match` only when its patterns \
+                             read compile-time-known structure; selecting an arm by, or \
+                             destructuring, a run-time value is not implemented"
                         ),
                     );
                 }
