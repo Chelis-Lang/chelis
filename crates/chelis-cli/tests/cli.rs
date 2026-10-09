@@ -9499,6 +9499,46 @@ fn explicit_accumulator_pairs_agree_in_eval_and_c() {
     }
 }
 
+/// chelis#3370: the C lane computes a matmul's products inside its sum
+/// instead of storing the rank-3 product, and prints exactly what eval
+/// prints. The operands make the [05-OP-30] tree observable: the first row
+/// totals 1.0 under the canonical tree and 0.0 under a left fold.
+/// They also carry signed zeros, subnormals, overflow to infinity,
+/// infinity minus infinity, and bf16/f16 rounding of each product, at every
+/// float dtype and explicit accumulator, batched, on a symbolic-extent
+/// helper, and on computed operands. A product read twice and an integer
+/// product stay stored and agree too.
+#[test]
+fn inlined_matmul_products_agree_in_eval_and_c() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("matmul.ch");
+    let expected = include_str!("fixtures/inlined_product/matmul.expected");
+    write_file(&path, include_str!("fixtures/inlined_product/matmul.ch"));
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval");
+    assert!(eval.status.success(), "eval: {eval:?}");
+    assert_eq!(String::from_utf8_lossy(&eval.stdout), expected, "eval");
+    let out_dir = dir.path().join("matmul_out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let run = StdCommand::new(out_dir.join("matmul"))
+        .output()
+        .expect("compiled program should run");
+    assert!(run.status.success(), "run: {run:?}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "C");
+}
+
 /// chelis#3009: a `sum`-family rejection decided after the call was checked
 /// (at the declaration boundary, or when a hole binds) carries the call's
 /// span. `g1h` is an authored `Int` binder; `a4` is a hole bound to bool.

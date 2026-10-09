@@ -159,13 +159,14 @@ fn inline_matmul_forms_preserve_primitive_arithmetic_and_storage() {
             counts.blas, 0,
             "vendor GEMM changes the specified reduction tree"
         );
-        // Two inserted operands and their product each have shape [8,16,4];
-        // the reduced output is [8,4]. The fifth allocation site owns the
+        // The sum computes each product of the two [8,16,4] expansions
+        // inside its canonical tree (chelis#3370), so neither expansion nor
+        // their product is stored: the reduced [8,4] output is the only
+        // literal-shape submission, and the second allocation site owns the
         // per-output 16-element scratch via its checked dynamic leaf count.
-        // The literal-shape byte total below measures the four DAG submissions.
-        assert_eq!(counts.allocs, 5);
+        assert_eq!(counts.allocs, 2);
         assert_eq!(counts.reduction_scratch_allocs, 1);
-        assert_eq!(counts.total_alloc_bytes, (3 * 8 * 16 * 4 + 8 * 4) * 4);
+        assert_eq!(counts.total_alloc_bytes, 8 * 4 * 4);
     }
     assert_eq!(direct_c.total_alloc_bytes, inline_c.total_alloc_bytes);
     eprintln!(

@@ -8,6 +8,7 @@
 //! **Invariant:** fusion never duplicates computation. A node with multiple
 //! consumers is never absorbed into a fused chain.
 
+use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{Dag, DagNode, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
@@ -479,6 +480,101 @@ pub fn reduction_inlined_fused_elems(dag: &Dag) -> UnordSet<NodeId> {
     inlined
 }
 
+/// A float `Sum(Mul(Expand(x), Expand(y)))`, spec/05 section 4.1's matmul
+/// graph among others, whose product a lane may compute leaf by leaf inside
+/// the sum instead of materializing the expanded operands and their product
+/// (chelis#3370).
+///
+/// Each leaf is still the operand-dtype product the `Mul` defines, entering
+/// the `Sum`'s canonical tree ([05-OP-30]) in the same position, so the
+/// result bits are those of the materialized graph. Float multiplication
+/// has no trap, and both expansions keep their checked plans, so the traps
+/// are too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlinedProduct {
+    pub sum: NodeId,
+    pub product: NodeId,
+    /// The `Mul`'s two `Expand` operands, in operand order.
+    pub views: [NodeId; 2],
+}
+
+impl InlinedProduct {
+    /// The product and its two expansions, which the lane does not store.
+    pub fn skipped(&self) -> [NodeId; 3] {
+        [self.product, self.views[0], self.views[1]]
+    }
+}
+
+/// Every [`InlinedProduct`] in `dag`.
+///
+/// A match requires that nothing else reads the intermediates: the product
+/// and each expansion have exactly one consumer, are no other node's shape
+/// or claim dependency, and carry no activation, and no `Drop` releases an
+/// expansion's operand before the sum reads it. The expansions and the
+/// product share one type, so the expansions' target checks discharge the
+/// product's operand agreement. An extent claim an intermediate owns stays
+/// the lane's to check at that intermediate's position, from the extents
+/// the expansions' checked plans hold.
+pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
+    let consumer_count = build_consumer_counts(dag);
+    let mut dependency = vec![false; dag.len()];
+    for node in dag.nodes() {
+        for id in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            dependency[id.0] = true;
+        }
+    }
+    let private = |node: &DagNode| {
+        consumer_count[node.id.0] == 1 && !dependency[node.id.0] && node.owner.activation.is_none()
+    };
+    let mut found = Vec::new();
+    for sum in dag.nodes() {
+        if !matches!(sum.op, RiscOp::Sum { .. })
+            || sum.inputs.len() != 1
+            || sum.owner.activation.is_some()
+        {
+            continue;
+        }
+        let Some(product) = dag.get(sum.inputs[0]) else {
+            continue;
+        };
+        if !matches!(product.op, RiscOp::Mul)
+            || product.inputs.len() != 2
+            || !matches!(
+                product.output_type.precision,
+                Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+            )
+            || !private(product)
+        {
+            continue;
+        }
+        let [Some(lhs), Some(rhs)] = [product.inputs[0], product.inputs[1]].map(|id| dag.get(id))
+        else {
+            continue;
+        };
+        let admitted = |view: &DagNode| {
+            matches!(view.op, RiscOp::Expand { .. })
+                && private(view)
+                && view.output_type == product.output_type
+        };
+        if !admitted(lhs) || !admitted(rhs) {
+            continue;
+        }
+        let operands = lhs.inputs.iter().chain(&rhs.inputs).collect::<Vec<_>>();
+        let released_early = dag.nodes()[..sum.id.0].iter().any(|node| {
+            matches!(node.op, RiscOp::Drop) && node.inputs.iter().any(|id| operands.contains(&id))
+        });
+        if released_early {
+            continue;
+        }
+        found.push(InlinedProduct {
+            sum: sum.id,
+            product: product.id,
+            views: [lhs.id, rhs.id],
+        });
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +810,115 @@ mod tests {
             fused_node.reusable_input, None,
             "fusion must not choose between conflicting reusable external inputs"
         );
+    }
+
+    /// spec/05 section 4.1's `[2,3] x [3,4]` matmul graph at `prim`, with
+    /// `extra` applied before the sum's root is added. Returns the DAG, the
+    /// two operand loads, both expansions, the product, and the sum.
+    fn matmul_graph(prim: Prim, extra: impl FnOnce(&mut Dag, [NodeId; 5])) -> (Dag, [NodeId; 6]) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let ty = |dims: &[usize]| TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision: prim,
+        };
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty(&[2, 3]),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty(&[3, 4]),
+            None,
+        );
+        let expand = |axis, size| RiscOp::Expand {
+            axis,
+            size: crate::dag::RtDim::Lit(size),
+        };
+        let lhs = dag.add_node(decl, expand(2, 4), vec![a], ty(&[2, 3, 4]), None);
+        let rhs = dag.add_node(decl, expand(0, 2), vec![b], ty(&[2, 3, 4]), None);
+        let product = dag.add_node(decl, RiscOp::Mul, vec![lhs, rhs], ty(&[2, 3, 4]), None);
+        extra(&mut dag, [a, b, lhs, rhs, product]);
+        let sum = dag.add_node(
+            decl,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: if prim.is_float() && !matches!(prim, Prim::Bf16 | Prim::F16) {
+                    prim
+                } else if prim.is_float() {
+                    Prim::F32
+                } else {
+                    Prim::Int64
+                },
+            },
+            vec![product],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
+                precision: if matches!(prim, Prim::Bf16 | Prim::F16) {
+                    Prim::F32
+                } else if prim.is_float() {
+                    prim
+                } else {
+                    Prim::Int64
+                },
+            },
+            None,
+        );
+        dag.add_root(sum);
+        (dag, [a, b, lhs, rhs, product, sum])
+    }
+
+    #[test]
+    fn matmul_products_are_inlined_at_every_float_dtype() {
+        for prim in [Prim::F32, Prim::F64, Prim::Bf16, Prim::F16] {
+            let (dag, [_, _, lhs, rhs, product, sum]) = matmul_graph(prim, |_, _| {});
+            assert_eq!(
+                reduction_inlined_products(&dag),
+                vec![InlinedProduct {
+                    sum,
+                    product,
+                    views: [lhs, rhs],
+                }],
+                "{prim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn observed_or_trapping_products_are_not_inlined() {
+        type Extra = fn(&mut Dag, [NodeId; 5]);
+        let observed: [(&str, Prim, Extra); 6] = [
+            // Integer products trap on overflow before any sum addition.
+            ("integer", Prim::Int64, |_, _| {}),
+            ("product root", Prim::F32, |dag, ids| dag.add_root(ids[4])),
+            ("expansion root", Prim::F32, |dag, ids| dag.add_root(ids[2])),
+            ("product read twice", Prim::F32, |dag, ids| {
+                let decl = dag.declare("other");
+                let ty = dag.get(ids[4]).unwrap().output_type.clone();
+                let neg = dag.add_node(decl, RiscOp::Neg, vec![ids[4]], ty, None);
+                dag.add_root(neg);
+            }),
+            ("product is a shape dependency", Prim::F32, |dag, ids| {
+                let decl = dag.declare("other");
+                let ty = dag.get(ids[0]).unwrap().output_type.clone();
+                let neg = dag.add_node(decl, RiscOp::Neg, vec![ids[0]], ty, None);
+                dag.node_mut(neg).unwrap().shape_deps.push(ids[4]);
+                dag.add_root(neg);
+            }),
+            ("operand released before the sum", Prim::F32, |dag, ids| {
+                let decl = dag.declare("other");
+                let ty = dag.get(ids[0]).unwrap().output_type.clone();
+                dag.add_node(decl, RiscOp::Drop, vec![ids[0]], ty, None);
+            }),
+        ];
+        for (case, prim, extra) in observed {
+            let (dag, _) = matmul_graph(prim, extra);
+            assert_eq!(reduction_inlined_products(&dag), vec![], "{case}");
+        }
     }
 }

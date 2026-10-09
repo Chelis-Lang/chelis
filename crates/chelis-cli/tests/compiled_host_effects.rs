@@ -818,6 +818,41 @@ fn matmul_operand_disagreements_trap_in_matmul_on_both_lanes() {
     }
 }
 
+/// chelis#3370: the C lane computes the product of a symbolic-extent matmul
+/// helper inside its sum, and that product carries the helper's `n` claim.
+/// Fed operands whose `n` extents disagree at run time, both lanes trap at
+/// the same entry check with the same message, before any product is
+/// formed. Fed agreeing extents, both lanes print the same result.
+#[test]
+fn inlined_claimed_matmul_extents_trap_and_agree_on_both_lanes() {
+    let runtime = |count: &str| format!("tensor_to_scalar(sum(to_tensor({count}), 0))");
+    let ones = |count: &str| format!("to_tensor(map(fn (i: i64) -> 1.5f32, range(0i64, {count})))");
+    let source = |(a_count, rows): (&str, &str), (b_count, cols): (&str, &str)| {
+        format!(
+            "def square[n](a: tensor[n, 7, f32], b: tensor[7, n, f32]) -> tensor[n, n, f32] = matmul(a, b)\n\
+             def main() -> tensor[*, *, f32] = square(reshape({}, [{}, 7i64]), reshape({}, [7i64, {}]))\n",
+            ones(a_count),
+            runtime(rows),
+            ones(b_count),
+            runtime(cols),
+        )
+    };
+    let two = ("14i64", "[1i64, 1i64]");
+    let run =
+        parity::assert_lanes_agree(&source(("21i64", "[1i64, 2i64]"), two), "square_disagree");
+    assert_eq!(run.status, Some(1), "{run:?}");
+    assert_eq!(
+        run.failure, "numeric trap: domain in load at i64",
+        "{run:?}"
+    );
+    assert_eq!(
+        run.context, "extent `n`: a axis 0 = 3, b axis 1 = 2",
+        "{run:?}"
+    );
+    let run = parity::assert_lanes_agree(&source(two, two), "square_agree");
+    assert_eq!(run.status, Some(0), "{run:?}");
+}
+
 /// The lanes recognise matmul's decomposed product by its two expands
 /// carrying the matmul call's one span (`tier2::is_matmul_product`), a
 /// heuristic until chelis#3125 marks the product structurally. This pins

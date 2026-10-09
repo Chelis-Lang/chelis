@@ -45,9 +45,11 @@ fn checked(source: &str) -> bool {
             }
         }
     }
-    // The loop reads the plan's checked projection once and makes no
-    // per-element runtime call.
+    // The loop reads the plan's checked projection once, through the terms
+    // an inlined product's sum also reads, and makes no per-element runtime
+    // call.
     let movement_loop = method(source, "emit_movement_loop");
+    let terms = method(source, "emit_movement_terms");
     [
         "chelis_movement_base(",
         "chelis_movement_term(",
@@ -55,8 +57,10 @@ fn checked(source: &str) -> bool {
         "term(\"SCALE\"",
     ]
     .iter()
-    .all(|required| movement_loop.contains(required))
+    .all(|required| terms.contains(required))
+        && movement_loop.contains("self.emit_movement_terms(")
         && !movement_loop.contains("chelis_movement_index(")
+        && !terms.contains("chelis_movement_index(")
 }
 #[test]
 fn all_five_movement_emitters_use_checked_plans_without_rank_scratch() {

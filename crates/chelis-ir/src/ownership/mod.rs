@@ -359,6 +359,10 @@ impl<'a> VerifiedDagView<'a> {
         crate::fuse::reduction_inlined_fused_elems(self.dag)
     }
 
+    pub fn reduction_inlined_products(self) -> Vec<crate::fuse::InlinedProduct> {
+        crate::fuse::reduction_inlined_products(self.dag)
+    }
+
     pub fn first_integer_abs_node(self) -> Option<NodeId> {
         crate::analysis::first_integer_abs_node(self.dag)
     }

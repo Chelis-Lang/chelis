@@ -577,8 +577,14 @@ fn build_storage_plan(
     lane: StorageLaneKind,
 ) -> Result<BuiltStoragePlan, OwnershipError> {
     let mut skipped = dag.reduction_inlined_fused_elems();
-    if lane == StorageLaneKind::Hip {
-        skipped.extend(hip_emission_literals(dag));
+    match lane {
+        // The C emitter computes an inlined product inside its sum.
+        StorageLaneKind::C => skipped.extend(
+            dag.reduction_inlined_products()
+                .iter()
+                .flat_map(crate::fuse::InlinedProduct::skipped),
+        ),
+        StorageLaneKind::Hip => skipped.extend(hip_emission_literals(dag)),
     }
     let mut placements = classify_nodes(dag, lane, &skipped);
     let owner_of = compute_owner_map(&placements);
@@ -869,23 +875,13 @@ fn extend_lifetimes(
             continue;
         }
         let mut effective_inputs = match &node.op {
-            RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
-                if let Some(input) = node.inputs.first().copied()
-                    && matches!(placements[input.0], StoragePlacement::Skipped)
-                {
-                    dag.get(input)
-                        .expect("verified skipped reduction input names a node")
-                        .inputs
-                        .clone()
-                } else {
-                    node.inputs.clone()
-                }
-            }
             RiscOp::Drop => match placements[node.id.0] {
                 StoragePlacement::TerminalDrop { source } => vec![source],
                 _ => node.inputs.clone(),
             },
-            _ => node.inputs.clone(),
+            // A node computing a skipped input inline reads, at its own
+            // position, everything that input would have read.
+            _ => read_through_skipped(dag, placements, &node.inputs),
         };
         // Ownership borrows shape dependencies as well as value inputs. A
         // result-claim witness stores the canonical scalar the producer reads;
@@ -910,6 +906,33 @@ fn extend_lifetimes(
             requirement.last_use_index = epilogue;
         }
     }
+}
+
+/// `inputs`, with each skipped node replaced by its own reads, transitively.
+fn read_through_skipped(
+    dag: VerifiedDagView<'_>,
+    placements: &[StoragePlacement],
+    inputs: &[NodeId],
+) -> Vec<NodeId> {
+    let mut reads = Vec::new();
+    let mut pending = inputs.iter().rev().copied().collect::<Vec<_>>();
+    while let Some(input) = pending.pop() {
+        if !matches!(placements[input.0], StoragePlacement::Skipped) {
+            reads.push(input);
+            continue;
+        }
+        let node = dag.get(input).expect("verified skipped input names a node");
+        pending.extend(
+            node.inputs
+                .iter()
+                .chain(&node.shape_deps)
+                .chain(&node.result_claim_deps)
+                .chain(&node.owner.activation)
+                .rev()
+                .copied(),
+        );
+    }
+    reads
 }
 
 fn assign_slots(

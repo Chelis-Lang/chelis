@@ -60,6 +60,10 @@ pub struct CEmitter {
     use_blas: bool,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: chelis_unord::UnordSet<usize>,
+    /// Products a sum computes leaf by leaf, by the sum's node id
+    /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` emits nothing and
+    /// their expansions emit only their checked plans.
+    inlined_products: BTreeMap<usize, chelis_ir::fuse::InlinedProduct>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
     fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
@@ -492,6 +496,11 @@ impl CEmitter {
                 .into_iter()
                 .map(|id| id.0)
                 .collect(),
+            inlined_products: dag
+                .reduction_inlined_products()
+                .into_iter()
+                .map(|inlined| (inlined.sum.0, inlined))
+                .collect(),
             memory_plan,
             fused_reuse,
             reused_sources: chelis_unord::UnordSet::new(),
@@ -722,7 +731,13 @@ impl CEmitter {
                 continue;
             }
             e.emit_input_axis_result_guards(node, dag);
-            if let RiscOp::Load { name } = &node.op {
+            if e.inlined_view(node.id).is_some() && matches!(node.op, RiscOp::Mul) {
+                // A product its sum computes inline keeps its extent checks
+                // here, on its expansions' plan extents, and computes nothing.
+                e.emit_span_comments(node);
+                e.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
+                e.emit_same_shape_result_guards(node);
+            } else if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
@@ -744,10 +759,7 @@ impl CEmitter {
                 })
                 .map(|site| {
                     let chelis_ir::dag::RtAxis::Lit(axis) = site.producer_axis();
-                    (
-                        axis as usize,
-                        format!("chelis_tensor_shape(t{}, {axis})", node.id.0),
-                    )
+                    (axis as usize, e.tensor_extent(node.id, axis as usize))
                 })
                 .collect::<Vec<_>>();
             if let Some(sites) = e.local_dim_guard_sites.get(&node.id.0) {
@@ -757,10 +769,7 @@ impl CEmitter {
                         chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
                     ) && !realized.iter().any(|(existing, _)| existing == axis)
                     {
-                        realized.push((
-                            *axis,
-                            format!("chelis_tensor_shape(t{}, {axis})", node.id.0),
-                        ));
+                        realized.push((*axis, e.tensor_extent(node.id, *axis)));
                     }
                 }
             }
@@ -1734,6 +1743,8 @@ impl CEmitter {
                         &node.output_type,
                         "sum",
                     )?;
+                } else if let Some(inlined) = self.inlined_products.get(&id).copied() {
+                    self.emit_inlined_product_sum(id, *axis, inlined, &node.output_type, dag);
                 } else {
                     self.emit_reduce_sum(
                         id,
@@ -7034,6 +7045,90 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
 
+    /// chelis#3370: `Sum(Mul(Expand(x), Expand(y)))` without storing the
+    /// expansions or their product. Each leaf is the product the `Mul`
+    /// defines, at the operand dtype with its finalization, read through the
+    /// two expansions' checked projections, and enters the same canonical
+    /// tree ([05-OP-30]) at the same position as the materialized graph's
+    /// leaf, so the result bits are identical.
+    fn emit_inlined_product_sum(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inlined: chelis_ir::fuse::InlinedProduct,
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let product_ty = &dag
+            .get(inlined.product)
+            .expect("verified inlined product")
+            .output_type;
+        let [lhs, rhs] = inlined.views.map(|view| view.0);
+        let [lhs_source, rhs_source] = inlined
+            .views
+            .map(|view| dag.get(view).expect("verified expansion").inputs[0].0);
+        let rank = product_ty.dims.len();
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        let acc_et = Self::elem_type(ty);
+        let operand_et = Self::elem_type(product_ty);
+        self.emit_reduction_plan(id, None, product_ty, &[axis], ty, "CHELIS_REDUCE_SUM", true);
+        self.emit_slot_wrapper(id, ty);
+        self.open_element_loop(
+            id,
+            "outer",
+            &format!("t{id}_size"),
+            Some("#pragma omp parallel for"),
+        );
+        // The result coordinates are the product's without the summed axis,
+        // in row-major order; together they place both operands' first leaf.
+        self.line(&format!("{index_type} __rest = outer;"));
+        self.line(&format!("{index_type} __lhs_{id} = t{lhs}_base;"));
+        self.line(&format!("{index_type} __rhs_{id} = t{rhs}_base;"));
+        for d in (0..rank).rev().filter(|d| *d != axis) {
+            self.line(&format!(
+                "{{ const {index_type} __c = __rest % t{lhs}_extent{d}; __rest /= t{lhs}_extent{d}; __lhs_{id} += __c * t{lhs}_scale{d}; __rhs_{id} += __c * t{rhs}_scale{d}; }}"
+            ));
+        }
+        self.emit_sum_level(id, &format!("t{id}_leaf_count"), ty.precision);
+        self.line(&format!(
+            "for ({index_type} __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
+        ));
+        self.indent += 1;
+        let read = |source: usize, side: &str, view: usize| {
+            format!(
+                "((const {operand_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}]"
+            )
+        };
+        let (lhs_read, rhs_read) = (read(lhs_source, "lhs", lhs), read(rhs_source, "rhs", rhs));
+        // The leaf the materialized `Mul` stores, as the `Sum` loads it
+        // (`emit_binary`, `emit_binary_reduced_f`, `emit_reduce_sum_general`).
+        let leaf = if Self::is_reduced_float(product_ty) {
+            let load = Self::reduced_to_f32_fn(product_ty.precision);
+            let store = Self::f32_to_reduced_fn(product_ty.precision);
+            format!("{load}({store}({load}({lhs_read}) * {load}({rhs_read})))")
+        } else {
+            finalize_elem(
+                crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
+                format!("({lhs_read}) * ({rhs_read})"),
+                product_ty,
+            )
+        };
+        self.line(&format!(
+            "__sum_level_{id}[__reduce_i] = ({acc_et})({leaf});"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.emit_sum_fold(id, ty.precision);
+        self.close_element_loop();
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
+        for view in [lhs, rhs] {
+            self.line(&format!("chelis_movement_plan_release(t{view}_movement);"));
+        }
+    }
+
     /// C zero-literal for a Chelis precision used as an accumulator
     /// initializer. Returns the source-text form (not a runtime
     /// expression) so it can be inlined into emitted assignments.
@@ -8373,8 +8468,18 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let elem_type = Self::elem_type(ty);
         self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_expand_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
         self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
-        self.emit_slot_wrapper(id, ty);
         let rank = ty.dims.len();
+        if self
+            .inlined_products
+            .values()
+            .any(|inlined| inlined.views.contains(&NodeId(id)))
+        {
+            // The consuming sum reads the source through this plan's
+            // projection and releases the plan; nothing is stored here.
+            self.emit_movement_terms(id, rank);
+            return;
+        }
+        self.emit_slot_wrapper(id, ty);
         self.emit_movement_loop(
             id,
             rank,
@@ -8657,7 +8762,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     .iter()
                     .any(|(existing, _): &(usize, String)| *existing == axis)
                 {
-                    extents.push((axis, format!("chelis_tensor_shape(t{}, {axis})", member.0)));
+                    extents.push((axis, self.tensor_extent(*member, axis)));
                 }
             };
         if let Some(sites) = self.local_dim_guard_sites.get(&node.id.0) {
@@ -8718,7 +8823,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .0;
         carriers
             .into_iter()
-            .map(|(axis, carrier)| (axis, Self::bound_c_expr(&carrier, inputs, operand, axis)))
+            .map(|(axis, carrier)| {
+                // An inlined product or expansion has no tensor.
+                if let RtDim::InputAxis {
+                    tensor,
+                    axis: RtAxis::Lit(source_axis),
+                } = carrier
+                    && let Some(source) = inputs.get(tensor)
+                    && self.inlined_view(*source).is_some()
+                {
+                    return (axis, self.tensor_extent(*source, source_axis as usize));
+                }
+                (axis, Self::bound_c_expr(&carrier, inputs, operand, axis))
+            })
             .collect()
     }
 
@@ -8807,26 +8924,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             dims: vec![],
             precision: Prim::Int64,
         });
-        let term = |field: &str, axis: usize| {
-            format!(
-                "chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"
-            )
-        };
         self.line("{");
         self.indent += 1;
-        self.line(&format!(
-            "const {index_type} t{id}_base = chelis_movement_base(t{id}_movement);"
-        ));
-        for axis in 0..rank {
-            self.line(&format!(
-                "const {index_type} t{id}_extent{axis} = {};",
-                term("MODULUS", axis)
-            ));
-            self.line(&format!(
-                "const {index_type} t{id}_scale{axis} = {};",
-                term("SCALE", axis)
-            ));
-        }
+        self.emit_movement_terms(id, rank);
         self.line(&format!("{index_type} i = 0;"));
         let mut offset = format!("t{id}_base");
         for axis in 0..rank {
@@ -8848,6 +8948,58 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// For a node an inlined product sum does not store, the expansion
+    /// whose checked plan holds its extents: the node itself for an
+    /// expansion, the first expansion for the product (both expansions and
+    /// the product share one type).
+    fn inlined_view(&self, node: NodeId) -> Option<usize> {
+        self.inlined_products.values().find_map(|inlined| {
+            if inlined.views.contains(&node) {
+                Some(node.0)
+            } else {
+                (inlined.product == node).then_some(inlined.views[0].0)
+            }
+        })
+    }
+
+    /// The C expression for `node`'s extent at `axis`: its tensor's
+    /// metadata, or for an unstored node the extent its expansion's checked
+    /// plan holds ([`Self::inlined_view`]), which that plan declared earlier.
+    fn tensor_extent(&self, node: NodeId, axis: usize) -> String {
+        match self.inlined_view(node) {
+            Some(view) => format!("t{view}_extent{axis}"),
+            None => format!("chelis_tensor_shape(t{}, {axis})", node.0),
+        }
+    }
+
+    /// [05-OP-33] Declare a movement plan's checked projection once: the
+    /// base `t{id}_base`, and per counted-domain axis its extent
+    /// `t{id}_extent{axis}` and scale `t{id}_scale{axis}`.
+    fn emit_movement_terms(&mut self, id: usize, rank: usize) {
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        let term = |field: &str, axis: usize| {
+            format!(
+                "chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"
+            )
+        };
+        self.line(&format!(
+            "const {index_type} t{id}_base = chelis_movement_base(t{id}_movement);"
+        ));
+        for axis in 0..rank {
+            self.line(&format!(
+                "const {index_type} t{id}_extent{axis} = {};",
+                term("MODULUS", axis)
+            ));
+            self.line(&format!(
+                "const {index_type} t{id}_scale{axis} = {};",
+                term("SCALE", axis)
+            ));
+        }
     }
 
     /// [05-OP-33] Read a reduction or window plan's checked group and leaf
