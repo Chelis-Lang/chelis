@@ -91,6 +91,53 @@ sqrt f32 1fffffff 007fffff # gradual-underflow: sqrt of the largest subnormal
 sqrt f32 3fb504f3 40000000 # round-once: sqrt(2)
 sqrt f32 3fddb3d7 40400000 # round-once: sqrt(3)
 sqrt f32 5f7fffff 7f7fffff # round-once: sqrt of the largest finite
+pow f32 7fc00000 7fc12345 40000000 # ieee-special: quiet NaN with payload base gives NaN
+pow f32 7fc00000 40000000 ffc00000 # ieee-special: negative quiet NaN exponent gives NaN
+pow f32 7fc00000 7f800001 40400000 # ieee-special: signaling NaN base gives NaN
+pow f32 3f800000 7fc12345 00000000 # ieee-special: pow(quiet NaN, +0) is 1
+pow f32 3f800000 ffc00000 80000000 # ieee-special: pow(quiet NaN, -0) is 1
+pow f32 3f800000 3f800000 7fc12345 # ieee-special: pow(1, quiet NaN) is 1
+pow f32 7fc00000 ffa00001 00000000 # ieee-special: pow(signaling NaN, +0) is invalid
+pow f32 7fc00000 3f800000 7f800001 # ieee-special: pow(1, signaling NaN) is invalid
+pow f32 3f800000 3f800000 ff800000 # ieee-special: pow(1, -inf) is 1
+pow f32 3f800000 bf800000 7f800000 # ieee-special: pow(-1, inf) is 1
+pow f32 3f800000 bf800000 ff800000 # ieee-special: pow(-1, -inf) is 1
+pow f32 7fc00000 c0000000 3f000000 # ieee-special: negative base, non-integer exponent is invalid
+pow f32 7f800000 ff800000 3f000000 # ieee-special: pow(-inf, 0.5) is inf
+pow f32 3f800000 00000000 00000000 # ieee-special: pow(0, 0) is 1
+pow f32 ff800000 80000000 c0400000 # signed-zero: pow(-0, negative odd integer) is -inf
+pow f32 7f800000 00000000 c0400000 # ieee-special: pow(+0, negative odd integer) is inf
+pow f32 7f800000 80000000 c0000000 # signed-zero: pow(-0, negative even integer) is inf
+pow f32 7f800000 80000000 bf000000 # signed-zero: pow(-0, negative non-integer) is inf
+pow f32 7f800000 80000000 ff800000 # signed-zero: pow(-0, -inf) is inf
+pow f32 80000000 80000000 40400000 # signed-zero: pow(-0, positive odd integer) is -0
+pow f32 00000000 80000000 40000000 # signed-zero: pow(-0, positive even integer) is +0
+pow f32 00000000 80000000 3f000000 # signed-zero: pow(-0, positive non-integer) is +0
+pow f32 00000000 80000000 7f800000 # signed-zero: pow(-0, inf) is +0
+pow f32 7f800000 40000000 7f800000 # ieee-special: pow(2, inf) is inf
+pow f32 00000000 3f000000 7f800000 # ieee-special: pow(0.5, inf) is +0
+pow f32 00000000 c0000000 ff800000 # ieee-special: pow(-2, -inf) is +0
+pow f32 7f800000 bf000000 ff800000 # ieee-special: pow(-0.5, -inf) is inf
+pow f32 7f800000 7f800000 3f000000 # ieee-special: pow(inf, positive) is inf
+pow f32 00000000 7f800000 bf000000 # ieee-special: pow(inf, negative) is +0
+pow f32 ff800000 ff800000 40400000 # ieee-special: pow(-inf, positive odd integer) is -inf
+pow f32 7f800000 ff800000 40000000 # ieee-special: pow(-inf, positive even integer) is inf
+pow f32 80000000 ff800000 c0400000 # signed-zero: pow(-inf, negative odd integer) is -0
+pow f32 00000000 ff800000 c0000000 # signed-zero: pow(-inf, negative even integer) is +0
+pow f32 41100000 c0400000 40000000 # correct-rounding: negative base, even integer exponent is 9
+pow f32 c1d80000 c0400000 40400000 # correct-rounding: negative base, odd integer exponent is -27
+pow f32 be000000 c0000000 c0400000 # correct-rounding: negative base, negative odd exponent is -1/8
+pow f32 40ec7324 bf800001 4b800000 # correct-rounding: negative base, exponent 2^p is an even integer
+pow f32 42b05cff 40c00000 40200000 # correct-rounding: 6^2.5
+pow f32 3fb504f3 40000000 3f000000 # correct-rounding: 2^0.5 is sqrt(2)
+pow f32 3dcccccd 41200000 bf800000 # correct-rounding: 10^-1
+pow f32 1a3504f3 00000001 3f000000 # gradual-underflow: square root of the smallest subnormal
+pow f32 007fffff 007fffff 3f800000 # gradual-underflow: subnormal base, exponent 1
+pow f32 00100000 3f000000 43010000 # gradual-underflow: 0.5^(3 - emin) is subnormal
+pow f32 00000000 3f000000 43160000 # gradual-underflow: half the smallest subnormal rounds to +0 (tie to even)
+pow f32 7f800000 40000000 43000000 # ieee-special: 2^emax+1 overflows to inf
+pow f32 ff800000 c0000000 43010000 # ieee-special: (-2)^odd overflow is -inf
+pow f32 5f7fffff 7f7fffff 3f000000 # correct-rounding: square root of the largest finite
 fma f32 32800000 3f800400 3f800400 bf800800 # round-once: fused: keeps the low product bits
 fma f32 7fc00000 7fc12345 3f800000 3f800000 # canonical-nan: quiet NaN with payload operand
 fma f32 7fc00000 3f800000 3f800000 ffc00000 # canonical-nan: negative quiet NaN addend
@@ -231,6 +278,53 @@ sqrt f64 1fffffffffffffff 000fffffffffffff # gradual-underflow: sqrt of the larg
 sqrt f64 3ff6a09e667f3bcd 4000000000000000 # round-once: sqrt(2)
 sqrt f64 3ffbb67ae8584caa 4008000000000000 # round-once: sqrt(3)
 sqrt f64 5fefffffffffffff 7fefffffffffffff # round-once: sqrt of the largest finite
+pow f64 7ff8000000000000 7ff8000000012345 4000000000000000 # ieee-special: quiet NaN with payload base gives NaN
+pow f64 7ff8000000000000 4000000000000000 fff8000000000000 # ieee-special: negative quiet NaN exponent gives NaN
+pow f64 7ff8000000000000 7ff0000000000001 4008000000000000 # ieee-special: signaling NaN base gives NaN
+pow f64 3ff0000000000000 7ff8000000012345 0000000000000000 # ieee-special: pow(quiet NaN, +0) is 1
+pow f64 3ff0000000000000 fff8000000000000 8000000000000000 # ieee-special: pow(quiet NaN, -0) is 1
+pow f64 3ff0000000000000 3ff0000000000000 7ff8000000012345 # ieee-special: pow(1, quiet NaN) is 1
+pow f64 7ff8000000000000 fff4000000000001 0000000000000000 # ieee-special: pow(signaling NaN, +0) is invalid
+pow f64 7ff8000000000000 3ff0000000000000 7ff0000000000001 # ieee-special: pow(1, signaling NaN) is invalid
+pow f64 3ff0000000000000 3ff0000000000000 fff0000000000000 # ieee-special: pow(1, -inf) is 1
+pow f64 3ff0000000000000 bff0000000000000 7ff0000000000000 # ieee-special: pow(-1, inf) is 1
+pow f64 3ff0000000000000 bff0000000000000 fff0000000000000 # ieee-special: pow(-1, -inf) is 1
+pow f64 7ff8000000000000 c000000000000000 3fe0000000000000 # ieee-special: negative base, non-integer exponent is invalid
+pow f64 7ff0000000000000 fff0000000000000 3fe0000000000000 # ieee-special: pow(-inf, 0.5) is inf
+pow f64 3ff0000000000000 0000000000000000 0000000000000000 # ieee-special: pow(0, 0) is 1
+pow f64 fff0000000000000 8000000000000000 c008000000000000 # signed-zero: pow(-0, negative odd integer) is -inf
+pow f64 7ff0000000000000 0000000000000000 c008000000000000 # ieee-special: pow(+0, negative odd integer) is inf
+pow f64 7ff0000000000000 8000000000000000 c000000000000000 # signed-zero: pow(-0, negative even integer) is inf
+pow f64 7ff0000000000000 8000000000000000 bfe0000000000000 # signed-zero: pow(-0, negative non-integer) is inf
+pow f64 7ff0000000000000 8000000000000000 fff0000000000000 # signed-zero: pow(-0, -inf) is inf
+pow f64 8000000000000000 8000000000000000 4008000000000000 # signed-zero: pow(-0, positive odd integer) is -0
+pow f64 0000000000000000 8000000000000000 4000000000000000 # signed-zero: pow(-0, positive even integer) is +0
+pow f64 0000000000000000 8000000000000000 3fe0000000000000 # signed-zero: pow(-0, positive non-integer) is +0
+pow f64 0000000000000000 8000000000000000 7ff0000000000000 # signed-zero: pow(-0, inf) is +0
+pow f64 7ff0000000000000 4000000000000000 7ff0000000000000 # ieee-special: pow(2, inf) is inf
+pow f64 0000000000000000 3fe0000000000000 7ff0000000000000 # ieee-special: pow(0.5, inf) is +0
+pow f64 0000000000000000 c000000000000000 fff0000000000000 # ieee-special: pow(-2, -inf) is +0
+pow f64 7ff0000000000000 bfe0000000000000 fff0000000000000 # ieee-special: pow(-0.5, -inf) is inf
+pow f64 7ff0000000000000 7ff0000000000000 3fe0000000000000 # ieee-special: pow(inf, positive) is inf
+pow f64 0000000000000000 7ff0000000000000 bfe0000000000000 # ieee-special: pow(inf, negative) is +0
+pow f64 fff0000000000000 fff0000000000000 4008000000000000 # ieee-special: pow(-inf, positive odd integer) is -inf
+pow f64 7ff0000000000000 fff0000000000000 4000000000000000 # ieee-special: pow(-inf, positive even integer) is inf
+pow f64 8000000000000000 fff0000000000000 c008000000000000 # signed-zero: pow(-inf, negative odd integer) is -0
+pow f64 0000000000000000 fff0000000000000 c000000000000000 # signed-zero: pow(-inf, negative even integer) is +0
+pow f64 4022000000000000 c008000000000000 4000000000000000 # correct-rounding: negative base, even integer exponent is 9
+pow f64 c03b000000000000 c008000000000000 4008000000000000 # correct-rounding: negative base, odd integer exponent is -27
+pow f64 bfc0000000000000 c000000000000000 c008000000000000 # correct-rounding: negative base, negative odd exponent is -1/8
+pow f64 401d8e64b8d4ddac bff0000000000001 4340000000000000 # correct-rounding: negative base, exponent 2^p is an even integer
+pow f64 40560b9fd68a4554 4018000000000000 4004000000000000 # correct-rounding: 6^2.5
+pow f64 3ff6a09e667f3bcd 4000000000000000 3fe0000000000000 # correct-rounding: 2^0.5 is sqrt(2)
+pow f64 3fb999999999999a 4024000000000000 bff0000000000000 # correct-rounding: 10^-1
+pow f64 1e60000000000000 0000000000000001 3fe0000000000000 # gradual-underflow: square root of the smallest subnormal
+pow f64 000fffffffffffff 000fffffffffffff 3ff0000000000000 # gradual-underflow: subnormal base, exponent 1
+pow f64 0002000000000000 3fe0000000000000 4090040000000000 # gradual-underflow: 0.5^(3 - emin) is subnormal
+pow f64 0000000000000000 3fe0000000000000 4090cc0000000000 # gradual-underflow: half the smallest subnormal rounds to +0 (tie to even)
+pow f64 7ff0000000000000 4000000000000000 4090000000000000 # ieee-special: 2^emax+1 overflows to inf
+pow f64 fff0000000000000 c000000000000000 4090040000000000 # ieee-special: (-2)^odd overflow is -inf
+pow f64 5fefffffffffffff 7fefffffffffffff 3fe0000000000000 # correct-rounding: square root of the largest finite
 fma f64 3c90000000000000 3ff0000002000000 3ff0000002000000 bff0000004000000 # round-once: fused: keeps the low product bits
 fma f64 7ff8000000000000 7ff8000000012345 3ff0000000000000 3ff0000000000000 # canonical-nan: quiet NaN with payload operand
 fma f64 7ff8000000000000 3ff0000000000000 3ff0000000000000 fff8000000000000 # canonical-nan: negative quiet NaN addend

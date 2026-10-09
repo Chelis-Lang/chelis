@@ -238,6 +238,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
+            | WireRiscOp::Pow
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
@@ -634,7 +635,9 @@ const _: () = {
     // `NamedCast`; it embeds no numeric payload.
     // Version 27 adds the Tier 1 `Erf` and `Erfc`, unary float primitives
     // grouped with `Atan`; they embed no numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 27);
+    // Version 28 adds the Tier 1 `Pow`, a binary float primitive grouped with
+    // `Div`; it embeds no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 28);
 };
 
 #[cfg(test)]

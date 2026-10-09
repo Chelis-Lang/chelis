@@ -156,6 +156,7 @@ Each row names its governing atom.
 | `Numeric:or:TableA` | [05-OP-27] |
 | `Numeric:pad:TableA` | [05-OP-49] |
 | `Numeric:permute:TableA` | [05-OP-49] |
+| `Numeric:pow:TableA` | [05-OP-79] |
 | `Numeric:prod_reduce:TableA` | [05-OP-14] |
 | `Numeric:rank:TableA` | [05-OP-50] |
 | `Numeric:recip:TableA` | [05-OP-46] |

@@ -445,6 +445,21 @@
       ]
     },
     {
+      "name": "correctly rounded C pow execution at every float width",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "pow_kernel_routes",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-backend-c::pow_kernel_routes::pow_is_correctly_rounded_on_every_c_route_at_every_float_dtype",
+        "chelis-backend-c::pow_kernel_routes::pow_route_oracle_covers_the_decided_cases"
+      ]
+    },
+    {
       "name": "checked key callable scalar and tensor C execution",
       "args": [
         "-p",

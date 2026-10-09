@@ -727,6 +727,7 @@ fn classify_nodes(
                 | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
+                | RiscOp::Pow
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::Mod

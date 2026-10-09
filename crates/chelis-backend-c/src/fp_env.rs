@@ -105,6 +105,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
+        | RiscOp::Pow
         | RiscOp::FloorDiv
         | RiscOp::Neg
         | RiscOp::Exp
@@ -214,6 +215,7 @@ pub fn fused_step_nan_finalization(op: &chelis_ir::dag::FusedStepOp) -> NanFinal
         | FusedStepOp::Sub
         | FusedStepOp::Mul
         | FusedStepOp::Div
+        | FusedStepOp::Pow
         | FusedStepOp::FloorDiv
         | FusedStepOp::TruncDiv
         | FusedStepOp::Neg

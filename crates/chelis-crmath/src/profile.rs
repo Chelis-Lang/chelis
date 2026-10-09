@@ -16,8 +16,8 @@
 //!   nine transcendentals at both widths (special cases, thresholds, and CORE-MATH's
 //!   hardest-to-round inputs);
 //! - `tests/fixtures/profile_obligations.txt`: arithmetic, the explicit fused
-//!   multiply-add, comparisons, conversions, and the expression shapes that
-//!   value-changing optimizations rewrite.
+//!   multiply-add, [05-OP-79]'s `pow` at both widths, comparisons, conversions, and
+//!   the expression shapes that value-changing optimizations rewrite.
 //!
 //! `scripts/vendor_core_math.py` writes all three from MPFR (`obligations --check`
 //! fails when the arithmetic fixture is stale). The C canary is generated here from the
@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 /// One rule of the profile, and the spec text that states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Obligation {
-    /// [05-OP-46]: the transcendentals are correctly rounded.
+    /// [05-OP-46] and [05-OP-79]: the transcendentals and `pow` are correctly rounded.
     CorrectRounding,
     /// [05-OP-46] and [04-NUM-2]: IEEE exceptional values (infinities, invalid
     /// operations, overflow, unordered comparison) are honoured.
@@ -82,8 +82,8 @@ impl Obligation {
     /// The spec text the obligation enforces.
     pub fn spec(self) -> &'static str {
         match self {
-            Obligation::CorrectRounding => "[05-OP-46]",
-            Obligation::IeeeSpecial => "[05-OP-46], [04-NUM-2]",
+            Obligation::CorrectRounding => "[05-OP-46], [05-OP-79]",
+            Obligation::IeeeSpecial => "[05-OP-46], [05-OP-79], [04-NUM-2]",
             Obligation::CanonicalNan => "[04-NUM-2]",
             Obligation::SignedZero => "[04-NUM-2]",
             Obligation::GradualUnderflow => "[04-NUM-2], spec/08-backends.md",
@@ -188,6 +188,14 @@ const KERNEL: &[Class] = &[
     Class::SignedZero,
     Class::SubnormalOperand,
 ];
+const POWER: &[Class] = &[
+    Class::NanOperand,
+    Class::Invalid,
+    Class::InfiniteOperand,
+    Class::SignedZero,
+    Class::SubnormalOperand,
+    Class::SubnormalResult,
+];
 const NARROWING: &[Class] = &[
     Class::NanOperand,
     Class::InfiniteOperand,
@@ -280,6 +288,7 @@ primitives! {
     ("tanh", 32, 1, F32, Some("chelis_cr_tanhf(a)"), KERNEL),
     ("erf", 32, 1, F32, Some("chelis_cr_erff(a)"), KERNEL),
     ("erfc", 32, 1, F32, Some("chelis_cr_erfcf(a)"), KERNEL),
+    ("pow", 32, 2, F32, Some("chelis_cr_powf(a, b)"), POWER),
     ("exp", 64, 1, F64, Some("chelis_cr_exp(a)"), KERNEL),
     ("log", 64, 1, F64, Some("chelis_cr_log(a)"), KERNEL),
     ("sin", 64, 1, F64, Some("chelis_cr_sin(a)"), KERNEL),
@@ -289,6 +298,7 @@ primitives! {
     ("tanh", 64, 1, F64, Some("chelis_cr_tanh(a)"), KERNEL),
     ("erf", 64, 1, F64, Some("chelis_cr_erf(a)"), KERNEL),
     ("erfc", 64, 1, F64, Some("chelis_cr_erfc(a)"), KERNEL),
+    ("pow", 64, 2, F64, Some("chelis_cr_pow(a, b)"), POWER),
 }
 
 impl Primitive {

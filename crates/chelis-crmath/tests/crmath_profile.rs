@@ -94,6 +94,7 @@ fn rust_lane(row: &Row, raw: bool) -> Option<u64> {
             "tanh" => u64::from(chelis_crmath::tanh_f32(a).to_bits()),
             "erf" => u64::from(chelis_crmath::erf_f32(a).to_bits()),
             "erfc" => u64::from(chelis_crmath::erfc_f32(a).to_bits()),
+            "pow" => u64::from(chelis_crmath::pow_f32(a, b()).to_bits()),
             other => panic!("no Rust lane for {other} f32"),
         })
     } else {
@@ -129,6 +130,7 @@ fn rust_lane(row: &Row, raw: bool) -> Option<u64> {
             "tanh" => chelis_crmath::tanh_f64(a).to_bits(),
             "erf" => chelis_crmath::erf_f64(a).to_bits(),
             "erfc" => chelis_crmath::erfc_f64(a).to_bits(),
+            "pow" => chelis_crmath::pow_f64(a, b()).to_bits(),
             other => panic!("no Rust lane for {other} f64"),
         })
     }

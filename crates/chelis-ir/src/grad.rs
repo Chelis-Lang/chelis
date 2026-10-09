@@ -689,6 +689,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
         RiscOp::Div => "div",
+        RiscOp::Pow => "pow",
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
@@ -1520,6 +1521,204 @@ fn compute_adjoints(
             );
             let db = dag.add_node(node.owner, RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
+        }
+        RiscOp::Pow => {
+            // [05-OP-79], with r = pow(x, y) the forward result and m = 2^p
+            // for the dtype's significand precision p:
+            //   dL/dx = where(y == 0, 0, where(c, g * (y * (r / x)),
+            //               g * (y * pow(x, y - 1))))
+            //   with c = (x != 0) and (abs(y) >= m)
+            //   dL/dy = where(x == 0, 0, g * (r * log(x)))
+            // From m on, y - 1 rounds an even exponent to an even one and
+            // loses a negative base's odd-power sign, which r / x keeps;
+            // below m, pow(x, y - 1) stays finite where r alone overflows.
+            // An infinite base takes r with its own sign from m on, and a
+            // base of 0 or +inf, constant in y on each side of y = 0, gives
+            // the exponent an exact zero.
+            // A zero exponent is constant in the base and a zero base is
+            // constant in the exponent on each side of y = 0, so each
+            // selection gives an exact zero where the product would read
+            // `0 * inf` or `inf * log(0)`.
+            let x = node.inputs[0];
+            let y = node.inputs[1];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let bool_ty = TensorType {
+                dims: ty.dims.clone(),
+                precision: Prim::Bool,
+            };
+            let zero = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let one = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 1.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let y_minus_one = tier2::lower_sub(node.owner, dag, y, one, &ty, None);
+            let lowered = dag.add_node(
+                node.owner,
+                RiscOp::Pow,
+                vec![x, y_minus_one],
+                ty.clone(),
+                None,
+            );
+            let slope_x = dag.add_node(node.owner, RiscOp::Mul, vec![y, lowered], ty.clone(), None);
+            let g_slope_x =
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_x], ty.clone(), None);
+            let y_is_zero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![y, zero],
+                bool_ty.clone(),
+                None,
+            );
+            // The magnitude from which an integer exponent's `y - 1` rounds.
+            let significand = match ty.precision {
+                Prim::F16 => 11,
+                Prim::Bf16 => 8,
+                Prim::F32 => 24,
+                Prim::F64 => 53,
+                other => unreachable!("[05-OP-79] admits float operands only, got {other:?}"),
+            };
+            let parity_limit = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, f64::from(2u32).powi(significand)),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let abs_y = dag.add_node(node.owner, RiscOp::Abs, vec![y], ty.clone(), None);
+            let y_beyond_parity = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Gte),
+                vec![abs_y, parity_limit],
+                bool_ty.clone(),
+                None,
+            );
+            let x_is_nonzero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Neq),
+                vec![x, zero],
+                bool_ty.clone(),
+                None,
+            );
+            let use_ratio = dag.add_node(
+                node.owner,
+                RiscOp::Logical(LogicalKind::And),
+                vec![x_is_nonzero, y_beyond_parity],
+                bool_ty.clone(),
+                None,
+            );
+            // x^(y-1) from the forward result where y - 1 has lost its
+            // parity: r / x for a finite base, and r carrying the infinite
+            // base's sign, since y - 1 is odd there.
+            let infinity = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, f64::INFINITY),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let abs_x = dag.add_node(node.owner, RiscOp::Abs, vec![x], ty.clone(), None);
+            let x_is_infinite = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![abs_x, infinity],
+                bool_ty.clone(),
+                None,
+            );
+            let x_is_negative = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Lt),
+                vec![x, zero],
+                bool_ty.clone(),
+                None,
+            );
+            let neg_r = dag.add_node(node.owner, RiscOp::Neg, vec![node.id], ty.clone(), None);
+            let signed_r = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![x_is_negative, neg_r, node.id],
+                ty.clone(),
+                None,
+            );
+            let quotient =
+                dag.add_node(node.owner, RiscOp::Div, vec![node.id, x], ty.clone(), None);
+            let ratio = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![x_is_infinite, signed_r, quotient],
+                ty.clone(),
+                None,
+            );
+            let slope_ratio =
+                dag.add_node(node.owner, RiscOp::Mul, vec![y, ratio], ty.clone(), None);
+            let g_slope_ratio = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![g, slope_ratio],
+                ty.clone(),
+                None,
+            );
+            let nonzero_exponent = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![use_ratio, g_slope_ratio, g_slope_x],
+                ty.clone(),
+                None,
+            );
+            let dx = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![y_is_zero, zero, nonzero_exponent],
+                ty.clone(),
+                None,
+            );
+            let log_x = dag.add_node(node.owner, RiscOp::Log, vec![x], ty.clone(), None);
+            let slope_y = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![node.id, log_x],
+                ty.clone(),
+                None,
+            );
+            let g_slope_y =
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_y], ty.clone(), None);
+            let x_is_zero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![x, zero],
+                bool_ty.clone(),
+                None,
+            );
+            let x_is_pos_infinite = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![x, infinity],
+                bool_ty.clone(),
+                None,
+            );
+            let x_is_constant_in_y = dag.add_node(
+                node.owner,
+                RiscOp::Logical(LogicalKind::Or),
+                vec![x_is_zero, x_is_pos_infinite],
+                bool_ty,
+                None,
+            );
+            let dy = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![x_is_constant_in_y, zero, g_slope_y],
+                ty,
+                None,
+            );
+            Some(vec![(x, dx), (y, dy)])
         }
         RiscOp::Compare(_) => {
             let a = node.inputs[0];
@@ -3762,6 +3961,263 @@ mod tests {
             (a - 0.25).abs() < 1e-6,
             "d(x/y)/dx at y=4 should be 0.25, got {a}"
         );
+    }
+
+    fn pow_dag() -> (Dag, NodeId, NodeId, NodeId) {
+        build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Pow, vec![a, b], ty.clone(), None)
+        })
+    }
+
+    /// Both [05-OP-79] cotangents at one point, from the gradient DAG.
+    fn pow_grads(x0: f64, y0: f64) -> (f64, f64) {
+        let (dag, x, y, out) = pow_dag();
+        let grad = grad_dag(&dag, out, &[x, y]).unwrap();
+        let inputs: UnordMap<String, f64> = [("x".to_string(), x0), ("y".to_string(), y0)]
+            .into_iter()
+            .collect();
+        let vals = eval_scalar(&grad.dag, &inputs);
+        (vals[&grad.grad_nodes[&x]], vals[&grad.grad_nodes[&y]])
+    }
+
+    /// [05-OP-79]: both cotangents agree with central differences, including a
+    /// negative base with an integer exponent and a negative exponent.
+    #[test]
+    fn grad_pow_matches_finite_differences() {
+        let (dag, x, y, out) = pow_dag();
+        for (x0, y0) in [
+            (2.0, 3.0),
+            (-1.5, 3.0),
+            (-1.5, 2.0),
+            (0.7, 2.5),
+            (1.3, -0.5),
+        ] {
+            let (a, n) = finite_diff(&dag, out, x, "x", &[("y", y0)], x0, 1e-6);
+            assert!(
+                (a - n).abs() < 1e-4 * a.abs().max(1.0),
+                "d pow/dx at ({x0}, {y0}): analytical {a}, numerical {n}"
+            );
+            let expected = y0 * x0.powf(y0 - 1.0);
+            assert!(
+                (a - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                "{a} vs {expected}"
+            );
+        }
+        for (x0, y0) in [(2.0, 3.0), (0.7, 2.5), (1.3, -0.5)] {
+            let (a, n) = finite_diff(&dag, out, y, "y", &[("x", x0)], y0, 1e-6);
+            assert!(
+                (a - n).abs() < 1e-4 * a.abs().max(1.0),
+                "d pow/dy at ({x0}, {y0}): analytical {a}, numerical {n}"
+            );
+        }
+    }
+
+    /// [05-OP-79]: a zero exponent gives the base an exact zero cotangent and a
+    /// zero base gives the exponent one, where the unguarded products are
+    /// `0 * inf` and `inf * log(0)`.
+    #[test]
+    fn grad_pow_selects_exact_zeros_at_zero_exponent_and_zero_base() {
+        let (dx, dy) = pow_grads(0.0, 0.0);
+        assert_eq!(dx.to_bits(), 0.0_f64.to_bits(), "d pow/dx at (0, 0)");
+        assert_eq!(dy.to_bits(), 0.0_f64.to_bits(), "d pow/dy at (0, 0)");
+        let (dx, _) = pow_grads(3.0, 0.0);
+        assert_eq!(dx, 0.0);
+        let (dx, dy) = pow_grads(-0.0, 2.0);
+        assert_eq!(dx, 0.0, "d pow/dx at (-0, 2) is 2 * (-0)^1");
+        assert_eq!(dy.to_bits(), 0.0_f64.to_bits(), "d pow/dy at (-0, 2)");
+        // The base cotangent at x = 0 is the real derivative where it exists.
+        let (dx, _) = pow_grads(0.0, 1.0);
+        assert_eq!(dx, 1.0);
+        let (dx, _) = pow_grads(0.0, 0.5);
+        assert_eq!(dx, f64::INFINITY);
+    }
+
+    /// The base cotangent of `pow(x, y)` at dtype `precision`, with `x` and `y`
+    /// loaded at f64 and cast to `precision` (each witness is exact there).
+    fn pow_base_grad_at(precision: Prim, x0: f64, y0: f64) -> f64 {
+        pow_grads_at(precision, x0, y0).0
+    }
+
+    /// Both cotangents of `pow(x, y)` at dtype `precision`, as [`pow_base_grad_at`].
+    fn pow_grads_at(precision: Prim, x0: f64, y0: f64) -> (f64, f64) {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let narrow = TensorType {
+            dims: vec![],
+            precision,
+        };
+        let load = |dag: &mut Dag, name: &str| {
+            let wide = dag.add_node(
+                owner,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                scalar_f64(),
+                None,
+            );
+            let cast = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: precision,
+                },
+                vec![wide],
+                narrow.clone(),
+                None,
+            );
+            (wide, cast)
+        };
+        let (x, xn) = load(&mut dag, "x");
+        let (y, yn) = load(&mut dag, "y");
+        let out = dag.add_node(owner, RiscOp::Pow, vec![xn, yn], narrow.clone(), None);
+        let grad = grad_dag(&dag, out, &[x, y]).unwrap();
+        let inputs: UnordMap<String, f64> = [("x".to_string(), x0), ("y".to_string(), y0)]
+            .into_iter()
+            .collect();
+        let vals = eval_scalar(&grad.dag, &inputs);
+        (vals[&grad.grad_nodes[&x]], vals[&grad.grad_nodes[&y]])
+    }
+
+    /// [05-OP-79] at an infinite base: the base cotangent is `y * x^(y-1)` on
+    /// both sides of `2^p`, its sign from the exact parity of `y - 1` (odd from
+    /// `2^p` on), never `inf / inf`; the exponent cotangent is an exact zero at
+    /// `+inf`, which is constant in `y` on each side of `y = 0`, and NaN at
+    /// `-inf` through `log`.
+    #[test]
+    fn grad_pow_cotangents_at_an_infinite_base() {
+        for (precision, limit) in [
+            (Prim::F16, 2048.0),
+            (Prim::Bf16, 256.0),
+            (Prim::F32, 16_777_216.0),
+            (Prim::F64, 9_007_199_254_740_992.0),
+        ] {
+            let inf = f64::INFINITY;
+            for y0 in [limit - 2.0, limit, 2.0 * limit] {
+                let label = format!("{precision:?} y = {y0}");
+                assert_eq!(
+                    pow_grads_at(precision, inf, y0).0,
+                    inf,
+                    "+inf base, {label}"
+                );
+                // y even: y - 1 odd, so (-inf)^(y-1) is -inf.
+                assert_eq!(
+                    pow_grads_at(precision, -inf, y0).0,
+                    -inf,
+                    "-inf base, {label}"
+                );
+                // y even and negative: (+-inf)^(y-1) is a zero, so the
+                // cotangent is a zero rather than the NaN of `inf / inf`.
+                assert_eq!(
+                    pow_grads_at(precision, inf, -y0).0,
+                    0.0,
+                    "+inf base, -{label}"
+                );
+                assert_eq!(
+                    pow_grads_at(precision, -inf, -y0).0,
+                    0.0,
+                    "-inf base, -{label}"
+                );
+            }
+            assert_eq!(
+                pow_grads_at(precision, -inf, 3.0).0,
+                inf,
+                "{precision:?} (-inf)^2 * 3"
+            );
+            assert_eq!(
+                pow_grads_at(precision, inf, 1.0).0,
+                1.0,
+                "{precision:?} y = 1"
+            );
+            for y0 in [-2.0, 0.0, 0.5, 2.0, limit] {
+                let dy = pow_grads_at(precision, inf, y0).1;
+                assert_eq!(
+                    dy.to_bits(),
+                    0.0f64.to_bits(),
+                    "{precision:?} d/dy at (+inf, {y0})"
+                );
+                assert!(
+                    pow_grads_at(precision, -inf, y0).1.is_nan(),
+                    "{precision:?} (-inf, {y0})"
+                );
+            }
+        }
+    }
+
+    /// [05-OP-79]: from `2^p` on, `y - 1` rounds an even exponent to an even
+    /// one; the base cotangent still has the odd power's sign, through `r / x`,
+    /// and its magnitude `y * |x|^(y-1)` (the reviewer's witnesses).
+    #[test]
+    fn grad_pow_keeps_the_odd_power_sign_where_y_minus_one_rounds() {
+        for (precision, x0, y0, tolerance) in [
+            (Prim::F32, -1.000_000_119_209_289_6, 16_777_218.0, 1e-5),
+            (
+                Prim::F64,
+                -(1.0 + f64::EPSILON),
+                9_007_199_254_740_994.0,
+                1e-12,
+            ),
+            (Prim::Bf16, -1.007_812_5, 258.0, 2e-2),
+            (Prim::Bf16, -1.007_812_5, 512.0, 2e-2),
+            (Prim::F16, -1.000_976_562_5, 2050.0, 4e-3),
+            (Prim::F16, -1.000_976_562_5, 3000.0, 4e-3),
+        ] {
+            let dx = pow_base_grad_at(precision, x0, y0);
+            let exact = -y0 * (-x0).powf(y0 - 1.0);
+            assert!(
+                dx < 0.0 && ((dx - exact) / exact).abs() < tolerance,
+                "{precision:?} d pow/dx at ({x0}, {y0}): got {dx}, derivative {exact}"
+            );
+        }
+    }
+
+    /// Below `2^p` the base cotangent stays `y * pow(x, y - 1)`, which is finite
+    /// and nonzero where the forward result alone overflows or underflows (a
+    /// ratio `r / x` would give `inf` and `0` here).
+    #[test]
+    fn grad_pow_base_cotangent_survives_forward_overflow_and_underflow() {
+        assert_eq!(pow_base_grad_at(Prim::F16, 300.0, 2.0), 600.0);
+        assert_eq!(
+            pow_base_grad_at(Prim::F32, 0.5, 150.0),
+            150.0 * 2f64.powi(-149)
+        );
+        assert_eq!(
+            pow_base_grad_at(Prim::F64, 0.5, 1075.0),
+            1075.0 * f64::from_bits(1)
+        );
+        assert_eq!(pow_base_grad_at(Prim::F64, -2.0, 3.0), 12.0);
+    }
+
+    /// Central differences across the normal range, at f64: integer exponents
+    /// for either sign of base, non-integer ones for a positive base.
+    #[test]
+    fn grad_pow_base_matches_finite_differences_across_normal_ranges() {
+        let (dag, x, _y, out) = pow_dag();
+        let bases = [-3.0, -1.7, -0.9, -0.25, 0.25, 0.9, 1.7, 3.0];
+        let exponents = [-4.0, -1.0, 1.0, 2.0, 5.0, 12.0, -2.5, 0.5, 3.75];
+        let mut checked = 0;
+        for x0 in bases {
+            for y0 in exponents {
+                if x0 < 0.0 && y0 != f64::round(y0) {
+                    continue;
+                }
+                let h = 1e-6 * f64::abs(x0);
+                let (a, n) = finite_diff(&dag, out, x, "x", &[("y", y0)], x0, h);
+                assert!(
+                    (a - n).abs() <= 1e-5 * a.abs().max(1.0),
+                    "d pow/dx at ({x0}, {y0}): analytical {a}, numerical {n}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 60, "{checked}");
+    }
+
+    /// Negative partner: a negative base has no real exponent derivative, so its
+    /// exponent cotangent is NaN through `log`, while its base cotangent stays
+    /// the signed integer-power derivative.
+    #[test]
+    fn grad_pow_negative_base_exponent_cotangent_is_nan() {
+        let (dx, dy) = pow_grads(-2.0, 3.0);
+        assert_eq!(dx, 12.0);
+        assert!(dy.is_nan(), "d pow/dy at (-2, 3) should be NaN, got {dy}");
     }
 
     #[test]

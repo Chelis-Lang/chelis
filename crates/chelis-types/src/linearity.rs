@@ -3592,6 +3592,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
             | "min_elem"
             | "sub"
             | "div"
+            | "pow"
             | "floor_div"
             | "trunc_div"
             | "mod"

@@ -27,6 +27,8 @@ mod raw {
         pub safe fn chelis_crmath_ffi_raw_tanh(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_erf(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_raw_erfc(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_raw_powf(x: f32, y: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_raw_pow(x: f64, y: f64) -> f64;
     }
 }
 
@@ -177,4 +179,56 @@ fn raw_upstream_kernels_do_not_canonicalize() {
             "raw {name} canonicalized every NaN operand"
         );
     }
+}
+
+/// `pow` ([05-OP-79]) canonicalizes a NaN from a NaN base, a NaN exponent, and a
+/// negative base with a non-integer exponent, at every width.
+#[test]
+fn every_pow_nan_result_is_canonical() {
+    for bits in NAN_OPERANDS_F32 {
+        let nan = f32::from_bits(bits);
+        for (x, y) in [(nan, 2.0), (2.0, nan)] {
+            let got = pow_f32(x, y).to_bits();
+            assert_eq!(got, CANONICAL_F32, "pow_f32({x:?}, {y:?}) gave {got:#010x}");
+        }
+    }
+    assert_eq!(pow_f32(-2.0, 0.5).to_bits(), CANONICAL_F32);
+    for bits in NAN_OPERANDS_F64 {
+        let nan = f64::from_bits(bits);
+        for (x, y) in [(nan, 2.0), (2.0, nan)] {
+            let got = pow_f64(x, y).to_bits();
+            assert_eq!(got, CANONICAL_F64, "pow_f64({x:?}, {y:?}) gave {got:#018x}");
+        }
+    }
+    assert_eq!(pow_f64(-2.0, 0.5).to_bits(), CANONICAL_F64);
+    for bits in [0xfe00_u16, 0x7e12, 0x7c01] {
+        let got = pow_f16(f16::from_bits(bits), f16::from_f32(3.0)).to_bits();
+        assert_eq!(
+            got, CANONICAL_F16,
+            "pow_f16({bits:#06x}, 3) gave {got:#06x}"
+        );
+    }
+    for bits in [0xffc0_u16, 0x7fc5, 0x7f81] {
+        let got = pow_bf16(bf16::from_f32(3.0), bf16::from_bits(bits)).to_bits();
+        assert_eq!(
+            got, CANONICAL_BF16,
+            "pow_bf16(3, {bits:#06x}) gave {got:#06x}"
+        );
+    }
+}
+
+/// Negative partner: the raw upstream `pow` kernels return a non-canonical NaN for
+/// some NaN operand, so the wrapper is what canonicalizes.
+#[test]
+fn raw_upstream_pow_does_not_canonicalize() {
+    let witness32 = NAN_OPERANDS_F32
+        .iter()
+        .map(|&bits| raw::chelis_crmath_ffi_raw_powf(f32::from_bits(bits), 2.0).to_bits())
+        .find(|&got| got != CANONICAL_F32);
+    assert!(witness32.is_some(), "raw powf canonicalized every NaN base");
+    let witness64 = NAN_OPERANDS_F64
+        .iter()
+        .map(|&bits| raw::chelis_crmath_ffi_raw_pow(f64::from_bits(bits), 2.0).to_bits())
+        .find(|&got| got != CANONICAL_F64);
+    assert!(witness64.is_some(), "raw pow canonicalized every NaN base");
 }

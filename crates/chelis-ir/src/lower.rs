@@ -4739,6 +4739,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mul"
                         | "sub"
                         | "div"
+                        | "pow"
                         | "floor_div"
                         | "trunc_div"
                         | "mod"
@@ -15611,6 +15612,22 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            // [05-OP-79]: same elementwise dim contract as `div`.
+            "pow" if args.len() == 2 => {
+                let x = self.lower_expr_node(&args[0], "pow base");
+                let y = self.lower_expr_node(&args[1], "pow exponent");
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_pow(
+                    self.owner(),
+                    &mut self.dag,
+                    x,
+                    y,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[x, y])
+            }
             // chelis#178: integer-division primitives. Same elementwise
             // dim contract as `div`; they lower to dedicated RISC ops.
             "floor_div" if args.len() == 2 => {
@@ -19260,6 +19277,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 RiscOp::Neg => numeric_unop(input0?, Some(IntUnOp::Neg), Some(FloatUnOp::Neg))?,
                 RiscOp::Div => numeric_binop(input0?, input1?, None, Some(FloatBinOp::Div))?,
+                RiscOp::Pow => numeric_binop(input0?, input1?, None, Some(FloatBinOp::Pow))?,
                 RiscOp::FloorDiv => numeric_binop(
                     input0?,
                     input1?,

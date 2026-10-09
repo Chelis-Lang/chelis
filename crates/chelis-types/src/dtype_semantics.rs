@@ -583,6 +583,8 @@ pub enum FloatBinOp {
     Sub,
     Mul,
     Div,
+    /// [05-OP-79] `pow`: correctly rounded through `chelis-crmath`.
+    Pow,
     FloorDiv,
     /// [05-OP-64] float `mod`: C `fmod`, the exact remainder with the
     /// quotient truncated toward zero (Rust's float `%`).
@@ -612,6 +614,7 @@ impl FloatBinOp {
             Self::Sub => "sub",
             Self::Mul => "mul",
             Self::Div => "div",
+            Self::Pow => "pow",
             Self::FloorDiv => "floor_div",
             Self::Rem => "mod",
             Self::Max => "max_elem",
@@ -1099,6 +1102,7 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
+        FloatBinOp::Pow => chelis_crmath::pow_f32(lhs, rhs),
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
@@ -1116,6 +1120,7 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
+        FloatBinOp::Pow => chelis_crmath::pow_f64(lhs, rhs),
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Rem => lhs % rhs,
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
@@ -1143,11 +1148,14 @@ pub fn float_binop(
         (Bits::F16(lhs), Bits::F16(rhs)) => Bits::F16(match op {
             FloatBinOp::Max => select_float_max_first(lhs, rhs, half::f16::is_nan),
             FloatBinOp::Min => select_float_min_first(lhs, rhs, half::f16::is_nan),
+            // [05-OP-79] decides a signaling NaN at the operand's own dtype.
+            FloatBinOp::Pow => chelis_crmath::pow_f16(lhs, rhs),
             _ => half::f16::from_f32(apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32())),
         }),
         (Bits::Bf16(lhs), Bits::Bf16(rhs)) => Bits::Bf16(match op {
             FloatBinOp::Max => select_float_max_first(lhs, rhs, half::bf16::is_nan),
             FloatBinOp::Min => select_float_min_first(lhs, rhs, half::bf16::is_nan),
+            FloatBinOp::Pow => chelis_crmath::pow_bf16(lhs, rhs),
             _ => half::bf16::from_f32(apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32())),
         }),
         _ => unreachable!("family and dtype checks make the float match exhaustive"),
@@ -1979,6 +1987,7 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
+        | FloatBinOp::Pow
         | FloatBinOp::FloorDiv
         | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| {
             from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
@@ -1998,6 +2007,7 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         | FloatBinOp::Sub
         | FloatBinOp::Mul
         | FloatBinOp::Div
+        | FloatBinOp::Pow
         | FloatBinOp::FloorDiv
         | FloatBinOp::Rem => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
@@ -2034,6 +2044,14 @@ pub fn float_tensor_binop(
     let buf = match (&lhs.buf, &rhs.buf) {
         (Buf::F64(lhs), Buf::F64(rhs)) => Buf::F64(float_vec_binop_f64(op, lhs, rhs)),
         (Buf::F32(lhs), Buf::F32(rhs)) => Buf::F32(float_vec_binop_f32(op, lhs, rhs, |x| x, |x| x)),
+        // [05-OP-79] decides a signaling NaN at the operand's own dtype, which
+        // `half`'s widening would quiet first.
+        (Buf::F16(lhs), Buf::F16(rhs)) if op == FloatBinOp::Pow => {
+            Buf::F16(zip_map(lhs, rhs, chelis_crmath::pow_f16))
+        }
+        (Buf::Bf16(lhs), Buf::Bf16(rhs)) if op == FloatBinOp::Pow => {
+            Buf::Bf16(zip_map(lhs, rhs, chelis_crmath::pow_bf16))
+        }
         (Buf::F16(lhs), Buf::F16(rhs)) => Buf::F16(float_vec_binop_f32(
             op,
             lhs,

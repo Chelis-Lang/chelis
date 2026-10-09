@@ -244,6 +244,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Softmax { .. }
         | RiscOp::Erf
         | RiscOp::Erfc
+        // [05-OP-79] makes `pow` correctly rounded too.
+        | RiscOp::Pow
         | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
@@ -405,6 +407,7 @@ fn agreement_operation_identity_is_derived_from_ir() {
         (RiscOp::Softmax { axis: 0 }, AgreementOp::Exact),
         (RiscOp::Erf, AgreementOp::Exact),
         (RiscOp::Erfc, AgreementOp::Exact),
+        (RiscOp::Pow, AgreementOp::Exact),
     ];
     for (risc, expected) in cases {
         assert_eq!(agreement_op_for_risc(&risc), expected);

@@ -3632,6 +3632,8 @@ impl<'a> EvalContext<'a> {
             // keeps IEEE-754 (`1.0 / 0.0 == inf`). The C backend follows the
             // platform SIGFPE for the same integer operands.
             "div" => eval_div(args),
+            // [05-OP-79]: float-only, correctly rounded through `chelis-crmath`.
+            "pow" => numeric_binop(args, None, Some(FloatBinOp::Pow)),
             // chelis#178: integer-division primitives. `floor_div` rounds
             // the quotient toward -inf (ints and floats); `trunc_div`
             // rounds toward zero (integer-only). Both trap on an integer

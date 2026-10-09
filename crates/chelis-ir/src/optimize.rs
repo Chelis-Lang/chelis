@@ -72,6 +72,13 @@ pub fn constant_fold(dag: &mut Dag) {
                     } else {
                         chelis_types::float_binop(chelis_types::FloatBinOp::Min, *lval, *rval)
                     }),
+                    // [05-OP-79]: the declared-width correctly rounded kernel,
+                    // so a folded literal carries the unfolded node's bits.
+                    RiscOp::Pow => Some(chelis_types::float_binop(
+                        chelis_types::FloatBinOp::Pow,
+                        *lval,
+                        *rval,
+                    )),
                     RiscOp::Compare(kind) => Some(
                         chelis_types::compare_scalars(
                             match kind {

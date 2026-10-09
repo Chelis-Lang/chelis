@@ -7,6 +7,7 @@ pub(super) const TENSOR_OPS: &[&str] = &[
     "mul",
     "sub",
     "div",
+    "pow",
     "floor_div",
     "trunc_div",
     "neg",
@@ -245,6 +246,20 @@ pub(super) fn family_policy_rejection(
                     .to_string(),
             ],
         ),
+        "pow" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "pow on {}operand precision {rendered} is not admitted per \
+                 spec/05-risc-primitives.md [05-OP-79]: `pow` is float-only. Cast \
+                 the operands to a float dtype explicitly.",
+                subject.qualifier("integer")
+            ),
+            vec![
+                "spec/05-risc-primitives.md [05-OP-79]: `pow` requires two float \
+                 operands of one dtype; there is no integer power."
+                    .to_string(),
+            ],
+        ),
         "trunc_div" => (
             CheckErrorKind::PrecisionMismatch,
             format!(
@@ -441,7 +456,7 @@ pub(super) fn operand_dtype_rejection(
             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                 || matches!(resolved, Type::Prim(prim) if prim.is_numeric())
         }
-        "div" => {
+        "div" | "pow" => {
             matches!(
                 resolved,
                 Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
@@ -545,7 +560,7 @@ pub(super) fn operand_dtype_rejection(
             &PrecisionSubject::Concrete(prim.name().to_string()),
             OperandFamily::Float,
         ))
-    } else if fname == "div"
+    } else if matches!(fname, "div" | "pow")
         && let Some(prim_name) = resolved_int_prim
     {
         Some(family_policy_rejection(

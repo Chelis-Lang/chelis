@@ -791,8 +791,8 @@ fn link_static_library_driver(out: &Path, library: &str, needs_blas: bool) -> bo
 
 fn nan_inventory_arity(name: &str) -> usize {
     match name {
-        "add" | "sub" | "mul" | "div" | "floor_div" | "mod" | "min" | "max" | "min_elem"
-        | "max_elem" => 2,
+        "add" | "sub" | "mul" | "div" | "pow" | "floor_div" | "mod" | "min" | "max"
+        | "min_elem" | "max_elem" => 2,
         "neg"
         | "sqrt"
         | "exp"
@@ -1184,6 +1184,7 @@ fn nan_atom_coverage(
         Id::Sub => (RiscOp::Sub, BuiltinInventory),
         Id::Mul => (RiscOp::Mul, BuiltinInventory),
         Id::Div => (RiscOp::Div, BuiltinInventory),
+        Id::Pow => (RiscOp::Pow, BuiltinInventory),
         Id::FloorDiv => (RiscOp::FloorDiv, BuiltinInventory),
         Id::MaxElem => (RiscOp::MaxElem, BuiltinInventory),
         Id::MinElem => (RiscOp::MinElem, BuiltinInventory),

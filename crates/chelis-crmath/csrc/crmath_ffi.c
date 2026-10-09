@@ -30,3 +30,12 @@ CHELIS_CRMATH_SHIM(atan, double)
 CHELIS_CRMATH_SHIM(tanh, double)
 CHELIS_CRMATH_SHIM(erf, double)
 CHELIS_CRMATH_SHIM(erfc, double)
+
+#define CHELIS_CRMATH_BINARY_SHIM(name, ctype)                                      \
+  ctype chelis_crmath_ffi_##name(ctype x, ctype y) { return chelis_cr_##name(x, y); } \
+  ctype chelis_crmath_ffi_raw_##name(ctype x, ctype y) {                            \
+    return chelis_cr_##name##__cr_##name(x, y);                                     \
+  }
+
+CHELIS_CRMATH_BINARY_SHIM(powf, float)
+CHELIS_CRMATH_BINARY_SHIM(pow, double)

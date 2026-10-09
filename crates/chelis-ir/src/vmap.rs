@@ -289,6 +289,7 @@ fn vectorize_axis0_impl(
             | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::Pow
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod

@@ -488,6 +488,8 @@ pub enum FusedStepOp {
     Sub,
     Mul,
     Div,
+    /// Correctly rounded power step ([05-OP-79]); see [`RiscOp::Pow`].
+    Pow,
     /// Floor division step (chelis#178); see [`RiscOp::FloorDiv`].
     FloorDiv,
     /// Truncating (round-toward-zero) division step, integer-only
@@ -518,10 +520,11 @@ pub enum FusedStepOp {
 /// `CmpLt` and `Lt` intentionally remain distinct source identities even
 /// though both use the same ordered comparison kernel.
 impl FusedStepOp {
-    /// [05-OP-46]'s transcendental operations, which no device lane may
-    /// compute until it has correctly rounded kernels of its own.
+    /// [05-OP-46]'s transcendental operations and [05-OP-79]'s `pow`, which no
+    /// device lane may compute until it has correctly rounded kernels of its own.
     pub const fn transcendental_name(self) -> Option<&'static str> {
         match self {
+            Self::Pow => Some("pow"),
             Self::Exp => Some("exp"),
             Self::Log => Some("log"),
             Self::Sin => Some("sin"),
@@ -563,7 +566,7 @@ impl FusedStepOp {
 
 /// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
 /// device lane has no correctly rounded kernels for [05-OP-46]'s
-/// transcendentals or `sqrt`, so a DAG that computes one, directly or inside
+/// transcendentals, `sqrt`, or [05-OP-79]'s `pow`, so a DAG that computes one, directly or inside
 /// a fused chain, is rejected through [05-UNS-1] rather than computed with a
 /// vendor library.
 pub fn reject_device_correctly_rounded_ops(
@@ -581,25 +584,44 @@ pub fn reject_device_correctly_rounded_ops(
             RiscOp::Tanh => Some("tanh"),
             RiscOp::Erf => Some("erf"),
             RiscOp::Erfc => Some("erfc"),
+            RiscOp::Pow => Some("pow"),
             RiscOp::Sqrt => Some("sqrt"),
             RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
             _ => None,
         };
         if let Some(name) = name {
-            return Err(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
-                format!(
-                    "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
-                ),
-                chelis_types::unsupported::Stage::Codegen(target),
-                chelis_types::deliberate_rejection!(
-                    "[05-OP-46]",
-                    "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
-                ),
-            ));
+            return Err(device_correctly_rounded_rejection(name, target));
         }
     }
     Ok(())
+}
+
+/// The [05-UNS-1] rejection of a correctly rounded operation `name` on the
+/// device lane `target`: one of [05-OP-46]'s transcendentals, `sqrt`, or
+/// [05-OP-79]'s `pow`.
+pub fn device_correctly_rounded_rejection(
+    name: &str,
+    target: &'static str,
+) -> chelis_types::unsupported::Unsupported {
+    let authority = if name == "pow" {
+        chelis_types::deliberate_rejection!(
+            "[05-OP-79]",
+            "device pow is fenced until the device lane has a correctly rounded kernel"
+        )
+    } else {
+        chelis_types::deliberate_rejection!(
+            "[05-OP-46]",
+            "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
+        )
+    };
+    chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
+        format!(
+            "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
+        ),
+        chelis_types::unsupported::Stage::Codegen(target),
+        authority,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -851,6 +873,12 @@ pub enum RiscOp {
     /// **Float operands only since chelis#178** — integer division
     /// uses [`RiscOp::FloorDiv`] / [`RiscOp::TruncDiv`].
     Div,
+    /// Element-wise correctly rounded power `x^y` with the IEEE 754 `pow`
+    /// special cases ([05-OP-79]), float operands only. Primitive because no
+    /// composition of the others computes it: `exp(mul(y, log(x)))` is NaN
+    /// for every `x < 0` and for `0^0`. Every lane computes it with the
+    /// `chelis-crmath` kernels.
+    Pow,
     /// Element-wise floor division: `floor(a / b)`, rounding the
     /// quotient toward −∞ (chelis#178). Integer operands round toward
     /// −∞ (native `/` plus a remainder-sign correction); float
@@ -1378,6 +1406,7 @@ pub enum RiscAtomIdentity {
     Add,
     Mul,
     Div,
+    Pow,
     FloorDiv,
     TruncDiv,
     Mod,
@@ -1464,6 +1493,7 @@ impl RiscAtomIdentity {
         Self::Add,
         Self::Mul,
         Self::Div,
+        Self::Pow,
         Self::FloorDiv,
         Self::TruncDiv,
         Self::Mod,
@@ -1550,6 +1580,7 @@ impl RiscAtomIdentity {
             Self::Add => "add",
             Self::Mul => "mul",
             Self::Div => "div",
+            Self::Pow => "pow",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
             Self::Mod => "mod",
@@ -1703,6 +1734,7 @@ impl RiscOp {
             Self::Add => Semantic(Id::Add),
             Self::Mul => Semantic(Id::Mul),
             Self::Div => Semantic(Id::Div),
+            Self::Pow => Semantic(Id::Pow),
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
@@ -2124,6 +2156,11 @@ impl RiscOp {
             // targets the numeric regions around them, not these nodes.
             RiscOp::Logical(_) | RiscOp::Where => false,
 
+            // [05-OP-79]'s `pow` has no interval or linear-relaxation
+            // transformer: its sign depends on the exponent's integer parity,
+            // and no ported or in-house rule bounds it yet.
+            RiscOp::Pow => false,
+
             // Stochastic ops have no deterministic value to bound.
             RiscOp::UniformLike
             | RiscOp::Dropout
@@ -2453,6 +2490,8 @@ impl DagNode {
             // `mean`'s count, which the node alone cannot tell apart.
             RiscOp::Div if integer => RuntimeCheck::OperandValues,
             RiscOp::Div => RuntimeCheck::MeanDivisor,
+            // [05-OP-79]: `pow` never traps; exceptional values are IEEE values.
+            RiscOp::Pow => RuntimeCheck::Nothing,
             // Read the cast's OWN target, not the node's output type: if a
             // lowering ever let them drift, deriving the class from the
             // output type would silently switch the check off.
@@ -4887,6 +4926,7 @@ mod tests {
             RiscOp::Add,
             RiscOp::Mul,
             RiscOp::Div,
+            RiscOp::Pow,
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
@@ -5217,8 +5257,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            71,
-            "one_of_every_risc_op must list all 71 classified samples"
+            72,
+            "one_of_every_risc_op must list all 72 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5247,13 +5287,14 @@ mod tests {
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
         // branch's key join (+1 = 32). The internal extrema adjoint
         // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
-        // composition has no dedicated transformer (+1 = 34).
+        // composition has no dedicated transformer (+1 = 34). [05-OP-79]'s
+        // `pow` has no transformer either (+1 = 35).
         assert_eq!(
             targetable, 37,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 34,
+            excluded, 35,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

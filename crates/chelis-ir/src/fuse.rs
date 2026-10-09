@@ -102,6 +102,7 @@ fn fused_step_op(op: &RiscOp) -> Option<FusedStepOp> {
         RiscOp::Sub => Some(FusedStepOp::Sub),
         RiscOp::Mul => Some(FusedStepOp::Mul),
         RiscOp::Div => Some(FusedStepOp::Div),
+        RiscOp::Pow => Some(FusedStepOp::Pow),
         RiscOp::FloorDiv => Some(FusedStepOp::FloorDiv),
         RiscOp::TruncDiv => Some(FusedStepOp::TruncDiv),
         RiscOp::MaxElem => Some(FusedStepOp::MaxElem),

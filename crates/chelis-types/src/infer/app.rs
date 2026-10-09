@@ -579,7 +579,15 @@ fn infer_app_inner(
         && (builtins::COMPARISON_OPS.contains(&fname.as_str())
             || matches!(
                 fname.as_str(),
-                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+                "add"
+                    | "sub"
+                    | "mul"
+                    | "div"
+                    | "pow"
+                    | "floor_div"
+                    | "trunc_div"
+                    | "max_elem"
+                    | "min_elem"
             ))
         && arg_tys.len() == 2
     {
@@ -669,14 +677,16 @@ fn infer_app_inner(
         }
     }
     let mixed_division_precisions =
-        matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
-            let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
-                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
-                _ => None,
-            };
-            matches!((precision(&arg_tys[0]), precision(&arg_tys[1])),
+        matches!(func_name.as_deref(), Some("div" | "pow" | "trunc_div"))
+            && arg_tys.len() == 2
+            && {
+                let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+                    Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                    _ => None,
+                };
+                matches!((precision(&arg_tys[0]), precision(&arg_tys[1])),
                 (Some(left), Some(right)) if left != right)
-        };
+            };
     if let Some(fname) = func_name.as_deref()
         && operand_family_policy(fname).is_some()
         && !mixed_division_precisions
