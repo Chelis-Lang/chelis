@@ -1,4 +1,4 @@
-//! Structural guard for compiler-authored canonical list readers.
+//! Structural guard for named canonical list readers and direct literal recursion.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -49,15 +49,15 @@ impl<'ast> Visit<'ast> for BodyScan<'_> {
         if let syn::Expr::Path(path) = call.func.as_ref() {
             self.self_call |= path
                 .path
-                .segments
-                .last()
-                .is_some_and(|s| s.ident == self.function);
+                .get_ident()
+                .is_some_and(|callee| callee == self.function);
         }
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        self.self_call |= call.method == self.function;
+        self.self_call |= call.method == self.function
+            && matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"));
         syn::visit::visit_expr_method_call(self, call);
     }
 
@@ -124,7 +124,7 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn canonical_cons_readers_share_the_iterator_and_no_second_recursive_reader_appears() {
+fn canonical_cons_readers_share_the_iterator_and_no_direct_literal_reader_appears() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -167,4 +167,16 @@ fn inventory_detects_a_new_recursive_cons_reader() {
     };
     let scan = inspect("new_reader", &function.block);
     assert!(scan.cons_literal && scan.self_call && !scan.shared_spine);
+}
+
+#[test]
+fn inventory_does_not_call_another_types_same_named_method_self_recursion() {
+    let parsed =
+        syn::parse_file("fn new_reader(x: i32) { let _ = \"Cons\"; Other::new_reader(x); }")
+            .expect("valid Rust probe");
+    let syn::Item::Fn(function) = &parsed.items[0] else {
+        unreachable!()
+    };
+    let scan = inspect("new_reader", &function.block);
+    assert!(scan.cons_literal && !scan.self_call);
 }

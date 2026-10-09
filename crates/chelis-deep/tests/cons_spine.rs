@@ -33,6 +33,26 @@ fn terminal_name_reader_preserves_qualified_cons_without_widening_exact_readers(
     let mut qualified = ConsSpine::with_terminal_names(&chain);
     assert!(qualified.next().is_some());
     qualified.require_nil().expect("qualified Cons, exact Nil");
+
+    let wrapped_callee = Expr::MetaExpr(
+        MetaExpr {
+            metadata: Metadata::default(),
+            expr: Box::new(var("Library__Cons")),
+        },
+        Span::new(0, 0),
+    );
+    let wrapped_chain = Expr::node(
+        DeepTag::App,
+        Metadata::default(),
+        vec![wrapped_callee, var("head"), var("Nil")],
+        Span::new(0, 0),
+    );
+    assert!(ConsSpine::new(&wrapped_chain).next().is_none());
+    let mut qualified = ConsSpine::with_terminal_names(&wrapped_chain);
+    assert!(qualified.next().is_some());
+    qualified
+        .require_nil()
+        .expect("metadata-wrapped qualified Cons, exact Nil");
 }
 
 #[test]

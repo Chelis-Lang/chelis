@@ -186,7 +186,7 @@ impl ConsSpineNode for Expr {
     fn cons_parts_with_terminal_name(&self) -> Option<(&Self::Head, &Self)> {
         match self.carrier() {
             ExprCarrier::DecodedNode(DeepTag::App, _, [constructor, head, tail])
-                if is_var(constructor, "Cons", true) =>
+                if is_var(constructor.unwrapped_for_spine(), "Cons", true) =>
             {
                 Some((head, tail))
             }
