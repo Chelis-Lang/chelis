@@ -282,7 +282,7 @@ explicit-premise binding, goal-directed optimality instantiation, and
 downstream helper lowering. Preserve the existing literal proofs as regression
 witnesses. The path-owned route for optional provider/SMT tests and
 feature-specific Clippy is specified in
-[Clarabel validation for Surf AST representation changes](clarabel_ast_ci_routing.md);
+[Feature validation dependencies for shared source changes](feature_validation_dependency_routing.md);
 broader coverage remains in the scheduled run. Unrelated PRs do not acquire a
 new serial Clarabel check.
 
