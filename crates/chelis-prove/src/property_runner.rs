@@ -752,7 +752,7 @@ fn prove_surf_property(
 ) -> PropertyOutcome {
     if expanded_contracts(property)
         .iter()
-        .any(|id| id == "clarabel.qp.ideal_optimality")
+        .any(|id| id == "clarabel.qp.ideal_optimality" || id == "clarabel.qp.assume_psd")
     {
         #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
         return qp_ideal::prove(decls, trusted_contract_decls, property, options);

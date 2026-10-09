@@ -1,0 +1,1 @@
+Clarabel QP properties can prove downstream statements for fixed-size symbolic inputs, including a derived Gram PSD matrix or an explicit call-bound PSD premise, while reporting their ideal-optimizer axiom and real-arithmetic qualification.
