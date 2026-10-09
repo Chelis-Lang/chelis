@@ -11527,6 +11527,14 @@ fn resolve_list_grad_shape_expr(
         if static_list_spine_items(&resolved).is_some() {
             break;
         }
+        // spec/04 section 8.2: a copy has its operand's value, so it has the
+        // operand's shape.
+        if let Some((DeepTag::Copy, _, kids)) = stamped_parts(&resolved)
+            && let Some(operand) = kids.first()
+        {
+            resolved = operand.clone();
+            continue;
+        }
         if let Some(name) = direct_var_name(&resolved) {
             if LoadStoreName::top_level_source_for_label(name)
                 .ok()

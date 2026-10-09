@@ -1239,17 +1239,14 @@ impl<'a> EvalContext<'a> {
                 self.result_producer = ResultProducer::aggregate(producers);
                 Ok(RuntimeValue::Tuple(values.into()))
             }
-            DeepTag::Copy => {
-                let value = self.eval_expr(
-                    node.children
-                        .first()
-                        .ok_or_else(|| "copy missing value".to_string())?,
-                )?;
-                match value {
-                    RuntimeValue::Tensor(tensor) => Ok(RuntimeValue::Tensor(tensor)),
-                    other => Err(format!("copy expects tensor input, got {other:?}")),
-                }
-            }
+            // spec/04 section 8.2: `copy` yields a fresh owned value of any
+            // checked type. Evaluator values are immutable, so the value is
+            // its own copy.
+            DeepTag::Copy => self.eval_expr(
+                node.children
+                    .first()
+                    .ok_or_else(|| "copy missing value".to_string())?,
+            ),
             DeepTag::Borrow => {
                 // The IR lower path treats `borrow` as identity
                 // (chelis-ir/src/lower.rs::lower_identity); mirror that
@@ -4415,10 +4412,10 @@ impl<'a> EvalContext<'a> {
                         .collect(),
                 ))
             }
-            "copy" => match args.first() {
-                Some(RuntimeValue::Tensor(tensor)) => Ok(RuntimeValue::Tensor(tensor.clone())),
-                other => Err(format!("copy expects tensor input, got {other:?}")),
-            },
+            "copy" => args
+                .first()
+                .cloned()
+                .ok_or_else(|| "copy expects 1 argument".to_string()),
             "reshape" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let shape = expect_list_arg(args, 1)?;

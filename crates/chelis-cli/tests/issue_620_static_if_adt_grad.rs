@@ -416,16 +416,15 @@ fn issue_620_curried_closure_over_params_adt() {
     }
 }
 
-/// Source-surface boundary pin: the checked surface cannot express a
-/// double-read of an owned ADT today. A second `match p` is a linearity
-/// error (match consumes the scrutinee), source-level `copy(p)` is a
-/// checker type error ("copy requires tensor input"), and `match &p` is
+/// Source-surface boundary pin: a second `match p` on an owned ADT is a
+/// linearity error (match consumes the scrutinee), and `match &p` is
 /// outside the borrow surface ("borrow is only valid as a direct call
-/// argument"). Compiler-INSERTED Copy/Drop over ADT values (the paths
-/// chelis#620 made lowerable) are therefore pinned at the unit level
-/// (`copy_adt_lowers_field_wise` / `drop_adt_closes_each_leaf` in
-/// chelis-ir's lower.rs) and end-to-end by the curried-closure test
-/// above; this pin documents why no checked-source e2e exists.
+/// argument"). The double read is spelled with an authored `copy(p)`,
+/// which `issue_2219_generic_copy_lanes` runs on both lanes.
+/// Compiler-INSERTED Copy/Drop over ADT values (the paths chelis#620 made
+/// lowerable) are pinned at the unit level (`copy_adt_lowers_field_wise` /
+/// `drop_adt_closes_each_leaf` in chelis-ir's lower.rs) and end-to-end by
+/// the curried-closure test above.
 #[test]
 fn issue_620_owned_adt_double_read_stays_a_linearity_error() {
     let w = [1.5, -0.5];

@@ -2113,9 +2113,10 @@ fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
     let errors = check("def lam() = fn (v) -> sum(copy(v), 0)\n")
         .expect_err("a never-applied gated route must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.starts_with("copy requires tensor input, got ?")),
+        errors.iter().any(|e| e.message.starts_with(
+            "copy requires its operand's type to be determined at the call, because whether \
+             it is a borrow decides the result (spec/04-type-system.md section 8.2), got ?"
+        )),
         "the existing copy rejection must not be lost:\n{}",
         summary(&errors)
     );

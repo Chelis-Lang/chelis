@@ -3204,7 +3204,11 @@ The user surface is type- and expression-based:
 - passing owned `T` where `&T` is expected auto-borrows; this rule also applies to pipe stages
 - passing `&T` where owned `T` is expected is a type error unless the program writes `copy(x)`
 - `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value;
-  explicit and compiler-inserted copies lower to `RiscOp::Copy`
+  explicit and compiler-inserted copies lower to `RiscOp::Copy`. Whether the operand
+  is a borrow decides the result, so the operand's type must be determined at the
+  call: an operand whose type is a type variable left unresolved in its declaration,
+  such as a parameter declared `x: t`, is a type error, while one declared `x: &t`
+  yields `t`
 - borrows cannot be stored in aggregates, returned, or captured by closures
 - source borrow syntax is erased before backend lowering, but the resolved ownership
   disposition of every use remains explicit in ownership-lowered IR; implicit

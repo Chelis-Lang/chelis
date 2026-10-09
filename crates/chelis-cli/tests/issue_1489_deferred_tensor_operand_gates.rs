@@ -98,29 +98,19 @@ fn an_operand_resolved_after_the_gate_is_accepted() {
     );
 }
 
-/// Negative parity: deferring must not become accepting. An operand that
-/// resolves to something concretely wrong is still rejected.
+/// chelis#2219: `copy` is generic (spec/04 section 8.2), so a settled
+/// operand of any kind is accepted, with the operand's own type. The
+/// negative parity this test pinned for `copy` moved to the gates that still
+/// refuse a settled operand: `cast` of a unit value, in the grid below.
 #[test]
-fn an_operand_resolved_to_a_non_tensor_is_still_rejected() {
+fn an_operand_resolved_to_a_non_tensor_is_copied() {
     let report = check_json(
         "module Issue1489Concrete\n\
-         def probe() -> i32 = {\n\
-        \x20 g = copy(())\n\
-        \x20 1i32\n\
-         }\n",
+         def probe() -> unit = copy(())\n",
     );
     assert!(
-        report["errors"]
-            .as_array()
-            .is_some_and(
-                |errors| errors.iter().any(|error| error["kind"] == "TypeMismatch"
-                    && error["expected"] == "tensor"
-                    && error["got"] == "()"
-                    && error["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("copy")))
-            ),
-        "copy of a unit value must still be rejected by name; got {report}"
+        messages(&report).is_empty(),
+        "copy of a unit value is a unit value; got {report}"
     );
 }
 
@@ -181,7 +171,8 @@ fn gate_rejected(report: &serde_json::Value) -> bool {
         errors.iter().any(|error| {
             error["kind"] == "CastNonTensor"
                 || (error["kind"] == "TypeMismatch"
-                    && error["expected"] == "tensor"
+                    && (error["expected"] == "tensor"
+                        || error["expected"] == "an operand of determined type")
                     && error["message"]
                         .as_str()
                         .is_some_and(|message| message.contains("copy")))
@@ -216,6 +207,8 @@ fn eager_and_deferred_gates_agree_on_the_same_operand() {
         ("unit", "copy(v)", "unit"),
         ("f32", "copy(v)", "f32"),
         ("(i32, i32)", "copy(v)", "(i32, i32)"),
+        ("List[tensor[2, f32]]", "copy(v)", "List[tensor[2, f32]]"),
+        ("&List[tensor[2, f32]]", "copy(v)", "List[tensor[2, f32]]"),
         ("tensor[3, f32]", "cast(v, f64)", "tensor[3, f64]"),
         ("&tensor[3, f32]", "cast(v, f64)", "tensor[3, f64]"),
         ("f32", "cast(v, f64)", "f64"),
@@ -612,34 +605,44 @@ fn a_host_slot_rejection_names_the_resolved_type_not_an_identity() {
 /// file passing while these two programs check clean at score 1.
 #[test]
 fn a_constraint_survives_its_variable_being_aliased_to_another() {
-    for (call, ret, kind, expected) in [
-        ("copy(w)", "unit", "TypeMismatch", "tensor"),
-        (
-            "cast(w, f64)",
-            "f64",
-            "CastNonTensor",
-            "tensor or numeric/bool scalar",
-        ),
-    ] {
-        let report = check_json(&format!(
+    let program = |parameter: &str, ret: &str, call: &str| {
+        format!(
             "module Issue1489Realias\n\
              def apply_it[a, b](f: (a) -> b, t: a) -> b = f(t)\n\
-             def probe(x: unit) -> {ret} =\n\
+             def probe(x: {parameter}) -> {ret} =\n\
             \x20 apply_it(fn (v) -> apply_it(fn (w) -> {call}, v), x)\n"
-        ));
-        assert!(
-            report["errors"]
-                .as_array()
-                .is_some_and(|errors| errors.iter().any(|error| error["kind"] == kind
-                    && error["expected"] == expected
+        )
+    };
+    // `copy` accepts every settled operand (chelis#2219), so the carried
+    // constraint shows in its result: the copy of a borrow is the owned
+    // referent. A dropped constraint leaves that result unconstrained, and a
+    // declared borrow result would then check.
+    let report = program("&List[tensor[2, f32]]", "&List[tensor[2, f32]]", "copy(w)");
+    let report = check_json(&report);
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "TypeMismatch"
+                && error["expected"] == "(&List tensor[2, f32]) -> &List tensor[2, f32]"
+                && error["got"] == "(&List tensor[2, f32]) -> List tensor[2, f32]")),
+        "copy(w): a constraint re-suspended onto an aliased variable must still \
+         decide the copy's owned result; got {report}"
+    );
+    let report = check_json(&program("unit", "f64", "cast(w, f64)"));
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(
+                |errors| errors.iter().any(|error| error["kind"] == "CastNonTensor"
+                    && error["expected"] == "tensor or numeric/bool scalar"
                     && error["got"] == "()"
                     && error["message"]
                         .as_str()
-                        .is_some_and(|message| message.contains(call.split('(').next().unwrap())))),
-            "{call}: a constraint re-suspended onto an aliased variable must \
-             still reject a non-tensor operand; got {report}"
-        );
-    }
+                        .is_some_and(|message| message.contains("cast")))
+            ),
+        "cast(w, f64): a constraint re-suspended onto an aliased variable must \
+         still reject a non-tensor operand; got {report}"
+    );
 }
 
 /// An operand a host slot accepts must not draw that SLOT'S OWN rejection
