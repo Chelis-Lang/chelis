@@ -64,12 +64,12 @@ int main(int argc, char **argv) {
         free(claims);
         return 0;
     }
-    if (mode < 1 || mode > 4) return 99;
+    if (mode < 1 || mode > 7) return 99;
     __chelis_host_result_axis axes[4] = {
         { 0, 3, "A", "source", 0 },
         { 0, mode == 1 || mode == 3 ? 2 : 1, "B", "source", 0 },
         { 0, 4, "C", "source", 0 },
-        { 0, 1, "D", "source", 0 },
+        { 0, mode == 1 || mode == 3 || mode == 6 || mode == 7 ? 5 : 1, "D", "source", 0 },
     };
     __chelis_host_result_claim claims[4] = {0};
     for (int i = 0; i < 4; ++i) {
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
         claims[i].axes = &axes[i];
         claims[i].outer_claims_first = i == 0 || i == 2;
     }
-    if (mode <= 2) {
+    if (mode <= 2 || mode == 6) {
         __chelis_check_host_result_claims(claims, &value, "probe", "mismatch");
     } else {
         __chelis_check_host_result_extent_claims(claims, 1, observations, 1, "probe", "mismatch");
@@ -99,7 +99,6 @@ fn result_claim_helpers_preserve_order_and_do_not_recurse_through_claim_chains()
     fs::write(&source_path, source).expect("write emitted helper probe");
     let toolchain = crate::toolchain::test_toolchain(Default::default());
     let compile = Command::new(&toolchain.compiler)
-        .arg("-O2")
         .args(&toolchain.compile_flags)
         .arg(&source_path)
         .args(&toolchain.link_flags)
@@ -113,7 +112,7 @@ fn result_claim_helpers_preserve_order_and_do_not_recurse_through_claim_chains()
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    for (mode, first_claim) in [(1, "B"), (2, "C"), (3, "B"), (4, "C")] {
+    for (mode, first_claim) in [(1, "B"), (2, "C"), (3, "B"), (4, "C"), (6, "D"), (7, "D")] {
         let output = Command::new(&binary_path)
             .arg(mode.to_string())
             .output()

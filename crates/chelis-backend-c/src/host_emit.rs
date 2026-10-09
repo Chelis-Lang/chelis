@@ -3104,35 +3104,91 @@ static void __chelis_host_result_claim_trap(const __chelis_host_result_axis *cla
     chelis_numeric_trap(trap);
 }
 
-static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
-    if (claims == NULL) return;
-    if (claims->outer_claims_first) __chelis_check_host_result_extent_claims(claims->next, rank, observations, count, op, trap);
-    {
-        if (rank == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
-            for (int64_t j = 0; j < count; ++j) {
-                if (claims->axes[i].axis != observations[j][0]) continue;
-                if (claims->axes[i].required != observations[j][2]) {
-                    __chelis_host_result_claim_trap(&claims->axes[i], op, observations[j][1], observations[j][2], trap);
-                }
+/* Immediate claims fail in link order; deferred claims fail in reverse link order.
+   Keep the first deferred claim inline so a single claim needs no allocation. */
+static void __chelis_defer_host_result_claim(const __chelis_host_result_claim **first, const __chelis_host_result_claim ***deferred, size_t *length, size_t *capacity, const __chelis_host_result_claim *claim) {
+    if (*first == NULL) {
+        *first = claim;
+        return;
+    }
+    if (*length == *capacity) {
+        if (*capacity > SIZE_MAX / (2 * sizeof(**deferred))) {
+            fprintf(stderr, "host runtime: result claim chain is too long\n");
+            abort();
+        }
+        size_t next_capacity = *capacity == 0 ? 8 : *capacity * 2;
+        const __chelis_host_result_claim **next = (const __chelis_host_result_claim **)realloc(*deferred, next_capacity * sizeof(**deferred));
+        if (next == NULL) {
+            fprintf(stderr, "host runtime: result claim traversal allocation failed\n");
+            abort();
+        }
+        *deferred = next;
+        *capacity = next_capacity;
+    }
+    (*deferred)[(*length)++] = claim;
+}
+
+static void __chelis_check_host_result_extent_claim_one(const __chelis_host_result_claim *claim, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
+    if (rank == claim->rank) for (int64_t i = 0; i < claim->count; ++i) {
+        for (int64_t j = 0; j < count; ++j) {
+            if (claim->axes[i].axis != observations[j][0]) continue;
+            if (claim->axes[i].required != observations[j][2]) {
+                __chelis_host_result_claim_trap(&claim->axes[i], op, observations[j][1], observations[j][2], trap);
             }
         }
     }
-    if (!claims->outer_claims_first) __chelis_check_host_result_extent_claims(claims->next, rank, observations, count, op, trap);
+}
+
+static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
+    if (claims == NULL) return;
+    const __chelis_host_result_claim *first_deferred = NULL;
+    const __chelis_host_result_claim **deferred = NULL;
+    size_t length = 0, capacity = 0;
+    for (const __chelis_host_result_claim *claim = claims; claim != NULL; claim = claim->next) {
+        if (claim->outer_claims_first) {
+            __chelis_defer_host_result_claim(&first_deferred, &deferred, &length, &capacity, claim);
+        } else {
+            __chelis_check_host_result_extent_claim_one(claim, rank, observations, count, op, trap);
+        }
+    }
+    while (length != 0) {
+        __chelis_check_host_result_extent_claim_one(deferred[--length], rank, observations, count, op, trap);
+    }
+    if (first_deferred != NULL) {
+        __chelis_check_host_result_extent_claim_one(first_deferred, rank, observations, count, op, trap);
+    }
+    if (deferred != NULL) free(deferred);
+}
+
+static void __chelis_check_host_result_claim_one(const __chelis_host_result_claim *claim, const chelis_tensor *value, const char *op, const char *trap) {
+    if (chelis_tensor_rank(value) == claim->rank) for (int64_t i = 0; i < claim->count; ++i) {
+        int64_t axis = claim->axes[i].axis;
+        int64_t observed = chelis_tensor_shape(value, axis);
+        if (observed != claim->axes[i].required) {
+            __chelis_host_result_claim_trap(&claim->axes[i], op, axis, observed, trap);
+        }
+    }
 }
 
 static void __chelis_check_host_result_claims(const __chelis_host_result_claim *claims, const chelis_tensor *value, const char *op, const char *trap) {
     if (claims == NULL) return;
-    if (claims->outer_claims_first) __chelis_check_host_result_claims(claims->next, value, op, trap);
-    {
-        if (chelis_tensor_rank(value) == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
-            int64_t axis = claims->axes[i].axis;
-            int64_t observed = chelis_tensor_shape(value, axis);
-            if (observed != claims->axes[i].required) {
-                __chelis_host_result_claim_trap(&claims->axes[i], op, axis, observed, trap);
-            }
+    const __chelis_host_result_claim *first_deferred = NULL;
+    const __chelis_host_result_claim **deferred = NULL;
+    size_t length = 0, capacity = 0;
+    for (const __chelis_host_result_claim *claim = claims; claim != NULL; claim = claim->next) {
+        if (claim->outer_claims_first) {
+            __chelis_defer_host_result_claim(&first_deferred, &deferred, &length, &capacity, claim);
+        } else {
+            __chelis_check_host_result_claim_one(claim, value, op, trap);
         }
     }
-    if (!claims->outer_claims_first) __chelis_check_host_result_claims(claims->next, value, op, trap);
+    while (length != 0) {
+        __chelis_check_host_result_claim_one(deferred[--length], value, op, trap);
+    }
+    if (first_deferred != NULL) {
+        __chelis_check_host_result_claim_one(first_deferred, value, op, trap);
+    }
+    if (deferred != NULL) free(deferred);
 }
 "#.to_string());
 }
