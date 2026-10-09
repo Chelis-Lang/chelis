@@ -3078,6 +3078,7 @@ fn nested_claim_frame_lines(
 ) -> Vec<String> {
     let nodes = format!("{frame}_nodes");
     let mut lines = claim_pattern_table_lines(pattern, &nodes, indent);
+    let binder_count = binders.len();
     let binder_table = if binders.is_empty() {
         "NULL".to_string()
     } else {
@@ -3093,8 +3094,12 @@ fn nested_claim_frame_lines(
         .expect("a nested result claim owes an obligation")
         .index();
     lines.push(format!(
-        "{indent}const __chelis_host_result_claim {frame} = {{ {parent}, -1, 0, NULL, {}, {nodes}, {root}, {binder_table} }};",
-        i32::from(outer_claims_first)
+        "{indent}const __chelis_host_result_claim {frame}_declared = {{ {parent}, -1, 0, NULL, {}, {nodes}, {root}, {binder_table}, {} }};",
+        i32::from(outer_claims_first),
+        binder_count
+    ));
+    lines.push(format!(
+        "{indent}const __chelis_host_result_claim *{frame}_joined = __chelis_join_host_result_claim(&{frame}_declared);"
     ));
     lines
 }
@@ -3262,11 +3267,12 @@ typedef struct __chelis_host_result_claim {
     const __chelis_claim_node *nodes;
     int64_t node;
     const __chelis_host_result_axis *binders;
+    int64_t binder_count;
 } __chelis_host_result_claim;
 
+/* One allocation of projected frames; the frames follow the header. */
 typedef struct __chelis_host_result_claim_block {
     struct __chelis_host_result_claim_block *next;
-    __chelis_host_result_claim frames[];
 } __chelis_host_result_claim_block;
 
 typedef struct __chelis_host_result_origin {
@@ -3565,15 +3571,51 @@ static int64_t __chelis_claim_child(const __chelis_claim_node *nodes, int64_t in
     return -1;
 }
 
+/* Two pattern frames that state the same obligation: the same pattern table
+   and node, ordering and binder witnesses. */
+static int __chelis_claim_frames_equal(const __chelis_host_result_claim *a, const __chelis_host_result_claim *b) {
+    if (a->nodes != b->nodes || a->node != b->node || a->outer_claims_first != b->outer_claims_first || a->binder_count != b->binder_count) return 0;
+    if (a->binders == b->binders) return 1;
+    if (a->binders == NULL || b->binders == NULL) return 0;
+    for (int64_t i = 0; i < a->binder_count; ++i) {
+        const __chelis_host_result_axis *x = &a->binders[i];
+        const __chelis_host_result_axis *y = &b->binders[i];
+        if (x->required != y->required || x->source_axis != y->source_axis || (x->claim == NULL) != (y->claim == NULL) || (x->source == NULL) != (y->source == NULL)) return 0;
+        if (x->claim != NULL && strcmp(x->claim, y->claim) != 0) return 0;
+        if (x->source != NULL && strcmp(x->source, y->source) != 0) return 0;
+    }
+    return 1;
+}
+
+static int __chelis_claim_chain_holds(const __chelis_host_result_claim *chain, const __chelis_host_result_claim *frame) {
+    for (; chain != NULL; chain = chain->next) {
+        if (chain->nodes != NULL && __chelis_claim_frames_equal(chain, frame)) return 1;
+    }
+    return 0;
+}
+
+/* A declared pattern frame joins the chain it extends unless that chain
+   already states the same obligation: a recursive activation re-declares the
+   frame its caller projected into it, and checking it twice adds nothing. */
+static const __chelis_host_result_claim *__chelis_join_host_result_claim(const __chelis_host_result_claim *frame) {
+    return __chelis_claim_chain_holds(frame->next, frame) ? frame->next : frame;
+}
+
 /* The claims a component of a value under construction owes: every pattern
-   frame projected to that component, in order. A tensor frame says nothing
-   about a component. */
+   frame projected to that component, in order, each distinct obligation
+   once. A tensor frame says nothing about a component. A chain that projects
+   onto itself, as in a recursive construction, is returned unchanged, so a
+   linear recursion holds one copy of each distinct claim. */
 static const __chelis_host_result_claim *__chelis_project_host_result_claims(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *claims, int64_t kind, const char *ctor, int64_t field) {
     int64_t count = 0;
+    int unchanged = 1;
     for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
-        if (frame->nodes != NULL && __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field) >= 0) count += 1;
+        int64_t child = frame->nodes != NULL ? __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field) : -1;
+        if (child >= 0) count += 1;
+        if (child != frame->node) unchanged = 0;
     }
     if (count == 0) return NULL;
+    if (unchanged) return claims;
     if (arena == NULL || (uint64_t)count > (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
         fprintf(stderr, "host runtime: invalid result claim projection\n");
         abort();
@@ -3585,17 +3627,24 @@ static const __chelis_host_result_claim *__chelis_project_host_result_claims(__c
     }
     block->next = arena->claim_head;
     arena->claim_head = block;
+    __chelis_host_result_claim *frames = (__chelis_host_result_claim *)(block + 1);
     int64_t at = 0;
     for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
         if (frame->nodes == NULL) continue;
         int64_t child = __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field);
         if (child < 0) continue;
-        block->frames[at] = *frame;
-        block->frames[at].node = child;
-        block->frames[at].next = at + 1 < count ? &block->frames[at + 1] : NULL;
+        frames[at] = *frame;
+        frames[at].node = child;
+        frames[at].next = NULL;
+        int duplicate = 0;
+        for (int64_t seen = 0; seen < at; ++seen) {
+            if (__chelis_claim_frames_equal(&frames[seen], &frames[at])) duplicate = 1;
+        }
+        if (duplicate) continue;
+        if (at > 0) frames[at - 1].next = &frames[at];
         at += 1;
     }
-    return &block->frames[0];
+    return &frames[0];
 }
 
 static const __chelis_host_result_origin *__chelis_claim_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
@@ -3703,7 +3752,11 @@ static int __chelis_claim_pattern_axis(const __chelis_host_result_claim *claims,
     if (axis < 0 || axis >= rank) return 0;
     int64_t slot = node->axes[i][1];
     if (slot < 0) {
-        *out = (__chelis_host_result_axis){ axis, node->axes[i][2], NULL, NULL, 0 };
+        out->axis = axis;
+        out->required = node->axes[i][2];
+        out->claim = NULL;
+        out->source = NULL;
+        out->source_axis = 0;
     } else {
         if (claims->binders == NULL || claims->binders[slot].source == NULL) return 0;
         *out = claims->binders[slot];
@@ -4562,7 +4615,7 @@ fn emit_function(
             &claims_parent,
             &indent,
         ));
-        claims_parent = "&__chelis_declared_nested_result".to_string();
+        claims_parent = "__chelis_declared_nested_result_joined".to_string();
     }
     match HostResultClaim::of(function) {
         Some(claim) => claim_lines.extend(claim.frame_lines(
@@ -6999,7 +7052,10 @@ impl<'a> HostEmitter<'a> {
                             plan.outer_claims_first(),
                         )),
                 }
-                let previous_claims = self.result_claims.replace(format!("&{frame}"));
+                let previous_claims = self.result_claims.replace(match plan.nested() {
+                    Some(_) => format!("{frame}_joined"),
+                    None => format!("&{frame}"),
+                });
                 self.claim_on_spine = true;
                 self.assign_expr(target, body, ty)?;
                 self.result_claims = previous_claims;
@@ -13775,11 +13831,6 @@ fn host_type(expr: &HostExpr) -> HostType {
     }
 }
 
-/// Whether the evaluator's `ResultProducer` model can attach provenance to
-/// a value of this resolved ABI type. A value that cannot carries a null
-/// origin rather than the uniform `load` leaf. ADT arguments are type
-/// parameters rather than a field-layout description, so every ADT is
-/// conservatively treated as able to.
 /// The value tag of an aggregate that may hold a claimed tensor, for a
 /// borrowed boundary walk of its pattern claims.
 pub(super) fn borrowed_claim_value_tag(ty: &HostType) -> Option<&'static str> {
@@ -13795,6 +13846,11 @@ pub(super) fn borrowed_claim_value_tag(ty: &HostType) -> Option<&'static str> {
     }
 }
 
+/// Whether the evaluator's `ResultProducer` model can attach provenance to
+/// a value of this resolved ABI type. A value that cannot carries a null
+/// origin rather than the uniform `load` leaf. ADT arguments are type
+/// parameters rather than a field-layout description, so every ADT is
+/// conservatively treated as able to.
 fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
     match ty {
         HostType::Tensor(_) | HostType::Adt(_, _) => true,

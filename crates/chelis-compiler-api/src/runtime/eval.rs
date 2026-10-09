@@ -246,6 +246,13 @@ struct NestedResultClaim {
 }
 
 impl NestedResultClaim {
+    /// The same obligation: one pattern at one node, with equal witnesses.
+    fn same_obligation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pattern, &other.pattern)
+            && self.node == other.node
+            && (Arc::ptr_eq(&self.binders, &other.binders) || self.binders == other.binders)
+    }
+
     fn claim(self) -> DeclaredResultClaim {
         DeclaredResultClaim {
             rank: 0,
@@ -317,7 +324,7 @@ impl NestedResultClaim {
 
 /// One declared result axis named by an output-inferred binder of
 /// `activation`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct FirstSiteAxis {
     axis: usize,
     binder: String,
@@ -367,7 +374,7 @@ impl ActivationExtents {
 }
 
 /// One declared result axis and the value it requires.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ResultAxisClaim {
     axis: usize,
     required: i64,
@@ -377,7 +384,7 @@ struct ResultAxisClaim {
     source: Option<NamedResultSource>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct NamedResultSource {
     claim: String,
     parameter: String,
@@ -395,6 +402,21 @@ impl ResultAxisClaim {
 }
 
 impl DeclaredResultClaim {
+    /// Whether two claims state the same obligation, so checking both adds
+    /// nothing. A recursive activation re-declares the nested claim its
+    /// caller projected into it; keeping one copy keeps the claim list
+    /// bounded by the distinct claims rather than the recursion depth.
+    fn same_obligation(&self, other: &Self) -> bool {
+        self.rank == other.rank
+            && self.axes == other.axes
+            && self.first_sites == other.first_sites
+            && match (&self.nested, &other.nested) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.same_obligation(right),
+                _ => false,
+            }
+    }
+
     fn verdict(&self, produced: &RuntimeValue, op: &str) -> Result<(), String> {
         let RuntimeValue::Tensor(tensor) = produced else {
             return Ok(());
@@ -2779,10 +2801,16 @@ impl<'a> EvalContext<'a> {
         claims: &[DeclaredResultClaim],
         step: chelis_ir::claim_pattern::ClaimStep<'_>,
     ) -> Vec<DeclaredResultClaim> {
-        claims
+        let mut projected: Vec<DeclaredResultClaim> = Vec::new();
+        for claim in claims
             .iter()
             .filter_map(|claim| claim.nested.as_ref()?.project(step))
-            .collect()
+        {
+            if !projected.iter().any(|seen| seen.same_obligation(&claim)) {
+                projected.push(claim);
+            }
+        }
+        projected
     }
 
     /// A tuple under construction on the result spine: each component is
@@ -3704,7 +3732,11 @@ impl<'a> EvalContext<'a> {
                             nested: None,
                         });
                     let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
-                    claims.extend(nested_claim);
+                    claims.extend(nested_claim.filter(|nested| {
+                        !inherited_claims
+                            .iter()
+                            .any(|inherited| inherited.same_obligation(nested))
+                    }));
                     claims.extend_from_slice(inherited_claims);
                     let value = self.eval_under_result_claim(&body, &claims)?;
                     // The declared result is a later site of every binder

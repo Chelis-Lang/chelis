@@ -277,6 +277,30 @@ def ident3(size: i64) -> Box[3] = {
 out = add(width(pass3(size_from("PATH")).0), width(ident3(size_from("PATH"))))
 "#;
 
+const DEEP_CLAIMED: &str = r#"type Wrap[n] =
+  | W { inner: Wrap[n] }
+  | B { v: tensor[n, f32] }
+def rec(depth: i64, size: i64) -> Wrap[3] = if gt(depth, 0i64) then W { inner: rec(sub(depth, 1i64), size) } else B { v: produce(size) }
+def leaf(w: Wrap[3]) -> i64 =
+  match w with {
+    | W { inner } => 1i64
+    | B { v } => shape(v, 0i32)
+  }
+out = leaf(rec(size_from("PATH"), 3i64))
+"#;
+
+const DEEP_UNCLAIMED: &str = r#"type Wrap =
+  | W { inner: Wrap }
+  | B { v: tensor[*, f32] }
+def rec(depth: i64, size: i64) -> Wrap = if gt(depth, 0i64) then W { inner: rec(sub(depth, 1i64), size) } else B { v: produce(size) }
+def leaf(w: Wrap) -> i64 =
+  match w with {
+    | W { inner } => 1i64
+    | B { v } => shape(v, 0i32)
+  }
+out = leaf(rec(size_from("PATH"), 3i64))
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -904,4 +928,85 @@ fn agreeing_claim_walks_run_when_the_host_is_cxx() {
     }
     let output = host_as_cxx(KINDED_NOMINAL_DIMENSIONS);
     assert!(output.contains("out = ()"), "{output}");
+}
+
+/// Run `command` to completion and return its stdout and peak resident set
+/// size, in the platform's `ru_maxrss` unit (only compared as a ratio).
+fn peak_resident(mut command: std::process::Command) -> (String, i64) {
+    let child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("measured process starts");
+    let pid = child.id() as libc::pid_t;
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.expect("stdout"), &mut stdout).expect("stdout");
+    let mut status = 0;
+    // SAFETY: `rusage` is plain data the call fills; `pid` is our child and
+    // is reaped exactly once, here.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let reaped = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+    assert_eq!(reaped, pid, "the measured process is reaped");
+    (stdout, usage.ru_maxrss as i64)
+}
+
+/// A recursive builder of a claimed nominal holds one copy of its claim, not
+/// one per level: its peak memory stays within a small factor of the same
+/// builder whose field claims nothing, on compiled C and on Eval. Copying the
+/// claim chain at every level made it quadratic in the depth.
+fn deep_recursion_peak(native: bool, depth: usize) -> (i64, i64) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let size = dir.path().join("depth.txt");
+    fs::write(&size, "x".repeat(depth)).expect("depth");
+    let mut peaks = Vec::new();
+    for (stem, case) in [("claimed", DEEP_CLAIMED), ("unclaimed", DEEP_UNCLAIMED)] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        fs::write(
+            &path,
+            format!("{PRELUDE}{case}").replace("PATH", &size.display().to_string()),
+        )
+        .expect("fixture");
+        let chelis = assert_cmd::cargo::cargo_bin("chelis");
+        let command = if native {
+            let out_dir = dir.path().join(stem);
+            assert_cmd::Command::new(&chelis)
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["build", "--allow-style-violations"])
+                .arg(&path)
+                .args(["--target", "c", "-o"])
+                .arg(&out_dir)
+                .assert()
+                .success();
+            std::process::Command::new(out_dir.join(stem))
+        } else {
+            let mut command = std::process::Command::new(&chelis);
+            command
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["eval", "--allow-style-violations", "--file"])
+                .arg(&path);
+            command
+        };
+        let (stdout, peak) = peak_resident(command);
+        assert!(stdout.contains("out = 1"), "{stem}: {stdout}");
+        peaks.push(peak);
+    }
+    (peaks[0], peaks[1])
+}
+
+#[test]
+fn c_recursive_claimed_builder_memory_stays_linear() {
+    let (claimed, unclaimed) = deep_recursion_peak(true, 4000);
+    assert!(
+        claimed <= 3 * unclaimed,
+        "claimed peak {claimed} against unclaimed {unclaimed}"
+    );
+}
+
+#[test]
+fn eval_recursive_claimed_builder_memory_stays_linear() {
+    let (claimed, unclaimed) = deep_recursion_peak(false, 2000);
+    assert!(
+        claimed <= 2 * unclaimed,
+        "claimed peak {claimed} against unclaimed {unclaimed}"
+    );
 }
