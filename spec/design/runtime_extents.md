@@ -817,7 +817,7 @@ success; compiled C must be compiled, linked and run.
 The only-empty-List result-binder case stays outside this matrix pending the
 normative decision above. These receipts prove retained formal tensor
 results with direct and List witnesses on Eval/C; they do not claim general
-aggregate result guards, device backends, or the broader #1277 class.
+aggregate result guards (C6.5), device backends, or the broader #1277 class.
 
 ##### Host entry guards (#1788)
 
@@ -1984,6 +1984,125 @@ under #729. Computed-input concat routing #2373 under #2514 has a separate
 design. Those plans compose with this one at a checked tensor boundary; they
 do not make an extent claim or guard optional.
 
+#### C6.5 Claims on tensors nested in aggregate and nominal types (#3347 and #2644)
+
+spec/04 §4.7.2 makes every declared or inferred result dimension that claims a
+literal or named extent an obligation, and [04-ADT-4] carries a nominal
+type's dimension argument through constructors, records, matches, evaluation
+and lowering without erasing it. A dimension does not stop being a declared
+dimension because it sits inside a tuple, an `Option`, a `List`, a record or a
+constructor field, or because a nominal argument supplies it: in `Box[3]`
+with `Box[n] = Box { v: tensor[n, f32] }`, the authored `3` claims axis 0 of
+`v`.
+
+The checker admits a computed `*` extent against such a claim. `unify_dim`'s
+wildcard arm accepts without binding, which is correct under §4.7.2 only
+because lowering is meant to retain the claim and check it. Lowering does
+that for the top-level tensor alone. Each claim source derives its obligations
+from a tensor-shaped declaration and nothing deeper:
+
+- the signature entry contract's `EntryPattern` knows `Tensor`, `List` and
+  `Other`, and treats a tuple, record or constructor formal as `Other`;
+- the host result plan (`HostResultClaimPlan`) and Eval's
+  `DeclaredResultClaim` are built for a tensor-typed result;
+- a local ascription records a `LocalAscriptionClaim` only for a tensor
+  annotation;
+- the exported C entry's aggregate walk (#2506) reads the host ABI type, and
+  that type has no representation for an ADT's dimension arguments, so the
+  walk can check a field's literal extent but not one a nominal argument
+  supplies.
+
+A tensor reached through any type constructor therefore carries no
+obligation, whatever its claim. Patching each consumer for one more
+constructor would leave the next constructor unguarded. The repair is one
+derivation that every claim source shares.
+
+**One claim pattern per authored type.** Lowering derives a claim pattern
+from the authored checked type of each claim source: a formal, a declared
+result, a local ascription, and a caller's claim inherited by a callee under
+#1771. It never derives one from the inferred type, which may already have
+absorbed the wildcard; the authored type is the claim (C2.3). The derivation
+is a total structural walk:
+
+| authored type | pattern |
+|---|---|
+| `tensor[...]` | one obligation per axis whose dimension is a literal or a named extent; a binder obligation keeps its scoped identity (C2.2); `*` contributes none |
+| tuple | its components' patterns, by position |
+| `List[T]` | `T`'s pattern, applied to every element |
+| record, `Option`, or any nominal application `N[a1, ..., ak]` | for each constructor, its fields' patterns, after substituting the application's type and dimension arguments into the declared field types |
+| any other type | no obligation |
+
+Substitution is how a nominal dimension argument becomes a claim. A literal
+argument becomes a literal claim on every field axis that names its
+parameter, a named argument becomes a named claim, a binder argument becomes
+a claim on that binder in the enclosing signature's scope, and `*` becomes
+none. The introducing site is the authored type position, and the field path
+(`Box.v`, `.0`) is diagnostic text, never a lookup key. Pattern nodes are
+memoized by nominal type and substituted argument tuple. Dimension arguments
+come from the finite set of authored dimensions in scope, so a recursive type
+such as `Tree[n] = Leaf { v: tensor[n, f32] } | Node { l: Tree[n], r: Tree[n] }`
+yields a finite pattern graph, and execution walks the runtime value along it
+with no depth limit. A pattern with no obligation anywhere is empty, and its
+claim source emits nothing.
+
+Static reasoning is unchanged. An independent fact proving equality removes
+the guard (C2.3). Contradictory literals, such as a five-element literal tensor
+field under a declared `Box[3]`, remain the checker's `DimensionMismatch`
+under [04-ADT-4]. The checker needs no new phase for the runtime cases.
+
+**Placement follows C1.3 and C6.2.** The pattern decides which obligations
+exist; the existing rules decide where each one executes.
+
+- *Entry.* A formal's pattern extends the #1788 entry contract. Execution
+  order is signature order, then depth-first through declared component and
+  field order, then axis order. A binder's first observation may be nested, so
+  a tuple-nested witness defines a binder for a later direct formal, and every
+  later witness is compared with it, as for List elements. Only the
+  constructor a value carries is walked; an absent variant owes nothing.
+- *Results and local ascriptions.* When the nested tensor's producer is in
+  the activation, the obligation is producer-owned. The #1771 origin
+  transport carries it through construction, aliases, selected branches and
+  private returns to that producer, which checks it before later effects. A
+  caller's `Box[3]` claim on a generic `make[n](..) -> Box[n]` therefore
+  reaches the `insert` inside `make`'s construction. When the activation has
+  no producer for the tensor, because the value arrives from a formal, an
+  opaque host value, or a cached or global load, the obligation is checked by
+  observing the value at the claim's boundary: the ascription's initializer,
+  or the result before the caller resumes.
+- *Failure.* The trap is the same Domain trap line, attributed to the producing
+  primitive, or to `load` at entry. Its context names the authored claim, the
+  field path and the observed extent.
+
+**One derivation, every consumer.** Eval and C consume the same derived
+pattern; neither rebuilds it from runtime values, host ABI types or backend
+layouts. The entry contract's tensor-or-List pattern, the tensor-only result
+plans of both lanes and the tensor-only local ascription claim migrate to the
+shared pattern in one change, for the reason C2.6 gives for B2b-1: dropping
+the pattern at any one boundary loses the same obligation. The #2506 walk
+keeps its null, dtype and rank admission. Its extent checks become consumers
+of the pattern, which supplies the nominal arguments the host ABI type lacks.
+If a pattern crosses a serialized artifact, it follows C2.6: a versioned
+field, deterministic order, and no missing-field default.
+
+**Exit.** These cells run on Eval and compiled, linked and executed C, each
+with the matching-extent control (`3i64`) executing unchanged:
+
+| Leaf | Program shape | Required result for runtime extent 5 |
+|---|---|---|
+| #3347 | nongeneric `def three(size: i64) -> Box[3] = Box { v: insert(.., size) }` | Domain trap at `insert` |
+| #3347 | generic `make[n](size: i64) -> Box[n]` called as `def three() -> Box[3] = make(5i64)` | Domain trap at `insert` inside `make` |
+| #3347 | local ascription `b: Box[3] = Box { v: insert(.., size) }` followed by a `match` on `b` | Domain trap at `insert`, before the `match` runs |
+| #3347 | formal `width(b: Box[3])` called with `make(5i64)` | Domain trap at entry of `width` |
+| #3347 | recursive `Node { l: leaf(3i64), r: leaf(size) }` under a declared `Pair[3]` | Domain trap at the `r` leaf's `insert`; the `l` leaf completes first |
+| #3347 | `Box[k]` result with `k` witnessed by a formal `x: tensor[k, f32]` | named-claim Domain trap naming `k` and `x` |
+| #2644 | tensor inside a tuple, `Option` or record result, with literal and named claims | Domain trap at the nested tensor's producer |
+| #2644 | binder witnessed only by a tuple-nested formal | entry Domain trap against the later witness |
+
+The discriminating negatives are an untaken constructor or `None` whose
+absent field would disagree (no trap), a static five-element literal field
+(checker rejection, unchanged), effects before and after the producer, and a
+call of the generic `make` whose result meets no claim (no guard emitted). HIP and Metal follow the platform interlocks below.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.
@@ -2000,6 +2119,7 @@ All are Slice B work under #1277 unless expressly separated.
 | #1948 same-shape result claims | C2.3's independent claim contract and spec/04 §4.7's returned-value producer rule | attach each declared-result obligation to the returned same-shape operation; represent every positive-rank agreement member without a selected operand origin; run operand agreement before the result guard; prove the dedicated check/Eval/compiled-C matrix and update the earlier #1798 attribution receipts |
 | #2110 local tensor ascriptions | C2.3's independent claim contract and C2.5's introducing-site rule | retain authored local tensor annotations as explicit checked obligations; attach them at the initializer producer; preserve them through aliases, inlining, rebuilds and artifact boundaries; prove the independent static/runtime/agreeing matrix on check, Eval and compiled C |
 | #1932 mapped-gradient artifact closure | C2.4's authored witnesses, batched node map and fail-loud artifact boundary | remap and retain the complete entry-witness/dimension-origin set through `vmap(grad(...))`, cotangent packing and splice; reject unresolved roots or rendered identifiers before success; execute the exact witness and controls on Eval and compiled C, including compile/link/run and mutation negatives |
+| C6.5 nested and nominal claims | C2.2 scoped identities, the #1788 entry contract and the #1771 origin transport | derive one claim pattern from each authored formal, result, local ascription and inherited claim type, substituting nominal dimension arguments; migrate the entry, result and ascription consumers of both lanes to it together; execute the C6.5 matrix for #3347 and #2644 |
 | C6 post-corpus witness closure | C2's scoped axis contracts and the recorded phase exit | implement the per-leaf C6.3 matrix for #1767, #1900, #1908, #1917, #1977, #1978, #2083, #2374, #2377, #1889, #1935 and #2370; the transformed subset belongs to nested class #2515 and uses `transformed_extent_witnesses.md`, and #1935 follows correctness closure |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 
