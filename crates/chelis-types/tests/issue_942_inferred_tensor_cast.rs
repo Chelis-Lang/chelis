@@ -335,8 +335,12 @@ def f(bias: tensor[1, 2, 1, f32]) = {
     );
 }
 
+/// The type itself is unrepresentable, its element count exceeding i64, so
+/// spec/04-type-system.md section 4.7 rejects it (chelis#3418). The reshape
+/// comparison must still be exact: equal products add no mismatch of their
+/// own beside that rejection.
 #[test]
-fn reshape_accepts_equal_static_products_beyond_i64() {
+fn reshape_of_equal_static_products_beyond_i64_reports_only_unrepresentability() {
     let errors = typecheck(
         r#"
 def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, 2, f32] =
@@ -344,7 +348,11 @@ def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, 2, 
 "#,
     );
     assert!(
-        errors.is_empty(),
+        !errors.is_empty()
+            && errors.iter().all(|error| {
+                matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                    && error.message.contains("is not representable")
+            }),
         "equal static products must compare exactly even when they exceed i64:\n{}",
         summary(&errors)
     );
@@ -358,10 +366,13 @@ def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, f32
   reshape(x, [9223372036854775807i64])
 "#,
     );
+    // The representability rejection (chelis#3418) must not be the only
+    // DimensionMismatch: the reshape's own count mismatch still reports.
     assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && !error.message.contains("is not representable")
+        }),
         "overflow must not turn a known static element-count mismatch into unknown:\n{}",
         summary(&errors)
     );

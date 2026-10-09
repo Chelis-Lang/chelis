@@ -1148,6 +1148,22 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "representable_extent.rs",
+      "function": "unrepresentable_tensor",
+      "ordinal": 1,
+      "pattern": "Type::Tensor(_ , TensorPrec::Var(_))",
+      "disposition": "not_a_route",
+      "reason": "spec/04-type-system.md §4.7 (chelis#3418): a post-inference validator over final owner types; an unresolved precision or a non-tensor type has no literal size to reject, so the arm answers nothing and routes nothing"
+    },
+    {
+      "file": "representable_extent.rs",
+      "function": "unrepresentable_tensor",
+      "ordinal": 2,
+      "pattern": "Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route",
+      "reason": "spec/04-type-system.md §4.7 (chelis#3418): a post-inference validator over final owner types; an unresolved precision or a non-tensor type has no literal size to reject, so the arm answers nothing and routes nothing"
+    },
+    {
       "file": "static_value.rs",
       "function": "reject_non_int32_axis_at",
       "ordinal": 1,

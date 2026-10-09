@@ -221,3 +221,109 @@ fn small_runtime_extent_still_evaluates_in_both_lanes() {
     let c = lanes.c.as_ref().expect("built binary ran");
     assert!(c.status.success(), "{}", text(c));
 }
+
+fn check_output(name: &str, source: &str) -> Output {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("check")
+}
+
+/// A size proven unrepresentable from literals is a type error (spec/04
+/// section 4.7, "A violation proven from literals is a type error"): `check`
+/// reports a `DimensionMismatch` naming the overflowing quantity, and
+/// neither eval nor build runs anything, the earlier effect included.
+#[test]
+fn literal_unrepresentable_sizes_are_type_errors_in_every_lane() {
+    for (name, source, quantity) in [
+        (
+            "literal_expand_bytes",
+            program("", "expand(to_tensor([1.0f32]), 0i32, 4611686018427387904i64)"),
+            "byte size",
+        ),
+        (
+            "literal_insert_bytes",
+            program("", "insert(to_tensor([1.0f32]), 0i32, 4611686018427387904i64)"),
+            "byte size",
+        ),
+        (
+            "literal_insert_count",
+            program(
+                "",
+                "insert(expand(to_tensor([1.0f32]), 0i32, 4i64), 0i32, 4611686018427387904i64)",
+            ),
+            "element count",
+        ),
+        (
+            "literal_bytes_one_past_i64",
+            program("", "expand(to_tensor([1.0f32]), 0i32, 2305843009213693952i64)"),
+            "byte size",
+        ),
+        (
+            "declared_parameter",
+            "def big(x: tensor[4611686018427387904, f32]) -> f32 = tensor_to_scalar(sum(x, 0i32))\nout = 1i64\n"
+                .to_string(),
+            "byte size",
+        ),
+    ] {
+        let check = check_output(name, &source);
+        let report = text(&check);
+        assert!(!check.status.success(), "{name}: check must fail:\n{report}");
+        assert!(
+            report.contains("\"kind\":\"DimensionMismatch\""),
+            "{name}: check must report DimensionMismatch:\n{report}"
+        );
+        assert!(
+            report.contains(&format!("{quantity} ")) && report.contains("exceeds i64"),
+            "{name}: the message must name the overflowing {quantity}:\n{report}"
+        );
+
+        let lanes = run_lanes(name, &source);
+        for (lane, output) in [("eval", &lanes.eval), ("build", &lanes.build)] {
+            let all = text(output);
+            assert!(!output.status.success(), "{name}: {lane} must reject:\n{all}");
+            assert!(
+                all.contains("DimensionMismatch") && all.contains("exceeds i64"),
+                "{name}: {lane} must reject with the type error:\n{all}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("before"),
+                "{name}: {lane} must run nothing:\n{all}"
+            );
+            assert!(!all.contains("panicked"), "{name}: {lane}:\n{all}");
+        }
+        assert!(lanes.c.is_none(), "{name}: no binary is produced");
+    }
+}
+
+/// Negative parity: the largest f32 extent whose byte size fits i64,
+/// 2^61 - 1 elements, and a declared parameter of that type, pass `check`.
+#[test]
+fn largest_representable_literal_sizes_pass_check() {
+    for (name, source) in [
+        (
+            "largest_expand",
+            "x = expand(to_tensor([1.0f32]), 0i32, 2305843009213693951i64)\n".to_string(),
+        ),
+        (
+            "largest_parameter",
+            "def big(x: tensor[2305843009213693951, f32]) -> f32 = tensor_to_scalar(sum(x, 0i32))\nout = 1i64\n"
+                .to_string(),
+        ),
+        (
+            "empty_with_huge_extent",
+            "empty: List[f64] = []\nx = reshape(to_tensor(empty), [4611686018427387904i64, 0i64])\n"
+                .to_string(),
+        ),
+    ] {
+        let check = check_output(name, &source);
+        let report = text(&check);
+        assert!(check.status.success(), "{name}: check must pass:\n{report}");
+        assert!(report.contains("\"errors\": []"), "{name}:\n{report}");
+    }
+}
