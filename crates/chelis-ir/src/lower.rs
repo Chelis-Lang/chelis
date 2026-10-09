@@ -17028,8 +17028,9 @@ impl<'program> LowerCtx<'program> {
             // Rejects this DAG slice when the list is not
             // statically enumerable, the axis is not a constant, an element
             // is not a recognized tensor node, or an element's concat-axis
-            // extent is not a concrete literal (a ragged/runtime concat,
-            // which still needs the host lane). Host admission precedes
+            // extent is not a concrete literal outside a `grad` or `vmap`
+            // body (a ragged/runtime concat, which still needs the host
+            // lane; chelis#3390 sizes it inside one). Host admission precedes
             // lowering; a forced DAG must never fabricate a concat input.
             "concat" if args.len() == 2 => {
                 if let Some(node) = self.lower_tensor_concat(&args[0], &args[1]) {
@@ -17429,8 +17430,9 @@ impl<'program> LowerCtx<'program> {
     /// list is not a closed `Cons` chain, the axis is not a compile-time
     /// constant, an element does not lower to a usable rank>=1 tensor node,
     /// the elements disagree on rank or on a non-concat axis, or an
-    /// element's concat-axis extent is not a concrete literal (a ragged or
-    /// runtime-extent concat, which the host lane still owns).
+    /// element's concat-axis extent is not a concrete literal outside a
+    /// `grad` or `vmap` body (a ragged or runtime-extent concat, which the
+    /// host lane owns there; see [`Self::runtime_extent_concat`]).
     fn lower_tensor_concat(&mut self, list_expr: &Expr, axis_expr: &Expr) -> Option<NodeId> {
         let resolved = self.resolved_list_expr(list_expr);
         let elements = collect_cons_chain(&resolved)?;
@@ -17492,15 +17494,26 @@ impl<'program> LowerCtx<'program> {
         // Every non-concat axis must agree across elements (concat does not
         // broadcast); the concat-axis extent of each element must be a
         // concrete literal so the per-element padding amounts are known.
-        let mut concat_extents = Vec::with_capacity(elem_types.len());
+        let mut literal_extents = Vec::with_capacity(elem_types.len());
         for ty in &elem_types {
             for (ax, (d, d0)) in ty.dims.iter().zip(elem_types[0].dims.iter()).enumerate() {
                 if ax != axis && d != d0 {
                     return None;
                 }
             }
-            concat_extents.push(concrete_dim_len(&ty.dims[axis])?);
+            literal_extents.push(concrete_dim_len(&ty.dims[axis]));
         }
+        let Some(concat_extents) = literal_extents.into_iter().collect::<Option<Vec<_>>>() else {
+            // Outside `grad` and `vmap` bodies, host admission routes a
+            // runtime-width concat to the host lane before lowering
+            // (chelis#2373), so the static DAG keeps refusing it. A
+            // differentiated or vectorized body has no host lane, so its DAG
+            // carries the runtime source boundaries itself (chelis#3390).
+            if !self.allow_host_list_ad_rewrites {
+                return None;
+            }
+            return Some(self.runtime_extent_concat(nodes, &elem_types, axis));
+        };
         let total: usize = concat_extents.iter().sum();
 
         // Output dims: the first element's dims with the concat axis
@@ -17543,6 +17556,94 @@ impl<'program> LowerCtx<'program> {
             });
         }
         accumulator
+    }
+
+    /// chelis#3390: the Pad+Add cascade of [`Self::tensor_concat_from_nodes`]
+    /// inside a `grad` or `vmap` body when some element's concat-axis extent
+    /// is known only at run time (a signature name or a wildcard). spec/04 section 4.5.4 rule 3 types the
+    /// concat axis `*`; every other axis is the elements' shared axis.
+    ///
+    /// Each element's extent is its literal, or a `Shape` read of the element
+    /// itself, so every pad amount is runtime arithmetic over the operands
+    /// that carry the extents: element `i` is padded by the sum of the
+    /// extents before it and the sum of the extents after it. The `Pad`
+    /// adjoint already shrinks a node-bounded pad back by those same scalars,
+    /// which is the [05-OP-62] split at the exact source boundaries.
+    fn runtime_extent_concat(
+        &mut self,
+        nodes: &[NodeId],
+        elem_types: &[TensorType],
+        axis: usize,
+    ) -> NodeId {
+        let rank = elem_types[0].dims.len();
+        let precision = elem_types[0].precision;
+        let mut out_dims = elem_types[0].dims.clone();
+        out_dims[axis] = DimInfo::Named("*".into(), None);
+        let out_ty = TensorType {
+            dims: out_dims,
+            precision,
+        };
+        let i64_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let extents: Vec<NodeId> = nodes
+            .iter()
+            .zip(elem_types)
+            .map(|(node, ty)| match concrete_dim_len(&ty.dims[axis]) {
+                Some(extent) => {
+                    self.int64_constant(i64::try_from(extent).expect("a tensor extent fits i64"))
+                }
+                None => self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Shape { axis },
+                    vec![*node],
+                    i64_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+            })
+            .collect();
+        let sum_extents = |this: &mut Self, parts: &[NodeId]| -> NodeId {
+            let mut parts = parts.iter().copied();
+            let Some(first) = parts.next() else {
+                return this.int64_constant(0);
+            };
+            parts.fold(first, |total, part| {
+                this.dag.add_node(
+                    this.owner(),
+                    RiscOp::Add,
+                    vec![total, part],
+                    i64_ty.clone(),
+                    this.current_span_id.clone(),
+                )
+            })
+        };
+
+        let mut accumulator: Option<NodeId> = None;
+        for (index, node) in nodes.iter().enumerate() {
+            let before = sum_extents(self, &extents[..index]);
+            let after = sum_extents(self, &extents[index + 1..]);
+            let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
+            padding[axis] = (RtDim::Node(1), RtDim::Node(2));
+            let padded = self.dag.add_node(
+                self.owner(),
+                RiscOp::zero_pad(precision, padding),
+                vec![*node, before, after],
+                out_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(match accumulator {
+                None => padded,
+                Some(prev) => self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Add,
+                    vec![prev, padded],
+                    out_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+            });
+        }
+        accumulator.expect("a concat has at least one element")
     }
 
     /// chelis#620: `concat` over list VALUES that are only statically known
