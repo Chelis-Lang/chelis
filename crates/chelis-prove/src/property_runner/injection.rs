@@ -1084,6 +1084,71 @@ type Probability =
     }
 
     #[test]
+    fn qualified_opaque_invariant_binder_selects_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+@invariant(p) p.value >= 0.0f32
+type Probability =
+  | Probability { value: f32 }
+@property bounded forall(p: M.Probability):
+  true
+",
+            "bounded",
+        );
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(true),
+            "qualified spelling must resolve to the invariant-bearing declaration"
+        );
+    }
+
+    #[test]
+    fn recursively_contained_opaque_invariant_binder_selects_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+@invariant(p) p.value >= 0.0f32
+type Probability =
+  | Probability { value: f32 }
+type Inner =
+  | Inner { probability: Probability }
+type Outer =
+  | Outer { inner: Inner }
+@property bounded forall(o: Outer):
+  true
+",
+            "bounded",
+        );
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(true),
+            "all nested value-bearing fields must be searched for opaque invariants"
+        );
+    }
+
+    #[test]
+    fn ordinary_opaque_and_recursive_records_without_invariants_do_not_select_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+type Token =
+  | Token { value: f32 }
+type Recursive =
+  | Recursive { next: Option[Recursive], token: Token }
+@property plain forall(r: Recursive):
+  true
+",
+            "plain",
+        );
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(false),
+            "cycle-safe traversal must not invent an invariant"
+        );
+    }
+
+    #[test]
     fn module_search_does_not_recurse_into_unknown_forms() {
         let span = span0();
         let deftype = node("deftype", vec![sym("Token"), Expr::BareList(vec![], span)]);
