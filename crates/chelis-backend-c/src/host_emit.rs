@@ -4214,6 +4214,12 @@ mod claim_frame_order_tests {
     // as a duplicate of the other. A third claim, checked between them,
     // fails with a different message, so a skip that moved the obligation to
     // the outer-first position would let the third claim name the trap.
+    //
+    // No Chelis program builds this pair: each claim site emits its own
+    // static pattern table and has one ordering flag, so two frames share a
+    // table only when one site produced both, with one flag. The probe
+    // builds the frames directly and defends the invariant the merge rule
+    // relies on, should tables ever be shared across sites.
 
     use super::{
         append_host_result_claim_checks, append_host_result_claim_support,
