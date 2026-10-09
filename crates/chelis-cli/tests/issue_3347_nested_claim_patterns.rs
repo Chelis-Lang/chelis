@@ -325,6 +325,44 @@ def leaf(w: Wrap) -> i64 =
 out = leaf(f(produce(3i64), size_from("PATH")))
 "#;
 
+const LAMBDA_FOLD_BOX: &str = r#"out = width(fold(fn (acc: Box[3], i: i64) -> make(size_from("PATH")), make(3i64), range(0i64, 2i64)))
+"#;
+
+const LAMBDA_FOLD_CHAIN: &str = r#"type Chain[n] =
+  | End { v: tensor[n, f32] }
+  | Link { v: tensor[n, f32], next: Chain[n] }
+def grow[m](size: i64, k: i64) -> Chain[m] = fold(fn (acc: Chain[m], i: i64) -> Link { v: produce(3i64), next: acc }, End { v: produce(size) }, range(0i64, k))
+def head[n](c: Chain[n]) -> i64 =
+  match c with {
+    | End { v } => shape(v, 0i32)
+    | Link { v, next } => shape(v, 0i32)
+  }
+out = head(grow(size_from("PATH"), 4i64))
+"#;
+
+const LAMBDA_SIBLING_BINDER: &str = r#"def run[n](size: i64) -> i64 = width(fold(fn (acc: Box[n], t: tensor[n, f32]) -> acc, make(size), [produce(3i64), produce(3i64)]))
+out = run(size_from("PATH"))
+"#;
+
+const LAMBDA_CALLBACKS: [&str; 6] = [
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, map(fn (b: Box[3]) -> width(b), [make(3i64), make(size_from("PATH"))]))
+"#,
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, scan(fn (acc: i64, b: Box[3]) -> add(acc, width(b)), 0i64, [make(3i64), make(size_from("PATH"))]))
+"#,
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, map(fn (b: Box[3]) -> width(b), filter(fn (b: Box[3]) -> gt(width(b), 0i64), [make(3i64), make(size_from("PATH"))])))
+"#,
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, map(fn (b: Box[3]) -> width(b), partition(fn (b: Box[3]) -> gt(width(b), 0i64), [make(3i64), make(size_from("PATH"))]).0))
+"#,
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, flat_map(fn (b: Box[3]) -> [width(b)], [make(3i64), make(size_from("PATH"))]))
+"#,
+    r#"out = (fn (b: Box[3]) -> width(b))(make(size_from("PATH")))
+"#,
+];
+
+const CALLABLE_FORMAL: &str = r#"def apply(f: (Box[3]) -> i64, size: i64) -> i64 = f(make(size))
+out = apply(width, size_from("PATH"))
+"#;
+
 /// A chain whose element type is a type argument, so the builder's
 /// `Chain[tensor[*, f32]]` claims nothing and only the claim under test walks
 /// the value. `DEPTH` links of width 3 hang above an `End` whose width the size
@@ -1312,4 +1350,130 @@ fn eval_deep_result_walk_reaches_the_last_link() {
 #[test]
 fn c_deep_result_walk_reaches_the_last_link() {
     deep_result_walk(true);
+}
+
+/// A literal entry claim on `formal.v`, rendered as each lane renders a bare
+/// tensor formal's: Eval as an extent claim, C as an input check.
+fn literal_entry_context(native: bool, formal: &str) -> String {
+    if native {
+        format!("input `{formal}.v` axis 0 expected 3, got 5")
+    } else {
+        format!("extent `3`: claimed = 3, {formal}.v axis 0 = 5")
+    }
+}
+
+/// A lambda formal's declared nominal type claims its nested tensors on
+/// every invocation, as a bare tensor or List lambda formal does: the second
+/// fold step receives a 5-wide `Box` under `acc: Box[3]`.
+fn lambda_formal_literal(native: bool) {
+    assert_trap_and_control(
+        LAMBDA_FOLD_BOX,
+        native,
+        &literal_entry_context(native, "acc"),
+        "load",
+        "out = 3",
+    );
+}
+
+#[test]
+fn eval_lambda_formal_claims_its_nested_tensor() {
+    lambda_formal_literal(false);
+}
+
+#[test]
+fn c_lambda_formal_claims_its_nested_tensor() {
+    lambda_formal_literal(true);
+}
+
+/// A fold accumulator `acc: Chain[m]` binds `m` at its first link and
+/// compares every later link with it, on each step, with one text on both
+/// lanes: the second step's chain ends in the 5-wide `End`.
+fn lambda_chain_accumulator(native: bool) {
+    assert_trap_and_control(
+        LAMBDA_FOLD_CHAIN,
+        native,
+        "extent `m`: acc.Link.v axis 0 = 3, acc.Link.next.End.v axis 0 = 5",
+        "load",
+        "out = 3",
+    );
+}
+
+#[test]
+fn eval_lambda_chain_accumulator_checks_every_link() {
+    lambda_chain_accumulator(false);
+}
+
+#[test]
+fn c_lambda_chain_accumulator_checks_every_link() {
+    lambda_chain_accumulator(true);
+}
+
+/// A binder a lambda's nested formal witnesses first is compared with a
+/// later tensor formal of the same lambda, with one text on both lanes.
+fn lambda_sibling_binder(native: bool) {
+    assert_trap_and_control(
+        LAMBDA_SIBLING_BINDER,
+        native,
+        "extent `n`: acc.v axis 0 = 5, t axis 0 = 3",
+        "load",
+        "out = 3",
+    );
+}
+
+#[test]
+fn eval_lambda_nested_binder_guards_a_later_formal() {
+    lambda_sibling_binder(false);
+}
+
+#[test]
+fn c_lambda_nested_binder_guards_a_later_formal() {
+    lambda_sibling_binder(true);
+}
+
+/// Every list callback and an immediately applied lambda check a `Box[3]`
+/// formal on the 5-wide element.
+fn lambda_callbacks(native: bool) {
+    for (case, control) in LAMBDA_CALLBACKS.iter().zip([
+        "out = 6", "out = 9", "out = 6", "out = 6", "out = 6", "out = 3",
+    ]) {
+        assert_trap_and_control(
+            case,
+            native,
+            &literal_entry_context(native, "b"),
+            "load",
+            control,
+        );
+    }
+}
+
+#[test]
+fn eval_lambda_callbacks_claim_their_nested_formals() {
+    lambda_callbacks(false);
+}
+
+#[test]
+fn c_lambda_callbacks_claim_their_nested_formals() {
+    lambda_callbacks(true);
+}
+
+/// A function-typed formal's parameter type claims the argument every call
+/// through it passes, whatever function the caller supplies.
+fn callable_formal(native: bool) {
+    assert_trap_and_control(
+        CALLABLE_FORMAL,
+        native,
+        &literal_entry_context(native, "arg0"),
+        "load",
+        "out = 3",
+    );
+}
+
+#[test]
+fn eval_callable_formal_claims_its_nested_parameter() {
+    callable_formal(false);
+}
+
+#[test]
+fn c_callable_formal_claims_its_nested_parameter() {
+    callable_formal(true);
 }
