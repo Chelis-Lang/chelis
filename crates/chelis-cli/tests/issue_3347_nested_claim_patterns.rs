@@ -266,11 +266,15 @@ def f(g: G[tensor[3, f32]]) -> i64 = 1i64
 out = f(None)
 "#;
 
-const LET_BOUND_RESULT: &str = r#"def ident3(size: i64) -> Box[3] = {
+const LET_BOUND_RESULT: &str = r#"def pass3(size: i64) -> (Box[3], i64) = {
+  b = make(size)
+  (b, 1i64)
+}
+def ident3(size: i64) -> Box[3] = {
   b = make(size)
   b
 }
-out = width(ident3(size_from("PATH")))
+out = add(width(pass3(size_from("PATH")).0), width(ident3(size_from("PATH"))))
 "#;
 
 /// Run `case` after the shared declarations with `size` read from a file.
@@ -885,12 +889,18 @@ fn agreeing_claim_walks_run_when_the_host_is_cxx() {
     let input = tempfile::tempdir().expect("size input");
     let size = input.path().join("size.txt");
     fs::write(&size, "xxx").expect("size");
-    // LET_BOUND_RESULT reaches the result-value walk, the others the entry
-    // walk and the producer-owned result check.
+    // LET_BOUND_RESULT's `pass3` reaches the result-value walk with a value
+    // its activation did not construct; the others reach the entry walk and
+    // the producer-owned result check.
     for case in [DIRECT, FORMAL, BOX_BINDER, LET_BOUND_RESULT] {
         let program = format!("{PRELUDE}{case}").replace("PATH", &size.display().to_string());
         let output = host_as_cxx(&program);
-        assert!(output.contains("out = 3"), "{case}\n{output}");
+        let expected = if case == LET_BOUND_RESULT {
+            "out = 6"
+        } else {
+            "out = 3"
+        };
+        assert!(output.contains(expected), "{case}\n{output}");
     }
     let output = host_as_cxx(KINDED_NOMINAL_DIMENSIONS);
     assert!(output.contains("out = ()"), "{output}");
