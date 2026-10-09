@@ -165,7 +165,8 @@ impl ClaimPattern {
             memo: BTreeMap::new(),
             analysis: std::cell::OnceCell::new(),
         };
-        let root = builder.node(authored)?;
+        let authored = expand_aliases(authored, registry, 0)?;
+        let root = builder.node(&authored)?;
         Ok(builder.finish(root))
     }
 
@@ -343,11 +344,11 @@ impl Builder<'_> {
             return Ok(Some(*id));
         }
         let Some(definition) = self.registry.lookup(name) else {
-            // An alias is transparent: its claim is its body's, with the
-            // alias arguments substituted, nominal dimensions included.
-            if let Some(alias) = self.registry.resolve_alias(name) {
-                let substitution = parameter_substitution(name, &alias.param_args, args)?;
-                return self.node(&substitute(&type_to_deep_expr(&alias.body), &substitution));
+            // The walk sees only alias-free types; see `expand_aliases`.
+            if self.registry.resolve_alias(name).is_some() {
+                return Err(ClaimPatternError::Malformed(format!(
+                    "alias `{name}` reached the claim walk unexpanded"
+                )));
             }
             // A name nothing declares cannot be shown to owe nothing.
             return Err(ClaimPatternError::UnresolvedNominal {
@@ -370,7 +371,11 @@ impl Builder<'_> {
         for variant in &definition.variants {
             let mut fields = Vec::with_capacity(variant.fields.len());
             for (field_name, field_ty) in &variant.fields {
-                let field_ty = substitute(&type_to_deep_expr(field_ty), &substitution);
+                let field_ty = expand_aliases(
+                    &substitute(&type_to_deep_expr(field_ty), &substitution),
+                    self.registry,
+                    0,
+                )?;
                 fields.push(ClaimField {
                     name: field_name.clone(),
                     node: self.node(&field_ty)?,
@@ -548,6 +553,43 @@ fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, Cla
         min_rank: fixed,
         axes,
     }))
+}
+
+/// Expand every type alias in `ty`, including inside type arguments at any
+/// depth and an alias whose body is itself an alias, substituting the alias
+/// arguments (nominal dimensions included). Every type the claim walk,
+/// `may_carry` and the memo keys see is alias-free, so an alias spelling
+/// derives exactly the pattern its expansion does.
+pub fn expand_aliases(
+    ty: &Expr,
+    registry: &AdtRegistry,
+    depth: usize,
+) -> Result<Expr, ClaimPatternError> {
+    // The checker rejects cyclic aliases; this bound only keeps a malformed
+    // registry from recursing without end.
+    if depth > 256 {
+        return Err(ClaimPatternError::Malformed(
+            "type alias expansion does not terminate".into(),
+        ));
+    }
+    let Some((tag, children)) = type_parts(ty) else {
+        return Ok(ty.clone());
+    };
+    let expanded = children
+        .iter()
+        .map(|child| expand_aliases(child, registry, depth))
+        .collect::<Result<Vec<_>, _>>()?;
+    if tag == DeepTag::TAdt
+        && let Some((name, args)) = expanded.split_first()
+        && let Some(name) = symbol(name)
+        && registry.lookup(name).is_none()
+        && let Some(alias) = registry.resolve_alias(name)
+    {
+        let substitution = parameter_substitution(name, &alias.param_args, args)?;
+        let body = substitute(&type_to_deep_expr(&alias.body), &substitution);
+        return expand_aliases(&body, registry, depth + 1);
+    }
+    Ok(Expr::node(tag, Metadata::default(), expanded, ty.span()))
 }
 
 /// The deterministic spelling of a type, independent of metadata and spans:
@@ -985,5 +1027,127 @@ mod tests {
         assert_eq!(root.axes[0].position, ClaimAxisPosition::Front(0));
         assert_eq!(root.axes[1].position, ClaimAxisPosition::Back(0));
         assert_eq!(root.axes[1].position.resolve(5), Some(4));
+    }
+
+    /// A structural rendering that ignores spans, metadata and declaration
+    /// names chosen by aliases: two spellings of one type render equally.
+    fn render(pattern: &ClaimPattern) -> String {
+        let id =
+            |node: Option<ClaimNodeId>| node.map_or("-".to_string(), |n| n.index().to_string());
+        let mut out = format!("root {}\n", id(pattern.root()));
+        for (index, node) in pattern.nodes().iter().enumerate() {
+            let line = match node {
+                ClaimNode::Tensor(tensor) => {
+                    format!(
+                        "tensor {:?} {} {:?}",
+                        tensor.rank, tensor.min_rank, tensor.axes
+                    )
+                }
+                ClaimNode::Tuple(items) => format!(
+                    "tuple {}",
+                    items
+                        .iter()
+                        .map(|item| id(*item))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                ClaimNode::List(item) => format!("list {}", item.index()),
+                ClaimNode::Option(item) => format!("option {}", item.index()),
+                ClaimNode::Nominal { name, constructors } => format!(
+                    "nominal {name} {}",
+                    constructors
+                        .iter()
+                        .map(|constructor| format!(
+                            "{}({})",
+                            constructor.name,
+                            constructor
+                                .fields
+                                .iter()
+                                .map(|field| id(field.node))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ),
+            };
+            out.push_str(&format!("{index}: {line}\n"));
+        }
+        out
+    }
+
+    /// The oracle the alias class cannot survive: for every position an alias
+    /// can occupy, the aliased spelling derives exactly the pattern of its
+    /// hand-expanded spelling, and that pattern owes the claim.
+    #[test]
+    fn every_alias_spelling_derives_its_expansion_pattern() {
+        let registry = registry(
+            "type Box[n] =\n  | Box { v: tensor[n, f32] }\n\
+             type Wrap[a] =\n  | Wrap { x: a }\n\
+             type Two[a, b] =\n  | Two { l: a, r: b }\n\
+             type B3 = Box[3]\n\
+             type V3 = tensor[3, f32]\n\
+             type BB[m] = Box[m]\n\
+             type BBB[m] = BB[m]\n\
+             type WB = Wrap[B3]\n\
+             type LV = List[V3]\n",
+        );
+        let box3 = "(t-adt {} Box (d-lit {} 3))";
+        let v3 = "(t-tensor {} (d-lit {} 3) (t-prim {} f32))";
+        let pairs = [
+            ("(t-adt {} B3)".to_string(), box3.to_string()),
+            ("(t-adt {} BB (d-lit {} 3))".to_string(), box3.to_string()),
+            ("(t-adt {} BBB (d-lit {} 3))".to_string(), box3.to_string()),
+            (
+                "(t-adt {} BB (t-var {} k))".to_string(),
+                "(t-adt {} Box (d-var {} k))".to_string(),
+            ),
+            (
+                "(t-adt {} Wrap (t-adt {} B3))".to_string(),
+                format!("(t-adt {{}} Wrap {box3})"),
+            ),
+            (
+                "(t-adt {} Wrap (t-adt {} V3))".to_string(),
+                format!("(t-adt {{}} Wrap {v3})"),
+            ),
+            (
+                "(t-adt {} Wrap (t-adt {} Wrap (t-adt {} B3)))".to_string(),
+                format!("(t-adt {{}} Wrap (t-adt {{}} Wrap {box3}))"),
+            ),
+            (
+                "(t-adt {} WB)".to_string(),
+                format!("(t-adt {{}} Wrap {box3})"),
+            ),
+            (
+                "(t-adt {} LV)".to_string(),
+                format!("(t-adt {{}} List {v3})"),
+            ),
+            (
+                "(t-adt {} List (t-adt {} Wrap (t-adt {} V3)))".to_string(),
+                format!("(t-adt {{}} List (t-adt {{}} Wrap {v3}))"),
+            ),
+            (
+                "(t-adt {} Option (t-adt {} B3))".to_string(),
+                format!("(t-adt {{}} Option {box3})"),
+            ),
+            (
+                "(t-tuple {} (t-adt {} B3) (t-prim {} i64))".to_string(),
+                format!("(t-tuple {{}} {box3} (t-prim {{}} i64))"),
+            ),
+            (
+                "(t-adt {} Two (t-adt {} V3) (t-adt {} BB (t-var {} k)))".to_string(),
+                format!("(t-adt {{}} Two {v3} (t-adt {{}} Box (d-var {{}} k)))"),
+            ),
+        ];
+        for (aliased, expanded) in pairs {
+            let left = ClaimPattern::derive(&ty(&aliased), &registry).unwrap();
+            let right = ClaimPattern::derive(&ty(&expanded), &registry).unwrap();
+            assert!(!right.is_empty(), "{expanded} owes its claim");
+            assert_eq!(
+                render(&left),
+                render(&right),
+                "{aliased} against {expanded}"
+            );
+        }
     }
 }

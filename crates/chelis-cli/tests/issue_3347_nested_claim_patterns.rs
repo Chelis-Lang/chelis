@@ -199,6 +199,44 @@ def claimed(b: B3) -> i64 = width(b)
 out = claimed(make(size_from("PATH")))
 "#;
 
+const ALIAS_ARGUMENT_BOX: &str = r#"type Wrap[a] =
+  | Wrap { x: a }
+type B3 = Box[3]
+def mk(size: i64) -> Wrap[B3] = Wrap { x: make(size) }
+out = match mk(size_from("PATH")) with {
+  | Wrap { x } => width(x)
+}
+"#;
+
+const ALIAS_ARGUMENT_TENSOR: &str = r#"type Wrap[a] =
+  | Wrap { x: a }
+type V3 = tensor[3, f32]
+def mk(size: i64) -> Wrap[V3] = Wrap { x: produce(size) }
+out = match mk(size_from("PATH")) with {
+  | Wrap { x } => shape(x, 0i32)
+}
+"#;
+
+const ALIAS_ARGUMENT_FORMAL: &str = r#"type Wrap[a] =
+  | Wrap { x: a }
+type B3 = Box[3]
+def claimed(w: Wrap[B3]) -> i64 =
+  match w with {
+    | Wrap { x } => width(x)
+  }
+out = claimed(Wrap { x: make(size_from("PATH")) })
+"#;
+
+const ALIAS_ARGUMENT_LIST_FORMAL: &str = r#"type Wrap[a] =
+  | Wrap { x: a }
+type V3 = tensor[3, f32]
+def total(ws: List[Wrap[V3]]) -> i64 =
+  fold(fn (acc: i64, w: Wrap[V3]) -> match w with {
+    | Wrap { x } => add(acc, shape(x, 0i32))
+  }, 0i64, ws)
+out = total([Wrap { x: produce(3i64) }, Wrap { x: produce(size_from("PATH")) }])
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -598,4 +636,33 @@ fn eval_aliased_nominal_claims_like_its_expansion() {
 #[test]
 fn c_aliased_nominal_claims_like_its_expansion() {
     alias(true);
+}
+
+/// An alias in a type argument, at any depth, claims exactly as its
+/// expansion: `Wrap[B3]` is `Wrap[Box[3]]` and `Wrap[V3]` is
+/// `Wrap[tensor[3, f32]]`, as results and as formals.
+fn alias_argument(native: bool) {
+    insert_literal(native, ALIAS_ARGUMENT_BOX);
+    insert_literal(native, ALIAS_ARGUMENT_TENSOR);
+    for (case, path, control) in [
+        (ALIAS_ARGUMENT_FORMAL, "w.x.v", "out = 3"),
+        (ALIAS_ARGUMENT_LIST_FORMAL, "ws[1].x", "out = 6"),
+    ] {
+        let context = if native {
+            format!("input `{path}` axis 0 expected 3, got 5")
+        } else {
+            format!("extent `3`: claimed = 3, {path} axis 0 = 5")
+        };
+        assert_trap_and_control(case, native, &context, "load", control);
+    }
+}
+
+#[test]
+fn eval_alias_type_argument_claims_like_its_expansion() {
+    alias_argument(false);
+}
+
+#[test]
+fn c_alias_type_argument_claims_like_its_expansion() {
+    alias_argument(true);
 }
