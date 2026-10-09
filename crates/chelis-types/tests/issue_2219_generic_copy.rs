@@ -273,3 +273,36 @@ fn copy_of_a_never_resolved_operand_is_refused() {
         "copy of a borrowed type parameter",
     );
 }
+
+#[test]
+fn a_copied_function_is_fenced_as_its_operand() {
+    // The copy of a function value is that value, so the core-transform
+    // fence (chelis#1952, #1954) classifies a copied target exactly as its
+    // operand: a copy of a top-level function or of a shadowing local is
+    // refused where the operand is, and a copy of a direct, unshadowed
+    // declaration is admitted where the declaration is.
+    let fence = "the core transform fragment rejects this `grad` target";
+    let sq = "def sq(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0i32))\n";
+    for (body, what) in [
+        (
+            "def gq() -> tensor[2, f32] = {\n  sq = fn (x: tensor[2, f32]) -> \
+             tensor_to_scalar(sum(x, 0i32))\n  grad(copy(sq))(to_tensor([1.0f32, 2.0f32]))\n}\n",
+            "grad(copy(sq)) of a shadowing local",
+        ),
+        (
+            "def gq() -> tensor[2, f32] = {\n  h = copy(sq)\n  \
+             grad(h)(to_tensor([1.0f32, 2.0f32]))\n}\n",
+            "a copied alias of a top-level function",
+        ),
+    ] {
+        let errors = check_errors(&format!("{sq}{body}"));
+        assert!(
+            errors.iter().any(|error| error.message.contains(fence)),
+            "{what}: expected the core-transform fence; got {errors:?}"
+        );
+    }
+    assert_checks(
+        &format!("{sq}def gq() -> tensor[2, f32] = grad(copy(sq))(to_tensor([1.0f32, 2.0f32]))\n"),
+        "grad(copy(sq)) of an unshadowed declaration",
+    );
+}

@@ -90,6 +90,34 @@ const POSITIVE: &[Case] = &[
         body: "def owned_from_borrow(seed: i64) -> tensor[2, f32] = {\n  p = Lin { w: to_tensor([1.0f32, 2.0f32]) }\n  q = own(p)\n  add(weight(q), weight(p))\n}\nresult = to_list(owned_from_borrow(0i64))\n",
         eval: "result = [2.0, 4.0]\n",
     },
+    // `copy(&x)` copies the referent of an explicit borrow.
+    Case {
+        name: "copy_of_a_borrowed_list",
+        body: "def borrowed_copy(seed: i64) -> i64 = {\n  xs = rows(seed)\n  ys = grow(copy(&xs))\n  add(len(ys), len(xs))\n}\nn = borrowed_copy(0i64)\n",
+        eval: "n = 5\n",
+    },
+    Case {
+        name: "copy_of_a_borrowed_adt",
+        body: "def borrowed_adt(seed: i64) -> tensor[2, f32] = {\n  p = Lin { w: to_tensor([1.0f32, 2.0f32]) }\n  q = copy(&p)\n  add(weight(q), weight(p))\n}\nresult = to_list(borrowed_adt(0i64))\n",
+        eval: "result = [2.0, 4.0]\n",
+    },
+    // The copy of a function value is that value: a closure capturing a
+    // tensor, a declaration, and a copied function as a transform target.
+    Case {
+        name: "copy_of_a_closure",
+        body: "def clo(seed: i64) -> tensor[2, f32] = {\n  w = to_tensor([1.0f32, 2.0f32])\n  g = fn (x: tensor[2, f32]) -> add(x, w)\n  h = copy(g)\n  add(h(to_tensor([1.0f32, 1.0f32])), g(to_tensor([2.0f32, 2.0f32])))\n}\nresult = to_list(clo(0i64))\n",
+        eval: "result = [5.0, 7.0]\n",
+    },
+    Case {
+        name: "copy_of_a_declaration",
+        body: "def twice_t(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)\ndef fv(seed: i64) -> tensor[2, f32] = {\n  h = copy(twice_t)\n  h(to_tensor([1.0f32, 1.0f32]))\n}\nresult = to_list(fv(0i64))\n",
+        eval: "result = [2.0, 2.0]\n",
+    },
+    Case {
+        name: "copied_function_as_a_grad_target",
+        body: "def sq(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0i32))\ndef gq(seed: i64) -> tensor[2, f32] = {\n  scaled = fn (x: tensor[2, f32]) -> tensor_to_scalar(sum(mul(x, to_tensor([3.0f32, 3.0f32])), 0i32))\n  h = copy(scaled)\n  grad(h)(to_tensor([1.0f32, 2.0f32]))\n}\nresult = to_list(gq(0i64))\ndirect = to_list(grad(copy(sq))(to_tensor([1.0f32, 2.0f32])))\n",
+        eval: "result = [3.0, 3.0]\ndirect = [2.0, 4.0]\n",
+    },
     // School's use: a copied parameter record feeds a gradient, and the
     // original stays usable.
     Case {
