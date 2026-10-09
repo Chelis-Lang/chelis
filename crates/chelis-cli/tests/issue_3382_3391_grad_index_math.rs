@@ -8,8 +8,9 @@
 //! still is ([05-OP-64]). spec/05 §5 gives every comparison a zero cotangent,
 //! and spec/04 §4.7.2 forbids rejecting an extent because of its provenance,
 //! so a comparison over a `range`-sized or wildcard extent differentiates
-//! (#3391), while operands whose extents disagree still trap. Each gradient
-//! is checked against its closed form on the evaluator and on the C lane.
+//! (#3391), while operands whose extents disagree still trap. The masks an
+//! adjoint builds (`abs`, `pow`) are comparisons too. Each gradient is
+//! checked against its closed form on the evaluator and on the C lane.
 use assert_cmd::Command;
 use tempfile::tempdir;
 #[path = "common/mod.rs"]
@@ -47,6 +48,29 @@ fn assert_gradient(source: &str, expected: &[f64], stem: &str) {
     assert_eq!(parse_tensor_data(&eval_text, "out"), expected, "eval");
     let c_text = build_and_run(source, stem);
     assert_eq!(parse_tensor_data(&c_text, "out"), expected, "C");
+}
+
+/// As [`assert_gradient`], to a relative `tolerance` for a transcendental
+/// closed form.
+fn assert_gradient_close(source: &str, expected: &[f64], tolerance: f64, stem: &str) {
+    let output = eval(source, stem);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let eval_text = String::from_utf8(output.stdout).unwrap();
+    let c_text = build_and_run(source, stem);
+    for (lane, text) in [("eval", eval_text), ("C", c_text)] {
+        let actual = parse_tensor_data(&text, "out");
+        assert_eq!(actual.len(), expected.len(), "{lane}: {actual:?}");
+        for (got, want) in actual.iter().zip(expected) {
+            assert!(
+                (got - want).abs() <= tolerance * want.abs().max(1.0),
+                "{lane}: got {actual:?}, want {expected:?}"
+            );
+        }
+    }
 }
 
 fn assert_refused(source: &str, needle: &str, stem: &str) {
@@ -182,4 +206,43 @@ out = grad(loss, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32, 
 
 fn parse_out_absent(stdout: &str) -> bool {
     !stdout.lines().any(|line| line.starts_with("out = "))
+}
+
+/// The comparisons an adjoint builds share the class: `abs`'s sign masks over
+/// a wildcard extent. `d/dx sum(abs(x)) = sign(x)`.
+#[test]
+fn abs_adjoint_masks_over_a_wildcard_extent_differentiate() {
+    assert_gradient(
+        r#"
+def loss(x: tensor[*, f32]) -> f32 = tensor_to_scalar(sum(abs(x), 0i32))
+out = grad(loss)(to_tensor([-1.0f32, 2.0f32, 3.0f32]))
+"#,
+        &[-1.0, 1.0, 1.0],
+        "abs_wildcard",
+    );
+}
+
+/// `pow`'s adjoint ([05-OP-79]) builds comparison and logical masks and
+/// constants beside its operands, all over the wildcard extent:
+/// `d/dx sum(pow(x, 2)) = 2x` exactly, and `d/dx sum(pow(x, x)) =
+/// x^x (ln x + 1)`, evaluated in float64.
+#[test]
+fn pow_adjoint_over_a_wildcard_extent_differentiates() {
+    assert_gradient(
+        r#"
+def loss(x: tensor[*, f32]) -> f32 = tensor_to_scalar(sum(pow(x, insert(scalar_to_tensor(2.0f32), 0i32, shape(&x, 0i32))), 0i32))
+out = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+"#,
+        &[2.0, 4.0, 6.0],
+        "pow_square_wildcard",
+    );
+    assert_gradient_close(
+        r#"
+def loss(x: tensor[*, f32]) -> f32 = tensor_to_scalar(sum(pow(&x, &x), 0i32))
+out = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+"#,
+        &[1.0, 6.772_588_722_239_781, 56.662_531_794_038_97],
+        1e-6,
+        "pow_self_wildcard",
+    );
 }

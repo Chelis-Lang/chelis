@@ -2910,6 +2910,20 @@ impl Dag {
         } else {
             Vec::new()
         };
+        // A comparison or logical result whose type spells an anonymous
+        // extent takes that extent from its first operand at run time. The
+        // verifier requires the result to name that operand as its extent
+        // authority, so record it here, where every such node is built:
+        // source lowering, adjoint masks in `grad`, and vectorization alike
+        // (chelis#3391).
+        let predicate_extent_authority = matches!(op, RiscOp::Compare(_) | RiscOp::Logical(_))
+            && output_type.dims.iter().any(
+                |dim| matches!(dim, DimInfo::Named(name, None) if name.is_empty() || name == "*"),
+            )
+            && inputs.first().is_some_and(|operand| {
+                self.get(*operand)
+                    .is_some_and(|operand| operand.output_type.dims.len() == output_type.dims.len())
+            });
         let owner = owner.into();
         // One fact, one carrier (spec/10 section 3.2): a draw's or key
         // operation's activation is its owner's and never an input, so a
@@ -2951,6 +2965,10 @@ impl Dag {
         });
         for (target, source) in inferred_where_shape_deps {
             self.add_shape_dep(target, source);
+        }
+        if predicate_extent_authority {
+            let operand = self.nodes[id.0].inputs[0];
+            self.add_shape_dep(id, operand);
         }
         id
     }

@@ -1346,13 +1346,25 @@ fn verifier_defers_unproved_operand_shapes_and_rejects_producerless_anonymous_ou
         named("runtime", Prim::F32),
         None,
     );
-    anonymous_compare_output.add_node(
+    let output = anonymous_compare_output.add_node(
         anonymous_compare_output_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         anonymous(Prim::Bool),
         None,
     );
+    // `add_node` records the first operand as the authority (chelis#3391);
+    // the verifier still refuses the output once that edge is removed.
+    assert_eq!(
+        anonymous_compare_output.get(output).unwrap().shape_deps,
+        vec![left]
+    );
+    assert!(verify::verify(&anonymous_compare_output).is_empty());
+    anonymous_compare_output
+        .node_mut(output)
+        .unwrap()
+        .shape_deps
+        .clear();
     assert!(
         verify::verify(&anonymous_compare_output)
             .iter()
@@ -1380,13 +1392,25 @@ fn verifier_defers_unproved_operand_shapes_and_rejects_producerless_anonymous_ou
         named("runtime", Prim::Bool),
         None,
     );
-    anonymous_logical_output.add_node(
+    let output = anonymous_logical_output.add_node(
         anonymous_logical_output_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         anonymous(Prim::Bool),
         None,
     );
+    // `add_node` records the first operand as the authority (chelis#3391);
+    // the verifier still refuses the output once that edge is removed.
+    assert_eq!(
+        anonymous_logical_output.get(output).unwrap().shape_deps,
+        vec![left]
+    );
+    assert!(verify::verify(&anonymous_logical_output).is_empty());
+    anonymous_logical_output
+        .node_mut(output)
+        .unwrap()
+        .shape_deps
+        .clear();
     assert!(
         verify::verify(&anonymous_logical_output)
             .iter()
