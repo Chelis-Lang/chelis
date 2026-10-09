@@ -142,12 +142,11 @@ Two things follow, and they are easy to conflate:
   asking the region-relative question loses the carrier inside every branch, which lets a
   branch consume fail to survive the join — the opposite of the rule above.
 - The join carries a branch's consume out onto a binding whose outer record is an
-  **alias**, and it does so only for a **component carrier**. An alias record is
-  bookkeeping, never a destruction, so for a carrier the branch's real consume must
-  replace it. An ordinary `let y = x` records the same shape for an unrelated reason,
-  and promoting it there would make a later *borrow* of `y` fail after one branch
-  consumed `x`. Ordinary aliases keep their existing behavior; the promotion is
-  carrier-only.
+  **alias**. An alias record is bookkeeping, never a destruction, so the branch's real
+  consume replaces it, for a component carrier and an ordinary `let y = x` alike. A
+  later borrow after an ordinary branch consume is copy-repaired fan-out (spec/04
+  section 8.3), so the promotion rejects only what a match scrutinee, a consuming
+  capture or a `drop` in the branch must reject after the join.
 
 ### Aliases
 

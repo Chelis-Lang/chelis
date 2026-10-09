@@ -6,5 +6,8 @@ primitive such as `sigmoid` or `len`, a closure capture, or a `grad(f)(..)` or
 A use after `drop`, after a match scrutinee or consuming closure capture, or after
 the consume of a destructured component is still rejected. That now holds when the
 match scrutinee or capture follows an earlier ordinary consume, and when it sits in
-either branch of an `if` or `match`; previously a later consume there was accepted. See
+either branch of an `if` or `match`; previously a later consume there was accepted. It
+also holds through an alias: a use of `y` after a closure that consumes `y` (with
+`y = x`), and a use of `x` or `y` after a branch that scrutinizes or captures one of
+them, are now rejected, where a later consume or borrow there was accepted before. See
 [#3398](https://github.com/Chelis-Lang/chelis/issues/3398).

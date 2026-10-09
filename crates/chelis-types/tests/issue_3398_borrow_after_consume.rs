@@ -929,3 +929,54 @@ fn components_under_a_type_parameter_are_tracked_apart() {
         "{repeated:#?}"
     );
 }
+
+/// A consuming capture is recorded on the binding it names ([04-LIN-2]), so a
+/// later use through that alias is a use after a non-ordinary consume and is
+/// rejected (spec/04 section 8.3), with or without an earlier ordinary consume
+/// of the owner, and whether the later use borrows or consumes.
+#[test]
+fn a_use_through_an_alias_after_its_consuming_capture_is_rejected() {
+    for prefix in ["", "  u = eats(x)\n"] {
+        for later in ["look(y)", "eats(y)"] {
+            let start = if prefix.is_empty() { "1.0f32" } else { "u" };
+            let errors = repairs(&format!(
+                "def f(x: tensor[2, f32]) -> f32 = {{\n{prefix}  y = x\n  g = fn (k: f32) -> add(k, eats(y))\n  add(g({start}), {later})\n}}\n"
+            ))
+            .expect_err("a use after a consuming capture is not repairable");
+            assert!(
+                errors.iter().any(|error| {
+                    matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                        && error.message.contains("variable `y`")
+                        && error.message.contains("closure capture")
+                }),
+                "{prefix:?} {later}: {errors:?}"
+            );
+        }
+    }
+}
+
+/// A match scrutinee through an alias inside a branch consumes the owner on
+/// that path, so a use of the owner after the join is rejected, as it is on
+/// the straight-line path.
+#[test]
+fn a_scrutinee_through_an_alias_in_a_branch_rejects_a_later_use() {
+    rejected(
+        "def f(x: tensor[2, f32], c: bool) -> f32 = {\n  y = x\n  v = if c then match y with {\n    | z => eats(z)\n  } else 0.0f32\n  add(v, look(x))\n}\n",
+        "match scrutinee",
+    );
+}
+
+/// A match scrutinee never receives a copy (spec/04 section 8.3), including
+/// one written as a projection.
+#[test]
+fn a_projection_scrutinee_is_not_a_copy_site() {
+    let source = "type R2 =\n  | R2 { w: tensor[2, f32], b: tensor[2, f32] }\n\
+                  def f(p: R2) -> f32 = {\n  v = match p.w with {\n    | t => eats(t)\n  }\n  add(v, look(p.w))\n}\n";
+    let repairs = accepted(source);
+    assert!(
+        repairs
+            .iter()
+            .all(|repair| repair.declaration.as_deref() != Some("f")),
+        "{repairs:#?}"
+    );
+}

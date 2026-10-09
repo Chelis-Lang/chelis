@@ -107,7 +107,7 @@ struct ConsumeSite {
 
 /// An ordinary consume that receives an inserted copy when a later use of an
 /// overlapping path follows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CopySite {
     at: SiteLocation,
     /// The binding or projection the copy duplicates, as the source spells
@@ -119,12 +119,72 @@ struct CopySite {
 
 /// One leaf of a binding's value, for the copy report ([04-LIN-11]): the
 /// component `path` names, less the deeper components `split` off it, and the
-/// latest ordinary consumes that took it, one per path into this point.
-#[derive(Debug, Clone, PartialEq)]
+/// latest ordinary consumes that took it, one per path into this point, as
+/// indices into the checker's [`Checker::copy_sites`].
+#[derive(Debug, Clone)]
 struct CopyLeaf {
     path: Vec<ProjectionStep>,
     split: Vec<Vec<ProjectionStep>>,
-    latest: Vec<CopySite>,
+    latest: Rc<LatestSet>,
+}
+
+/// A set of copy-site indices that a join builds without copying: the join
+/// of two sets is a node over both, and only a use flattens it. Unions are
+/// hash-consed ([`LatestUnions`]), so leaves that join the same two sets share
+/// one node, and a use after many sequential joins visits each node once.
+#[derive(Debug)]
+enum LatestSet {
+    Empty,
+    One(usize),
+    Union(Rc<LatestSet>, Rc<LatestSet>),
+}
+
+/// The union nodes built so far, keyed by their operands' addresses. Each
+/// entry holds its operands, so an address is never freed and reused while
+/// it is a key.
+type LatestUnions = BTreeMap<(usize, usize), (Rc<LatestSet>, Rc<LatestSet>, Rc<LatestSet>)>;
+
+impl LatestSet {
+    fn union(unions: &mut LatestUnions, lhs: &Rc<Self>, rhs: &Rc<Self>) -> Rc<Self> {
+        if Rc::ptr_eq(lhs, rhs) || matches!(**rhs, LatestSet::Empty) {
+            return lhs.clone();
+        }
+        if matches!(**lhs, LatestSet::Empty) {
+            return rhs.clone();
+        }
+        let key = (Rc::as_ptr(lhs) as usize, Rc::as_ptr(rhs) as usize);
+        unions
+            .entry(key)
+            .or_insert_with(|| {
+                (
+                    lhs.clone(),
+                    rhs.clone(),
+                    Rc::new(LatestSet::Union(lhs.clone(), rhs.clone())),
+                )
+            })
+            .2
+            .clone()
+    }
+
+    /// Add every index in `set` to `out`, visiting each shared node once.
+    fn collect(set: &Rc<Self>, visited: &mut BTreeSet<usize>, out: &mut BTreeSet<usize>) {
+        let mut stack = vec![set.clone()];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(Rc::as_ptr(&node) as usize) {
+                continue;
+            }
+            match &*node {
+                LatestSet::Empty => {}
+                LatestSet::One(site) => {
+                    out.insert(*site);
+                }
+                LatestSet::Union(lhs, rhs) => {
+                    stack.push(lhs.clone());
+                    stack.push(rhs.clone());
+                }
+            }
+        }
+    }
 }
 
 /// A type whose components the copy report is deriving: the binding's own
@@ -584,6 +644,44 @@ impl LinearScope {
         }
     }
 
+    /// Every generation on `id`'s alias chain, from `id` itself to the owner
+    /// it resolves to, with the same cycle guard as [`Self::resolve_alias_chain`].
+    fn alias_chain(&self, id: BindingId) -> Vec<BindingId> {
+        let mut chain = vec![id];
+        let mut visited: UnordSet<BindingId> = UnordSet::new();
+        visited.insert(id);
+        let mut current = id;
+        while let Some(source) = self.record(current).and_then(|record| record.origin.alias) {
+            if !visited.insert(source) {
+                break;
+            }
+            chain.push(source);
+            current = source;
+        }
+        chain
+    }
+
+    /// The consume, on any generation of `use_id`'s alias chain, after which
+    /// no use is valid: a `drop` ([04-LIN-11]), or a match scrutinee or a
+    /// consuming closure capture (spec/04 section 8.3). A consuming capture
+    /// is recorded on the binding it names ([04-LIN-2]), not forwarded to the
+    /// owner, so a use through that alias must find it there. Every use path
+    /// asks this one question.
+    fn blocking_consume(&self, use_id: BindingId) -> Option<ConsumeSite> {
+        self.alias_chain(use_id)
+            .into_iter()
+            .find_map(|id| match self.state(id) {
+                Some(BindingState::Consumed(site))
+                    if site.terminal
+                        || (matches!(site.kind, ConsumeKind::Structural)
+                            && !site.is_ordinary()) =>
+                {
+                    Some(site.clone())
+                }
+                _ => None,
+            })
+    }
+
     /// Walk the alias chain from the generation `id` to the underlying
     /// non-alias source generation.  Returns `None` if `id` carries no
     /// alias link; returns `Some(source)` if it aliases `source`
@@ -669,6 +767,18 @@ struct Checker {
     current_def: Option<String>,
     /// The record definitions the copy report splits values by.
     adt_registry: AdtRegistry,
+    /// Every copy site the report has created, in walk order; a leaf's
+    /// `latest` holds indices into it so a join copies integers, not sites.
+    copy_sites: Vec<CopySite>,
+    latest_unions: LatestUnions,
+    /// Whether the walk keeps the copy report's bookkeeping. Only
+    /// [`copy_repairs`] reads it, so [`check_linearity`] skips it: no verdict
+    /// may pay for report-only work.
+    report: bool,
+    /// Set while the walk checks a match scrutinee written as a projection:
+    /// the scrutinee consumes the component and never receives a copy
+    /// (spec/04 section 8.3).
+    scrutinee_projection: bool,
     /// The top-level value bindings that are roots of the program under
     /// check, for the [04-LIN-6] copies; `None` makes every one a root.
     roots: Option<BTreeSet<String>>,
@@ -696,13 +806,14 @@ impl Checker {
     /// not listed, and a copy only it forces is not either.
     fn record_copy_repair(
         &mut self,
-        site: &CopySite,
+        site: usize,
         later: Option<SiteLocation>,
         kind: CopyRepairUseKind,
     ) {
         let Some(later) = later else {
             return;
         };
+        let site = &self.copy_sites[site];
         self.repairs
             .entry(site.at.clone())
             .or_insert_with(|| {
@@ -729,6 +840,9 @@ impl Checker {
         kind: CopyRepairUseKind,
         takes: Takes,
     ) {
+        if !self.report {
+            return;
+        }
         let (label, path, later) = match &self.projection_use {
             Some(projection) => (
                 projection.label.clone(),
@@ -753,33 +867,36 @@ impl Checker {
         split_copy_leaf(leaves, &path);
         let consumes = !matches!(takes, Takes::Nothing);
         let copy = match takes {
-            Takes::Copyable { at, consumed_by } => Some(CopySite {
-                at: SiteLocation {
-                    declaration: self.current_def.clone(),
-                    ..at
-                },
-                binding: label,
-                consumed_by,
-            }),
+            Takes::Copyable { at, consumed_by } => {
+                self.copy_sites.push(CopySite {
+                    at: SiteLocation {
+                        declaration: self.current_def.clone(),
+                        ..at
+                    },
+                    binding: label,
+                    consumed_by,
+                });
+                Some(self.copy_sites.len() - 1)
+            }
             Takes::Nothing | Takes::Original => None,
         };
-        let mut forced: Vec<CopySite> = Vec::new();
+        let mut forced: BTreeSet<usize> = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let taken = match (copy, consumes) {
+            (Some(copy), _) => Some(Rc::new(LatestSet::One(copy))),
+            (None, true) => Some(Rc::new(LatestSet::Empty)),
+            (None, false) => None,
+        };
         for leaf in leaves
             .iter_mut()
             .filter(|leaf| leaf.path.starts_with(&path))
         {
-            for site in &leaf.latest {
-                if !forced.contains(site) {
-                    forced.push(site.clone());
-                }
-            }
-            match (&copy, consumes) {
-                (Some(copy), _) => leaf.latest = vec![copy.clone()],
-                (None, true) => leaf.latest.clear(),
-                (None, false) => {}
+            LatestSet::collect(&leaf.latest, &mut visited, &mut forced);
+            if let Some(taken) = &taken {
+                leaf.latest = taken.clone();
             }
         }
-        for site in &forced {
+        for site in forced {
             self.record_copy_repair(site, later.clone(), kind);
         }
     }
@@ -803,7 +920,7 @@ impl Checker {
             .map(|path| CopyLeaf {
                 path,
                 split: Vec::new(),
-                latest: Vec::new(),
+                latest: Rc::new(LatestSet::Empty),
             })
             .collect()
     }
@@ -1007,7 +1124,7 @@ fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut L
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
-    let checker = walk_linearity(program, None);
+    let checker = walk_linearity(program, None, false);
     if checker.errors.is_empty() {
         Ok(program.clone().with_linearity(checker.info))
     } else {
@@ -1027,7 +1144,7 @@ pub fn copy_repairs(
     program: &CheckedProgram,
     roots: Option<&BTreeSet<String>>,
 ) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
-    let checker = walk_linearity(program, roots.cloned());
+    let checker = walk_linearity(program, roots.cloned(), true);
     if checker.errors.is_empty() {
         Ok(checker.into_copy_repairs())
     } else {
@@ -1035,7 +1152,11 @@ pub fn copy_repairs(
     }
 }
 
-fn walk_linearity(program: &CheckedProgram, roots: Option<BTreeSet<String>>) -> Checker {
+fn walk_linearity(
+    program: &CheckedProgram,
+    roots: Option<BTreeSet<String>>,
+    report: bool,
+) -> Checker {
     let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let key_carrying_adts = compute_key_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
@@ -1049,6 +1170,10 @@ fn walk_linearity(program: &CheckedProgram, roots: Option<BTreeSet<String>>) -> 
         projection_root: None,
         current_def: None,
         adt_registry: program.adt_registry().clone(),
+        report,
+        scrutinee_projection: false,
+        copy_sites: Vec::new(),
+        latest_unions: LatestUnions::new(),
         roots,
         projection_use: None,
         repairs: CopyRepairs::new(),
@@ -1179,6 +1304,10 @@ pub fn check_linearity_with_context(
         projection_root: None,
         current_def: None,
         adt_registry: new_program.adt_registry().clone(),
+        report: false,
+        scrutinee_projection: false,
+        copy_sites: Vec::new(),
+        latest_unions: LatestUnions::new(),
         roots: None,
         projection_use: None,
         repairs: CopyRepairs::new(),
@@ -1269,8 +1398,11 @@ impl Checker {
         &mut self,
         expr: &Expr,
         scope: &LinearScope,
-        observed: &mut BTreeMap<BindingId, Vec<CopySite>>,
+        observed: &mut BTreeMap<BindingId, BTreeSet<usize>>,
     ) {
+        if !self.report {
+            return;
+        }
         let children = match expr.carrier() {
             ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
                 for child in children.iter().skip(1) {
@@ -1308,17 +1440,14 @@ impl Checker {
         }
         let owner = scope.resolve_alias_chain(id).unwrap_or(id);
         let frontier = observed.get(&owner).cloned().unwrap_or_else(|| {
-            let mut frontier: Vec<CopySite> = Vec::new();
+            let mut frontier = BTreeSet::new();
+            let mut visited = BTreeSet::new();
             for leaf in scope
                 .record(owner)
                 .and_then(|record| record.copy_leaves.as_deref())
                 .unwrap_or_default()
             {
-                for site in &leaf.latest {
-                    if !frontier.contains(site) {
-                        frontier.push(site.clone());
-                    }
-                }
+                LatestSet::collect(&leaf.latest, &mut visited, &mut frontier);
             }
             frontier
         });
@@ -1326,17 +1455,15 @@ impl Checker {
             declaration: Some(name.to_string()),
             ..site_location(expr)
         };
-        for site in &frontier {
+        for site in frontier {
             self.record_copy_repair(site, Some(at.clone()), CopyRepairUseKind::Root);
         }
-        observed.insert(
-            owner,
-            vec![CopySite {
-                at,
-                binding: name.to_string(),
-                consumed_by: format!("the root observation of `{name}`"),
-            }],
-        );
+        self.copy_sites.push(CopySite {
+            at,
+            binding: name.to_string(),
+            consumed_by: format!("the root observation of `{name}`"),
+        });
+        observed.insert(owner, BTreeSet::from([self.copy_sites.len() - 1]));
     }
 
     /// [04-LIN-6] and [04-LIN-9]: every top-level value binding is a root
@@ -2331,7 +2458,9 @@ impl Checker {
                 },
             );
         } else {
+            self.scrutinee_projection = projection_chain(&children[0]).is_some();
             self.check_expr(&children[0], scope);
+            self.scrutinee_projection = false;
         }
 
         let visible_ids = scope.all_visible_ids();
@@ -2634,10 +2763,15 @@ impl Checker {
                 .iter()
                 .filter_map(|branch| branch.record(*id)?.copy_leaves.as_ref())
                 .collect::<Vec<_>>();
-            if let Some(first) = branch_leaves.first()
+            if self.report
+                && let Some(first) = branch_leaves.first()
                 && let Some(record) = scope.record_mut(*id)
             {
-                record.copy_leaves = Some(join_copy_leaves(first, &branch_leaves));
+                record.copy_leaves = Some(join_copy_leaves(
+                    &mut self.latest_unions,
+                    first,
+                    &branch_leaves,
+                ));
             }
             let Some(site) = consumed_site else {
                 continue;
@@ -2656,31 +2790,25 @@ impl Checker {
             // `Structural` consume from a branch legitimately replaces it,
             // exactly as `consume_var_expr`'s Aliasing-then-Structural arm does
             // on the straight-line path.
-            // The rule (chelis#1200 review finding 2):
+            // The rule:
             //
             //   Live                      -> a branch consume always wins.
-            //   Consumed(Aliasing), and
-            //     the name is a component
-            //     carrier                 -> a branch Structural consume wins.
-            //   Consumed(Aliasing), and
-            //     the name is an ordinary
-            //     binding                 -> unchanged.
+            //   Consumed(Aliasing)        -> a branch Structural consume wins.
+            //   Consumed(Structural)      -> a branch consume that ranks at
+            //                                least as high wins.
             //   Consumed, not by a `drop`,
             //     and a branch dropped
             //     the owner               -> the `drop` wins, as in
             //                                `consume_var_expr` (chelis#3177).
             //
-            // The carve-out is deliberately narrow. The justification above
-            // is entirely about carriers: a component's `Aliasing` record is
-            // bookkeeping for `p = (var __chelis_tmpN)`, never a destruction,
-            // so a branch's real consume must replace it. An ordinary `y = x`
-            // alias records the same `Aliasing` shape for a completely
-            // different reason, and upgrading it there rejects
-            // `y = x; if c then { f = fn () -> realize(x) f() } else t;
-            // add(y, y)` — which released 0.18.4 accepts. Tightening ordinary
-            // aliases is exactly the class of ecosystem-breaking change
-            // chelis#1200 exists to undo, so the upgrade asks for component
-            // identity (permanent) rather than the region-relative F2 mark.
+            // An ordinary `y = x` alias records the same `Aliasing` shape as a
+            // component carrier, and its branch consumes win too. chelis#1200
+            // kept them from winning because a later borrow after an ordinary
+            // consume used to be rejected; spec/04 section 8.3 now repairs
+            // that borrow with a copy, so an ordinary branch consume rejects
+            // nothing, and a scrutinee or consuming capture in a branch must
+            // reject a later use after the join exactly as it does on the
+            // straight-line path.
             let replaces_outer = match scope.state(*id) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
@@ -2691,8 +2819,7 @@ impl Checker {
                         || (matches!(outer.kind, ConsumeKind::Structural)
                             && site.join_rank() >= outer.join_rank())
                         || (matches!(outer.kind, ConsumeKind::Aliasing)
-                            && matches!(site.kind, ConsumeKind::Structural)
-                            && scope.is_component_id(*id))
+                            && matches!(site.kind, ConsumeKind::Structural))
                 }
                 None => false,
             };
@@ -2863,39 +2990,40 @@ impl Checker {
             self.consume_key_holder(expr, name, target, scope, site);
             return;
         }
-        // A `drop` ends the owner, so every later use is refused, whatever
-        // this use's own kind (chelis#3177). The owner is checked through the
-        // alias chain as well as on the use's own binding: after `y = x;
-        // c = drop(x)`, binding `z = y` is an `Aliasing` consume whose target
-        // is `y`'s live record, but it names the dropped owner.
+        // A `drop`, a match scrutinee or a consuming capture leaves nothing a
+        // copy could repair, so every later use is refused, whatever this
+        // use's own kind (chelis#3177, spec/04 section 8.3). It is looked for
+        // on every binding of the alias chain: after `y = x; c = drop(x)`,
+        // binding `z = y` is an `Aliasing` consume whose target is `y`'s live
+        // record, but it names the dropped owner; and a consuming capture of
+        // `y` is recorded on `y` itself.
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        let ended_at = [use_id, owner]
-            .into_iter()
-            .find_map(|id| match scope.state(id) {
-                Some(BindingState::Consumed(consumed_at)) if consumed_at.terminal => {
-                    Some(consumed_at.description.clone())
-                }
-                _ => None,
-            });
-        if let Some(description) = ended_at {
+        if let Some(blocking) = scope.blocking_consume(use_id) {
             // chelis#1200: report the name the user wrote, not
             // `target`. `target` is the alias chain's terminal, which
             // for a destructured component is the desugarer's
             // `__chelis_tmpN` — a name that appears nowhere in the
             // user's source and that they cannot act on.
-            self.push_diagnostic(located_error(expr, CheckError::new(
-                CheckErrorKind::UseAfterConsume,
-                with_macro_provenance(
-                    expr,
-                    format!(
-                        "variable `{name}` was already consumed by {description}; later use {} is invalid",
-                        diag_site(expr)
+            let suggestion = if blocking.terminal {
+                format!("Move the later use before the `drop`, or bind `copy({name})` before it")
+            } else {
+                "Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()
+            };
+            self.push_diagnostic(located_error(
+                expr,
+                CheckError::new(
+                    CheckErrorKind::UseAfterConsume,
+                    with_macro_provenance(
+                        expr,
+                        format!(
+                            "variable `{name}` was already consumed by {}; later use {} is invalid",
+                            blocking.description,
+                            diag_site(expr)
+                        ),
                     ),
+                    vec![suggestion],
                 ),
-                vec![format!(
-                    "Move the later use before the `drop`, or bind `copy({name})` before it"
-                )],
-            )));
+            ));
             return;
         }
         // A `drop` cannot end an owner that a closure still borrows: the
@@ -2924,6 +3052,7 @@ impl Checker {
         }
         if matches!(site.kind, ConsumeKind::Structural) {
             let takes = match (&site.at, &self.projection_use) {
+                (_, Some(_)) if self.scrutinee_projection => Takes::Original,
                 (_, Some(projection)) if site.is_ordinary() => match &projection.at {
                     Some(at) => Takes::Copyable {
                         at: at.clone(),
@@ -3116,7 +3245,15 @@ impl Checker {
             return;
         };
         let resolved = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        let Some(BindingState::Consumed(site)) = scope.state(resolved) else {
+        let blocking = scope.blocking_consume(use_id);
+        let state = match &blocking {
+            Some(site) => Some(site),
+            None => match scope.state(resolved) {
+                Some(BindingState::Consumed(site)) => Some(site),
+                _ => None,
+            },
+        };
+        let Some(site) = state else {
             return;
         };
         // Binding an alias shares the value and permits later borrows.
@@ -4837,7 +4974,7 @@ fn type_expr_holds_key(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> boo
 }
 
 /// [04-LIN-11]: one step of a projection chain, `.i` or `.f`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ProjectionStep {
     Index(usize),
     Field(String),
@@ -4895,34 +5032,51 @@ fn split_copy_leaf(leaves: &mut Vec<CopyLeaf>, path: &[ProjectionStep]) {
 /// The union, per leaf, of every branch's latest consumes. Branches split
 /// leaves independently, so each is first refined to every leaf any branch
 /// has; a leaf of the refinement lies inside exactly one leaf of each branch.
-fn join_copy_leaves(first: &[CopyLeaf], branches: &[&Vec<CopyLeaf>]) -> Vec<CopyLeaf> {
+fn join_copy_leaves(
+    unions: &mut LatestUnions,
+    first: &[CopyLeaf],
+    branches: &[&Vec<CopyLeaf>],
+) -> Vec<CopyLeaf> {
     let mut joined = first
         .iter()
         .map(|leaf| CopyLeaf {
-            latest: Vec::new(),
+            latest: Rc::new(LatestSet::Empty),
             ..leaf.clone()
         })
         .collect::<Vec<_>>();
+    let mut present = joined
+        .iter()
+        .map(|leaf| leaf.path.clone())
+        .collect::<BTreeSet<_>>();
     for branch in branches {
         for leaf in branch.iter() {
-            split_copy_leaf(&mut joined, &leaf.path);
+            if present.insert(leaf.path.clone()) {
+                split_copy_leaf(&mut joined, &leaf.path);
+            }
         }
     }
+    let by_path = branches
+        .iter()
+        .map(|branch| {
+            branch
+                .iter()
+                .map(|leaf| (leaf.path.as_slice(), leaf))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
     for target in &mut joined {
-        for branch in branches {
-            let Some(source) = branch.iter().find(|leaf| {
-                target.path.starts_with(&leaf.path)
-                    && !leaf
-                        .split
-                        .iter()
-                        .any(|split| target.path.starts_with(split))
-            }) else {
-                continue;
-            };
-            for site in &source.latest {
-                if !target.latest.contains(site) {
-                    target.latest.push(site.clone());
-                }
+        for (branch, by_path) in branches.iter().zip(&by_path) {
+            let source = by_path.get(target.path.as_slice()).copied().or_else(|| {
+                branch.iter().find(|leaf| {
+                    target.path.starts_with(&leaf.path)
+                        && !leaf
+                            .split
+                            .iter()
+                            .any(|split| target.path.starts_with(split))
+                })
+            });
+            if let Some(source) = source {
+                target.latest = LatestSet::union(unions, &target.latest, &source.latest);
             }
         }
     }
