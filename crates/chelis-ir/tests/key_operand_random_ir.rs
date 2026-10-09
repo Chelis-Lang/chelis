@@ -7,7 +7,7 @@
 //! `grad` through the key edge, and the `RandomSelectionParameter` rejection
 //! of chelis#2421.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::verify::verify;
@@ -318,6 +318,52 @@ fn a_parameter_reaching_the_rate_through_adjoint_slots_is_rejected() {
     );
     // The same rate is a constant when only x is differentiated.
     assert_eq!(rejection(grad_dag_checked(&dag, loss, &[x])), None);
+}
+
+#[test]
+fn a_parameter_that_only_sizes_the_rate_differentiates() {
+    // rate = sum(expand(v, shape(p))): p sizes the expand, an extent with no
+    // cotangent ([05-MOV-1], chelis#3382), so the rate is a constant for p.
+    // Expanding a value computed from p instead reaches the rate as data.
+    for (from_p, expected) in [
+        (false, None),
+        (true, Some(AdRejectionReason::RandomSelectionParameter)),
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+        let p = load(&mut dag, decl, "p", tensor(Prim::F32, 4));
+        let value = if from_p {
+            let total = loss_of(&mut dag, decl, p, Prim::F32);
+            let c = constant(&mut dag, decl, Prim::F32, 0.0);
+            dag.add_node(decl, RiscOp::Mul, vec![total, c], scalar(Prim::F32), None)
+        } else {
+            constant(&mut dag, decl, Prim::F32, 0.0)
+        };
+        let sized = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, p],
+            tensor(Prim::F32, 4),
+            None,
+        );
+        let rate = loss_of(&mut dag, decl, sized, Prim::F32);
+        let out = dropout(&mut dag, decl, x, rate, 7, None);
+        let scaled = dag.add_node(decl, RiscOp::Mul, vec![out, p], tensor(Prim::F32, 4), None);
+        let loss = loss_of(&mut dag, decl, scaled, Prim::F32);
+        dag.add_root(loss);
+        assert_eq!(
+            rejection(grad_dag_checked(&dag, loss, &[p])),
+            expected,
+            "from_p={from_p}"
+        );
+    }
 }
 
 #[test]

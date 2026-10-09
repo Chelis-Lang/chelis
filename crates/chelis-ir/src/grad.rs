@@ -245,9 +245,10 @@ fn grad_dag_checked_impl(
     // INDEX MATH, not data. They carry no cotangent, so their input edges are a
     // stop-gradient boundary and must not pull their producers -- which may be
     // intentionally non-differentiable integer arithmetic -- into this check.
-    // The edge selection here mirrors `compute_adjoints`: movement ops and
-    // `Gather` route only to their values input, while `ScatterAdd` routes to
-    // target and updates but not indices. A control scalar that is ALSO reached
+    // The edge selection here mirrors `compute_adjoints`: movement ops
+    // (`expand`, whose size is an `insert` extent, among them; [05-MOV-1],
+    // chelis#3382) and `Gather` route only to their values input, while
+    // `ScatterAdd` routes to target and updates but not indices. A control scalar that is ALSO reached
     // through a genuine data edge stays live through that edge and is checked.
     let reach = cotangent_reach(forward, output);
     let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
@@ -320,6 +321,7 @@ fn selected_data_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
                 | RiscOp::Stride { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Reshape { .. }
+                | RiscOp::Expand { .. }
                 | RiscOp::Gather { .. }
                 | RiscOp::Dropout
                 | RiscOp::DropoutReplay => slot == 0,
@@ -356,6 +358,7 @@ fn cotangent_reach(forward: &Dag, output: NodeId) -> Vec<u8> {
                 | RiscOp::Stride { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Reshape { .. }
+                | RiscOp::Expand { .. }
                 | RiscOp::Gather { .. } => {
                     if let Some(values) = node.inputs.first() {
                         mark(*values, current);
@@ -644,6 +647,7 @@ fn reject_random_selection_parameters(
             | RiscOp::Stride { .. }
             | RiscOp::Pad { .. }
             | RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. }
             | RiscOp::Gather { .. }
             | RiscOp::Dropout
             | RiscOp::DropoutReplay => &node.inputs[..node.inputs.len().min(1)],
@@ -1539,6 +1543,8 @@ fn compute_adjoints(
             // constant in the exponent on each side of y = 0, so each
             // selection gives an exact zero where the product would read
             // `0 * inf` or `inf * log(0)`.
+            // Each constant takes its extents from the base it stands beside,
+            // so a runtime axis keeps its source (chelis#3381, #3391).
             let x = node.inputs[0];
             let y = node.inputs[1];
             let ty = forward.get(x).unwrap().output_type.clone();
@@ -1546,20 +1552,8 @@ fn compute_adjoints(
                 dims: ty.dims.clone(),
                 precision: Prim::Bool,
             };
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
-            let one = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 1.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
+            let one = fill_like(dag, node.owner, x, 1.0);
             let y_minus_one = tier2::lower_sub(node.owner, dag, y, one, &ty, None);
             let lowered = dag.add_node(
                 node.owner,
@@ -1586,13 +1580,7 @@ fn compute_adjoints(
                 Prim::F64 => 53,
                 other => unreachable!("[05-OP-79] admits float operands only, got {other:?}"),
             };
-            let parity_limit = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, f64::from(2u32).powi(significand)),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let parity_limit = fill_like(dag, node.owner, x, f64::from(2u32).powi(significand));
             let abs_y = dag.add_node(node.owner, RiscOp::Abs, vec![y], ty.clone(), None);
             let y_beyond_parity = dag.add_node(
                 node.owner,
@@ -1618,13 +1606,7 @@ fn compute_adjoints(
             // x^(y-1) from the forward result where y - 1 has lost its
             // parity: r / x for a finite base, and r carrying the infinite
             // base's sign, since y - 1 is odd there.
-            let infinity = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, f64::INFINITY),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let infinity = fill_like(dag, node.owner, x, f64::INFINITY);
             let abs_x = dag.add_node(node.owner, RiscOp::Abs, vec![x], ty.clone(), None);
             let x_is_infinite = dag.add_node(
                 node.owner,
@@ -3674,6 +3656,101 @@ mod tests {
                 matches!(grad_dag_checked(&dag, output, &[n]), Err(AdError::NotSupported { op, reason: AdRejectionReason::IntegerArithmeticOutput }) if op == kind.name())
             );
         }
+    }
+
+    /// chelis#3382: an `expand` whose size reads a differentiated
+    /// parameter's shape does not make its value selected data ([05-MOV-1]),
+    /// so a bitwise coefficient built from it stays a forward value. The
+    /// parameter that IS the expanded value still selects it.
+    #[test]
+    fn an_expand_extent_does_not_select_a_bitwise_coefficient() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let vector = |precision| TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision,
+        };
+        let int_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        };
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vector(Prim::F32),
+            None,
+        );
+        let n = dag.add_node(
+            owner,
+            RiscOp::Load { name: "n".into() },
+            vec![],
+            int_ty,
+            None,
+        );
+        let sized = dag.add_node(
+            owner,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![n, x],
+            vector(Prim::Int32),
+            None,
+        );
+        let masked = dag.add_node(
+            owner,
+            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
+            vec![sized, sized],
+            vector(Prim::Int32),
+            None,
+        );
+        let coefficient = dag.add_node(
+            owner,
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![masked],
+            vector(Prim::F32),
+            None,
+        );
+        let weighted = dag.add_node(
+            owner,
+            RiscOp::Mul,
+            vec![x, coefficient],
+            vector(Prim::F32),
+            None,
+        );
+        let output = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![weighted],
+            scalar_f32(),
+            None,
+        );
+        let result = grad_dag_checked(&dag, output, &[x]).expect("an extent selects nothing");
+        let inputs = UnordMap::from([
+            ("x".into(), TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+            ("n".into(), TensorValue::from_vec(vec![], vec![3.0])),
+        ]);
+        let actual = crate::eval::eval_tensor(&result.dag, &inputs).unwrap();
+        assert_eq!(
+            actual[&result.grad_nodes[&x]].to_f64_lossy_vec(),
+            vec![3.0, 3.0]
+        );
+        assert!(matches!(
+            grad_dag_checked(&dag, output, &[n]),
+            Err(AdError::NotSupported {
+                reason: AdRejectionReason::IntegerArithmeticOutput,
+                ..
+            })
+        ));
     }
 
     #[test]
