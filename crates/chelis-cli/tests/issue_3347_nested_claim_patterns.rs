@@ -366,6 +366,10 @@ const LAMBDA_TUPLES: [&str; 2] = [
 "#,
 ];
 
+const LAMBDA_OUTER_BINDER: &str = r#"def run[n](w: tensor[n, f32], size: i64) -> i64 = width(fold(fn (acc: Box[n], i: i64) -> acc, make(size), range(0i64, 2i64)))
+out = run(produce(4i64), size_from("PATH"))
+"#;
+
 const CALLABLE_FORMAL: &str = r#"def apply(f: (Box[3]) -> i64, size: i64) -> i64 = f(make(size))
 out = apply(width, size_from("PATH"))
 "#;
@@ -1507,4 +1511,33 @@ fn eval_lambda_tuple_formals_claim_their_positions() {
 #[test]
 fn c_lambda_tuple_formals_claim_their_positions() {
     lambda_tuples(true);
+}
+
+/// DISPOSITION LOCK pending chelis#3517, not a regression test of correct
+/// behaviour. A lambda formal's binder is witnessed by the lambda's own
+/// formals at each invocation, never by the enclosing declaration's formal
+/// that the checker resolves it to; both lanes agree, for bare, List and
+/// nested lambda formals alike. `w` is 4 wide and `acc` is 3 or 5 wide, and
+/// neither lane traps. When #3517 binds the lambda's `n` to `w`, both runs
+/// trap and this lock is replaced by the regression test.
+fn lambda_outer_binder_lock(native: bool) {
+    for size in [3, 5] {
+        let (ok, output) = run(LAMBDA_OUTER_BINDER, size, native);
+        assert!(ok, "{}\n{output}", lane(native));
+        assert!(
+            output.contains(&format!("out = {size}")),
+            "{}\n{output}",
+            lane(native)
+        );
+    }
+}
+
+#[test]
+fn eval_lambda_outer_binder_disposition_lock() {
+    lambda_outer_binder_lock(false);
+}
+
+#[test]
+fn c_lambda_outer_binder_disposition_lock() {
+    lambda_outer_binder_lock(true);
 }
