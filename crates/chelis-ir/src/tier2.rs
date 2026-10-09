@@ -1861,9 +1861,8 @@ pub fn lower_conv_runtime(
     // Row-major strides of the padded input: `spatial_strides[a]` for
     // spatial axis `a`, and `channel_stride` for the channel axis.
     let mut spatial_strides = vec![one; rank];
-    for axis in (0..rank.saturating_sub(1)).rev() {
-        spatial_strides[axis] =
-            graph.scalar(RiscOp::Mul, spatial_strides[axis + 1], padded[axis + 1]);
+    for axis in (1..rank).rev() {
+        spatial_strides[axis - 1] = graph.scalar(RiscOp::Mul, spatial_strides[axis], padded[axis]);
     }
     let channel_stride = graph.scalar(RiscOp::Mul, spatial_strides[0], padded[0]);
     let batch_stride = graph.scalar(RiscOp::Mul, channels, channel_stride);
